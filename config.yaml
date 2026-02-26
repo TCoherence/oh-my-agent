@@ -1,0 +1,40 @@
+gateway:
+  channels:
+    - platform: discord
+      token: MTQ3NjQzOTc4MjEzNjQ3OTg4NQ.GjhQLF.gaXZlPyutnO4kAmozfRh5QM6ExGjSC7j2is_Ms
+      channel_id: "767174280856600621"
+      agents: [claude, gemini]   # fallback 顺序，第一个失败自动切下一个
+
+    # Slack 示例（暂未实现，留作占位）
+    # - platform: slack
+    #   token: ${SLACK_BOT_TOKEN}
+    #   channel_id: "${SLACK_CHANNEL_ID}"
+    #   agents: [anthropic_api]
+
+agents:
+  claude:
+    type: cli
+    cli_path: claude             # PATH 里的可执行文件名，或绝对路径
+    max_turns: 25
+    model: sonnet
+    allowed_tools: [Bash, Read, Edit, Glob, Grep]
+
+  gemini:
+    type: cli
+    cli_path: gemini
+    max_turns: 10
+    model: gemini-3-flash-preview
+
+  anthropic_api:
+    type: api
+    provider: anthropic
+    model: claude-sonnet-4-6
+    api_key: ${ANTHROPIC_API_KEY}
+    max_tokens: 8192
+
+  openai_api:
+    type: api
+    provider: openai
+    model: gpt-4o
+    api_key: ${OPENAI_API_KEY}
+    max_tokens: 4096

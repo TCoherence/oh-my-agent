@@ -17,7 +17,7 @@ def _build_agent(name: str, cfg: dict):
             from oh_my_agent.agents.cli.gemini import GeminiCLIAgent
             return GeminiCLIAgent(
                 cli_path=cfg.get("cli_path", "gemini"),
-                model=cfg.get("model", "gemini-2.0-flash"),
+                model=cfg.get("model", "gemini-3-flash-preview"),
             )
         else:
             # Default to claude for any unknown CLI type

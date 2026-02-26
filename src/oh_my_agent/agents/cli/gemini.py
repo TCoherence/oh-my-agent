@@ -12,7 +12,7 @@ class GeminiCLIAgent(BaseCLIAgent):
     def __init__(
         self,
         cli_path: str = "gemini",
-        model: str = "gemini-2.0-flash",
+        model: str = "gemini-3-flash-preview",
         timeout: int = 300,
     ) -> None:
         super().__init__(cli_path=cli_path, timeout=timeout)
