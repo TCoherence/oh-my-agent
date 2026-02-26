@@ -90,22 +90,8 @@ def _setup_logging() -> None:
     root.addHandler(file_handler)
 
 
-def main() -> None:
-    _setup_logging()
-    logger = logging.getLogger(__name__)
-
-    # Locate config.yaml (next to cwd or project root)
-    config_path = Path("config.yaml")
-    if not config_path.exists():
-        logger.error("config.yaml not found. Copy config.yaml.example and fill in your values.")
-        sys.exit(1)
-
-    try:
-        from oh_my_agent.config import load_config
-        config = load_config(config_path)
-    except Exception as exc:
-        logger.error("Failed to load config.yaml: %s", exc)
-        sys.exit(1)
+async def _async_main(config: dict, logger: logging.Logger) -> None:
+    """Async entry point — builds agents, memory, and starts gateway."""
 
     # Build agent registry map
     agents_cfg: dict = config.get("agents", {})
@@ -117,6 +103,36 @@ def main() -> None:
         except Exception as exc:
             logger.error("Failed to build agent '%s': %s", agent_name, exc)
             sys.exit(1)
+
+    # Build memory store
+    memory_cfg = config.get("memory", {})
+    memory_store = None
+    compressor = None
+
+    if memory_cfg.get("backend", "sqlite") == "sqlite":
+        from oh_my_agent.memory.store import SQLiteMemoryStore
+        from oh_my_agent.memory.compressor import HistoryCompressor
+
+        db_path = memory_cfg.get("path", "data/memory.db")
+        memory_store = SQLiteMemoryStore(db_path)
+        await memory_store.init()
+        logger.info("Memory store ready: %s", db_path)
+
+        compressor = HistoryCompressor(
+            store=memory_store,
+            max_turns=int(memory_cfg.get("max_turns", 20)),
+            summary_max_chars=int(memory_cfg.get("summary_max_chars", 500)),
+        )
+
+    # Sync skills
+    skills_cfg = config.get("skills", {})
+    if skills_cfg.get("enabled", False):
+        from oh_my_agent.skills.skill_sync import SkillSync
+
+        skills_path = skills_cfg.get("path", "skills/")
+        syncer = SkillSync(skills_path)
+        synced = syncer.sync()
+        logger.info("Synced %d skill(s)", synced)
 
     # Build (channel, registry) pairs
     from oh_my_agent.agents.registry import AgentRegistry
@@ -148,9 +164,36 @@ def main() -> None:
         logger.error("No channels configured in config.yaml")
         sys.exit(1)
 
-    gateway = GatewayManager(channel_pairs)
+    gateway = GatewayManager(channel_pairs, compressor=compressor)
+    if memory_store:
+        gateway.set_memory_store(memory_store)
+
     logger.info("Starting gateway with %d channel(s)...", len(channel_pairs))
-    asyncio.run(gateway.start())
+    try:
+        await gateway.start()
+    finally:
+        if memory_store:
+            await memory_store.close()
+
+
+def main() -> None:
+    _setup_logging()
+    logger = logging.getLogger(__name__)
+
+    # Locate config.yaml (next to cwd or project root)
+    config_path = Path("config.yaml")
+    if not config_path.exists():
+        logger.error("config.yaml not found. Copy config.yaml.example and fill in your values.")
+        sys.exit(1)
+
+    try:
+        from oh_my_agent.config import load_config
+        config = load_config(config_path)
+    except Exception as exc:
+        logger.error("Failed to load config.yaml: %s", exc)
+        sys.exit(1)
+
+    asyncio.run(_async_main(config, logger))
 
 
 if __name__ == "__main__":

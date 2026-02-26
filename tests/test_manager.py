@@ -136,7 +136,7 @@ async def test_handle_message_error_response_sent_and_history_cleaned():
     assert "Error" in sent
     assert "boom" in sent
     # History should be empty (failed turn was popped)
-    assert session.get_history("t1") == []
+    assert await session.get_history("t1") == []
 
 
 @pytest.mark.asyncio
@@ -161,7 +161,7 @@ async def test_handle_message_appends_to_history():
     msg = _make_msg(thread_id=None, content="question")
     await gm.handle_message(session, registry, msg)
 
-    history = session.get_history("t1")
+    history = await session.get_history("t1")
     assert len(history) == 2
     assert history[0]["role"] == "user"
     assert history[1]["role"] == "assistant"

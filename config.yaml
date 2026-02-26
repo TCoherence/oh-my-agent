@@ -1,3 +1,13 @@
+memory:
+  backend: sqlite
+  path: data/memory.db
+  max_turns: 20               # 超出后自动压缩旧对话为摘要
+  summary_max_chars: 500
+
+skills:
+  enabled: true
+  path: skills/
+
 gateway:
   channels:
     - platform: discord

@@ -1,0 +1,161 @@
+# Oh My Agent — 未来发展讨论
+
+> 基于你提出的两个核心观点和项目现有 todo/roadmap 的综合分析
+
+---
+
+## 🎯 你的两个论点
+
+### 1. CLI Agent 优先 → 去掉 API Agent
+
+**完全同意。** 这是一个很好的架构简化方向。
+
+当前项目同时维护了两条路径：
+
+```
+BaseAgent
+  ├── BaseCLIAgent  →  claude, gemini (有完整 agentic loop)
+  └── BaseAPIAgent  →  anthropic, openai (只是 SDK call, 无 tool use)
+```
+
+两者的根本不兼容在于：
+
+| 维度 | CLI Agent | API Agent |
+|------|-----------|-----------|
+| Context Engineering | CLI 自己管理（AGENT.md, skills, tool use） | 需要自己搭建全部 |
+| Tool Use | 内置（Bash, Read, Edit, Grep...） | 需要自己定义 function schema |
+| Skill 系统 | 原生支持（SKILL.md auto-discovery） | 无法使用 |
+| Memory 集成 | 可以通过 prompt 注入 history | 需要自己管 messages array |
+| 迭代成本 | 零 — CLI 升级即可 | 需要跟进 API 变更 + 自研 |
+
+**建议行动：**
+- 标记 `agents/api/` 为 **deprecated**，暂时保留代码但不再投入维护
+- 从 `config.yaml.example` 和 `README.md` 中降低 API agent 的存在感
+- `todo.md` 中移除与 API agent 相关的 streaming SDK 等条目
+- 未来如果需要 "轻量级" 回答（比如简单问答不需要 agentic loop），可以考虑一个 `SimpleChatAgent`，但那是 **后话**
+
+---
+
+### 2. Skill 同步 — 双向 sync 的挑战
+
+当前流程是**单向的**：
+
+```
+skills/ (canonical source)
+  └─ SkillSync.sync() ──→ .gemini/skills/ (symlink)
+                        ──→ .claude/skills/  (symlink)
+```
+
+如果我们希望 oh-my-agent **自己迭代 skill**（比如通过 CLI agent 创建新 skill），那流程会变成：
+
+```
+CLI Agent 创建 skill
+  └─ 写入 .gemini/skills/new_skill/ (CLI 的原生位置)
+     └─ ❌ 不会自动出现在 skills/ (canonical source)
+        └─ ❌ 也不会 sync 给其他 CLI agent
+```
+
+**需要补全的能力是「反向同步」：**
+
+```
+方案 A: Watch + Reverse Copy
+  └─ 用 watchdog 或轮询 .gemini/skills/ 和 .claude/skills/
+  └─ 检测到新的非 symlink 目录 → 复制回 skills/
+  └─ 然后触发 SkillSync.sync() 同步给所有 CLI
+
+方案 B: Agent 指令约束
+  └─ 在 AGENT.md 中指示 agent：创建 skill 时直接写到 skills/ 目录
+  └─ 然后手动或自动触发 sync()
+  └─ 更简单，但依赖 agent 遵守指令
+
+方案 C: Webhook / Post-run Hook
+  └─ 每次 CLI agent run 完成后，检查 .gemini/skills/ 有无新目录
+  └─ 如果有，自动 reverse sync
+  └─ 最实际的方案，可以集成在 GatewayManager.handle_message() 里
+```
+
+**推荐方案 B + C 结合**：在 `AGENT.md` 中指示 agent 写到 `skills/`，同时在每次 agent response 后做一次 diff 检查作为 safety net。
+
+---
+
+## 💡 基于现有 Roadmap 的想法
+
+### 优先级重排（考虑去掉 API agent 后）
+
+从 [todo.md](file:///Users/yanghanzhi/repos/oh-my-agent/docs/todo.md) 来看，去掉 API agent 后，一些条目可以简化或移除：
+
+| 原有条目 | 建议 |
+|----------|------|
+| Streaming responses（需要 `--output-format stream-json` + streaming SDK） | **简化** — 只需关注 CLI 的 stream-json，去掉 SDK streaming |
+| Codex CLI agent | **保留** — 自然是 CLI 路线的延伸 |
+| Slash commands (`/agent claude`) | **保留** — agent 切换在纯 CLI 架构下更有意义 |
+| Cross-session memory | **升级优先级** — 这是 oh-my-agent 自我迭代的基础设施 |
+| SQLite → PostgreSQL | **降低优先级** — 单机 CLI agent 暂时不需要 |
+
+### 新增建议条目
+
+#### 1. **SkillSync 双向同步** (v0.4.0)
+上面已经分析了。实现 reverse sync 是 self-evolving agent 的前置条件。
+
+#### 2. **Agent 自我迭代框架** (v0.5.0)
+让 oh-my-agent 能够：
+- 接收用户指令 → 创建/修改 skill → 自动 sync
+- Skill 版本管理（简单的 git commit 或 changelog）
+- Skill 测试机制（创建 skill 后自动验证）
+
+#### 3. **CLI Agent Session 管理优化**
+当前 CLI agent 是 stateless 的（每次 subprocess），history 通过 prompt flattening 传入。
+考虑：
+- `claude --resume <session_id>` 的可行性 — 避免每次都把完整 history 塞进 prompt
+- 对于长对话，prompt flattening 会导致 token 膨胀
+- 这与 `HistoryCompressor` 形成互补：compressor 压缩旧 history，session resume 避免重发 history
+
+#### 4. **多 CLI Agent 协作**
+既然是纯 CLI 架构，可以考虑更有意思的模式：
+- **专家路由**：不再是简单的 fallback，而是根据任务类型选择 agent（代码 → Claude，搜索 → Gemini）
+- **Review 模式**：一个 agent 写代码，另一个 review
+- 这需要更丰富的 `AgentRegistry` 逻辑
+
+#### 5. **Memory 抽离准备**
+你提到 memory 和 skill 应该独立于 repo。虽然现在不急，但可以为此做准备：
+- `MemoryStore` 的 ABC 已经设计得不错，换 backend 很容易
+- 可以加一个 `memory.export()` / `memory.import()` 接口，方便未来迁移
+- Skill 目录如果用 git submodule 或独立 repo，SkillSync 需要适配
+
+---
+
+## 📋 建议的版本规划
+
+```
+v0.4.0 — CLI-First Cleanup + Skill Sync
+  ├─ Deprecate API agent layer
+  ├─ SkillSync reverse sync (方案 B+C)
+  ├─ Streaming responses (CLI only)
+  ├─ Slash commands (/reset, /agent, /search)
+  └─ Update README + development.md
+
+v0.5.0 — Self-Evolution
+  ├─ Agent-driven skill creation workflow
+  ├─ Skill testing / validation
+  ├─ CLI session resume (claude --resume)
+  ├─ Cross-session memory search
+  └─ Memory export/import API
+
+v0.6.0 — Multi-Agent Intelligence
+  ├─ Smart agent routing (专家路由)
+  ├─ Agent collaboration (review 模式)
+  ├─ Agent selection via @mention
+  └─ More platform adapters (Telegram, Feishu)
+```
+
+---
+
+## 🤔 一个值得辩论的问题
+
+> **API agent 是否应该完全移除，还是保留为 "lightweight fallback"？**
+
+有一个实际场景：当所有 CLI agent 都挂了（比如 API quota 用完导致 CLI 也失败），一个不需要 tool use 的 API agent 可以作为最后的兜底，至少回复用户"我现在无法处理复杂请求"。
+
+但这可能 over-engineering 了 — 一个简单的硬编码 fallback message 就够了，不需要走 API agent。
+
+**结论：去掉 API agent 是正确的方向。** 保持架构简洁比保留一个几乎不会用到的 fallback 更重要。

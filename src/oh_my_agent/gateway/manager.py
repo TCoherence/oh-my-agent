@@ -18,8 +18,13 @@ THREAD_NAME_MAX = 90
 class GatewayManager:
     """Manages multiple platform channels and routes messages to agent sessions."""
 
-    def __init__(self, channels: list[tuple[BaseChannel, AgentRegistry]]) -> None:
+    def __init__(
+        self,
+        channels: list[tuple[BaseChannel, AgentRegistry]],
+        compressor=None,
+    ) -> None:
         self._channels = channels
+        self._compressor = compressor
         # key: "platform:channel_id" → ChannelSession
         self._sessions: dict[str, ChannelSession] = {}
 
@@ -39,11 +44,20 @@ class GatewayManager:
             )
         return self._sessions[key]
 
+    def set_memory_store(self, store) -> None:
+        """Inject a MemoryStore into all current and future sessions."""
+        self._memory_store = store
+        for session in self._sessions.values():
+            session.memory_store = store
+
     async def start(self) -> None:
         """Start all platform channels concurrently."""
         tasks = []
         for channel, registry in self._channels:
             session = self._get_session(channel, registry)
+            # Inject memory store if available
+            if hasattr(self, "_memory_store"):
+                session.memory_store = self._memory_store
 
             async def make_handler(s: ChannelSession, r: AgentRegistry):
                 async def handler(msg: IncomingMessage) -> None:
@@ -86,8 +100,8 @@ class GatewayManager:
             logger.info("[%s] THREAD created thread_id=%s name=%r", req_id, thread_id, name)
 
         # Append user turn to history
-        session.append_user(thread_id, msg.content, msg.author)
-        history = session.get_history(thread_id)
+        await session.append_user(thread_id, msg.content, msg.author)
+        history = await session.get_history(thread_id)
         prior_history = history[:-1] if len(history) > 1 else []
 
         logger.info(
@@ -113,7 +127,9 @@ class GatewayManager:
             )
             await channel.send(thread_id, f"**Error** ({agent_used.name}): {response.error[:1800]}")
             # Remove the failed user turn so history stays clean
-            session.get_history(thread_id).pop()
+            history = await session.get_history(thread_id)
+            if history:
+                history.pop()
             return
 
         logger.info(
@@ -125,7 +141,7 @@ class GatewayManager:
         )
 
         # Record assistant response in history
-        session.append_assistant(thread_id, response.text, agent_used.name)
+        await session.append_assistant(thread_id, response.text, agent_used.name)
 
         # Send with attribution header + chunked content
         attribution = f"-# via **{agent_used.name}**"
@@ -145,6 +161,30 @@ class GatewayManager:
             max(len(chunks), 1),
             elapsed_total,
         )
+
+        # Async: check compression (don't block the response)
+        if self._compressor:
+            asyncio.create_task(
+                self._try_compress(session, registry, thread_id, req_id)
+            )
+
+    async def _try_compress(
+        self,
+        session: ChannelSession,
+        registry: AgentRegistry,
+        thread_id: str,
+        req_id: str,
+    ) -> None:
+        try:
+            did_compress = await self._compressor.maybe_compress(
+                session.platform, session.channel_id, thread_id, registry,
+            )
+            if did_compress:
+                # Invalidate cache so next load picks up the summary
+                session._cache.pop(thread_id, None)
+                logger.info("[%s] COMPRESS thread=%s completed", req_id, thread_id)
+        except Exception as exc:
+            logger.warning("[%s] COMPRESS failed: %s", req_id, exc)
 
     @staticmethod
     def _thread_name(content: str) -> str:

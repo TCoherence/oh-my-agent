@@ -2,7 +2,93 @@
 
 ## Project Overview
 
-**Oh My Agent** — a multi-platform bot that uses CLI-based AI agents (Claude, Gemini, etc.) or API agents (Anthropic, OpenAI) as the execution layer, instead of calling model APIs directly. Inspired by OpenClaw.
+**Oh My Agent** — a multi-platform bot that uses CLI-based AI agents (Claude, Gemini, etc.) as the execution layer, instead of calling model APIs directly. Inspired by OpenClaw.
+
+> **Architecture direction (v0.4+):** CLI-first. API agents (`agents/api/`) are deprecated — CLI agents provide a complete agentic loop (tool use, skills, context management) that API SDK calls cannot match without significant reimplementation. See [future_planning_discussion.md](future_planning_discussion.md) for full rationale.
+
+---
+
+## v0.4.0 — CLI-First Cleanup + Skill Sync (Planned)
+
+### Goals
+
+1. **Deprecate API agent layer** — `agents/api/` kept for reference but no longer maintained. Remove from `config.yaml.example` and README. CLI agents are the sole execution path going forward.
+2. **SkillSync reverse sync** — when a CLI agent creates a new skill in `.gemini/skills/` or `.claude/skills/`, detect and copy it back to the canonical `skills/` directory. Two-pronged approach:
+   - **Instruction**: update `AGENT.md` to tell agents to write skills directly to `skills/`.
+   - **Safety net**: post-response hook in `GatewayManager.handle_message()` diffs CLI skill dirs for new non-symlink entries.
+3. **Streaming responses** — CLI-only via `--output-format stream-json`. Edit Discord messages in-place.
+4. **Slash commands** — `/reset`, `/agent`, `/search`. Requires `discord.app_commands`.
+
+### Architecture Impact
+
+```
+BaseAgent
+  └── BaseCLIAgent  →  claude, gemini, codex (future)
+       │
+       └── agents/api/  DEPRECATED — no new development
+```
+
+SkillSync becomes bidirectional:
+
+```
+skills/ (canonical) ←──reverse sync──┐
+  └─ SkillSync.sync() ──→ .gemini/skills/ (symlink)
+                        ──→ .claude/skills/ (symlink)
+                                      │
+                        CLI agent creates skill here
+```
+
+See [todo.md](todo.md) for the full versioned roadmap (v0.4 → v0.5 → v0.6).
+
+---
+
+## v0.3.0 — Memory + Skills
+
+### What Changed
+
+1. **Memory layer** — `MemoryStore` ABC + `SQLiteMemoryStore` persists all conversation turns to `data/memory.db`. WAL mode, FTS5 full-text search, thread-level CRUD.
+2. **History compression** — `HistoryCompressor` auto-summarises old turns when `len(turns) > max_turns`. Uses the first available agent to generate a summary; falls back to truncation if all agents fail. Runs asynchronously after each response.
+3. **Skill system** — `SkillSync` symlinks skills from `skills/` to `.gemini/skills/` and `.claude/skills/` on startup. Both CLIs auto-discover `SKILL.md` files via the Agent Skills standard.
+4. **Async session API** — `ChannelSession.get_history()`, `append_user()`, `append_assistant()` are now async. In-memory cache avoids repeated DB reads.
+5. **Agent config** — `CLAUDE.md` → `AGENT.md` (shared via symlinks to `CLAUDE.md` and `GEMINI.md` so all CLIs read the same project context).
+
+### New Files
+
+```
+src/oh_my_agent/
+  memory/
+    store.py                     # MemoryStore ABC + SQLiteMemoryStore (WAL, FTS5)
+    compressor.py                # HistoryCompressor (agent summary + truncation fallback)
+  skills/
+    skill_sync.py                # SkillSync: symlinks skills/ → CLI native dirs
+
+skills/                          # Skill definitions (Agent Skills standard)
+  weather/
+    SKILL.md
+    scripts/weather.sh
+```
+
+### Database Schema
+
+```sql
+turns(id, platform, channel_id, thread_id, role, content, author, agent, created_at)
+turns_fts(content)               -- FTS5 full-text index
+summaries(id, platform, channel_id, thread_id, summary, turns_start, turns_end, created_at)
+```
+
+### New Config Sections
+
+```yaml
+memory:
+  backend: sqlite
+  path: data/memory.db
+  max_turns: 20
+  summary_max_chars: 500
+
+skills:
+  enabled: true
+  path: skills/
+```
 
 ---
 
@@ -120,14 +206,7 @@ agents:
 
 ### Roadmap (Future)
 
-- [ ] Slack adapter (full implementation)
-- [ ] Telegram adapter
-- [ ] Streaming responses (incremental message edits)
-- [ ] Cross-session memory sharing
-- [ ] Agent selection via @mention (`@claude`, `@gemini`)
-- [ ] Slash commands
-- [ ] Rate limiting / request queue
-- [ ] File attachment support
+> Moved to [todo.md](todo.md) — versioned roadmap starting from v0.4.0.
 
 ---
 
@@ -144,7 +223,19 @@ Initial working bot: Discord channel → Claude CLI → thread reply.
 ## Architecture Decisions
 
 ### Why CLI subprocess instead of API SDK?
-The `claude` CLI provides a complete agentic loop (tool use, file operations, bash, context management). Wrapping it as a subprocess means all of that is available without reimplementing it. The `BaseAPIAgent` path exists for cases where you want simpler stateless or multi-turn calls without tool use.
+The `claude` CLI provides a complete agentic loop (tool use, file operations, bash, context management). Wrapping it as a subprocess means all of that is available without reimplementing it.
+
+### Why deprecate API agents? (v0.4+)
+CLI agents and API agents have a fundamental incompatibility in abstraction level:
+
+| Dimension | CLI Agent | API Agent |
+|-----------|-----------|----------|
+| Context Engineering | CLI manages it (AGENT.md, skills, tool use) | Must build from scratch |
+| Tool Use | Built-in (Bash, Read, Edit, Grep…) | Must define function schemas |
+| Skill System | Native (SKILL.md auto-discovery) | Cannot use |
+| Iteration Cost | Zero — CLI upgrades are free | Must track API changes + build infra |
+
+Maintaining both paths doubles the surface area without proportional value. The API agent code is kept for reference but receives no new development.
 
 ### Why session-per-channel?
 Each channel is an independent workspace. Cross-channel contamination would be confusing and potentially leak context between users/projects. Future: opt-in shared memory via explicit memory module.
