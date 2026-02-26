@@ -27,17 +27,17 @@ The system has four abstraction layers between the user (chat platform) and the 
 **Gateway layer** (`src/oh_my_agent/gateway/`)
 
 - `BaseChannel` ABC: platform adapter with `start()`, `create_thread()`, `send()`, `send_message()`, `edit_message()`, `typing()`. Implemented for Discord (with slash commands); Slack is a stub.
-- `GatewayManager`: holds `(BaseChannel, AgentRegistry)` pairs, routes `IncomingMessage` to `handle_message()`. Manages `ChannelSession`s, streaming responses, and triggers history compression in the background.
+- `GatewayManager`: holds `(BaseChannel, AgentRegistry)` pairs, routes `IncomingMessage` to `handle_message()`. Manages `ChannelSession`s and triggers history compression in the background.
 - `ChannelSession`: per-channel state with async API. Loads/persists per-thread conversation histories via `MemoryStore`. In-memory cache avoids repeated DB reads.
 - Discord slash commands: `/ask`, `/reset`, `/agent`, `/search` via `app_commands.CommandTree`.
 - Message flow: `on_message` → `IncomingMessage` → `GatewayManager.handle_message()` → `AgentRegistry.run()` → stream-edit or `channel.send()`.
 
 **Agent layer** (`src/oh_my_agent/agents/`)
 
-- `BaseAgent` ABC: `async run(prompt, history) → AgentResponse`. Optional `run_stream()` async iterator and `supports_streaming` property.
+- `BaseAgent` ABC: `async run(prompt, history) → AgentResponse`.
 - `AgentRegistry`: ordered `list[BaseAgent]` with automatic fallback — tries each in sequence, returns first success. Passes `thread_id` for session resume.
-- `BaseCLIAgent` (`agents/cli/base.py`): subprocess runner for CLI agents. Flattens `history` into prompt text. Subclasses override `_build_command()` and optionally `_build_stream_command()`.
-- Concrete CLI agents: `ClaudeAgent` (streaming + session resume), `GeminiCLIAgent`, `CodexCLIAgent`.
+- `BaseCLIAgent` (`agents/cli/base.py`): subprocess runner for CLI agents. Flattens `history` into prompt text. Subclasses override `_build_command()`.
+- Concrete CLI agents: `ClaudeAgent` (session resume), `GeminiCLIAgent`, `CodexCLIAgent`.
 - `agents/api/` — **deprecated since v0.4.0**. `AnthropicAPIAgent`, `OpenAIAPIAgent` kept for reference only.
 
 **Memory layer** (`src/oh_my_agent/memory/`)

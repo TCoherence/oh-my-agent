@@ -16,11 +16,10 @@
 2. **Added `Write` to Claude allowed_tools** — config default now `[Bash, Read, Write, Edit, Glob, Grep]`.
 3. **Added Codex CLI agent** — `agents/cli/codex.py` using `codex exec --full-auto` (auto-approve + OS-level sandbox).
 4. **SkillSync reverse sync** — `SkillSync.reverse_sync()` detects non-symlink skill directories in `.gemini/skills/` and `.claude/skills/`, copies them back to `skills/`. `full_sync()` runs reverse then forward on startup.
-5. **Streaming responses** — `ClaudeAgent` supports `--output-format stream-json`. `GatewayManager` edits Discord messages in-place with rate-limited updates (1.5s interval). Falls back to non-streaming on error.
-6. **Slash commands** — `/ask`, `/reset`, `/agent`, `/search` via `discord.app_commands.CommandTree`. Synced on bot startup.
-7. **CLI session resume** — `ClaudeAgent` tracks session IDs per thread. Uses `--resume <session_id>` + `--output-format json` to continue sessions without re-flattening history. Falls back to fresh session if resume fails.
-8. **Memory export/import** — `MemoryStore.export_data()` returns all turns + summaries as JSON. `import_data()` restores from backup.
-9. **Updated README** — rewritten for CLI-first architecture with agent comparison table.
+5. **Slash commands** — `/ask`, `/reset`, `/agent`, `/search` via `discord.app_commands.CommandTree`. Synced on bot startup.
+6. **CLI session resume** — `ClaudeAgent` tracks session IDs per thread. Uses `--resume <session_id>` + `--output-format json` to continue sessions without re-flattening history. Falls back to fresh session if resume fails.
+7. **Memory export/import** — `MemoryStore.export_data()` returns all turns + summaries as JSON. `import_data()` restores from backup.
+8. **Updated README** — rewritten for CLI-first architecture with agent comparison table.
 
 ### New Files
 
@@ -32,18 +31,10 @@ src/oh_my_agent/agents/cli/codex.py    # CodexCLIAgent
 
 ```
 BaseAgent
-  ├── supports_streaming property
-  ├── run_stream() async iterator
   └── BaseCLIAgent
-        ├── _build_stream_command() → streaming support
-        ├── _parse_stream_line() → stream-json parsing
-        ├── ClaudeAgent  (streaming + session resume)
+        ├── ClaudeAgent  (session resume)
         ├── GeminiCLIAgent
         └── CodexCLIAgent (new)
-
-BaseChannel
-  ├── send_message() → returns message_id
-  └── edit_message() → in-place update
 
 SkillSync
   ├── sync() → forward only

@@ -146,7 +146,7 @@ These features can be worked on **immediately and in parallel** — no blockers:
 - [x] **Add Codex CLI agent** — `agents/cli/codex.py` using `codex exec --full-auto`.
 - [ ] **Enable CLI sandbox modes** — Codex: `--full-auto` (included by default). Gemini: add `--sandbox`. Claude: monitor for `--sandbox` flag.
 - [x] **SkillSync reverse sync** — `SkillSync.reverse_sync()` detects new skills in CLI dirs, copies back to `skills/`. `full_sync()` runs both directions on startup.
-- [x] **Streaming responses** — `ClaudeAgent` supports `--output-format stream-json`. Discord messages edited in-place with rate-limited updates.
+- [ ] **Streaming responses** — deferred; planned as status monitor in a future release.
 - [x] **Slash commands** — `/ask`, `/reset`, `/agent`, `/search` via `discord.app_commands`.
 - [x] **CLI session resume** — `ClaudeAgent` tracks session IDs per thread, uses `--resume` for subsequent messages.
 - [x] **Memory export/import** — `MemoryStore.export_data()` / `import_data()` for JSON backup/restore.

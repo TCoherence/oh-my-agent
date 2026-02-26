@@ -17,12 +17,12 @@ User (Discord / Slack / ...)
          │ tries in order, auto-fallback on error
          ▼
    BaseCLIAgent.run(prompt, history)
-     ├── ClaudeAgent   (claude CLI, streaming, session resume)
+     ├── ClaudeAgent   (claude CLI, session resume)
      ├── GeminiCLIAgent (gemini CLI)
      └── CodexCLIAgent  (codex CLI, sandboxed)
          │
          ▼
-   Response → stream-edit or chunk → thread.send()
+   Response → chunk → thread.send()
    (-# via **agent-name** attribution)
 ```
 
@@ -123,19 +123,16 @@ oh-my-agent
 | `/agent` | Show available agents and their status |
 | `/search <query>` | Search across all conversation history |
 
-### Streaming
-Claude agent streams responses in real-time — Discord messages are edited in-place as tokens arrive.
-
 ### Session Resume
 Claude agent tracks session IDs per thread. Subsequent messages in the same thread use `--resume` to continue the session without re-flattening history.
 
 ## Agents
 
-| Agent | CLI | Sandbox | Streaming | Notes |
-|-------|-----|---------|-----------|-------|
-| Claude | `claude` | `--allowedTools` | Yes (`stream-json`) | Session resume via `--resume` |
-| Gemini | `gemini` | `--sandbox` (optional) | No | `--yolo` for auto-approve |
-| Codex | `codex` | `--full-auto` (built-in) | No | OS-level sandbox by default |
+| Agent | CLI | Sandbox | Notes |
+|-------|-----|---------|-------|
+| Claude | `claude` | `--allowedTools` | Session resume via `--resume` |
+| Gemini | `gemini` | `--sandbox` (optional) | `--yolo` for auto-approve |
+| Codex | `codex` | `--full-auto` (built-in) | OS-level sandbox by default |
 
 ## Development
 

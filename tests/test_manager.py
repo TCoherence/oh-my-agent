@@ -67,9 +67,7 @@ async def test_handle_message_creates_thread_when_no_thread_id():
 
     mock_agent = MagicMock()
     mock_agent.name = "claude"
-    mock_agent.supports_streaming = False
     registry = MagicMock(spec=AgentRegistry)
-    registry.agents = [mock_agent]
     registry.run = AsyncMock(return_value=(mock_agent, AgentResponse(text="reply")))
 
     session = _make_session(channel=channel, registry=registry)
@@ -98,9 +96,7 @@ async def test_handle_message_uses_existing_thread_id():
 
     mock_agent = MagicMock()
     mock_agent.name = "claude"
-    mock_agent.supports_streaming = False
     registry = MagicMock(spec=AgentRegistry)
-    registry.agents = [mock_agent]
     registry.run = AsyncMock(return_value=(mock_agent, AgentResponse(text="hi")))
 
     session = _make_session(channel=channel, registry=registry)
@@ -127,9 +123,7 @@ async def test_handle_message_error_response_sent_and_history_cleaned():
 
     mock_agent = MagicMock()
     mock_agent.name = "claude"
-    mock_agent.supports_streaming = False
     registry = MagicMock(spec=AgentRegistry)
-    registry.agents = [mock_agent]
     registry.run = AsyncMock(return_value=(mock_agent, AgentResponse(text="", error="boom")))
 
     session = _make_session(channel=channel, registry=registry)
@@ -158,9 +152,7 @@ async def test_handle_message_appends_to_history():
 
     mock_agent = MagicMock()
     mock_agent.name = "claude"
-    mock_agent.supports_streaming = False
     registry = MagicMock(spec=AgentRegistry)
-    registry.agents = [mock_agent]
     registry.run = AsyncMock(return_value=(mock_agent, AgentResponse(text="answer")))
 
     session = _make_session(channel=channel, registry=registry)

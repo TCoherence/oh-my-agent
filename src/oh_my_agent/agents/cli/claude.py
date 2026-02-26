@@ -13,10 +13,9 @@ logger = logging.getLogger(__name__)
 class ClaudeAgent(BaseCLIAgent):
     """Agent that delegates to the ``claude`` CLI.
 
-    Supports batch, streaming, and session resume modes:
+    Supports batch and session resume modes:
 
-    - **Batch**: ``--output-format text`` (default, stateless)
-    - **Streaming**: ``--output-format stream-json``
+    - **Batch**: ``--output-format json`` (default, extracts session_id)
     - **Session resume**: ``--resume <session_id>`` to continue a prior session
       without re-flattening history.
     """
@@ -64,11 +63,6 @@ class ClaudeAgent(BaseCLIAgent):
     def _build_command(self, prompt: str) -> list[str]:
         cmd = self._base_command(prompt)
         cmd.extend(["--output-format", "text"])
-        return cmd
-
-    def _build_stream_command(self, prompt: str) -> list[str]:
-        cmd = self._base_command(prompt)
-        cmd.extend(["--output-format", "stream-json"])
         return cmd
 
     def _build_resume_command(self, prompt: str, session_id: str) -> list[str]:

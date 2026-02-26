@@ -103,8 +103,7 @@ class DiscordChannel(BaseChannel):
 
             lines = ["**Available agents** (in fallback order):"]
             for i, agent in enumerate(self._registry.agents, 1):
-                streaming = " (streaming)" if agent.supports_streaming else ""
-                lines.append(f"{i}. `{agent.name}`{streaming}")
+                lines.append(f"{i}. `{agent.name}`")
 
             await interaction.response.send_message("\n".join(lines))
 
@@ -198,16 +197,6 @@ class DiscordChannel(BaseChannel):
     async def send(self, thread_id: str, text: str) -> None:
         thread = await self._resolve_channel(thread_id)
         await thread.send(text)
-
-    async def send_message(self, thread_id: str, text: str) -> str:
-        thread = await self._resolve_channel(thread_id)
-        msg = await thread.send(text)
-        return str(msg.id)
-
-    async def edit_message(self, thread_id: str, message_id: str, text: str) -> None:
-        thread = await self._resolve_channel(thread_id)
-        msg = await thread.fetch_message(int(message_id))
-        await msg.edit(content=text)
 
     @asynccontextmanager
     async def typing(self, thread_id: str) -> AsyncIterator[None]:

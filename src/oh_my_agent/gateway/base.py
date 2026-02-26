@@ -53,18 +53,6 @@ class BaseChannel(ABC):
         """Send *text* to the given thread."""
         ...
 
-    async def send_message(self, thread_id: str, text: str) -> str:
-        """Send *text* and return a message ID that can be used with ``edit_message``.
-
-        Default implementation delegates to ``send()`` and returns an empty
-        string (no editing support).
-        """
-        await self.send(thread_id, text)
-        return ""
-
-    async def edit_message(self, thread_id: str, message_id: str, text: str) -> None:
-        """Edit a previously sent message in-place. Optional — default is no-op."""
-
     @asynccontextmanager
     async def typing(self, thread_id: str) -> AsyncIterator[None]:
         """Show a typing indicator while the body executes. Optional — default is no-op."""
