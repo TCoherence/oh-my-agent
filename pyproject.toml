@@ -1,0 +1,16 @@
+[project]
+name = "oh-my-agent"
+version = "0.1.0"
+description = "Discord bot that routes messages to CLI-based AI agents"
+requires-python = ">=3.11"
+dependencies = [
+    "discord.py>=2.4,<3",
+    "python-dotenv>=1.0,<2",
+]
+
+[project.scripts]
+oh-my-agent = "oh_my_agent.main:main"
+
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
