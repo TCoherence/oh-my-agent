@@ -19,7 +19,9 @@ graph TD
     %% ── v0.4.0 ─────────────────────────────────────
     DEPRECATE["Deprecate API Agents"]
     CODEX["Add Codex CLI Agent"]
-    SANDBOX["Enable CLI Sandbox Modes"]
+    WORKSPACE["Workspace Directory Isolation"]
+    ENVSANITIZE["Env Variable Sanitization"]
+    SKILLCOPY["Skill Copy to Workspace"]
     WRITE["Add Write to Claude Tools"]
     REVERSE["SkillSync Reverse Sync"]
     STREAM["Streaming Responses"]
@@ -29,6 +31,7 @@ graph TD
     %% ── v0.5.0 ─────────────────────────────────────
     SKILLCREATE["Agent-Driven Skill Creation"]
     SKILLTEST["Skill Testing / Validation"]
+    SKILLPERM["Skill Permission Manifest"]
     RESUME["CLI Session Resume"]
     XMEM["Cross-Session Memory Search"]
     MEMIO["Memory Export/Import"]
@@ -44,8 +47,11 @@ graph TD
 
     %% ── Dependencies ────────────────────────────────
 
-    %% v0.4 internal
-    SANDBOX -->|"Codex sandbox = --full-auto"| CODEX
+    %% v0.4 internal (sandbox isolation)
+    WORKSPACE -->|"cwd for CLI sandbox"| CODEX
+    WORKSPACE -->|"cwd for CLI sandbox"| SKILL
+    SKILLCOPY -->|"copy skills into workspace"| WORKSPACE
+    REVERSE --> SKILLCOPY
     DEPRECATE --> README
     CODEX --> README
 
@@ -54,6 +60,7 @@ graph TD
     WRITE --> SKILLCREATE
     SKILL --> REVERSE
     SKILLCREATE --> SKILLTEST
+    SKILLCREATE --> SKILLPERM
     SLASH -->|"/search command"| XMEM
     MEM --> XMEM
     MEM --> MEMIO
@@ -67,7 +74,8 @@ graph TD
     SLASH -->|"/agent command"| MENTION
 
     %% Backlog
-    SANDBOX --> DOCKER
+    WORKSPACE --> DOCKER
+    ENVSANITIZE --> DOCKER
     CODEX -->|"multi-agent needed"| RATELIMIT
 
     %% Style
@@ -78,34 +86,37 @@ graph TD
     classDef backlog fill:#495057,stroke:#6c757d,color:#fff
 
     class MEM,COMP,SKILL,FALLBACK done
-    class DEPRECATE,CODEX,SANDBOX,WRITE,REVERSE,STREAM,SLASH,README v04
-    class SKILLCREATE,SKILLTEST,RESUME,XMEM,MEMIO v05
+    class DEPRECATE,CODEX,WORKSPACE,ENVSANITIZE,SKILLCOPY,WRITE,REVERSE,STREAM,SLASH,README v04
+    class SKILLCREATE,SKILLTEST,SKILLPERM,RESUME,XMEM,MEMIO v05
     class ROUTING,COLLAB,MENTION v06
     class DOCKER,RATELIMIT backlog
 ```
 
 ### Dependency Summary
 
-| Feature | Hard Dependencies | Soft / Recommended |
-|---------|------------------|--------------------|
-| **Deprecate API agents** | None (independent) | — |
-| **Add Codex CLI agent** | None (independent) | — |
-| **Enable CLI sandbox** | Codex agent (sandbox config is part of Codex `_build_command`) | — |
-| **Add `Write` to Claude tools** | None (config change only) | — |
-| **SkillSync reverse sync** | ✅ Skill System (v0.3) | — |
-| **Streaming responses** | None (independent) | — |
-| **Slash commands** | None (independent, but `/search` only useful after cross-session memory) | Cross-session memory |
-| **Update README** | Deprecate API agents, Add Codex (wait for arch to settle) | — |
-| **Agent-driven skill creation** | ⬅ SkillSync reverse sync, ⬅ Add `Write` to Claude tools | Skill testing |
-| **Skill testing / validation** | ⬅ Agent-driven skill creation | — |
-| **CLI session resume** | ✅ History Compression (v0.3) | — |
-| **Cross-session memory search** | ✅ Memory (v0.3), ⬅ Slash commands (`/search`) | — |
-| **Memory export/import** | ✅ Memory (v0.3) | — |
-| **Smart agent routing** | ✅ Agent Registry (v0.3), ⬅ Add Codex (need ≥3 agents) | — |
-| **Agent collaboration** | ⬅ Smart agent routing | — |
-| **Agent selection @mention** | ⬅ Smart agent routing, ⬅ Slash commands (`/agent`) | — |
-| **Docker-based isolation** | ⬅ Enable CLI sandbox (understand CLI-level first) | — |
-| **Rate limiting** | ⬅ Add Codex (multi-agent concurrency increases load) | — |
+| Feature                           | Hard Dependencies                                                        | Soft / Recommended                  |
+| --------------------------------- | ------------------------------------------------------------------------ | ----------------------------------- |
+| **Deprecate API agents**          | None (independent)                                                       | —                                   |
+| **Add Codex CLI agent**           | None (independent)                                                       | —                                   |
+| **Workspace directory isolation** | None (independent)                                                       | Codex agent (sandbox scoped to cwd) |
+| **Env variable sanitization**     | None (independent)                                                       | —                                   |
+| **Skill copy to workspace**       | ⬅ SkillSync reverse sync, ⬅ Workspace isolation                          | —                                   |
+| **Add `Write` to Claude tools**   | None (config change only)                                                | —                                   |
+| **SkillSync reverse sync**        | ✅ Skill System (v0.3)                                                    | —                                   |
+| **Streaming responses**           | None (independent)                                                       | —                                   |
+| **Slash commands**                | None (independent, but `/search` only useful after cross-session memory) | Cross-session memory                |
+| **Update README**                 | Deprecate API agents, Add Codex (wait for arch to settle)                | —                                   |
+| **Agent-driven skill creation**   | ⬅ SkillSync reverse sync, ⬅ Add `Write` to Claude tools                  | Skill testing                       |
+| **Skill testing / validation**    | ⬅ Agent-driven skill creation                                            | —                                   |
+| **Skill permission manifest**     | ⬅ Agent-driven skill creation                                            | —                                   |
+| **CLI session resume**            | ✅ History Compression (v0.3)                                             | —                                   |
+| **Cross-session memory search**   | ✅ Memory (v0.3), ⬅ Slash commands (`/search`)                            | —                                   |
+| **Memory export/import**          | ✅ Memory (v0.3)                                                          | —                                   |
+| **Smart agent routing**           | ✅ Agent Registry (v0.3), ⬅ Add Codex (need ≥3 agents)                    | —                                   |
+| **Agent collaboration**           | ⬅ Smart agent routing                                                    | —                                   |
+| **Agent selection @mention**      | ⬅ Smart agent routing, ⬅ Slash commands (`/agent`)                       | —                                   |
+| **Docker-based isolation**        | ⬅ Workspace isolation, ⬅ Env sanitization (understand app-level first)   | —                                   |
+| **Rate limiting**                 | ⬅ Add Codex (multi-agent concurrency increases load)                     | —                                   |
 
 ### Critical Paths
 
@@ -144,7 +155,10 @@ These features can be worked on **immediately and in parallel** — no blockers:
 - [x] **Deprecate API agent layer** — `agents/api/` marked deprecated with warnings. Removed from `config.yaml.example`.
 - [x] **Add `Write` to Claude allowed_tools** — config updated to `[Bash, Read, Write, Edit, Glob, Grep]`.
 - [x] **Add Codex CLI agent** — `agents/cli/codex.py` using `codex exec --full-auto`.
-- [ ] **Enable CLI sandbox modes** — Codex: `--full-auto` (included by default). Gemini: add `--sandbox`. Claude: monitor for `--sandbox` flag.
+- [ ] **Sandbox isolation** — layered defense model. See [future_planning_discussion.md](future_planning_discussion.md#-sandbox-隔离策略讨论2025-02-26-补充) for full analysis.
+  - [ ] **Workspace directory isolation** — config `workspace` field, `BaseCLIAgent` sets `cwd` to dedicated workspace. Agent files (`AGENT.md`, skills) copied into workspace.
+  - [ ] **Environment variable sanitization** — `_build_env()` whitelist mode. Only `PATH`/`HOME`/`LANG` etc. passed by default; agent-specific keys via `env_passthrough` config.
+  - [ ] **Skill copy to workspace** — `SkillSync` copies skills into workspace dir (not symlink to dev repo) in production mode.
 - [x] **SkillSync reverse sync** — `SkillSync.reverse_sync()` detects new skills in CLI dirs, copies back to `skills/`. `full_sync()` runs both directions on startup.
 - [ ] **Streaming responses** — deferred; planned as status monitor in a future release.
 - [x] **Slash commands** — `/ask`, `/reset`, `/agent`, `/search` via `discord.app_commands`.
@@ -156,6 +170,7 @@ These features can be worked on **immediately and in parallel** — no blockers:
 
 - [ ] **Agent-driven skill creation** — user requests skill → agent creates it → auto sync. *(⬅ depends on: ✅ SkillSync reverse sync, ✅ Write tool)*
 - [ ] **Skill testing / validation** — auto-verify newly created skills. *(⬅ depends on: Agent-driven skill creation)*
+- [ ] **Skill permission manifest** — `permissions:` in SKILL.md frontmatter (network, filesystem, env_vars). Declarative capability control. *(⬅ depends on: Agent-driven skill creation)*
 - [ ] **Cross-session memory search** — FTS5 search across threads via `/search`. *(⬅ depends on: ✅ Memory v0.3, ✅ Slash commands `/search`)*
 
 ## v0.6.0 — Multi-Agent Intelligence

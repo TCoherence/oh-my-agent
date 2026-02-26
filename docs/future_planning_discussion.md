@@ -20,13 +20,13 @@ BaseAgent
 
 两者的根本不兼容在于：
 
-| 维度 | CLI Agent | API Agent |
-|------|-----------|-----------|
-| Context Engineering | CLI 自己管理（AGENT.md, skills, tool use） | 需要自己搭建全部 |
-| Tool Use | 内置（Bash, Read, Edit, Grep...） | 需要自己定义 function schema |
-| Skill 系统 | 原生支持（SKILL.md auto-discovery） | 无法使用 |
-| Memory 集成 | 可以通过 prompt 注入 history | 需要自己管 messages array |
-| 迭代成本 | 零 — CLI 升级即可 | 需要跟进 API 变更 + 自研 |
+| 维度                | CLI Agent                                  | API Agent                    |
+| ------------------- | ------------------------------------------ | ---------------------------- |
+| Context Engineering | CLI 自己管理（AGENT.md, skills, tool use） | 需要自己搭建全部             |
+| Tool Use            | 内置（Bash, Read, Edit, Grep...）          | 需要自己定义 function schema |
+| Skill 系统          | 原生支持（SKILL.md auto-discovery）        | 无法使用                     |
+| Memory 集成         | 可以通过 prompt 注入 history               | 需要自己管 messages array    |
+| 迭代成本            | 零 — CLI 升级即可                          | 需要跟进 API 变更 + 自研     |
 
 **建议行动：**
 - 标记 `agents/api/` 为 **deprecated**，暂时保留代码但不再投入维护
@@ -84,13 +84,13 @@ CLI Agent 创建 skill
 
 从 [todo.md](file:///Users/yanghanzhi/repos/oh-my-agent/docs/todo.md) 来看，去掉 API agent 后，一些条目可以简化或移除：
 
-| 原有条目 | 建议 |
-|----------|------|
+| 原有条目                                                                  | 建议                                                       |
+| ------------------------------------------------------------------------- | ---------------------------------------------------------- |
 | Streaming responses（需要 `--output-format stream-json` + streaming SDK） | **简化** — 只需关注 CLI 的 stream-json，去掉 SDK streaming |
-| Codex CLI agent | **保留** — 自然是 CLI 路线的延伸 |
-| Slash commands (`/agent claude`) | **保留** — agent 切换在纯 CLI 架构下更有意义 |
-| Cross-session memory | **升级优先级** — 这是 oh-my-agent 自我迭代的基础设施 |
-| SQLite → PostgreSQL | **降低优先级** — 单机 CLI agent 暂时不需要 |
+| Codex CLI agent                                                           | **保留** — 自然是 CLI 路线的延伸                           |
+| Slash commands (`/agent claude`)                                          | **保留** — agent 切换在纯 CLI 架构下更有意义               |
+| Cross-session memory                                                      | **升级优先级** — 这是 oh-my-agent 自我迭代的基础设施       |
+| SQLite → PostgreSQL                                                       | **降低优先级** — 单机 CLI agent 暂时不需要                 |
 
 ### 新增建议条目
 
@@ -140,12 +140,12 @@ CLI Agent 创建 skill
 
 Codex CLI 是 OpenAI 的本地 coding agent，和 Claude CLI、Gemini CLI 定位一致。关键区别：
 
-| 对比 | Claude CLI | Gemini CLI | Codex CLI |
-|------|-----------|-----------|-----------|
-| 非交互模式 | `claude -p "<prompt>"` | `gemini -p "<prompt>"` | `codex exec "<prompt>"` |
-| 自动批准 | `--dangerously-skip-permissions` | `--yolo` | `--full-auto` |
-| 内置 Sandbox | 仅交互模式 (`/sandbox`) | `--sandbox` | `--sandbox workspace-write` |
-| 静默模式 | 默认 | 默认 | `-q` |
+| 对比         | Claude CLI                       | Gemini CLI             | Codex CLI                   |
+| ------------ | -------------------------------- | ---------------------- | --------------------------- |
+| 非交互模式   | `claude -p "<prompt>"`           | `gemini -p "<prompt>"` | `codex exec "<prompt>"`     |
+| 自动批准     | `--dangerously-skip-permissions` | `--yolo`               | `--full-auto`               |
+| 内置 Sandbox | 仅交互模式 (`/sandbox`)          | `--sandbox`            | `--sandbox workspace-write` |
+| 静默模式     | 默认                             | 默认                   | `-q`                        |
 
 `--full-auto` = `--ask-for-approval on-request` + `--sandbox workspace-write`，是 oh-my-agent headless 场景的理想组合。
 
@@ -153,13 +153,13 @@ Codex CLI 是 OpenAI 的本地 coding agent，和 Claude CLI、Gemini CLI 定位
 
 三个 CLI 都支持某种形式的 sandbox：
 
-| 特性 | Claude CLI | Gemini CLI | Codex CLI |
-|------|-----------|-----------|-----------|
-| 机制 | Apple Seatbelt (macOS) / bubblewrap (Linux) | Seatbelt (macOS) / Docker (Linux) | OS-level |
-| 文件限制 | cwd 内读写 | project dir 内写入 | cwd 内写入 |
-| 网络隔离 | Proxy + 白名单域名 | 可配置 | 默认禁止 |
-| Headless 可用 | ❌ 仅交互模式，CLI flag 待开发 | ✅ `--sandbox` | ✅ `--sandbox workspace-write` |
-| Docker 选项 | Docker Sandbox (microVM) | Container-based | 无 |
+| 特性          | Claude CLI                                  | Gemini CLI                        | Codex CLI                     |
+| ------------- | ------------------------------------------- | --------------------------------- | ----------------------------- |
+| 机制          | Apple Seatbelt (macOS) / bubblewrap (Linux) | Seatbelt (macOS) / Docker (Linux) | OS-level                      |
+| 文件限制      | cwd 内读写                                  | project dir 内写入                | cwd 内写入                    |
+| 网络隔离      | Proxy + 白名单域名                          | 可配置                            | 默认禁止                      |
+| Headless 可用 | ❌ 仅交互模式，CLI flag 待开发               | ✅ `--sandbox`                     | ✅ `--sandbox workspace-write` |
+| Docker 选项   | Docker Sandbox (microVM)                    | Container-based                   | 无                            |
 
 **推荐策略**：
 1. Codex → `--full-auto`（自带 sandbox）
@@ -226,4 +226,184 @@ v0.6.0 — Multi-Agent Intelligence
 但这可能 over-engineering 了 — 一个简单的硬编码 fallback message 就够了，不需要走 API agent。
 
 **结论：去掉 API agent 是正确的方向。** 保持架构简洁比保留一个几乎不会用到的 fallback 更重要。
+
+---
+
+## 🔒 Sandbox 隔离策略讨论（2025-02-26 补充）
+
+### 核心担忧
+
+两个关键风险：
+
+1. **CLI agent 在 dev repo 内操作** — 当前 `BaseCLIAgent.run()` 没有设置 `cwd`，subprocess 继承 oh-my-agent 进程的工作目录（即开发 repo）。agent 能看到源码、`config.yaml`（含 token）、`AGENT.md`，甚至可能直接修改这些文件。
+2. **Skill 脚本逃逸** — 即使 CLI sandbox 限制了文件写入范围，skill 脚本可能通过网络、环境变量、子进程等方式突破限制。
+
+### 当前代码的三个缺口
+
+#### 缺口 1: 没有 workspace 隔离
+
+```python
+# BaseCLIAgent.run() — 当前实现
+proc = await asyncio.create_subprocess_exec(
+    *cmd,
+    # ❌ 没有 cwd= 参数，继承父进程工作目录
+    stdout=asyncio.subprocess.PIPE,
+    stderr=asyncio.subprocess.PIPE,
+    env=self._build_env(),
+)
+```
+
+CLI agent 的 sandbox 都是基于 cwd 的：
+- Codex `--sandbox workspace-write` → 限制写入 cwd 内
+- Claude Seatbelt → 限制读写 cwd 内
+- Gemini `--sandbox` → 限制写入 project dir 内
+
+如果 cwd = dev repo，sandbox 反而「保护」了 agent 对 dev repo 的访问权。
+
+#### 缺口 2: 环境变量直通
+
+```python
+# BaseCLIAgent._build_env() — 当前实现
+def _build_env(self) -> dict[str, str]:
+    env = os.environ.copy()  # ❌ 全量复制，包含所有 token 和 secret
+    env.pop("CLAUDECODE", None)
+    return env
+```
+
+所有环境变量（包括 `DISCORD_BOT_TOKEN`、`ANTHROPIC_API_KEY` 等）都传给了子进程。Skill 脚本可以通过 `echo $DISCORD_BOT_TOKEN` 直接获取。
+
+#### 缺口 3: Skill symlink 指向 dev repo
+
+```python
+# SkillSync.sync() — 当前实现
+link.symlink_to(source)  # source = dev_repo/skills/xxx
+```
+
+Skill 以 symlink 形式指向 dev repo 的 `skills/` 目录。如果 agent 的 cwd 是 workspace，但 skill 是到 dev repo 的 symlink，agent 仍然可以通过 symlink 间接访问 dev repo。
+
+### Skill 逃逸风险矩阵
+
+| 逃逸方式          | 例子                       |       Codex       |         Claude         |      Gemini       |
+| ----------------- | -------------------------- | :---------------: | :--------------------: | :---------------: |
+| 网络请求          | `curl` exfiltrate 数据     |    ✅ 默认禁网     |        ❌ 无限制        |     ❌ 无限制      |
+| 读 sandbox 外文件 | `cat ~/.ssh/id_rsa`        |  ✅ sandbox 限制   |  ⚠️ Seatbelt 部分限制   | ❌ `--yolo` 无限制 |
+| 环境变量泄露      | `echo $DISCORD_BOT_TOKEN`  |         ❌         |           ❌            |         ❌         |
+| 子进程逃逸        | skill 里 `exec` 另一个进程 |  ✅ sandbox 继承   | ⚠️ 取决于 Seatbelt 粒度 |         ❌         |
+| 篡改 AGENT.md     | 改指令让 agent 做别的事    | ✅ workspace-write |  ⚠️ 如果在 cwd 内可写   |         ❌         |
+
+> ✅ = CLI sandbox 能防住，⚠️ = 部分防护，❌ = 无法防御
+
+**结论**：环境变量泄露是所有 CLI agent 的共同弱点，仅靠 CLI sandbox 无法解决。
+
+### 分层防御方案
+
+```
+Layer 4: Docker 容器隔离（进程级隔离，长期目标）
+Layer 3: Skill 权限声明（permissions manifest，v0.5+）
+Layer 2: CLI-native sandbox（--full-auto, --sandbox, --allowedTools）← 已有
+Layer 1: 环境变量净化（白名单化 _build_env）
+Layer 0: Workspace 目录隔离（cwd 设为专属目录）
+```
+
+#### Layer 0: Workspace 隔离（v0.4.x）
+
+Config 中添加 `workspace` 字段，agent spawn 时设 `cwd=workspace_path`：
+
+```yaml
+# config.yaml
+workspace: ~/oh-my-agent-workspace   # 所有 agent 的专属工作目录
+
+agents:
+  claude:
+    type: cli
+    # workspace 也可以 per-agent 覆盖
+```
+
+```python
+# BaseCLIAgent.run() 改动
+proc = await asyncio.create_subprocess_exec(
+    *cmd,
+    cwd=self._workspace,   # ← 新增：指向专属 workspace
+    stdout=asyncio.subprocess.PIPE,
+    stderr=asyncio.subprocess.PIPE,
+    env=self._build_env(),
+)
+```
+
+Workspace 目录在启动时自动创建，包含：
+- Agent 需要的 `AGENT.md`（拷贝，不是 symlink）
+- Skill 文件（拷贝到 workspace 的 `.skills/` 子目录）
+- Agent 产生的文件（代码、输出等）
+
+#### Layer 1: 环境变量净化（v0.4.x）
+
+`_build_env()` 改为白名单模式：
+
+```python
+def _build_env(self) -> dict[str, str]:
+    SAFE_KEYS = {"PATH", "HOME", "USER", "LANG", "LC_ALL", "TERM", "SHELL",
+                 "TMPDIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME"}
+    env = {k: v for k, v in os.environ.items() if k in SAFE_KEYS}
+    # CLI agent 可能需要自己的 API key（例如 Codex 需要 OPENAI_API_KEY）
+    # 这些通过 config 显式声明，而不是继承全局环境
+    for key in self._passthrough_env_keys:
+        if key in os.environ:
+            env[key] = os.environ[key]
+    return env
+```
+
+```yaml
+# config.yaml 显式声明需要传递的环境变量
+agents:
+  codex:
+    type: cli
+    env_passthrough: [OPENAI_API_KEY]   # 只有这些 env vars 会传给子进程
+  claude:
+    type: cli
+    env_passthrough: [ANTHROPIC_API_KEY]
+```
+
+#### Layer 2: CLI-native sandbox（已有，微调）
+
+保持现有策略，不变：
+- Codex: `--full-auto`（sandbox + 禁网）
+- Gemini: 加 `--sandbox` flag
+- Claude: `--allowedTools` 守护，等待 `--sandbox` CLI flag
+
+#### Layer 3: Skill 权限声明（v0.5+）
+
+在 `SKILL.md` 的 YAML frontmatter 中声明权限：
+
+```yaml
+---
+name: weather
+description: Get weather information
+permissions:
+  network: true          # 需要访问网络
+  filesystem: read-only  # 只读文件系统
+  env_vars: []           # 不需要任何环境变量
+---
+```
+
+oh-my-agent 在 invoke 前检查权限声明，不匹配时拒绝执行。这是一个 **声明式** 的 capability，不是强制执行——真正的强制执行依赖 Layer 0-2 和 Layer 4。
+
+#### Layer 4: Docker 隔离（长期，backlog）
+
+所有 CLI agent + workspace 运行在 Docker 容器内：
+- 进程级隔离，不依赖 CLI 自身的 sandbox 实现
+- 网络、文件系统、环境变量全部由容器控制
+- 是唯一真正意义上的 defense-in-depth
+
+### 推荐实施节奏
+
+| 阶段                 | 内容                                 | 代码量  | 风险解决                  |
+| -------------------- | ------------------------------------ | ------- | ------------------------- |
+| **v0.4.x（立即做）** | Layer 0 workspace + Layer 1 env 净化 | ~50 行  | 解决 80% 的担忧           |
+| **v0.5+**            | Layer 3 skill permissions            | ~100 行 | 声明式 capability control |
+| **Backlog**          | Layer 4 Docker                       | 中等    | 完整的进程隔离            |
+
+v0.4.x 的三个改动互相独立，可以分别 PR：
+1. `workspace` config + `BaseCLIAgent` cwd — 不影响现有行为（默认 workspace = cwd）
+2. `_build_env()` 白名单 — 可能需要测试确保 CLI agent 正常运行
+3. SkillSync 拷贝到 workspace — 需要区分 dev 模式（symlink）和 production 模式（copy）
 

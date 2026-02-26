@@ -51,11 +51,11 @@ AgentRegistry
 
 **Short answer: Yes, they already can.** But the current config happens to restrict Claude.
 
-| CLI | File Editing | Current Config | What To Change |
-|-----|-------------|----------------|----------------|
-| Claude | Built-in `Edit` tool, also `Write` for new files | `allowed_tools: [Bash, Read, Edit, Glob, Grep]` — **Edit is already included** | Already works. Add `Write` to `allowed_tools` if creating new files is needed. |
-| Gemini | Uses shell commands (cat, sed, etc.) via `--yolo` | No tool restrictions — has full access | Already works. |
-| Codex | Built-in file editing within workspace | `--sandbox workspace-write` restricts to cwd | Will work out-of-box once integrated. |
+| CLI    | File Editing                                      | Current Config                                                                 | What To Change                                                                 |
+| ------ | ------------------------------------------------- | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------ |
+| Claude | Built-in `Edit` tool, also `Write` for new files  | `allowed_tools: [Bash, Read, Edit, Glob, Grep]` — **Edit is already included** | Already works. Add `Write` to `allowed_tools` if creating new files is needed. |
+| Gemini | Uses shell commands (cat, sed, etc.) via `--yolo` | No tool restrictions — has full access                                         | Already works.                                                                 |
+| Codex  | Built-in file editing within workspace            | `--sandbox workspace-write` restricts to cwd                                   | Will work out-of-box once integrated.                                          |
 
 Key insight: Claude's `--allowedTools` controls which built-in tools the agent can use. The current config already includes `Edit` (modify existing files) and `Bash` (can also edit via shell). To allow creating entirely new files, add `Write` to `allowed_tools`:
 
@@ -107,14 +107,14 @@ agents:
 
 All three CLI agents support some form of sandbox. Comparison:
 
-| Feature | Claude CLI | Gemini CLI | Codex CLI |
-|---------|-----------|-----------|----------|
-| **Sandbox mechanism** | Apple Seatbelt (macOS) / bubblewrap (Linux) | Seatbelt (macOS) / Docker/Podman (Linux) | OS-level (macOS/Linux) |
-| **Enable flag** | `/sandbox` in interactive, or auto-allow mode | `-s` / `--sandbox` | `--sandbox <mode>` |
-| **File restriction** | Read/write within cwd only | Writes restricted to project dir | Writes restricted to cwd |
-| **Network isolation** | Proxy-based, approved domains only | Configurable via sandbox profile | Blocked by default |
-| **Headless activation** | Not yet a CLI flag (feature requested); current workaround is `--dangerously-skip-permissions` + `--allowedTools` | `--sandbox` works in headless | `--sandbox workspace-write` works in headless |
-| **Docker option** | Docker Sandbox (microVM) available | Container-based sandbox available | N/A |
+| Feature                 | Claude CLI                                                                                                        | Gemini CLI                               | Codex CLI                                     |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------- | ---------------------------------------- | --------------------------------------------- |
+| **Sandbox mechanism**   | Apple Seatbelt (macOS) / bubblewrap (Linux)                                                                       | Seatbelt (macOS) / Docker/Podman (Linux) | OS-level (macOS/Linux)                        |
+| **Enable flag**         | `/sandbox` in interactive, or auto-allow mode                                                                     | `-s` / `--sandbox`                       | `--sandbox <mode>`                            |
+| **File restriction**    | Read/write within cwd only                                                                                        | Writes restricted to project dir         | Writes restricted to cwd                      |
+| **Network isolation**   | Proxy-based, approved domains only                                                                                | Configurable via sandbox profile         | Blocked by default                            |
+| **Headless activation** | Not yet a CLI flag (feature requested); current workaround is `--dangerously-skip-permissions` + `--allowedTools` | `--sandbox` works in headless            | `--sandbox workspace-write` works in headless |
+| **Docker option**       | Docker Sandbox (microVM) available                                                                                | Container-based sandbox available        | N/A                                           |
 
 **Recommended approach for oh-my-agent:**
 
@@ -291,22 +291,22 @@ agents:
 
 ### Implementation Status (v0.2.0)
 
-| Component | Status |
-|---|---|
-| `config.py` — YAML loader | Done |
-| `agents/base.py` — history param | Done |
-| `agents/registry.py` — fallback | Done |
-| `agents/cli/base.py` — subprocess + history | Done |
-| `agents/cli/claude.py` | Done |
-| `agents/cli/gemini.py` | Done |
-| `agents/api/anthropic.py` | Done |
-| `agents/api/openai.py` | Done |
-| `gateway/base.py` — IncomingMessage, BaseChannel | Done |
-| `gateway/session.py` — ChannelSession | Done |
-| `gateway/manager.py` — GatewayManager | Done |
-| `gateway/platforms/discord.py` | Done |
-| `gateway/platforms/slack.py` | Stub |
-| End-to-end testing | Pending |
+| Component                                        | Status  |
+| ------------------------------------------------ | ------- |
+| `config.py` — YAML loader                        | Done    |
+| `agents/base.py` — history param                 | Done    |
+| `agents/registry.py` — fallback                  | Done    |
+| `agents/cli/base.py` — subprocess + history      | Done    |
+| `agents/cli/claude.py`                           | Done    |
+| `agents/cli/gemini.py`                           | Done    |
+| `agents/api/anthropic.py`                        | Done    |
+| `agents/api/openai.py`                           | Done    |
+| `gateway/base.py` — IncomingMessage, BaseChannel | Done    |
+| `gateway/session.py` — ChannelSession            | Done    |
+| `gateway/manager.py` — GatewayManager            | Done    |
+| `gateway/platforms/discord.py`                   | Done    |
+| `gateway/platforms/slack.py`                     | Stub    |
+| End-to-end testing                               | Pending |
 
 ### Roadmap (Future)
 
@@ -332,12 +332,12 @@ The `claude` CLI provides a complete agentic loop (tool use, file operations, ba
 ### Why deprecate API agents? (v0.4+)
 CLI agents and API agents have a fundamental incompatibility in abstraction level:
 
-| Dimension | CLI Agent | API Agent |
-|-----------|-----------|----------|
-| Context Engineering | CLI manages it (AGENT.md, skills, tool use) | Must build from scratch |
-| Tool Use | Built-in (Bash, Read, Edit, Grep…) | Must define function schemas |
-| Skill System | Native (SKILL.md auto-discovery) | Cannot use |
-| Iteration Cost | Zero — CLI upgrades are free | Must track API changes + build infra |
+| Dimension           | CLI Agent                                   | API Agent                            |
+| ------------------- | ------------------------------------------- | ------------------------------------ |
+| Context Engineering | CLI manages it (AGENT.md, skills, tool use) | Must build from scratch              |
+| Tool Use            | Built-in (Bash, Read, Edit, Grep…)          | Must define function schemas         |
+| Skill System        | Native (SKILL.md auto-discovery)            | Cannot use                           |
+| Iteration Cost      | Zero — CLI upgrades are free                | Must track API changes + build infra |
 
 Maintaining both paths doubles the surface area without proportional value. The API agent code is kept for reference but receives no new development.
 
@@ -360,4 +360,12 @@ Yes. Claude CLI has built-in `Edit` and `Write` tools — `Edit` is already in t
 Codex CLI is the only CLI agent with **built-in, headless-friendly sandbox** (`--sandbox workspace-write`). Adding it provides: (1) a third fallback agent for resilience, (2) a sandbox-first reference implementation, and (3) access to OpenAI models via the same CLI-agent architecture. Its `codex exec` non-interactive mode maps cleanly to `BaseCLIAgent._build_command()`.
 
 ### Sandbox strategy (v0.4+)
-Short-term: enable CLI-level sandbox where available (Codex `--full-auto`, Gemini `--sandbox`). Claude CLI's sandbox is interactive-only for now — `--allowedTools` serves as the guardrail. Long-term: wrap all CLI agents in Docker containers for full process isolation, independent of CLI-level sandboxing.
+Layered defense model with four tiers. See [future_planning_discussion.md](future_planning_discussion.md#-sandbox-隔离策略讨论2025-02-26-补充) for detailed risk analysis and implementation plan.
+
+- **Layer 0 — Workspace isolation**: Dedicate a `workspace` directory (configurable in `config.yaml`) and pass it as `cwd` to `create_subprocess_exec`. All CLI sandboxes are cwd-scoped, so this effectively confines agents to a directory separate from the dev repo.
+- **Layer 1 — Environment variable sanitization**: `_build_env()` switches from `os.environ.copy()` to a whitelist (`PATH`, `HOME`, `LANG`, etc.). Agent-specific keys (e.g. `OPENAI_API_KEY`) are declared explicitly via `env_passthrough` in config.
+- **Layer 2 — CLI-native sandbox**: Codex `--full-auto` (sandbox + no network), Gemini `--sandbox`, Claude `--allowedTools`. Already partially in place.
+- **Layer 3 — Skill permissions** (v0.5+): `permissions:` block in `SKILL.md` frontmatter declaring network, filesystem, and env_vars access. Declarative — enforcement depends on L0–L2 and L4.
+- **Layer 4 — Docker isolation** (backlog): Run CLI agent + workspace inside a container for full process-level isolation, independent of CLI sandbox implementations.
+
+Key insight: environment variable leakage is a blind spot across all CLI agents' sandboxes — none of them filter inherited env vars. Layer 1 is the only mitigation without Docker.
