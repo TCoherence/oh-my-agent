@@ -1,40 +1,31 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+import re
+from pathlib import Path
+from typing import Any
 
+import yaml
 from dotenv import load_dotenv
 
+# Regex for ${VAR_NAME} substitution
+_ENV_RE = re.compile(r"\$\{([^}]+)\}")
 
-@dataclass(frozen=True)
-class Config:
-    """Application configuration loaded from environment variables."""
 
-    discord_bot_token: str
-    discord_channel_id: int
-    claude_max_turns: int = 25
-    claude_allowed_tools: list[str] = field(
-        default_factory=lambda: ["Bash", "Read", "Edit", "Glob", "Grep"]
-    )
-    claude_model: str = "sonnet"
+def _substitute(value: Any) -> Any:
+    """Recursively replace ${VAR} with environment variable values in strings."""
+    if isinstance(value, str):
+        return _ENV_RE.sub(lambda m: os.environ.get(m.group(1), m.group(0)), value)
+    if isinstance(value, dict):
+        return {k: _substitute(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_substitute(item) for item in value]
+    return value
 
-    @classmethod
-    def from_env(cls) -> Config:
-        load_dotenv()
 
-        token = os.environ["DISCORD_BOT_TOKEN"]
-        channel_id = int(os.environ["DISCORD_CHANNEL_ID"])
-
-        allowed_tools_raw = os.getenv("CLAUDE_ALLOWED_TOOLS", "")
-        if allowed_tools_raw.strip():
-            allowed_tools = [t.strip() for t in allowed_tools_raw.split(",") if t.strip()]
-        else:
-            allowed_tools = cls.__dataclass_fields__["claude_allowed_tools"].default_factory()
-
-        return cls(
-            discord_bot_token=token,
-            discord_channel_id=channel_id,
-            claude_max_turns=int(os.getenv("CLAUDE_MAX_TURNS", "25")),
-            claude_allowed_tools=allowed_tools,
-            claude_model=os.getenv("CLAUDE_MODEL", "sonnet"),
-        )
+def load_config(path: str | Path = "config.yaml") -> dict:
+    """Load config.yaml with ${ENV_VAR} substitution from the environment."""
+    load_dotenv()
+    raw = Path(path).read_text(encoding="utf-8")
+    data = yaml.safe_load(raw)
+    return _substitute(data)

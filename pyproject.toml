@@ -1,12 +1,18 @@
 [project]
 name = "oh-my-agent"
-version = "0.1.0"
-description = "Discord bot that routes messages to CLI-based AI agents"
+version = "0.2.0"
+description = "Multi-platform Discord/Slack bot backed by CLI or API AI agents"
 requires-python = ">=3.11"
 dependencies = [
     "discord.py>=2.4,<3",
     "python-dotenv>=1.0,<2",
+    "PyYAML>=6.0,<7",
 ]
+
+[project.optional-dependencies]
+anthropic = ["anthropic>=0.40"]
+openai = ["openai>=1.0"]
+all = ["anthropic>=0.40", "openai>=1.0"]
 
 [project.scripts]
 oh-my-agent = "oh_my_agent.main:main"

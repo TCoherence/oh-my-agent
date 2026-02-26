@@ -2,78 +2,158 @@
 
 ## Project Overview
 
-**Oh My Agent** — a Discord bot that uses CLI-based AI agents (starting with `claude`) as the execution layer, instead of calling model APIs directly. Inspired by OpenClaw.
+**Oh My Agent** — a multi-platform bot that uses CLI-based AI agents (Claude, Gemini, etc.) or API agents (Anthropic, OpenAI) as the execution layer, instead of calling model APIs directly. Inspired by OpenClaw.
 
-## MVP Scope (v0.1.0)
+---
 
-### Core Features
-- [x] Connect to a Discord channel
-- [x] Reply in threads (not separate messages)
-- [x] Use `claude` CLI as the underlying agent via subprocess
-- [x] Extensible agent abstraction (`BaseAgent` ABC) for future CLI agents
-- [x] Basic local system permissions
+## v0.2.0 — Gateway + Multi-Agent Architecture
 
-### Implementation Status
+### What Changed
 
-| Component | File | Status |
-|---|---|---|
-| Project scaffolding | `pyproject.toml`, `.env.example`, `.gitignore` | Done |
-| Config layer | `src/oh_my_agent/config.py` | Done |
-| Agent abstraction | `src/oh_my_agent/agents/base.py` | Done |
-| Claude agent | `src/oh_my_agent/agents/claude.py` | Done |
-| Message chunker | `src/oh_my_agent/utils/chunker.py` | Done |
-| Discord bot | `src/oh_my_agent/bot.py` | Done |
-| Entry point | `src/oh_my_agent/main.py` | Done |
-| End-to-end testing | — | Pending |
+Full architectural refactor to support:
+1. **Gateway layer** — platform-agnostic channel abstraction, each channel maps to an independent session
+2. **Agent registry** — ordered fallback across multiple agents, with attribution in replies
+3. **Thread-level conversation history** — same thread retains context across messages
+4. **API agents** — direct SDK calls to Anthropic and OpenAI (alongside CLI agents)
+5. **YAML config** — `config.yaml` replaces flat `.env` for structured multi-channel setup
 
-### Not Yet Implemented (Future)
-- [ ] Conversation memory within threads (currently stateless per message)
-- [ ] Streaming responses (edit Discord message in-place as tokens arrive)
-- [ ] Multiple CLI agents (codex, gemini) with routing via mentions
-- [ ] Slash commands (`/ask claude ...`)
-- [ ] Markdown-aware chunking (avoid splitting inside code blocks)
-- [ ] Rate limiting / request queuing
+### Architecture
+
+```
+User (Discord / Slack / ...)
+         │ message
+         ▼
+   GatewayManager
+         │ routes to ChannelSession
+         ▼
+   ChannelSession ──── histories: {thread_id → [turns]}
+         │
+         ▼
+   AgentRegistry ─── [claude, gemini, anthropic_api, ...]
+         │ fallback chain
+         ▼
+   BaseAgent.run(prompt, history)
+     ├── BaseCLIAgent (claude, gemini)
+     │     subprocess → flatten history into prompt
+     └── BaseAPIAgent (anthropic, openai)
+           SDK → native messages array
+         │
+         ▼
+   Response → chunk → send to thread
+   (with `-# via **agent_name**` attribution)
+```
+
+### Project Structure
+
+```
+src/oh_my_agent/
+  main.py                        # Entry: load config.yaml, build GatewayManager
+  config.py                      # YAML loader with ${ENV_VAR} substitution
+  gateway/
+    base.py                      # IncomingMessage, BaseChannel ABC
+    session.py                   # ChannelSession (per-channel state + thread histories)
+    manager.py                   # GatewayManager: routes messages, calls agents
+    platforms/
+      discord.py                 # Discord adapter
+      slack.py                   # Slack stub (NotImplementedError)
+  agents/
+    base.py                      # BaseAgent ABC + AgentResponse
+    registry.py                  # AgentRegistry with ordered fallback
+    cli/
+      base.py                    # BaseCLIAgent (shared subprocess + history → prompt)
+      claude.py                  # Claude CLI agent
+      gemini.py                  # Gemini CLI agent
+    api/
+      base.py                    # BaseAPIAgent
+      anthropic.py               # Anthropic API agent (multi-turn)
+      openai.py                  # OpenAI API agent (multi-turn)
+  utils/
+    chunker.py                   # Message chunking for platform limits
+```
+
+### Configuration
+
+```yaml
+# config.yaml
+gateway:
+  channels:
+    - platform: discord
+      token: ${DISCORD_BOT_TOKEN}
+      channel_id: "${DISCORD_CHANNEL_ID}"
+      agents: [claude, gemini]   # fallback order
+
+agents:
+  claude:
+    type: cli
+    cli_path: claude
+    max_turns: 25
+    model: sonnet
+    allowed_tools: [Bash, Read, Edit, Glob, Grep]
+  gemini:
+    type: cli
+    cli_path: gemini
+  anthropic_api:
+    type: api
+    provider: anthropic
+    model: claude-sonnet-4-6
+    api_key: ${ANTHROPIC_API_KEY}
+```
+
+### Implementation Status (v0.2.0)
+
+| Component | Status |
+|---|---|
+| `config.py` — YAML loader | Done |
+| `agents/base.py` — history param | Done |
+| `agents/registry.py` — fallback | Done |
+| `agents/cli/base.py` — subprocess + history | Done |
+| `agents/cli/claude.py` | Done |
+| `agents/cli/gemini.py` | Done |
+| `agents/api/anthropic.py` | Done |
+| `agents/api/openai.py` | Done |
+| `gateway/base.py` — IncomingMessage, BaseChannel | Done |
+| `gateway/session.py` — ChannelSession | Done |
+| `gateway/manager.py` — GatewayManager | Done |
+| `gateway/platforms/discord.py` | Done |
+| `gateway/platforms/slack.py` | Stub |
+| End-to-end testing | Pending |
+
+### Roadmap (Future)
+
+- [ ] Slack adapter (full implementation)
+- [ ] Telegram adapter
+- [ ] Streaming responses (incremental message edits)
+- [ ] Cross-session memory sharing
+- [ ] Agent selection via @mention (`@claude`, `@gemini`)
+- [ ] Slash commands
+- [ ] Rate limiting / request queue
 - [ ] File attachment support
-- [ ] Multi-channel support
+
+---
+
+## v0.1.0 — MVP (Discord + Claude CLI)
+
+Initial working bot: Discord channel → Claude CLI → thread reply.
+
+- Single platform (Discord), single agent (Claude CLI)
+- No conversation history (stateless per message)
+- Environment variable config
+
+---
 
 ## Architecture Decisions
 
 ### Why CLI subprocess instead of API SDK?
+The `claude` CLI provides a complete agentic loop (tool use, file operations, bash, context management). Wrapping it as a subprocess means all of that is available without reimplementing it. The `BaseAPIAgent` path exists for cases where you want simpler stateless or multi-turn calls without tool use.
 
-The `claude` CLI already provides a complete agentic loop (tool use, file read/write, bash execution, context management). Wrapping it as a subprocess means we get all of that for free without reimplementing it. This also keeps the bot decoupled from any specific Python SDK version.
+### Why session-per-channel?
+Each channel is an independent workspace. Cross-channel contamination would be confusing and potentially leak context between users/projects. Future: opt-in shared memory via explicit memory module.
 
-### Why `discord.Client` instead of `commands.Bot`?
+### Why flatten history into prompt for CLI agents?
+CLI agents are stateless by design. Flattening history into the prompt string is the simplest approach. The alternative (`claude --resume <session_id>`) requires JSON output parsing and session ID storage — added complexity for future versions.
 
-The MVP doesn't need slash commands or prefix commands. The bot listens to raw messages and responds in threads. `discord.Client` is simpler and sufficient.
-
-### Why `--output-format text` instead of `json`?
-
-For the MVP we only need the final text answer. The text format gives us exactly that with zero parsing overhead. When we need session tracking or cost metrics, we'll switch to JSON.
-
-### Why stateless (no conversation memory)?
-
-Each message gets a fresh `claude -p` invocation. This is a deliberate MVP simplification. Adding memory later can be done by:
-1. Collecting thread history and passing as multi-turn prompt context
-2. Using `claude --resume <session_id>` with JSON output to capture session IDs
-
-### Why `asyncio.create_subprocess_exec`?
-
-`subprocess.run()` is blocking and would freeze the Discord event loop while Claude is thinking. `asyncio.create_subprocess_exec` is non-blocking and lets the bot handle other events concurrently.
+### Why `asyncio.create_subprocess_exec` not `subprocess.run`?
+`subprocess.run` blocks the event loop. With multiple concurrent channel sessions and async Discord/Slack clients, a blocking call would stall all other processing.
 
 ### Why `--dangerously-skip-permissions`?
-
-Required for headless/non-interactive subprocess mode. Without this, the CLI would prompt for permission confirmations that cannot be answered by a subprocess. The `--allowedTools` flag still constrains which tools are available.
-
-## Testing Checklist
-
-- [ ] Bot logs "Bot is online" on startup
-- [ ] Message in target channel creates a thread
-- [ ] Thread name is the first ~90 chars of the message
-- [ ] Bot shows typing indicator while processing
-- [ ] Claude response appears in the thread
-- [ ] Reply in existing thread sends response in the same thread
-- [ ] Messages in other channels are ignored
-- [ ] Messages from the bot itself are ignored
-- [ ] Responses > 2000 chars are split into multiple messages
-- [ ] Claude CLI not found → error message in thread
-- [ ] Claude CLI timeout → timeout error in thread
+Required for headless mode. Without it, the CLI prompts for permission confirmations that cannot be answered in a subprocess. `--allowedTools` still constrains what the agent can do.

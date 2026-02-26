@@ -14,11 +14,24 @@ class AgentResponse:
 
 
 class BaseAgent(ABC):
-    """Interface for a CLI-backed AI agent."""
+    """Interface for all AI agents (CLI or API)."""
 
     @property
     @abstractmethod
     def name(self) -> str: ...
 
     @abstractmethod
-    async def run(self, prompt: str) -> AgentResponse: ...
+    async def run(
+        self,
+        prompt: str,
+        history: list[dict] | None = None,
+    ) -> AgentResponse:
+        """Execute the agent.
+
+        Args:
+            prompt: The current user message.
+            history: Prior turns in the conversation.
+                     Each entry: {"role": "user"|"assistant", "content": str,
+                                  "author"?: str, "agent"?: str}
+        """
+        ...
