@@ -29,7 +29,11 @@ class DiscordChannel(BaseChannel):
     def channel_id(self) -> str:
         return self._channel_id
 
-    async def start(self, on_message: MessageHandler) -> None:
+    async def start(self, handler: MessageHandler) -> None:
+        # Capture as a local alias BEFORE @client.event defines an inner
+        # function also named `on_message` which would shadow this parameter.
+        _handler = handler
+
         intents = discord.Intents.default()
         intents.message_content = True
         client = discord.Client(intents=intents)
@@ -77,7 +81,7 @@ class DiscordChannel(BaseChannel):
             if not msg.content:
                 return
 
-            await on_message(msg)
+            await _handler(msg)
 
         await client.start(self._token)
 
