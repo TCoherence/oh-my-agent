@@ -18,12 +18,90 @@
    - **Safety net**: post-response hook in `GatewayManager.handle_message()` diffs CLI skill dirs for new non-symlink entries.
 3. **Streaming responses** — CLI-only via `--output-format stream-json`. Edit Discord messages in-place.
 4. **Slash commands** — `/reset`, `/agent`, `/search`. Requires `discord.app_commands`.
+5. **Add Codex CLI agent** — `agents/cli/codex.py`. OpenAI Codex CLI with built-in sandbox. See discussion below.
+6. **Sandbox / isolation** — evaluate and enable sandbox modes across CLI agents. See discussion below.
+
+### Discussion: Can CLI Agents Edit Files?
+
+**Short answer: Yes, they already can.** But the current config happens to restrict Claude.
+
+| CLI | File Editing | Current Config | What To Change |
+|-----|-------------|----------------|----------------|
+| Claude | Built-in `Edit` tool, also `Write` for new files | `allowed_tools: [Bash, Read, Edit, Glob, Grep]` — **Edit is already included** | Already works. Add `Write` to `allowed_tools` if creating new files is needed. |
+| Gemini | Uses shell commands (cat, sed, etc.) via `--yolo` | No tool restrictions — has full access | Already works. |
+| Codex | Built-in file editing within workspace | `--sandbox workspace-write` restricts to cwd | Will work out-of-box once integrated. |
+
+Key insight: Claude's `--allowedTools` controls which built-in tools the agent can use. The current config already includes `Edit` (modify existing files) and `Bash` (can also edit via shell). To allow creating entirely new files, add `Write` to `allowed_tools`:
+
+```yaml
+agents:
+  claude:
+    allowed_tools: [Bash, Read, Write, Edit, Glob, Grep]
+    #                           ^^^^^ add this for new file creation
+```
+
+Gemini with `--yolo` has unrestricted tool access — it can read, write, and execute anything.
+
+### Discussion: Codex CLI Integration
+
+OpenAI Codex CLI (`codex`) is a local coding agent similar to Claude CLI and Gemini CLI. Key differences:
+
+- **Non-interactive mode**: `codex exec "<prompt>"` (vs `claude -p` and `gemini -p`)
+- **Built-in sandbox**: `--sandbox workspace-write` restricts writes to cwd, blocks network. OS-level enforcement.
+- **Approval policy**: `--ask-for-approval on-request` for headless mode (similar to `--dangerously-skip-permissions`)
+- **Shortcut**: `--full-auto` = `--ask-for-approval on-request` + `--sandbox workspace-write` — the ideal mode for oh-my-agent
+- **Quiet mode**: `-q` suppresses interactive prompts, good for subprocess
+
+Proposed implementation for `agents/cli/codex.py`:
+
+```python
+class CodexCLIAgent(BaseCLIAgent):
+    def _build_command(self, prompt: str) -> list[str]:
+        cmd = [
+            self._cli_path,
+            "exec", prompt,          # non-interactive mode
+            "--full-auto",           # auto-approve + workspace sandbox
+            "-q",                    # suppress prompts for subprocess
+        ]
+        if self._model:
+            cmd.extend(["--model", self._model])
+        return cmd
+```
+
+```yaml
+# config.yaml
+agents:
+  codex:
+    type: cli
+    cli_path: codex
+    model: gpt-5-codex        # or o4-mini, etc.
+```
+
+### Discussion: Sandbox / Isolation
+
+All three CLI agents support some form of sandbox. Comparison:
+
+| Feature | Claude CLI | Gemini CLI | Codex CLI |
+|---------|-----------|-----------|----------|
+| **Sandbox mechanism** | Apple Seatbelt (macOS) / bubblewrap (Linux) | Seatbelt (macOS) / Docker/Podman (Linux) | OS-level (macOS/Linux) |
+| **Enable flag** | `/sandbox` in interactive, or auto-allow mode | `-s` / `--sandbox` | `--sandbox <mode>` |
+| **File restriction** | Read/write within cwd only | Writes restricted to project dir | Writes restricted to cwd |
+| **Network isolation** | Proxy-based, approved domains only | Configurable via sandbox profile | Blocked by default |
+| **Headless activation** | Not yet a CLI flag (feature requested); current workaround is `--dangerously-skip-permissions` + `--allowedTools` | `--sandbox` works in headless | `--sandbox workspace-write` works in headless |
+| **Docker option** | Docker Sandbox (microVM) available | Container-based sandbox available | N/A |
+
+**Recommended approach for oh-my-agent:**
+
+1. **Codex**: use `--full-auto` which includes `--sandbox workspace-write` — sandbox is on by default.
+2. **Gemini**: add `--sandbox` flag to `_build_command()`. Minimal change.
+3. **Claude**: `--dangerously-skip-permissions` + `--allowedTools` is the current isolation mechanism. True sandbox (`/sandbox`) is interactive-only for now. Monitor for a `--sandbox` CLI flag.
+4. **Long-term**: for production, consider running all CLI agents inside Docker containers for full process isolation. This is orthogonal to CLI-level sandbox and provides defense-in-depth.
 
 ### Architecture Impact
 
 ```
 BaseAgent
-  └── BaseCLIAgent  →  claude, gemini, codex (future)
+  └── BaseCLIAgent  →  claude, gemini, codex
        │
        └── agents/api/  DEPRECATED — no new development
 ```
@@ -248,3 +326,12 @@ CLI agents are stateless by design. Flattening history into the prompt string is
 
 ### Why `--dangerously-skip-permissions`?
 Required for headless mode. Without it, the CLI prompts for permission confirmations that cannot be answered in a subprocess. `--allowedTools` still constrains what the agent can do.
+
+### Can CLI agents edit files? (v0.4+)
+Yes. Claude CLI has built-in `Edit` and `Write` tools — `Edit` is already in the default `allowed_tools` config. Gemini CLI uses shell commands via `--yolo` with no tool restrictions. Codex CLI has native file editing within its workspace sandbox. The key constraint is not capability but **scope** — sandbox and `allowed_tools` control *where* and *what* they can touch, not *whether* they can edit.
+
+### Why add Codex CLI? (v0.4+)
+Codex CLI is the only CLI agent with **built-in, headless-friendly sandbox** (`--sandbox workspace-write`). Adding it provides: (1) a third fallback agent for resilience, (2) a sandbox-first reference implementation, and (3) access to OpenAI models via the same CLI-agent architecture. Its `codex exec` non-interactive mode maps cleanly to `BaseCLIAgent._build_command()`.
+
+### Sandbox strategy (v0.4+)
+Short-term: enable CLI-level sandbox where available (Codex `--full-auto`, Gemini `--sandbox`). Claude CLI's sandbox is interactive-only for now — `--allowedTools` serves as the guardrail. Long-term: wrap all CLI agents in Docker containers for full process isolation, independent of CLI-level sandboxing.

@@ -124,29 +124,96 @@ CLI Agent 创建 skill
 
 ---
 
+## 🔧 CLI Agent 能力讨论（2025-02-26 补充）
+
+### CLI Agent 能不能改文件？
+
+**可以，而且当前架构已经支持。**
+
+- **Claude CLI**: 内置 `Edit` 工具（改现有文件）和 `Write` 工具（创建新文件）。当前 config 的 `allowed_tools: [Bash, Read, Edit, Glob, Grep]` 已经包含了 `Edit`。如果要创建新文件，加上 `Write` 即可。另外 `Bash` 工具本身也能通过 shell 命令操作文件。
+- **Gemini CLI**: `--yolo` 模式下没有工具限制，通过 shell 命令可以做任何文件操作。
+- **Codex CLI**: 在 `--sandbox workspace-write` 模式下可以读写 cwd 内的所有文件。
+
+**结论**：文件编辑不是能力问题，而是 **范围控制** 问题 — sandbox 和 `allowedTools` 控制的是 agent 能碰哪些文件、能做哪些操作，而非能不能改文件。
+
+### Codex CLI 集成
+
+Codex CLI 是 OpenAI 的本地 coding agent，和 Claude CLI、Gemini CLI 定位一致。关键区别：
+
+| 对比 | Claude CLI | Gemini CLI | Codex CLI |
+|------|-----------|-----------|-----------|
+| 非交互模式 | `claude -p "<prompt>"` | `gemini -p "<prompt>"` | `codex exec "<prompt>"` |
+| 自动批准 | `--dangerously-skip-permissions` | `--yolo` | `--full-auto` |
+| 内置 Sandbox | 仅交互模式 (`/sandbox`) | `--sandbox` | `--sandbox workspace-write` |
+| 静默模式 | 默认 | 默认 | `-q` |
+
+`--full-auto` = `--ask-for-approval on-request` + `--sandbox workspace-write`，是 oh-my-agent headless 场景的理想组合。
+
+### Sandbox / 隔离环境
+
+三个 CLI 都支持某种形式的 sandbox：
+
+| 特性 | Claude CLI | Gemini CLI | Codex CLI |
+|------|-----------|-----------|-----------|
+| 机制 | Apple Seatbelt (macOS) / bubblewrap (Linux) | Seatbelt (macOS) / Docker (Linux) | OS-level |
+| 文件限制 | cwd 内读写 | project dir 内写入 | cwd 内写入 |
+| 网络隔离 | Proxy + 白名单域名 | 可配置 | 默认禁止 |
+| Headless 可用 | ❌ 仅交互模式，CLI flag 待开发 | ✅ `--sandbox` | ✅ `--sandbox workspace-write` |
+| Docker 选项 | Docker Sandbox (microVM) | Container-based | 无 |
+
+**推荐策略**：
+1. Codex → `--full-auto`（自带 sandbox）
+2. Gemini → 加 `--sandbox` flag
+3. Claude → 当前用 `--allowedTools` 守护，等待 `--sandbox` CLI flag
+4. 长期 → 所有 CLI agent 跑在 Docker 容器内，defense-in-depth
+
+---
+
 ## 📋 建议的版本规划
+
+> 完整的依赖关系图（Mermaid DAG）见 [todo.md](todo.md)。
 
 ```
 v0.4.0 — CLI-First Cleanup + Skill Sync
-  ├─ Deprecate API agent layer
-  ├─ SkillSync reverse sync (方案 B+C)
-  ├─ Streaming responses (CLI only)
-  ├─ Slash commands (/reset, /agent, /search)
-  └─ Update README + development.md
+  ├─ Deprecate API agent layer        (独立，无依赖)
+  ├─ Add Write to Claude tools        (独立，config 改动)
+  ├─ Add Codex CLI agent              (独立，无依赖)
+  ├─ Enable CLI sandbox modes         (⬅ Codex CLI agent)
+  ├─ SkillSync reverse sync (B+C)     (⬅ ✅ Skill System v0.3)
+  ├─ Streaming responses (CLI only)   (独立，无依赖)
+  ├─ Slash commands                   (独立，但 /search 需要 v0.5 memory)
+  └─ Update README                    (⬅ Deprecate API + Add Codex)
 
 v0.5.0 — Self-Evolution
-  ├─ Agent-driven skill creation workflow
-  ├─ Skill testing / validation
-  ├─ CLI session resume (claude --resume)
-  ├─ Cross-session memory search
-  └─ Memory export/import API
+  ├─ Agent-driven skill creation      (⬅ Reverse sync + Write tool)
+  ├─ Skill testing / validation       (⬅ Skill creation)
+  ├─ CLI session resume               (⬅ ✅ History Compression v0.3)
+  ├─ Cross-session memory search      (⬅ ✅ Memory v0.3 + Slash commands)
+  └─ Memory export/import API         (⬅ ✅ Memory v0.3)
 
 v0.6.0 — Multi-Agent Intelligence
-  ├─ Smart agent routing (专家路由)
-  ├─ Agent collaboration (review 模式)
-  ├─ Agent selection via @mention
-  └─ More platform adapters (Telegram, Feishu)
+  ├─ Smart agent routing              (⬅ ✅ Agent Registry + Codex CLI)
+  ├─ Agent collaboration              (⬅ Smart routing)
+  ├─ Agent selection via @mention     (⬅ Smart routing + Slash /agent)
+  └─ Platform adapters                (独立，无 agent 依赖)
 ```
+
+### 关键发现
+
+**三条关键路径**：
+
+1. **Self-Evolution 路径** — Skill System → Reverse Sync → Skill Creation → Skill Testing。这是最长的链，v0.4 的 reverse sync 和 Write tool 是 v0.5 self-evolution 的硬性前置。
+2. **Multi-Agent 路径** — Codex CLI → Smart Routing → Collaboration / @mention。v0.4 加 Codex 是 v0.6 multi-agent 的前置（至少 3 个 agent 才有 routing 的意义）。
+3. **Memory 路径** — Memory (✅) → Cross-Session Search ← Slash Commands。这条路径比较短，Slash commands 和 memory 都已经有基础，主要是 wiring。
+
+**可以立即并行做的**（无任何依赖，v0.4 的第一批工作）：
+1. Deprecate API agents
+2. Add Codex CLI agent
+3. Add `Write` to Claude tools（一行 config）
+4. Streaming responses
+5. Slash commands
+6. CLI session resume
+7. Memory export/import
 
 ---
 
@@ -159,3 +226,4 @@ v0.6.0 — Multi-Agent Intelligence
 但这可能 over-engineering 了 — 一个简单的硬编码 fallback message 就够了，不需要走 API agent。
 
 **结论：去掉 API agent 是正确的方向。** 保持架构简洁比保留一个几乎不会用到的 fallback 更重要。
+
