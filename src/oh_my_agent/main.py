@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import logging.handlers
 import sys
 from pathlib import Path
 
@@ -66,11 +67,31 @@ def _build_channel(cfg: dict):
     raise ValueError(f"Unknown platform '{platform}'")
 
 
-def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+def _setup_logging() -> None:
+    log_format = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+
+    # Console handler — always on
+    console = logging.StreamHandler(sys.stderr)
+    console.setFormatter(logging.Formatter(log_format))
+    root.addHandler(console)
+
+    # Rotating file handler — one file per day, keep 7 days
+    log_dir = Path("logs")
+    log_dir.mkdir(exist_ok=True)
+    file_handler = logging.handlers.TimedRotatingFileHandler(
+        log_dir / "oh-my-agent.log",
+        when="midnight",
+        backupCount=7,
+        encoding="utf-8",
     )
+    file_handler.setFormatter(logging.Formatter(log_format))
+    root.addHandler(file_handler)
+
+
+def main() -> None:
+    _setup_logging()
     logger = logging.getLogger(__name__)
 
     # Locate config.yaml (next to cwd or project root)
