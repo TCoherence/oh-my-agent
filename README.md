@@ -1,56 +1,48 @@
 # Oh My Agent
 
-Discord bot that routes messages to CLI-based AI agents. Inspired by [OpenClaw](https://github.com/openclaw).
+Multi-platform bot that routes messages to AI agents — CLI-based (Claude, Gemini) or API-based (Anthropic, OpenAI). Inspired by [OpenClaw](https://openclaw.dev).
 
-## How It Works
-
-1. User posts a message in a designated Discord channel
-2. Bot creates a **thread** from that message
-3. Runs `claude` CLI as an async subprocess to generate a response
-4. Posts the response in the thread (auto-chunked for Discord's 2000 char limit)
-5. Follow-up messages in the same thread continue the conversation there
+Each platform channel maps to an independent agent session. Messages in the same thread retain conversation history. If the primary agent fails, the next one in the fallback chain takes over automatically.
 
 ## Architecture
 
 ```
-User (Discord)
-    │ message in #channel
-    ▼
-AgentBot (discord.Client)
-    │ on_message → create thread
-    ▼
-ClaudeAgent (BaseAgent)
-    │ asyncio.create_subprocess_exec("claude", "-p", ...)
-    ▼
-Claude CLI (agentic loop)
-    │ tool use, reasoning, etc.
-    ▼
-Response → chunked → thread.send()
+User (Discord / Slack / ...)
+         │ message
+         ▼
+   GatewayManager
+         │ routes to ChannelSession (per channel, isolated)
+         ▼
+   AgentRegistry ── [claude, gemini, anthropic_api, ...]
+         │ tries in order, auto-fallback on error
+         ▼
+   BaseAgent.run(prompt, history)
+     ├── BaseCLIAgent  →  subprocess  (claude, gemini CLIs)
+     └── BaseAPIAgent  →  SDK call    (Anthropic, OpenAI)
+         │
+         ▼
+   Response → chunked → thread.send()  (-# via **agent-name**)
 ```
-
-The agent layer is abstracted behind `BaseAgent` ABC, making it easy to add other CLI agents (codex, gemini, etc.) in the future.
 
 ## Prerequisites
 
 - Python 3.11+
-- `claude` CLI installed and authenticated (`claude auth status`)
+- At least one of:
+  - `claude` CLI installed and authenticated (`claude auth status`)
+  - `gemini` CLI installed
+  - Anthropic or OpenAI API key
 - A Discord bot token with **Message Content Intent** enabled
 
 ## Setup
 
 ### 1. Discord Bot
 
-1. Go to [Discord Developer Portal](https://discord.com/developers/applications) and create a new application
-2. **Bot** tab → click "Reset Token" → copy the token
-3. Under "Privileged Gateway Intents", enable **Message Content Intent**
-4. **OAuth2 → URL Generator** → select `bot` scope → select permissions:
-   - Send Messages
-   - Create Public Threads
-   - Send Messages in Threads
-   - Read Message History
-5. Open the generated URL in a browser and invite the bot to your server
+1. Go to [Discord Developer Portal](https://discord.com/developers/applications) → create application
+2. **Bot** tab → copy token → enable **Message Content Intent**
+3. **OAuth2 → URL Generator** → scope `bot` → permissions: Send Messages, Create Public Threads, Send Messages in Threads, Read Message History
+4. Open the generated URL to invite the bot to your server
 
-### 2. Install & Configure
+### 2. Install
 
 ```bash
 git clone <repo-url>
@@ -59,39 +51,63 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
 
-cp .env.example .env
-# Edit .env:
-#   DISCORD_BOT_TOKEN=your-token
-#   DISCORD_CHANNEL_ID=your-channel-id
+# Optional: API-based agents
+pip install -e ".[anthropic]"   # Anthropic SDK
+pip install -e ".[openai]"      # OpenAI SDK
+pip install -e ".[all]"         # Both
 ```
 
-### 3. Run
+### 3. Configure
+
+```bash
+cp config.yaml.example config.yaml
+```
+
+Edit `config.yaml` — set your tokens and choose which agents each channel uses:
+
+```yaml
+gateway:
+  channels:
+    - platform: discord
+      token: ${DISCORD_BOT_TOKEN}       # or paste directly
+      channel_id: "${DISCORD_CHANNEL_ID}"
+      agents: [claude, gemini]          # fallback order
+
+agents:
+  claude:
+    type: cli
+    model: sonnet
+  gemini:
+    type: cli
+  anthropic_api:
+    type: api
+    provider: anthropic
+    api_key: ${ANTHROPIC_API_KEY}
+    model: claude-sonnet-4-6
+```
+
+Secrets can live in a `.env` file — `${VAR}` placeholders are substituted automatically.
+
+### 4. Run
 
 ```bash
 source .venv/bin/activate
 oh-my-agent
 ```
 
-## Configuration
+## Usage
 
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `DISCORD_BOT_TOKEN` | Yes | — | Discord bot token |
-| `DISCORD_CHANNEL_ID` | Yes | — | Channel ID the bot listens to |
-| `CLAUDE_MAX_TURNS` | No | `25` | Max agentic loop iterations |
-| `CLAUDE_ALLOWED_TOOLS` | No | `Bash,Read,Edit,Glob,Grep` | Tools the Claude CLI can use |
-| `CLAUDE_MODEL` | No | `sonnet` | Claude model to use |
+- **Post a message** in the configured channel → bot creates a thread and replies there
+- **Reply in the thread** → bot responds in the same thread, with conversation history
+- Each reply is prefixed with `-# via **agent-name**` so you always know which agent responded
+- If an agent fails or hits quota, the next one in the `agents:` list takes over silently
 
-## Project Structure
+## Development
 
+```bash
+pip install -e ".[dev]"
+pytest                        # run all tests
+pytest -k "test_fallback"     # run a specific test
 ```
-src/oh_my_agent/
-  main.py              # Entry point
-  config.py            # Environment config loader
-  bot.py               # Discord client and thread handling
-  agents/
-    base.py            # BaseAgent ABC + AgentResponse
-    claude.py          # Claude CLI subprocess wrapper
-  utils/
-    chunker.py         # Message chunking for Discord limit
-```
+
+See [`docs/todo.md`](docs/todo.md) for the roadmap and [`docs/development.md`](docs/development.md) for architecture decisions.
