@@ -9,7 +9,11 @@ logger = logging.getLogger(__name__)
 
 
 class AnthropicAPIAgent(BaseAPIAgent):
-    """Agent that calls Anthropic API directly (supports multi-turn conversation)."""
+    """Agent that calls Anthropic API directly (supports multi-turn conversation).
+
+    .. deprecated:: 0.4.0
+        Use :class:`~oh_my_agent.agents.cli.claude.ClaudeAgent` instead.
+    """
 
     def __init__(
         self,

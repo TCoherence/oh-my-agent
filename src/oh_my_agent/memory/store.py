@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import tempfile
 from abc import ABC, abstractmethod
 from pathlib import Path
+from typing import Any
 
 import aiosqlite
 
@@ -80,6 +82,19 @@ class MemoryStore(ABC):
         channel_id: str,
         thread_id: str,
     ) -> int:
+        ...
+
+    @abstractmethod
+    async def export_data(self) -> dict[str, Any]:
+        """Export all turns and summaries as a JSON-serialisable dict."""
+        ...
+
+    @abstractmethod
+    async def import_data(self, data: dict[str, Any]) -> int:
+        """Import turns and summaries from a previously exported dict.
+
+        Returns the number of turns imported.
+        """
         ...
 
     @abstractmethod
@@ -335,3 +350,60 @@ class SQLiteMemoryStore(MemoryStore):
         )
         row = await cursor.fetchone()
         return row[0]  # type: ignore[index]
+
+    # -- export / import ---------------------------------------------------
+
+    async def export_data(self) -> dict[str, Any]:
+        db = await self._conn()
+
+        cursor = await db.execute(
+            "SELECT platform, channel_id, thread_id, role, content, "
+            "author, agent, created_at FROM turns ORDER BY id"
+        )
+        turns = [dict(r) for r in await cursor.fetchall()]
+
+        cursor = await db.execute(
+            "SELECT platform, channel_id, thread_id, summary, "
+            "turns_start, turns_end, created_at FROM summaries ORDER BY id"
+        )
+        summaries = [dict(r) for r in await cursor.fetchall()]
+
+        return {"version": 1, "turns": turns, "summaries": summaries}
+
+    async def import_data(self, data: dict[str, Any]) -> int:
+        db = await self._conn()
+        count = 0
+
+        for turn in data.get("turns", []):
+            await db.execute(
+                "INSERT INTO turns (platform, channel_id, thread_id, role, content, author, agent) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    turn["platform"],
+                    turn["channel_id"],
+                    turn["thread_id"],
+                    turn["role"],
+                    turn["content"],
+                    turn.get("author"),
+                    turn.get("agent"),
+                ),
+            )
+            count += 1
+
+        for summary in data.get("summaries", []):
+            await db.execute(
+                "INSERT INTO summaries (platform, channel_id, thread_id, summary, turns_start, turns_end) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    summary["platform"],
+                    summary["channel_id"],
+                    summary["thread_id"],
+                    summary["summary"],
+                    summary["turns_start"],
+                    summary["turns_end"],
+                ),
+            )
+
+        await db.commit()
+        logger.info("Imported %d turns and %d summaries", count, len(data.get("summaries", [])))
+        return count

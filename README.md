@@ -1,36 +1,44 @@
 # Oh My Agent
 
-Multi-platform bot that routes messages to AI agents — CLI-based (Claude, Gemini) or API-based (Anthropic, OpenAI). Inspired by [OpenClaw](https://openclaw.dev).
+Multi-platform bot that routes messages to CLI-based AI agents (Claude, Gemini, Codex). Each platform channel maps to an independent agent session with persistent conversation memory, streaming responses, and slash commands.
 
-Each platform channel maps to an independent agent session. Messages in the same thread retain conversation history. If the primary agent fails, the next one in the fallback chain takes over automatically.
+Inspired by [OpenClaw](https://openclaw.dev).
 
 ## Architecture
 
 ```
 User (Discord / Slack / ...)
-         │ message
+         │ message or /ask command
          ▼
    GatewayManager
          │ routes to ChannelSession (per channel, isolated)
          ▼
-   AgentRegistry ── [claude, gemini, anthropic_api, ...]
+   AgentRegistry ── [claude, gemini, codex]
          │ tries in order, auto-fallback on error
          ▼
-   BaseAgent.run(prompt, history)
-     ├── BaseCLIAgent  →  subprocess  (claude, gemini CLIs)
-     └── BaseAPIAgent  →  SDK call    (Anthropic, OpenAI)
+   BaseCLIAgent.run(prompt, history)
+     ├── ClaudeAgent   (claude CLI, streaming, session resume)
+     ├── GeminiCLIAgent (gemini CLI)
+     └── CodexCLIAgent  (codex CLI, sandboxed)
          │
          ▼
-   Response → chunked → thread.send()  (-# via **agent-name**)
+   Response → stream-edit or chunk → thread.send()
+   (-# via **agent-name** attribution)
 ```
+
+**Key layers:**
+- **Gateway** — platform adapters (Discord, Slack stub) with slash commands
+- **Agents** — CLI subprocess wrappers with ordered fallback
+- **Memory** — SQLite + FTS5 persistent conversation history with auto-compression
+- **Skills** — bidirectional sync between `skills/` and CLI-native directories
 
 ## Prerequisites
 
 - Python 3.11+
-- At least one of:
-  - `claude` CLI installed and authenticated (`claude auth status`)
-  - `gemini` CLI installed
-  - Anthropic or OpenAI API key
+- At least one CLI agent installed:
+  - [`claude`](https://docs.anthropic.com/en/docs/claude-code) — Claude Code CLI
+  - [`gemini`](https://github.com/google-gemini/gemini-cli) — Gemini CLI
+  - [`codex`](https://github.com/openai/codex) — OpenAI Codex CLI
 - A Discord bot token with **Message Content Intent** enabled
 
 ## Setup
@@ -39,7 +47,7 @@ User (Discord / Slack / ...)
 
 1. Go to [Discord Developer Portal](https://discord.com/developers/applications) → create application
 2. **Bot** tab → copy token → enable **Message Content Intent**
-3. **OAuth2 → URL Generator** → scope `bot` → permissions: Send Messages, Create Public Threads, Send Messages in Threads, Read Message History
+3. **OAuth2 → URL Generator** → scope `bot` + `applications.commands` → permissions: Send Messages, Create Public Threads, Send Messages in Threads, Read Message History
 4. Open the generated URL to invite the bot to your server
 
 ### 2. Install
@@ -50,11 +58,6 @@ cd oh-my-agent
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
-
-# Optional: API-based agents
-pip install -e ".[anthropic]"   # Anthropic SDK
-pip install -e ".[openai]"      # OpenAI SDK
-pip install -e ".[all]"         # Both
 ```
 
 ### 3. Configure
@@ -63,27 +66,36 @@ pip install -e ".[all]"         # Both
 cp config.yaml.example config.yaml
 ```
 
-Edit `config.yaml` — set your tokens and choose which agents each channel uses:
+Edit `config.yaml`:
 
 ```yaml
+memory:
+  backend: sqlite
+  path: data/memory.db
+  max_turns: 20
+
+skills:
+  enabled: true
+  path: skills/
+
 gateway:
   channels:
     - platform: discord
-      token: ${DISCORD_BOT_TOKEN}       # or paste directly
+      token: ${DISCORD_BOT_TOKEN}
       channel_id: "${DISCORD_CHANNEL_ID}"
-      agents: [claude, gemini]          # fallback order
+      agents: [claude, gemini]    # fallback order
 
 agents:
   claude:
     type: cli
     model: sonnet
+    allowed_tools: [Bash, Read, Write, Edit, Glob, Grep]
   gemini:
     type: cli
-  anthropic_api:
-    type: api
-    provider: anthropic
-    api_key: ${ANTHROPIC_API_KEY}
-    model: claude-sonnet-4-6
+    model: gemini-2.0-flash
+  codex:
+    type: cli
+    model: o4-mini
 ```
 
 Secrets can live in a `.env` file — `${VAR}` placeholders are substituted automatically.
@@ -97,10 +109,33 @@ oh-my-agent
 
 ## Usage
 
-- **Post a message** in the configured channel → bot creates a thread and replies there
-- **Reply in the thread** → bot responds in the same thread, with conversation history
-- Each reply is prefixed with `-# via **agent-name**` so you always know which agent responded
-- If an agent fails or hits quota, the next one in the `agents:` list takes over silently
+### Messages
+- **Post a message** in the configured channel → bot creates a thread and replies
+- **Reply in the thread** → bot responds with full conversation context
+- Each reply is prefixed with `-# via **agent-name**`
+- If an agent fails, the next one in the fallback chain takes over
+
+### Slash Commands
+| Command | Description |
+|---------|-------------|
+| `/ask <question>` | Ask the AI (creates a new thread) |
+| `/reset` | Clear conversation history for current thread |
+| `/agent` | Show available agents and their status |
+| `/search <query>` | Search across all conversation history |
+
+### Streaming
+Claude agent streams responses in real-time — Discord messages are edited in-place as tokens arrive.
+
+### Session Resume
+Claude agent tracks session IDs per thread. Subsequent messages in the same thread use `--resume` to continue the session without re-flattening history.
+
+## Agents
+
+| Agent | CLI | Sandbox | Streaming | Notes |
+|-------|-----|---------|-----------|-------|
+| Claude | `claude` | `--allowedTools` | Yes (`stream-json`) | Session resume via `--resume` |
+| Gemini | `gemini` | `--sandbox` (optional) | No | `--yolo` for auto-approve |
+| Codex | `codex` | `--full-auto` (built-in) | No | OS-level sandbox by default |
 
 ## Development
 

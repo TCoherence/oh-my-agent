@@ -8,14 +8,15 @@ logger = logging.getLogger(__name__)
 
 
 class SkillSync:
-    """Sync skills from a unified directory to CLI-native skill directories.
+    """Bidirectional skill sync between ``skills/`` and CLI-native directories.
 
-    Both Gemini CLI and Claude CLI follow the Agent Skills standard:
-    - Gemini: ``.gemini/skills/{name}/SKILL.md``
-    - Claude: ``.claude/skills/{name}/SKILL.md``
+    **Forward sync** (default): symlinks each skill from ``skills/`` into
+    ``.gemini/skills/`` and ``.claude/skills/`` so both CLI agents discover
+    them natively.
 
-    This module symlinks each skill folder from ``skills_path`` into both
-    CLI directories so both agents can discover them natively.
+    **Reverse sync**: detects new skills created by CLI agents in their
+    native directories (non-symlink folders containing ``SKILL.md``) and
+    copies them back to ``skills/`` so they become the canonical source.
     """
 
     def __init__(
@@ -26,21 +27,19 @@ class SkillSync:
         self._skills_path = Path(skills_path).resolve()
         self._project_root = Path(project_root).resolve() if project_root else Path.cwd()
 
+    # ------------------------------------------------------------------ #
+    #  Public API                                                          #
+    # ------------------------------------------------------------------ #
+
     def sync(self) -> int:
-        """Sync all skills and return the number synced."""
-        if not self._skills_path.is_dir():
-            logger.info("Skills directory not found: %s — skipping", self._skills_path)
-            return 0
+        """Run forward sync and return the number of skills synced."""
+        self._skills_path.mkdir(parents=True, exist_ok=True)
 
         # Collect valid skill directories (must contain SKILL.md)
-        skills = []
-        for child in sorted(self._skills_path.iterdir()):
-            if child.is_dir() and (child / "SKILL.md").exists():
-                skills.append(child)
+        skills = self._collect_skills(self._skills_path)
 
         if not skills:
             logger.info("No skills found in %s", self._skills_path)
-            return 0
 
         targets = [
             self._project_root / ".gemini" / "skills",
@@ -53,12 +52,88 @@ class SkillSync:
                 link = target_dir / skill_dir.name
                 self._ensure_symlink(skill_dir, link)
 
-        logger.info(
-            "Synced %d skill(s) to .gemini/skills/ and .claude/skills/: %s",
-            len(skills),
-            [s.name for s in skills],
-        )
+        if skills:
+            logger.info(
+                "Synced %d skill(s) to .gemini/skills/ and .claude/skills/: %s",
+                len(skills),
+                [s.name for s in skills],
+            )
         return len(skills)
+
+    def reverse_sync(self) -> int:
+        """Copy new skills from CLI directories back to ``skills/``.
+
+        Only copies directories that:
+        - Are **not** symlinks (i.e. created by a CLI agent, not by forward sync)
+        - Contain a ``SKILL.md`` file
+        - Do not already exist in ``skills/``
+
+        Returns the number of skills imported.
+        """
+        import shutil
+
+        self._skills_path.mkdir(parents=True, exist_ok=True)
+        existing_names = {
+            d.name
+            for d in self._skills_path.iterdir()
+            if d.is_dir()
+        }
+
+        sources = [
+            self._project_root / ".gemini" / "skills",
+            self._project_root / ".claude" / "skills",
+        ]
+
+        imported = 0
+        for src_dir in sources:
+            if not src_dir.is_dir():
+                continue
+            for child in sorted(src_dir.iterdir()):
+                if not child.is_dir():
+                    continue
+                # Skip symlinks — those are our own forward-sync links
+                if child.is_symlink():
+                    continue
+                if not (child / "SKILL.md").exists():
+                    continue
+                if child.name in existing_names:
+                    continue
+
+                dest = self._skills_path / child.name
+                shutil.copytree(child, dest)
+                existing_names.add(child.name)
+                imported += 1
+                logger.info(
+                    "Reverse-synced skill '%s' from %s → %s",
+                    child.name,
+                    child,
+                    dest,
+                )
+
+        if imported:
+            logger.info("Reverse-synced %d new skill(s) into %s", imported, self._skills_path)
+        return imported
+
+    def full_sync(self) -> tuple[int, int]:
+        """Run reverse sync first, then forward sync. Returns (forward, reverse) counts."""
+        reverse_count = self.reverse_sync()
+        forward_count = self.sync()
+        return forward_count, reverse_count
+
+    # ------------------------------------------------------------------ #
+    #  Internal helpers                                                    #
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _collect_skills(directory: Path) -> list[Path]:
+        """Return sorted list of skill directories containing SKILL.md."""
+        if not directory.is_dir():
+            return []
+        return sorted(
+            child
+            for child in directory.iterdir()
+            if child.is_dir() and (child / "SKILL.md").exists()
+        )
 
     @staticmethod
     def _ensure_symlink(source: Path, link: Path) -> None:

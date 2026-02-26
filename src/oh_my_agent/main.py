@@ -19,10 +19,16 @@ def _build_agent(name: str, cfg: dict):
                 cli_path=cfg.get("cli_path", "gemini"),
                 model=cfg.get("model", "gemini-3-flash-preview"),
             )
+        elif provider == "codex":
+            from oh_my_agent.agents.cli.codex import CodexCLIAgent
+            return CodexCLIAgent(
+                cli_path=cfg.get("cli_path", "codex"),
+                model=cfg.get("model", "o4-mini"),
+            )
         else:
             # Default to claude for any unknown CLI type
             from oh_my_agent.agents.cli.claude import ClaudeAgent
-            tools = cfg.get("allowed_tools", ["Bash", "Read", "Edit", "Glob", "Grep"])
+            tools = cfg.get("allowed_tools", ["Bash", "Read", "Write", "Edit", "Glob", "Grep"])
             return ClaudeAgent(
                 cli_path=cfg.get("cli_path", "claude"),
                 max_turns=int(cfg.get("max_turns", 25)),
@@ -31,6 +37,13 @@ def _build_agent(name: str, cfg: dict):
             )
 
     if agent_type == "api":
+        import warnings
+        warnings.warn(
+            f"API agent '{name}' is deprecated since v0.4.0. "
+            "Use CLI agents instead. API agent support will be removed in a future release.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         provider = cfg.get("provider", "")
         if provider == "openai":
             from oh_my_agent.agents.api.openai import OpenAIAPIAgent
@@ -131,8 +144,8 @@ async def _async_main(config: dict, logger: logging.Logger) -> None:
 
         skills_path = skills_cfg.get("path", "skills/")
         syncer = SkillSync(skills_path)
-        synced = syncer.sync()
-        logger.info("Synced %d skill(s)", synced)
+        forward, reverse = syncer.full_sync()
+        logger.info("Skills: %d synced, %d reverse-imported", forward, reverse)
 
     # Build (channel, registry) pairs
     from oh_my_agent.agents.registry import AgentRegistry

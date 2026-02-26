@@ -1,15 +1,25 @@
+memory:
+  backend: sqlite
+  path: data/memory.db
+  max_turns: 20
+  summary_max_chars: 500
+
+skills:
+  enabled: true
+  path: skills/
+
 gateway:
   channels:
     - platform: discord
       token: ${DISCORD_BOT_TOKEN}
       channel_id: "${DISCORD_CHANNEL_ID}"
-      agents: [claude]           # fallback 顺序，第一个失败自动切下一个
+      agents: [claude, gemini]   # fallback 顺序，第一个失败自动切下一个
 
     # Slack 示例（暂未实现，留作占位）
     # - platform: slack
     #   token: ${SLACK_BOT_TOKEN}
     #   channel_id: "${SLACK_CHANNEL_ID}"
-    #   agents: [anthropic_api]
+    #   agents: [claude]
 
 agents:
   claude:
@@ -17,24 +27,30 @@ agents:
     cli_path: claude             # PATH 里的可执行文件名，或绝对路径
     max_turns: 25
     model: sonnet
-    allowed_tools: [Bash, Read, Edit, Glob, Grep]
+    allowed_tools: [Bash, Read, Write, Edit, Glob, Grep]
 
   gemini:
     type: cli
     cli_path: gemini
     max_turns: 10
-    model: gemini-2.0-flash
+    model: gemini-3.0-flash
 
-  anthropic_api:
-    type: api
-    provider: anthropic
-    model: claude-sonnet-4-6
-    api_key: ${ANTHROPIC_API_KEY}
-    max_tokens: 8192
+  codex:
+    type: cli
+    cli_path: codex
+    model: gpt-5.3-codex
 
-  openai_api:
-    type: api
-    provider: openai
-    model: gpt-4o
-    api_key: ${OPENAI_API_KEY}
-    max_tokens: 4096
+  # ----- API agents (deprecated since v0.4.0, use CLI agents instead) -----
+  # anthropic_api:
+  #   type: api
+  #   provider: anthropic
+  #   model: claude-sonnet-4-6
+  #   api_key: ${ANTHROPIC_API_KEY}
+  #   max_tokens: 8192
+  #
+  # openai_api:
+  #   type: api
+  #   provider: openai
+  #   model: gpt-4o
+  #   api_key: ${OPENAI_API_KEY}
+  #   max_tokens: 4096

@@ -8,18 +8,53 @@
 
 ---
 
-## v0.4.0 — CLI-First Cleanup + Skill Sync (Planned)
+## v0.4.0 — CLI-First Cleanup + Skill Sync
 
-### Goals
+### What Changed
 
-1. **Deprecate API agent layer** — `agents/api/` kept for reference but no longer maintained. Remove from `config.yaml.example` and README. CLI agents are the sole execution path going forward.
-2. **SkillSync reverse sync** — when a CLI agent creates a new skill in `.gemini/skills/` or `.claude/skills/`, detect and copy it back to the canonical `skills/` directory. Two-pronged approach:
-   - **Instruction**: update `AGENT.md` to tell agents to write skills directly to `skills/`.
-   - **Safety net**: post-response hook in `GatewayManager.handle_message()` diffs CLI skill dirs for new non-symlink entries.
-3. **Streaming responses** — CLI-only via `--output-format stream-json`. Edit Discord messages in-place.
-4. **Slash commands** — `/reset`, `/agent`, `/search`. Requires `discord.app_commands`.
-5. **Add Codex CLI agent** — `agents/cli/codex.py`. OpenAI Codex CLI with built-in sandbox. See discussion below.
-6. **Sandbox / isolation** — evaluate and enable sandbox modes across CLI agents. See discussion below.
+1. **Deprecated API agent layer** — `agents/api/` marked deprecated with `DeprecationWarning`. Removed from `config.yaml.example`. Code kept for reference.
+2. **Added `Write` to Claude allowed_tools** — config default now `[Bash, Read, Write, Edit, Glob, Grep]`.
+3. **Added Codex CLI agent** — `agents/cli/codex.py` using `codex exec --full-auto` (auto-approve + OS-level sandbox).
+4. **SkillSync reverse sync** — `SkillSync.reverse_sync()` detects non-symlink skill directories in `.gemini/skills/` and `.claude/skills/`, copies them back to `skills/`. `full_sync()` runs reverse then forward on startup.
+5. **Streaming responses** — `ClaudeAgent` supports `--output-format stream-json`. `GatewayManager` edits Discord messages in-place with rate-limited updates (1.5s interval). Falls back to non-streaming on error.
+6. **Slash commands** — `/ask`, `/reset`, `/agent`, `/search` via `discord.app_commands.CommandTree`. Synced on bot startup.
+7. **CLI session resume** — `ClaudeAgent` tracks session IDs per thread. Uses `--resume <session_id>` + `--output-format json` to continue sessions without re-flattening history. Falls back to fresh session if resume fails.
+8. **Memory export/import** — `MemoryStore.export_data()` returns all turns + summaries as JSON. `import_data()` restores from backup.
+9. **Updated README** — rewritten for CLI-first architecture with agent comparison table.
+
+### New Files
+
+```
+src/oh_my_agent/agents/cli/codex.py    # CodexCLIAgent
+```
+
+### Architecture Changes
+
+```
+BaseAgent
+  ├── supports_streaming property
+  ├── run_stream() async iterator
+  └── BaseCLIAgent
+        ├── _build_stream_command() → streaming support
+        ├── _parse_stream_line() → stream-json parsing
+        ├── ClaudeAgent  (streaming + session resume)
+        ├── GeminiCLIAgent
+        └── CodexCLIAgent (new)
+
+BaseChannel
+  ├── send_message() → returns message_id
+  └── edit_message() → in-place update
+
+SkillSync
+  ├── sync() → forward only
+  ├── reverse_sync() → CLI dirs → skills/
+  └── full_sync() → reverse + forward
+
+AgentRegistry
+  └── run(thread_id=...) → forwarded to agents supporting session resume
+```
+
+### Discussion (Retained from Planning)
 
 ### Discussion: Can CLI Agents Edit Files?
 

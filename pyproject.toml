@@ -1,7 +1,7 @@
 [project]
 name = "oh-my-agent"
-version = "0.2.0"
-description = "Multi-platform Discord/Slack bot backed by CLI or API AI agents"
+version = "0.4.0"
+description = "Multi-platform bot backed by CLI-based AI agents (Claude, Gemini, Codex)"
 requires-python = ">=3.11"
 dependencies = [
     "discord.py>=2.4,<3",

@@ -21,6 +21,11 @@ class IncomingMessage:
 
 MessageHandler = Callable[[IncomingMessage], Awaitable[None]]
 
+# Slash command handlers — set by GatewayManager, consumed by platform channels
+SlashResetHandler = Callable[[str, str, str], Awaitable[str]]           # (platform, channel_id, thread_id) → confirmation
+SlashAgentHandler = Callable[[str, str], Awaitable[str]]                # (platform, channel_id) → agent list info
+SlashSearchHandler = Callable[[str, int], Awaitable[list[dict]]]        # (query, limit) → results
+
 
 class BaseChannel(ABC):
     """Platform adapter: bridges a chat platform with the GatewayManager."""
@@ -47,6 +52,18 @@ class BaseChannel(ABC):
     async def send(self, thread_id: str, text: str) -> None:
         """Send *text* to the given thread."""
         ...
+
+    async def send_message(self, thread_id: str, text: str) -> str:
+        """Send *text* and return a message ID that can be used with ``edit_message``.
+
+        Default implementation delegates to ``send()`` and returns an empty
+        string (no editing support).
+        """
+        await self.send(thread_id, text)
+        return ""
+
+    async def edit_message(self, thread_id: str, message_id: str, text: str) -> None:
+        """Edit a previously sent message in-place. Optional — default is no-op."""
 
     @asynccontextmanager
     async def typing(self, thread_id: str) -> AsyncIterator[None]:

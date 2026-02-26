@@ -141,22 +141,22 @@ These features can be worked on **immediately and in parallel** — no blockers:
 
 ## v0.4.0 — CLI-First Cleanup + Skill Sync
 
-- [ ] **Deprecate API agent layer** — mark `agents/api/` as deprecated. Keep code but remove from `config.yaml.example` and README. *(independent, no blockers)*
-- [ ] **Add `Write` to Claude allowed_tools** — current config has `[Bash, Read, Edit, Glob, Grep]`. Add `Write` for full file operations. *(independent, config-only change)*
-- [ ] **Add Codex CLI agent** — `agents/cli/codex.py` using `codex exec` + `--full-auto`. See [development.md](development.md). *(independent, no blockers)*
-- [ ] **Enable CLI sandbox modes** — Codex: `--full-auto` (included by default). Gemini: add `--sandbox`. Claude: monitor for `--sandbox` flag. *(⬅ depends on: Add Codex CLI agent for Codex sandbox config)*
-- [ ] **SkillSync reverse sync** — detect new skills in CLI dirs, copy back to `skills/`. Post-response hook in `GatewayManager`. *(⬅ depends on: ✅ Skill System v0.3)*
-- [ ] **Streaming responses (CLI only)** — `--output-format stream-json`, edit Discord messages in-place. *(independent, no blockers)*
-- [ ] **Slash commands** — `/ask`, `/reset`, `/agent`, `/search`. Requires `discord.app_commands`. *(independent, but `/search` is a shell without cross-session memory)*
-- [ ] **Update README.md** — rewrite for v0.3.0+ CLI-first architecture. *(⬅ depends on: Deprecate API agents, Add Codex — wait for architecture to stabilize)*
+- [x] **Deprecate API agent layer** — `agents/api/` marked deprecated with warnings. Removed from `config.yaml.example`.
+- [x] **Add `Write` to Claude allowed_tools** — config updated to `[Bash, Read, Write, Edit, Glob, Grep]`.
+- [x] **Add Codex CLI agent** — `agents/cli/codex.py` using `codex exec --full-auto`.
+- [ ] **Enable CLI sandbox modes** — Codex: `--full-auto` (included by default). Gemini: add `--sandbox`. Claude: monitor for `--sandbox` flag.
+- [x] **SkillSync reverse sync** — `SkillSync.reverse_sync()` detects new skills in CLI dirs, copies back to `skills/`. `full_sync()` runs both directions on startup.
+- [x] **Streaming responses** — `ClaudeAgent` supports `--output-format stream-json`. Discord messages edited in-place with rate-limited updates.
+- [x] **Slash commands** — `/ask`, `/reset`, `/agent`, `/search` via `discord.app_commands`.
+- [x] **CLI session resume** — `ClaudeAgent` tracks session IDs per thread, uses `--resume` for subsequent messages.
+- [x] **Memory export/import** — `MemoryStore.export_data()` / `import_data()` for JSON backup/restore.
+- [x] **Update README.md** — rewritten for v0.4.0 CLI-first architecture.
 
 ## v0.5.0 — Self-Evolution
 
-- [ ] **Agent-driven skill creation** — user requests skill → agent creates it → auto sync. *(⬅ depends on: SkillSync reverse sync, Add `Write` to Claude tools)*
+- [ ] **Agent-driven skill creation** — user requests skill → agent creates it → auto sync. *(⬅ depends on: ✅ SkillSync reverse sync, ✅ Write tool)*
 - [ ] **Skill testing / validation** — auto-verify newly created skills. *(⬅ depends on: Agent-driven skill creation)*
-- [ ] **CLI session resume** — `claude --resume <session_id>` to avoid prompt flattening. *(⬅ depends on: ✅ History Compression v0.3)*
-- [ ] **Cross-session memory search** — FTS5 search across threads via `/search`. *(⬅ depends on: ✅ Memory v0.3, Slash commands `/search`)*
-- [ ] **Memory export/import API** — `MemoryStore.export()` / `import()` for future decoupling. *(⬅ depends on: ✅ Memory v0.3)*
+- [ ] **Cross-session memory search** — FTS5 search across threads via `/search`. *(⬅ depends on: ✅ Memory v0.3, ✅ Slash commands `/search`)*
 
 ## v0.6.0 — Multi-Agent Intelligence
 

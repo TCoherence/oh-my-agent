@@ -7,12 +7,17 @@ import uuid
 
 from oh_my_agent.gateway.base import BaseChannel, IncomingMessage
 from oh_my_agent.gateway.session import ChannelSession
+from oh_my_agent.agents.base import AgentResponse
 from oh_my_agent.agents.registry import AgentRegistry
 from oh_my_agent.utils.chunker import chunk_message
 
 logger = logging.getLogger(__name__)
 
 THREAD_NAME_MAX = 90
+# Minimum interval (seconds) between Discord message edits to respect rate limits
+STREAM_EDIT_INTERVAL = 1.5
+# Discord message size limit (leaving room for attribution header)
+STREAM_MAX_LEN = 1900
 
 
 class GatewayManager:
@@ -58,6 +63,14 @@ class GatewayManager:
             # Inject memory store if available
             if hasattr(self, "_memory_store"):
                 session.memory_store = self._memory_store
+
+            # Inject session context for slash commands (Discord-specific)
+            if hasattr(channel, "set_session_context"):
+                channel.set_session_context(
+                    session,
+                    registry,
+                    getattr(self, "_memory_store", None),
+                )
 
             async def make_handler(s: ChannelSession, r: AgentRegistry):
                 async def handler(msg: IncomingMessage) -> None:
@@ -111,21 +124,42 @@ class GatewayManager:
             len(prior_history),
         )
 
-        # Run agent (with fallback)
+        # Pick first agent that works; try streaming for the first agent
+        first_agent = registry.agents[0]
         t_agent = time.perf_counter()
-        async with channel.typing(thread_id):
-            agent_used, response = await registry.run(msg.content, prior_history)
-        elapsed_agent = time.perf_counter() - t_agent
 
-        if response.error:
+        if first_agent.supports_streaming:
+            result_text, agent_used, error = await self._run_streaming(
+                first_agent, channel, thread_id, msg.content, prior_history, req_id,
+            )
+            elapsed_agent = time.perf_counter() - t_agent
+
+            if error:
+                # Streaming failed — fall back to non-streaming registry
+                logger.warning("[%s] Streaming failed for %s, falling back", req_id, first_agent.name)
+                async with channel.typing(thread_id):
+                    agent_used, response = await registry.run(msg.content, prior_history, thread_id=thread_id)
+                elapsed_agent = time.perf_counter() - t_agent
+                result_text = response.text
+                error = response.error
+            else:
+                error = None
+        else:
+            async with channel.typing(thread_id):
+                agent_used, response = await registry.run(msg.content, prior_history)
+            elapsed_agent = time.perf_counter() - t_agent
+            result_text = response.text
+            error = response.error
+
+        if error:
             logger.error(
                 "[%s] AGENT_ERROR agent=%s elapsed=%.2fs error=%r",
                 req_id,
                 agent_used.name,
                 elapsed_agent,
-                response.error,
+                error,
             )
-            await channel.send(thread_id, f"**Error** ({agent_used.name}): {response.error[:1800]}")
+            await channel.send(thread_id, f"**Error** ({agent_used.name}): {error[:1800]}")
             # Remove the failed user turn so history stays clean
             history = await session.get_history(thread_id)
             if history:
@@ -137,21 +171,22 @@ class GatewayManager:
             req_id,
             agent_used.name,
             elapsed_agent,
-            len(response.text),
+            len(result_text),
         )
 
         # Record assistant response in history
-        await session.append_assistant(thread_id, response.text, agent_used.name)
+        await session.append_assistant(thread_id, result_text, agent_used.name)
 
-        # Send with attribution header + chunked content
-        attribution = f"-# via **{agent_used.name}**"
-        chunks = chunk_message(response.text)
-        if chunks:
-            await channel.send(thread_id, f"{attribution}\n{chunks[0]}")
-            for chunk in chunks[1:]:
-                await channel.send(thread_id, chunk)
-        else:
-            await channel.send(thread_id, f"{attribution}\n*(empty response)*")
+        # If we already streamed the response, no need to send again
+        if not first_agent.supports_streaming or error:
+            attribution = f"-# via **{agent_used.name}**"
+            chunks = chunk_message(result_text)
+            if chunks:
+                await channel.send(thread_id, f"{attribution}\n{chunks[0]}")
+                for chunk in chunks[1:]:
+                    await channel.send(thread_id, chunk)
+            else:
+                await channel.send(thread_id, f"{attribution}\n*(empty response)*")
 
         elapsed_total = time.perf_counter() - t_start
         logger.info(
@@ -167,6 +202,53 @@ class GatewayManager:
             asyncio.create_task(
                 self._try_compress(session, registry, thread_id, req_id)
             )
+
+    async def _run_streaming(
+        self,
+        agent,
+        channel: BaseChannel,
+        thread_id: str,
+        prompt: str,
+        history: list[dict] | None,
+        req_id: str,
+    ) -> tuple[str, object, str | None]:
+        """Run an agent in streaming mode, editing a Discord message in-place.
+
+        Returns ``(full_text, agent, error_or_None)``.
+        """
+        attribution = f"-# via **{agent.name}**\n"
+        msg_id = await channel.send_message(thread_id, f"{attribution}*thinking...*")
+        accumulated = ""
+        last_edit = 0.0
+
+        try:
+            async for chunk in agent.run_stream(prompt, history):
+                accumulated += chunk
+                now = time.perf_counter()
+                # Throttle edits to respect Discord rate limits
+                if now - last_edit >= STREAM_EDIT_INTERVAL:
+                    display = accumulated[:STREAM_MAX_LEN]
+                    if len(accumulated) > STREAM_MAX_LEN:
+                        display += "\n..."
+                    await channel.edit_message(thread_id, msg_id, f"{attribution}{display}")
+                    last_edit = now
+        except Exception as exc:
+            logger.error("[%s] Streaming error: %s", req_id, exc)
+            return "", agent, str(exc)
+
+        # Final edit with complete text
+        if accumulated:
+            final_chunks = chunk_message(accumulated)
+            await channel.edit_message(
+                thread_id, msg_id, f"{attribution}{final_chunks[0][:STREAM_MAX_LEN]}"
+            )
+            # Send remaining chunks as separate messages
+            for extra in final_chunks[1:]:
+                await channel.send(thread_id, extra)
+        else:
+            await channel.edit_message(thread_id, msg_id, f"{attribution}*(empty response)*")
+
+        return accumulated, agent, None
 
     async def _try_compress(
         self,

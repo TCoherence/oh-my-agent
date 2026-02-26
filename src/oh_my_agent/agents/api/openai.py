@@ -9,7 +9,11 @@ logger = logging.getLogger(__name__)
 
 
 class OpenAIAPIAgent(BaseAPIAgent):
-    """Agent that calls OpenAI API directly (supports multi-turn conversation)."""
+    """Agent that calls OpenAI API directly (supports multi-turn conversation).
+
+    .. deprecated:: 0.4.0
+        API agents are deprecated. Use CLI agents instead.
+    """
 
     def __init__(
         self,
