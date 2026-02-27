@@ -30,6 +30,7 @@ class AgentRegistry:
         *,
         thread_id: str | None = None,
         force_agent: str | None = None,
+        workspace_override=None,
     ) -> tuple[BaseAgent, AgentResponse]:
         """Try each agent in order. Return the first successful (agent, response) pair.
 
@@ -48,10 +49,12 @@ class AgentRegistry:
                 )
             import inspect
             sig = inspect.signature(agent.run)
+            kwargs = {}
             if "thread_id" in sig.parameters:
-                response = await agent.run(prompt, history, thread_id=thread_id)
-            else:
-                response = await agent.run(prompt, history)
+                kwargs["thread_id"] = thread_id
+            if "workspace_override" in sig.parameters:
+                kwargs["workspace_override"] = workspace_override
+            response = await agent.run(prompt, history, **kwargs)
             return agent, response
 
         last_agent = self._agents[-1]
@@ -62,10 +65,12 @@ class AgentRegistry:
             # Pass thread_id to agents that support it (e.g. ClaudeAgent)
             import inspect
             sig = inspect.signature(agent.run)
+            kwargs = {}
             if "thread_id" in sig.parameters:
-                response = await agent.run(prompt, history, thread_id=thread_id)
-            else:
-                response = await agent.run(prompt, history)
+                kwargs["thread_id"] = thread_id
+            if "workspace_override" in sig.parameters:
+                kwargs["workspace_override"] = workspace_override
+            response = await agent.run(prompt, history, **kwargs)
             if not response.error:
                 return agent, response
             logger.warning(

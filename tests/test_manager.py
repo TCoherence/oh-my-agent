@@ -1,11 +1,13 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+from pathlib import Path
 from oh_my_agent.gateway.manager import GatewayManager
 from oh_my_agent.gateway.base import IncomingMessage
 from oh_my_agent.gateway.session import ChannelSession
 from oh_my_agent.agents.base import AgentResponse
 from oh_my_agent.agents.registry import AgentRegistry
 from oh_my_agent.automation import ScheduledJob
+from oh_my_agent.memory.store import SQLiteMemoryStore
 
 
 def _make_msg(thread_id=None, content="hello", author_id=None, system=False) -> IncomingMessage:
@@ -330,3 +332,98 @@ async def test_scheduler_dispatch_dm_skips_when_channel_unsupported():
 
     registry.run.assert_not_called()
     channel.send.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_handle_message_uses_short_workspace_override(tmp_path):
+    base = tmp_path / "base-workspace"
+    base.mkdir(parents=True, exist_ok=True)
+    (base / "AGENT.md").write_text("ctx", encoding="utf-8")
+    (base / ".claude").mkdir(exist_ok=True)
+    (base / ".gemini").mkdir(exist_ok=True)
+
+    channel = MagicMock()
+    channel.platform = "discord"
+    channel.channel_id = "100"
+    channel.create_thread = AsyncMock(return_value="t1")
+    channel.send = AsyncMock()
+    channel.typing = MagicMock()
+    channel.typing.return_value.__aenter__ = AsyncMock(return_value=None)
+    channel.typing.return_value.__aexit__ = AsyncMock(return_value=False)
+
+    mock_agent = MagicMock()
+    mock_agent.name = "codex"
+    registry = MagicMock(spec=AgentRegistry)
+    registry.run = AsyncMock(return_value=(mock_agent, AgentResponse(text="answer")))
+
+    session = _make_session(channel=channel, registry=registry)
+    gm = GatewayManager(
+        [],
+        short_workspace={
+            "enabled": True,
+            "ttl_hours": 24,
+            "cleanup_interval_minutes": 1440,
+            "root": str(tmp_path / "sessions"),
+            "base_workspace": str(base),
+        },
+    )
+
+    msg = _make_msg(thread_id="t1", content="hello")
+    await gm.handle_message(session, registry, msg)
+
+    assert registry.run.call_count == 1
+    kwargs = registry.run.call_args.kwargs
+    ws = kwargs.get("workspace_override")
+    assert isinstance(ws, Path)
+    assert ws.parent == (tmp_path / "sessions")
+    assert (ws / "AGENT.md").exists()
+
+
+@pytest.mark.asyncio
+async def test_short_workspace_cleanup_uses_db_ttl(tmp_path):
+    base = tmp_path / "base-workspace"
+    base.mkdir(parents=True, exist_ok=True)
+    (base / "AGENT.md").write_text("ctx", encoding="utf-8")
+
+    channel = MagicMock()
+    channel.platform = "discord"
+    channel.channel_id = "100"
+    channel.create_thread = AsyncMock(return_value="t1")
+    channel.send = AsyncMock()
+    channel.typing = MagicMock()
+    channel.typing.return_value.__aenter__ = AsyncMock(return_value=None)
+    channel.typing.return_value.__aexit__ = AsyncMock(return_value=False)
+
+    registry = MagicMock(spec=AgentRegistry)
+    session = _make_session(channel=channel, registry=registry)
+    gm = GatewayManager(
+        [],
+        short_workspace={
+            "enabled": True,
+            "ttl_hours": 24,
+            "cleanup_interval_minutes": 1440,
+            "root": str(tmp_path / "sessions"),
+            "base_workspace": str(base),
+        },
+    )
+
+    store = SQLiteMemoryStore(tmp_path / "memory.db")
+    await store.init()
+    gm.set_memory_store(store)
+
+    ws = await gm._resolve_short_workspace(session, "t-clean")
+    assert ws is not None and ws.exists()
+
+    db = await store._conn()  # noqa: SLF001
+    await db.execute(
+        "UPDATE ephemeral_workspaces SET last_used_at='2000-01-01 00:00:00' "
+        "WHERE workspace_key=?",
+        (gm._short_workspace_key("discord", "100", "t-clean"),),
+    )
+    await db.commit()
+
+    cleaned = await gm._cleanup_expired_short_workspaces()
+    assert cleaned == 1
+    assert not ws.exists()
+
+    await store.close()

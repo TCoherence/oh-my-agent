@@ -195,6 +195,22 @@ class MemoryStore(ABC):
     ) -> list[RuntimeTask]:
         return []
 
+    # -- short-conversation ephemeral workspaces -------------------------
+
+    async def upsert_ephemeral_workspace(self, workspace_key: str, workspace_path: str) -> None:
+        return None
+
+    async def list_expired_ephemeral_workspaces(
+        self,
+        *,
+        ttl_hours: int,
+        limit: int = 200,
+    ) -> list[dict[str, str]]:
+        return []
+
+    async def mark_ephemeral_workspace_cleaned(self, workspace_key: str) -> None:
+        return None
+
 
 # --------------------------------------------------------------------------- #
 #  SQLite implementation                                                        #
@@ -330,6 +346,17 @@ CREATE INDEX IF NOT EXISTS idx_runtime_task_decisions_task
     ON runtime_task_decisions(task_id, created_at);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_runtime_task_decisions_nonce
     ON runtime_task_decisions(task_id, nonce);
+
+CREATE TABLE IF NOT EXISTS ephemeral_workspaces (
+    workspace_key    TEXT PRIMARY KEY,
+    workspace_path   TEXT NOT NULL,
+    created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_used_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    cleaned_at       TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_ephemeral_workspaces_active
+    ON ephemeral_workspaces(cleaned_at, last_used_at);
 """
 
 
@@ -617,6 +644,52 @@ class SQLiteMemoryStore(MemoryStore):
             )
         rows = await cursor.fetchall()
         return [RuntimeTask.from_row(dict(r)) for r in rows]
+
+    async def upsert_ephemeral_workspace(self, workspace_key: str, workspace_path: str) -> None:
+        db = await self._conn()
+        await db.execute(
+            "INSERT INTO ephemeral_workspaces (workspace_key, workspace_path, last_used_at, cleaned_at) "
+            "VALUES (?, ?, CURRENT_TIMESTAMP, NULL) "
+            "ON CONFLICT(workspace_key) DO UPDATE SET "
+            "workspace_path=excluded.workspace_path, "
+            "last_used_at=CURRENT_TIMESTAMP, "
+            "cleaned_at=NULL",
+            (workspace_key, workspace_path),
+        )
+        await db.commit()
+
+    async def list_expired_ephemeral_workspaces(
+        self,
+        *,
+        ttl_hours: int,
+        limit: int = 200,
+    ) -> list[dict[str, str]]:
+        db = await self._conn()
+        cursor = await db.execute(
+            "SELECT workspace_key, workspace_path FROM ephemeral_workspaces "
+            "WHERE cleaned_at IS NULL "
+            "AND last_used_at <= datetime('now', ?) "
+            "ORDER BY last_used_at ASC LIMIT ?",
+            (f"-{int(ttl_hours)} hours", int(limit)),
+        )
+        rows = await cursor.fetchall()
+        return [
+            {
+                "workspace_key": str(row["workspace_key"]),
+                "workspace_path": str(row["workspace_path"]),
+            }
+            for row in rows
+        ]
+
+    async def mark_ephemeral_workspace_cleaned(self, workspace_key: str) -> None:
+        db = await self._conn()
+        await db.execute(
+            "UPDATE ephemeral_workspaces "
+            "SET cleaned_at=CURRENT_TIMESTAMP "
+            "WHERE workspace_key=?",
+            (workspace_key,),
+        )
+        await db.commit()
 
     async def update_runtime_task(self, task_id: str, **updates) -> RuntimeTask | None:
         if not updates:

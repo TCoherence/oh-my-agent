@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import logging
+import os
+import shutil
 import time
 import uuid
+from pathlib import Path
 
 from oh_my_agent.automation import ScheduledJob, Scheduler
 from oh_my_agent.gateway.base import BaseChannel, IncomingMessage
@@ -29,6 +33,7 @@ class GatewayManager:
         skill_syncer=None,
         workspace_skills_dirs=None,
         runtime_service=None,
+        short_workspace: dict | None = None,
     ) -> None:
         self._channels = channels
         self._compressor = compressor
@@ -38,6 +43,21 @@ class GatewayManager:
         self._skill_syncer = skill_syncer
         self._workspace_skills_dirs = workspace_skills_dirs  # list[Path] | None
         self._runtime_service = runtime_service
+        short_cfg = short_workspace or {}
+        self._short_workspace_enabled = bool(short_cfg.get("enabled", True))
+        self._short_workspace_ttl_hours = int(short_cfg.get("ttl_hours", 24))
+        self._short_workspace_cleanup_interval_minutes = int(
+            short_cfg.get("cleanup_interval_minutes", 1440)
+        )
+        root_cfg = short_cfg.get("root")
+        self._short_workspace_root = (
+            Path(root_cfg).expanduser().resolve() if root_cfg else None
+        )
+        self._base_workspace = (
+            Path(short_cfg["base_workspace"]).expanduser().resolve()
+            if short_cfg.get("base_workspace")
+            else None
+        )
         # key: "platform:channel_id" → ChannelSession
         self._sessions: dict[str, ChannelSession] = {}
 
@@ -121,6 +141,16 @@ class GatewayManager:
 
         if self._runtime_service:
             await self._runtime_service.start()
+
+        if self._short_workspace_enabled and self._short_workspace_root is not None:
+            self._short_workspace_root.mkdir(parents=True, exist_ok=True)
+            tasks.append(asyncio.create_task(self._run_short_workspace_janitor()))
+            logger.info(
+                "Short-workspace janitor enabled root=%s ttl=%sh interval=%sm",
+                self._short_workspace_root,
+                self._short_workspace_ttl_hours,
+                self._short_workspace_cleanup_interval_minutes,
+            )
 
         await asyncio.gather(*tasks)
 
@@ -256,6 +286,7 @@ class GatewayManager:
                         logger.debug("Restored session %s for %s thread %s", stored[:12], agent.name, thread_id)
 
         # Run agent (with fallback, or targeted if preferred_agent is set)
+        workspace_override = await self._resolve_short_workspace(session, thread_id)
         t_agent = time.perf_counter()
         async with channel.typing(thread_id):
             agent_used, response = await registry.run(
@@ -263,6 +294,7 @@ class GatewayManager:
                 prior_history,
                 thread_id=thread_id,
                 force_agent=msg.preferred_agent,
+                workspace_override=workspace_override,
             )
         elapsed_agent = time.perf_counter() - t_agent
 
@@ -411,6 +443,93 @@ class GatewayManager:
                 logger.info("[%s] COMPRESS thread=%s completed", req_id, thread_id)
         except Exception as exc:
             logger.warning("[%s] COMPRESS failed: %s", req_id, exc)
+
+    async def _run_short_workspace_janitor(self) -> None:
+        while True:
+            try:
+                cleaned = await self._cleanup_expired_short_workspaces()
+                if cleaned:
+                    logger.info("Short-workspace janitor removed %d expired workspace(s)", cleaned)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("Short-workspace janitor failed: %s", exc)
+            await asyncio.sleep(max(1, self._short_workspace_cleanup_interval_minutes) * 60)
+
+    async def _resolve_short_workspace(
+        self,
+        session: ChannelSession,
+        thread_id: str,
+    ) -> Path | None:
+        if not self._short_workspace_enabled or self._short_workspace_root is None:
+            return None
+        ws_key = self._short_workspace_key(session.platform, session.channel_id, thread_id)
+        workspace = self._short_workspace_root / self._workspace_dirname(thread_id, ws_key)
+        workspace.mkdir(parents=True, exist_ok=True)
+        self._prepare_workspace_compat_files(workspace)
+        store = getattr(self, "_memory_store_ref", None)
+        if store and hasattr(store, "upsert_ephemeral_workspace"):
+            await store.upsert_ephemeral_workspace(ws_key, str(workspace))
+        return workspace
+
+    async def _cleanup_expired_short_workspaces(self) -> int:
+        if not self._short_workspace_enabled or self._short_workspace_root is None:
+            return 0
+
+        cleaned = 0
+        store = getattr(self, "_memory_store_ref", None)
+        if store and hasattr(store, "list_expired_ephemeral_workspaces"):
+            rows = await store.list_expired_ephemeral_workspaces(
+                ttl_hours=self._short_workspace_ttl_hours,
+                limit=500,
+            )
+            for row in rows:
+                path = Path(row.get("workspace_path", ""))
+                if path.exists():
+                    shutil.rmtree(path, ignore_errors=True)
+                if hasattr(store, "mark_ephemeral_workspace_cleaned"):
+                    await store.mark_ephemeral_workspace_cleaned(row["workspace_key"])
+                cleaned += 1
+            return cleaned
+
+        # Fallback cleanup mode (no DB): scan by mtime.
+        now = time.time()
+        ttl_seconds = max(1, self._short_workspace_ttl_hours) * 3600
+        for child in self._short_workspace_root.iterdir():
+            if not child.is_dir():
+                continue
+            age = now - child.stat().st_mtime
+            if age < ttl_seconds:
+                continue
+            shutil.rmtree(child, ignore_errors=True)
+            cleaned += 1
+        return cleaned
+
+    def _prepare_workspace_compat_files(self, workspace: Path) -> None:
+        if self._base_workspace is None:
+            return
+        for name in ("AGENT.md", "CLAUDE.md", "GEMINI.md", ".claude", ".gemini"):
+            src = self._base_workspace / name
+            dst = workspace / name
+            if not src.exists() or dst.exists():
+                continue
+            try:
+                os.symlink(src, dst, target_is_directory=src.is_dir())
+            except OSError:
+                if src.is_dir():
+                    shutil.copytree(src, dst)
+                else:
+                    shutil.copy2(src, dst)
+
+    @staticmethod
+    def _short_workspace_key(platform: str, channel_id: str, thread_id: str) -> str:
+        return f"{platform}:{channel_id}:{thread_id}"
+
+    @staticmethod
+    def _workspace_dirname(thread_id: str, workspace_key: str) -> str:
+        digest = hashlib.sha1(workspace_key.encode("utf-8")).hexdigest()[:10]
+        safe = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in thread_id)
+        return f"{safe[:32]}-{digest}"
 
     @staticmethod
     def _thread_name(content: str) -> str:

@@ -16,6 +16,14 @@ access:
 # Agent workspace (Layer 0 sandbox). Defaults to external path.
 workspace: ~/.oh-my-agent/agent-workspace
 
+# Short conversation (/ask) artifact workspace:
+# each thread uses a transient subdir under root and is cleaned by TTL.
+short_workspace:
+  enabled: true
+  root: ~/.oh-my-agent/agent-workspace/sessions
+  ttl_hours: 24
+  cleanup_interval_minutes: 1440
+
 automations:
   enabled: false                      # global scheduler switch
   jobs:

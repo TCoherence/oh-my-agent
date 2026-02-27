@@ -44,6 +44,7 @@
 - [x] **Legacy migration** — startup migrates `.workspace` to external layout with backup + marker.
 - [x] **Janitor cleanup** — retention-based cleanup removes worktree artifacts and keeps DB audit metadata.
 - [x] **Manual cleanup** — `/task_cleanup [task_id]` for immediate admin cleanup.
+- [x] **Short conversation workspace TTL** — `/ask` thread artifacts stored in transient sub-workspaces and cleaned every 24h (state persisted in SQLite).
 
 ### Runtime Entry Points
 

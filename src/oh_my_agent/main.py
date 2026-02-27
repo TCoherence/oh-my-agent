@@ -150,6 +150,11 @@ def _build_channel(cfg: dict, *, owner_user_ids: set[str] | None = None):
 
 def _apply_v052_defaults(config: dict) -> None:
     config.setdefault("workspace", "~/.oh-my-agent/agent-workspace")
+    short_ws_cfg = config.setdefault("short_workspace", {})
+    short_ws_cfg.setdefault("enabled", True)
+    short_ws_cfg.setdefault("ttl_hours", 24)
+    short_ws_cfg.setdefault("cleanup_interval_minutes", 1440)
+    short_ws_cfg.setdefault("root", "~/.oh-my-agent/agent-workspace/sessions")
 
     memory_cfg = config.setdefault("memory", {})
     memory_cfg.setdefault("backend", "sqlite")
@@ -410,6 +415,10 @@ async def _async_main(config: dict, logger: logging.Logger) -> None:
         skill_syncer=skill_syncer,
         workspace_skills_dirs=workspace_skills_dirs,
         runtime_service=runtime_service,
+        short_workspace={
+            **config.get("short_workspace", {}),
+            "base_workspace": str(workspace) if workspace is not None else None,
+        },
     )
     if memory_store:
         gateway.set_memory_store(memory_store)

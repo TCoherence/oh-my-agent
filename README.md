@@ -92,6 +92,12 @@ access:
 # AGENT.md and skills are copied here on startup. Env vars are sanitized.
 workspace: ~/.oh-my-agent/agent-workspace
 
+short_workspace:
+  enabled: true
+  root: ~/.oh-my-agent/agent-workspace/sessions
+  ttl_hours: 24
+  cleanup_interval_minutes: 1440
+
 automations:
   enabled: true
   jobs:
@@ -228,6 +234,7 @@ Claude session IDs are persisted per `(platform, channel_id, thread_id, agent)` 
 - Decision surface: Discord buttons first + slash fallback.
 - Execution completion now enters `WAITING_MERGE`; final apply requires `Merge/Discard/Request Changes`.
 - Reactions are non-blocking status signals only (`⏳`, `👀`, `🧪`, `✅`, `⚠️`, `🗑️`).
+- Short `/ask` conversations use per-thread transient workspaces under `short_workspace.root` and are TTL-cleaned (default 24h, metadata persisted in SQLite).
 
 ## Agents
 

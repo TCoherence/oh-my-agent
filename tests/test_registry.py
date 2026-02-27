@@ -33,6 +33,20 @@ class _FailAgent(BaseAgent):
         return AgentResponse(text="", error=self._error)
 
 
+class _WorkspaceAgent(BaseAgent):
+    def __init__(self, name: str):
+        self._name = name
+        self.calls: list[tuple] = []
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    async def run(self, prompt, history=None, *, thread_id=None, workspace_override=None):
+        self.calls.append((prompt, history, thread_id, workspace_override))
+        return AgentResponse(text="ok")
+
+
 def test_registry_requires_at_least_one_agent():
     with pytest.raises(ValueError):
         AgentRegistry([])
@@ -89,3 +103,14 @@ async def test_single_agent_success():
     assert agent is a
     assert resp.text == "42"
     assert resp.error is None
+
+
+@pytest.mark.asyncio
+async def test_workspace_override_passed_when_agent_supports_it(tmp_path):
+    agent = _WorkspaceAgent("ws")
+    registry = AgentRegistry([agent])
+    workspace = tmp_path / "thread-1"
+    await registry.run("q", thread_id="thread-1", workspace_override=workspace)
+    assert len(agent.calls) == 1
+    assert agent.calls[0][2] == "thread-1"
+    assert agent.calls[0][3] == workspace

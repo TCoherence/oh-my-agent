@@ -108,3 +108,26 @@ async def test_fts_search(store):
 async def test_empty_thread_returns_empty(store):
     history = await store.load_history("discord", "ch1", "nonexistent")
     assert history == []
+
+
+@pytest.mark.asyncio
+async def test_ephemeral_workspace_lifecycle(store, tmp_path):
+    ws = tmp_path / "ws-a"
+    await store.upsert_ephemeral_workspace("discord:100:t1", str(ws))
+
+    # Manually age the row for deterministic expiry test.
+    db = await store._conn()  # noqa: SLF001
+    await db.execute(
+        "UPDATE ephemeral_workspaces SET last_used_at='2000-01-01 00:00:00' "
+        "WHERE workspace_key=?",
+        ("discord:100:t1",),
+    )
+    await db.commit()
+
+    rows = await store.list_expired_ephemeral_workspaces(ttl_hours=24, limit=10)
+    assert len(rows) == 1
+    assert rows[0]["workspace_key"] == "discord:100:t1"
+
+    await store.mark_ephemeral_workspace_cleaned("discord:100:t1")
+    rows_after = await store.list_expired_ephemeral_workspaces(ttl_hours=24, limit=10)
+    assert rows_after == []
