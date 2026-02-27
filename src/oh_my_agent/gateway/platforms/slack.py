@@ -24,5 +24,5 @@ class SlackChannel(BaseChannel):
     async def create_thread(self, msg: IncomingMessage, name: str) -> str:
         raise NotImplementedError
 
-    async def send(self, thread_id: str, text: str) -> None:
+    async def send(self, thread_id: str, text: str) -> str | None:
         raise NotImplementedError

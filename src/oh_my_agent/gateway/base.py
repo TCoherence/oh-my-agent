@@ -70,8 +70,8 @@ class BaseChannel(ABC):
         ...
 
     @abstractmethod
-    async def send(self, thread_id: str, text: str) -> None:
-        """Send *text* to the given thread."""
+    async def send(self, thread_id: str, text: str) -> str | None:
+        """Send *text* to the given thread and optionally return message id."""
         ...
 
     @asynccontextmanager

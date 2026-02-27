@@ -712,9 +712,10 @@ class DiscordChannel(BaseChannel):
         )
         return str(thread.id)
 
-    async def send(self, thread_id: str, text: str) -> None:
+    async def send(self, thread_id: str, text: str) -> str | None:
         thread = await self._resolve_channel(thread_id)
-        await thread.send(text)
+        msg = await thread.send(text)
+        return str(msg.id)
 
     @asynccontextmanager
     async def typing(self, thread_id: str) -> AsyncIterator[None]:

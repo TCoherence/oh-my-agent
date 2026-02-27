@@ -173,6 +173,15 @@ class RuntimeService:
             "task.created",
             {"source": source, "status": status, "risk_reasons": reasons},
         )
+        logger.info(
+            "Runtime task created id=%s status=%s source=%s agent=%s budget=%d/%d",
+            task.id,
+            status,
+            source,
+            chosen_agent,
+            steps,
+            minutes,
+        )
 
         if status == TASK_STATUS_DRAFT:
             nonce = await self._store.create_runtime_decision_nonce(
@@ -188,10 +197,12 @@ class RuntimeService:
                 f"Task `{task.id}` is waiting for approval. Use buttons or `/task_approve {task.id}`.",
             )
         else:
-            await session.channel.send(
+            msg_id = await session.channel.send(
                 thread_id,
                 f"Task `{task.id}` queued (`{chosen_agent}`), max {steps} steps / {minutes} min.",
             )
+            if msg_id:
+                await self._store.update_runtime_task(task.id, decision_message_id=msg_id)
 
         return task
 
@@ -380,6 +391,7 @@ class RuntimeService:
                 if task is None:
                     await asyncio.sleep(0.8)
                     continue
+                logger.info("Runtime worker=%d claimed task=%s", idx, task.id)
                 await self._run_task(task)
             except asyncio.CancelledError:
                 raise
@@ -405,6 +417,12 @@ class RuntimeService:
             return
 
         await self._store.update_runtime_task(task.id, workspace_path=str(workspace))
+        logger.info(
+            "Runtime task=%s start workspace=%s goal=%r",
+            task.id,
+            workspace,
+            task.goal[:140],
+        )
         await self._signal_status(task, "👀")
 
         start = time.monotonic()
@@ -437,6 +455,12 @@ class RuntimeService:
                 status=TASK_STATUS_RUNNING,
                 step_no=step,
             )
+            logger.info(
+                "Runtime task=%s step=%d/%d status=RUNNING",
+                task.id,
+                step,
+                task.max_steps,
+            )
             prompt = build_runtime_prompt(
                 goal=task.goal,
                 step_no=step,
@@ -445,17 +469,28 @@ class RuntimeService:
                 resume_instruction=current.resume_instruction,
             )
 
+            t_agent = time.perf_counter()
             agent_name, response = await self._run_agent(
                 registry=registry,
                 task=task,
                 prompt=prompt,
                 workspace=workspace,
             )
+            elapsed_agent = time.perf_counter() - t_agent
             if response.error:
                 await self._fail(task, f"{agent_name}: {response.error}")
                 return
 
             state, block_reason = parse_task_state(response.text)
+            logger.info(
+                "Runtime task=%s step=%d AGENT_OK agent=%s elapsed=%.2fs response_len=%d state=%s",
+                task.id,
+                step,
+                agent_name,
+                elapsed_agent,
+                len(response.text),
+                state,
+            )
             changed_files = await self._worktree.changed_files(workspace)
             guard_error = self._validate_changed_paths(changed_files)
             if guard_error:
@@ -463,11 +498,24 @@ class RuntimeService:
                 return
 
             await self._store.update_runtime_task(task.id, status=TASK_STATUS_VALIDATING)
+            logger.info(
+                "Runtime task=%s step=%d status=VALIDATING test=%r changed=%d",
+                task.id,
+                step,
+                task.test_command,
+                len(changed_files),
+            )
             rc, out, err = await self._worktree.run_shell(workspace, task.test_command)
             test_ok = rc == 0
             test_summary = (out + ("\n" + err if err else "")).strip()
             if not test_summary:
                 test_summary = f"exit={rc}"
+            logger.info(
+                "Runtime task=%s step=%d TEST_DONE rc=%d",
+                task.id,
+                step,
+                rc,
+            )
 
             await self._store.add_runtime_checkpoint(
                 task_id=task.id,
@@ -495,6 +543,11 @@ class RuntimeService:
                     status=TASK_STATUS_BLOCKED,
                     blocked_reason=block_reason or "Agent reported blocked.",
                 )
+                logger.info(
+                    "Runtime task=%s BLOCKED reason=%r",
+                    task.id,
+                    block_reason or "unknown reason",
+                )
                 await self._notify(
                     task,
                     f"Task `{task.id}` blocked: {block_reason or 'unknown reason'}",
@@ -510,6 +563,11 @@ class RuntimeService:
                     summary=f"Completed in {step} step(s).",
                     blocked_reason=None,
                 )
+                logger.info(
+                    "Runtime task=%s APPLIED step=%d",
+                    task.id,
+                    step,
+                )
                 await self._notify(task, f"Task `{task.id}` completed successfully.")
                 await self._signal_status(task, "✅")
                 return
@@ -522,6 +580,7 @@ class RuntimeService:
             ended_at_now=True,
             summary="Task exceeded step budget.",
         )
+        logger.info("Runtime task=%s TIMEOUT max_steps=%d", task.id, task.max_steps)
         await self._notify(task, f"Task `{task.id}` reached max steps and stopped.")
         await self._signal_status(task, "⚠️")
 
@@ -572,6 +631,7 @@ class RuntimeService:
             ended_at_now=True,
         )
         await self._store.add_runtime_event(task.id, "task.failed", {"error": error[:1000]})
+        logger.error("Runtime task=%s FAILED error=%s", task.id, error[:600])
         await self._notify(task, f"Task `{task.id}` failed: {error[:400]}")
         await self._signal_status(task, "⚠️")
 
@@ -611,16 +671,24 @@ class RuntimeService:
         session = self._session_for(task)
         if session is None:
             return
-        await session.channel.send(task.thread_id, text[:1900])
+        msg_id = await session.channel.send(task.thread_id, text[:1900])
+        if msg_id:
+            current = await self._store.get_runtime_task(task.id)
+            if current and not current.decision_message_id:
+                await self._store.update_runtime_task(task.id, decision_message_id=msg_id)
 
     async def _signal_status(self, task: RuntimeTask, emoji: str) -> None:
         session = self._session_for(task)
         if session is None:
             return
+        current = await self._store.get_runtime_task(task.id)
+        message_id = current.decision_message_id if current else task.decision_message_id
+        if not message_id:
+            return
         signaler = getattr(session.channel, "signal_task_status", None)
         if signaler and callable(signaler):
             try:
-                await signaler(task.thread_id, task.decision_message_id, emoji)
+                await signaler(task.thread_id, message_id, emoji)
             except Exception:
                 logger.debug("signal_task_status failed for task %s", task.id, exc_info=True)
 
