@@ -35,6 +35,7 @@ The system has four abstraction layers between the user (chat platform) and the 
   - Thread messages support `@claude` / `@gemini` / `@codex` prefix to force one agent for that turn.
   - Prefix is stripped before dispatch; agent name is passed via `IncomingMessage.preferred_agent`.
 - Message flow: `on_message` → `IncomingMessage` → `GatewayManager.handle_message()` → `AgentRegistry.run()` → `channel.send()`.
+- Owner gate: `GatewayManager` can enforce `access.owner_user_ids`; system-generated messages bypass this gate.
 
 **Agent layer** (`src/oh_my_agent/agents/`)
 
@@ -59,6 +60,13 @@ The system has four abstraction layers between the user (chat platform) and the 
   - `reverse_sync()` — copies non-symlink skills from CLI dirs back to `skills/`.
   - `full_sync()` — runs reverse then forward on startup.
 - When `workspace` is configured, `_setup_workspace()` in `main.py` copies skills into `workspace/.claude/skills/` and `workspace/.gemini/skills/` (real files, not symlinks) so CLI agents find them from the workspace cwd.
+- Includes a `scheduler` skill for creating/updating recurring jobs in `config.yaml` and validating job schema.
+
+**Automation layer** (`src/oh_my_agent/automation/`)
+
+- `Scheduler`: interval-based recurring job runner.
+- `build_scheduler_from_config()`: parses `automations` from config.
+- Jobs dispatch back into `GatewayManager.handle_message()` as system messages.
 
 **Sandbox isolation** (`main.py` + `BaseCLIAgent`)
 
@@ -76,7 +84,9 @@ Without `workspace` in config, the bot runs in backward-compatible mode (full en
 
 ```yaml
 memory:         # SQLite backend, max_turns, summary_max_chars
+access:         # optional owner-only mode: owner_user_ids
 skills:         # enabled, path
+automations:    # optional recurring jobs (interval_seconds)
 workspace:      # optional — activates sandbox isolation (Layer 0 + L1)
 gateway:        # channels list (platform, token, channel_id, agents)
 agents:         # per-agent: type, cli_path, model, timeout, allowed_tools, env_passthrough, skip_git_repo_check

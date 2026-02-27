@@ -21,9 +21,10 @@ class DiscordChannel(BaseChannel):
     (``/ask``, ``/reset``, ``/agent``, ``/search``).
     """
 
-    def __init__(self, token: str, channel_id: str) -> None:
+    def __init__(self, token: str, channel_id: str, owner_user_ids: set[str] | None = None) -> None:
         self._token = token
         self._channel_id = channel_id
+        self._owner_user_ids = owner_user_ids or set()
         self._client: discord.Client | None = None
         # Injected by GatewayManager after construction
         self._session = None  # ChannelSession
@@ -67,6 +68,13 @@ class DiscordChannel(BaseChannel):
             question: str,
             agent: str | None = None,
         ):
+            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
+                await interaction.response.send_message(
+                    "This bot is currently restricted to the configured owner.",
+                    ephemeral=True,
+                )
+                return
+
             if interaction.channel_id != target_id:
                 await interaction.response.send_message(
                     "This command only works in the configured channel.",
@@ -92,6 +100,7 @@ class DiscordChannel(BaseChannel):
                 channel_id=self._channel_id,
                 thread_id=None,
                 author=str(interaction.user.display_name),
+                author_id=str(interaction.user.id),
                 content=question,
                 raw=response_msg,
                 preferred_agent=agent,
@@ -100,6 +109,13 @@ class DiscordChannel(BaseChannel):
 
         @tree.command(name="reset", description="Clear conversation history for this thread")
         async def slash_reset(interaction: discord.Interaction):
+            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
+                await interaction.response.send_message(
+                    "This bot is currently restricted to the configured owner.",
+                    ephemeral=True,
+                )
+                return
+
             ch = interaction.channel
             if not isinstance(ch, discord.Thread) or ch.parent_id != target_id:
                 await interaction.response.send_message(
@@ -115,6 +131,13 @@ class DiscordChannel(BaseChannel):
 
         @tree.command(name="history", description="Show conversation history for this thread (for debugging)")
         async def slash_history(interaction: discord.Interaction):
+            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
+                await interaction.response.send_message(
+                    "This bot is currently restricted to the configured owner.",
+                    ephemeral=True,
+                )
+                return
+
             ch = interaction.channel
             if not isinstance(ch, discord.Thread) or ch.parent_id != target_id:
                 await interaction.response.send_message(
@@ -148,6 +171,13 @@ class DiscordChannel(BaseChannel):
 
         @tree.command(name="agent", description="Show available agents and their status")
         async def slash_agent(interaction: discord.Interaction):
+            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
+                await interaction.response.send_message(
+                    "This bot is currently restricted to the configured owner.",
+                    ephemeral=True,
+                )
+                return
+
             if not self._registry:
                 await interaction.response.send_message("No agents configured.", ephemeral=True)
                 return
@@ -168,6 +198,13 @@ class DiscordChannel(BaseChannel):
             query: str,
             limit: int = 5,
         ):
+            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
+                await interaction.response.send_message(
+                    "This bot is currently restricted to the configured owner.",
+                    ephemeral=True,
+                )
+                return
+
             if not self._memory_store:
                 await interaction.response.send_message(
                     "Memory store not configured.", ephemeral=True,
@@ -204,6 +241,8 @@ class DiscordChannel(BaseChannel):
         async def on_message(message: discord.Message) -> None:
             if message.author == client.user or message.author.bot:
                 return
+            if self._owner_user_ids and str(message.author.id) not in self._owner_user_ids:
+                return
 
             ch = message.channel
             content = message.content.strip()
@@ -224,6 +263,7 @@ class DiscordChannel(BaseChannel):
                     channel_id=self._channel_id,
                     thread_id=str(ch.id),
                     author=str(message.author.display_name),
+                    author_id=str(message.author.id),
                     content=content,
                     raw=message,
                     preferred_agent=preferred_agent,
@@ -235,6 +275,7 @@ class DiscordChannel(BaseChannel):
                     channel_id=self._channel_id,
                     thread_id=None,
                     author=str(message.author.display_name),
+                    author_id=str(message.author.id),
                     content=content,
                     raw=message,
                     preferred_agent=preferred_agent,

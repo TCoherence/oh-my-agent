@@ -5,6 +5,7 @@ import logging
 import time
 import uuid
 
+from oh_my_agent.automation import ScheduledJob, Scheduler
 from oh_my_agent.gateway.base import BaseChannel, IncomingMessage
 from oh_my_agent.gateway.session import ChannelSession
 from oh_my_agent.agents.registry import AgentRegistry
@@ -22,9 +23,13 @@ class GatewayManager:
         self,
         channels: list[tuple[BaseChannel, AgentRegistry]],
         compressor=None,
+        scheduler: Scheduler | None = None,
+        owner_user_ids: set[str] | None = None,
     ) -> None:
         self._channels = channels
         self._compressor = compressor
+        self._scheduler = scheduler
+        self._owner_user_ids = owner_user_ids or set()
         self._memory_store_ref = None  # set by set_memory_store()
         # key: "platform:channel_id" → ChannelSession
         self._sessions: dict[str, ChannelSession] = {}
@@ -92,7 +97,38 @@ class GatewayManager:
                 "Started channel %s:%s", channel.platform, channel.channel_id
             )
 
+        if self._scheduler:
+            tasks.append(asyncio.create_task(self._run_scheduler()))
+            logger.info("Scheduler started with %d job(s)", len(self._scheduler.jobs))
+
         await asyncio.gather(*tasks)
+
+    async def _run_scheduler(self) -> None:
+        if not self._scheduler:
+            return
+        await self._scheduler.run(self._dispatch_scheduled_job)
+
+    async def _dispatch_scheduled_job(self, job: ScheduledJob) -> None:
+        key = self._session_key(job.platform, job.channel_id)
+        session = self._sessions.get(key)
+        if session is None:
+            logger.warning(
+                "Scheduler job '%s' skipped: no active channel %s:%s",
+                job.name,
+                job.platform,
+                job.channel_id,
+            )
+            return
+        msg = IncomingMessage(
+            platform=job.platform,
+            channel_id=job.channel_id,
+            thread_id=job.thread_id,
+            author=job.author,
+            content=job.prompt,
+            preferred_agent=job.agent,
+            system=True,
+        )
+        await self.handle_message(session, session.registry, msg)
 
     async def handle_message(
         self,
@@ -113,6 +149,16 @@ class GatewayManager:
             msg.author,
             msg.content[:120],
         )
+
+        if (not msg.system) and self._owner_user_ids:
+            if msg.author_id is None or msg.author_id not in self._owner_user_ids:
+                logger.warning(
+                    "[%s] IGNORE unauthorized user author=%r author_id=%r",
+                    req_id,
+                    msg.author,
+                    msg.author_id,
+                )
+                return
 
         # Determine thread: use existing or create a new one
         thread_id = msg.thread_id

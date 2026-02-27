@@ -26,6 +26,7 @@ graph TD
     REVERSE["✅ SkillSync Reverse Sync"]
     SLASH["✅ Slash Commands"]
     DIRECTMENTION["✅ Direct Agent Selection (@mention + /ask agent)"]
+    SCHED["✅ Scheduler MVP (interval jobs)"]
     README["✅ Update README"]
     RESUME["✅ CLI Session Resume"]
     MEMIO["✅ Memory Export/Import"]
@@ -87,7 +88,7 @@ graph TD
     classDef v06 fill:#7b2cbf,stroke:#9d4edd,color:#fff
     classDef backlog fill:#495057,stroke:#6c757d,color:#fff
 
-    class MEM,COMP,SKILL,FALLBACK,DEPRECATE,CODEX,WORKSPACE,ENVSANITIZE,SKILLCOPY,WRITE,REVERSE,SLASH,DIRECTMENTION,README,RESUME,MEMIO done
+    class MEM,COMP,SKILL,FALLBACK,DEPRECATE,CODEX,WORKSPACE,ENVSANITIZE,SKILLCOPY,WRITE,REVERSE,SLASH,DIRECTMENTION,SCHED,README,RESUME,MEMIO done
     class STREAM v04
     class SKILLCREATE,SKILLTEST,SKILLPERM,XMEM v05
     class ROUTING,COLLAB,MENTION v06
@@ -108,6 +109,7 @@ graph TD
 | **Streaming responses**           | None (independent)                                                       | —                                   |
 | **Slash commands**                | None (independent, but `/search` only useful after cross-session memory) | Cross-session memory                |
 | **Direct agent selection**        | ✅ Slash commands (`/ask agent`), ✅ Agent registry                       | —                                   |
+| **Scheduler MVP**                 | ✅ Gateway manager + agent registry routing                               | Owner-only mode recommended         |
 | **Update README**                 | Deprecate API agents, Add Codex (wait for arch to settle)                | —                                   |
 | **Agent-driven skill creation**   | ⬅ SkillSync reverse sync, ⬅ Add `Write` to Claude tools                  | Skill testing                       |
 | **Skill testing / validation**    | ⬅ Agent-driven skill creation                                            | —                                   |
@@ -195,6 +197,7 @@ Deferred to backlog:
 - [x] **SkillSync reverse sync** — `reverse_sync()` imports agent-created skills back to `skills/`; `full_sync()` runs both directions on startup.
 - [x] **Slash commands** — `/ask`, `/reset`, `/agent`, `/search` via `discord.app_commands`.
 - [x] **Direct agent selection** — thread-level `@claude/@gemini/@codex` and `/ask` optional `agent` override.
+- [x] **Scheduler MVP** — `automations.jobs` interval-based recurring execution via `GatewayManager`.
 - [x] **CLI session resume** — `ClaudeAgent` tracks session IDs per thread, uses `--resume` for subsequent messages.
 - [x] **Memory export/import** — `MemoryStore.export_data()` / `import_data()` for JSON backup/restore.
 - [x] **Update README.md** — rewritten for v0.4.0 CLI-first architecture with sandbox docs.

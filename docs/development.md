@@ -8,6 +8,36 @@
 
 ---
 
+## v0.4.2 — Owner Gate + Scheduler MVP
+
+### What Changed
+
+1. **Owner-only access control** — new `access.owner_user_ids` config. Non-owner messages/commands are ignored (or rejected for slash commands).
+2. **Automation scheduler (MVP)** — new `automations` config section with interval-based recurring jobs.
+3. **System dispatch path** — scheduler jobs are dispatched as internal `IncomingMessage(system=True)` through existing `GatewayManager` and `AgentRegistry`.
+4. **Scheduler skill** — added `skills/scheduler/` so any CLI agent can create/update automation jobs and validate schema with a local script.
+
+### Config Additions
+
+```yaml
+access:
+  owner_user_ids: ["123456789012345678"]
+
+automations:
+  enabled: true
+  jobs:
+    - name: daily-refactor
+      platform: discord
+      channel_id: "767174280856600621"
+      thread_id: "1476736679120207983"  # optional
+      prompt: "Review TODOs and implement one coding task."
+      agent: codex                       # optional
+      interval_seconds: 86400
+      initial_delay_seconds: 10
+```
+
+---
+
 ## v0.4.1 — Reliability + Routing UX
 
 ### What Changed

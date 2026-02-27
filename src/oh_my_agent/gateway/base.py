@@ -16,9 +16,12 @@ class IncomingMessage:
     thread_id: str | None   # Existing thread ID; None means create a new thread
     author: str             # Display name of the sender
     content: str            # Message text
+    author_id: str | None = None  # Stable sender identifier (platform user ID)
     raw: Any = field(default=None, repr=False)  # Original platform object
     # When set, bypass fallback and run only this named agent
     preferred_agent: str | None = None
+    # Internal/system-generated message (e.g. scheduler); bypasses owner gate.
+    system: bool = False
 
 
 MessageHandler = Callable[[IncomingMessage], Awaitable[None]]

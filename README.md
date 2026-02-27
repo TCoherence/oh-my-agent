@@ -78,10 +78,25 @@ skills:
   enabled: true
   path: skills/
 
+access:
+  owner_user_ids: ["123456789012345678"]   # optional owner-only mode
+
 # Sandbox isolation: agents run in this dir instead of the repo root.
 # AGENT.md and skills are copied here on startup. Env vars are sanitized.
 # Leave unset if you want agents to edit this repository directly.
 # workspace: .workspace/agent
+
+automations:
+  enabled: true
+  jobs:
+    - name: daily-refactor
+      platform: discord
+      channel_id: "${DISCORD_CHANNEL_ID}"
+      thread_id: "1476736679120207983"      # optional
+      prompt: "Review TODOs and implement one coding task."
+      agent: codex                            # optional
+      interval_seconds: 86400
+      initial_delay_seconds: 10
 
 gateway:
   channels:
@@ -128,6 +143,7 @@ oh-my-agent
 - **Prefix with `@agent`** (for example `@gemini`, `@claude`, `@codex`) to force a specific agent for that message
 - Each reply is prefixed with `-# via **agent-name**`
 - If an agent fails, the next one in the fallback chain takes over
+- If `access.owner_user_ids` is configured, only listed users can trigger the bot
 
 ### Slash Commands
 | Command | Description |
@@ -149,6 +165,12 @@ Claude session IDs are persisted per `(platform, channel_id, thread_id, agent)` 
 - On successful reply, latest `session_id` is upserted
 - On bot restart, session IDs are loaded before handling the next message
 - If `--resume` fails, in-memory + DB session entries are cleared and next turn falls back to flattened history
+
+### Automations (MVP)
+- Configure recurring jobs in `automations.jobs` (interval-based scheduler)
+- Jobs reuse the same routing stack (`GatewayManager -> AgentRegistry`)
+- Set `thread_id` to post into an existing thread, or omit to create a new thread each run
+- Use `agent` to force a specific model for the job
 
 ## Agents
 
@@ -179,6 +201,7 @@ Skills are Markdown-described tools in `skills/{name}/SKILL.md` that CLI agents 
 - **Workspace**: copies skills into `workspace/.claude/skills/` and `workspace/.gemini/skills/` when workspace is configured
 
 To add a skill: create `skills/{name}/SKILL.md`. It will be picked up on the next startup.
+This repo includes a built-in `scheduler` skill to help agents manage `automations.jobs`.
 
 ## Development
 

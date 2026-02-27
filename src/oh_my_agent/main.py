@@ -127,14 +127,18 @@ def _build_agent(name: str, cfg: dict, workspace: Path | None = None):
     raise ValueError(f"Unknown agent type '{agent_type}' for agent '{name}'")
 
 
-def _build_channel(cfg: dict):
+def _build_channel(cfg: dict, *, owner_user_ids: set[str] | None = None):
     """Instantiate a platform channel from its config dict."""
     platform = cfg["platform"]
     channel_id = str(cfg["channel_id"])
 
     if platform == "discord":
         from oh_my_agent.gateway.platforms.discord import DiscordChannel
-        return DiscordChannel(token=cfg["token"], channel_id=channel_id)
+        return DiscordChannel(
+            token=cfg["token"],
+            channel_id=channel_id,
+            owner_user_ids=owner_user_ids,
+        )
 
     if platform == "slack":
         from oh_my_agent.gateway.platforms.slack import SlackChannel
@@ -170,6 +174,14 @@ def _setup_logging(runtime_root: Path | None = None) -> None:
 
 async def _async_main(config: dict, logger: logging.Logger) -> None:
     """Async entry point — builds agents, memory, and starts gateway."""
+
+    owner_user_ids = {
+        str(uid).strip()
+        for uid in config.get("access", {}).get("owner_user_ids", [])
+        if str(uid).strip()
+    }
+    if owner_user_ids:
+        logger.info("Owner-only mode enabled for %d user(s)", len(owner_user_ids))
 
     # Setup workspace (optional — Layer 0 sandbox isolation)
     project_root = Path.cwd()
@@ -221,13 +233,24 @@ async def _async_main(config: dict, logger: logging.Logger) -> None:
         forward, reverse = syncer.full_sync()
         logger.info("Skills: %d synced, %d reverse-imported", forward, reverse)
 
+    # Build scheduler (optional)
+    from oh_my_agent.automation import build_scheduler_from_config
+
+    try:
+        scheduler = build_scheduler_from_config(config)
+        if scheduler:
+            logger.info("Loaded scheduler with %d job(s)", len(scheduler.jobs))
+    except Exception as exc:
+        logger.error("Failed to build scheduler from config: %s", exc)
+        sys.exit(1)
+
     # Build (channel, registry) pairs
     from oh_my_agent.agents.registry import AgentRegistry
     from oh_my_agent.gateway.manager import GatewayManager
 
     channel_pairs = []
     for ch_cfg in config.get("gateway", {}).get("channels", []):
-        channel = _build_channel(ch_cfg)
+        channel = _build_channel(ch_cfg, owner_user_ids=owner_user_ids)
         agent_names: list[str] = ch_cfg.get("agents", [])
         selected = []
         for name in agent_names:
@@ -251,7 +274,12 @@ async def _async_main(config: dict, logger: logging.Logger) -> None:
         logger.error("No channels configured in config.yaml")
         sys.exit(1)
 
-    gateway = GatewayManager(channel_pairs, compressor=compressor)
+    gateway = GatewayManager(
+        channel_pairs,
+        compressor=compressor,
+        scheduler=scheduler,
+        owner_user_ids=owner_user_ids,
+    )
     if memory_store:
         gateway.set_memory_store(memory_store)
 

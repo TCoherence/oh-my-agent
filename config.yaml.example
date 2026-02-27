@@ -8,12 +8,30 @@ skills:
   enabled: true
   path: skills/
 
+access:
+  # Optional owner-only mode. When set, only these user IDs can use the bot.
+  # For Discord, use the numeric user ID as string.
+  owner_user_ids: []
+
 # Optional: workspace directory for agent sandbox isolation (Layer 0).
 # When set, all CLI agents run with cwd=workspace instead of the repo root.
 # AGENT.md and skills are copied into the workspace on startup.
 # Environment variables are also sanitized (whitelist mode) when this is set.
 # Leave unset if you want agents to edit this repository directly.
 # workspace: .workspace/agent
+
+automations:
+  enabled: false
+  jobs:
+    # - name: "daily-standup"
+    #   platform: discord
+    #   channel_id: "${DISCORD_CHANNEL_ID}"
+    #   thread_id: "1234567890123456789"   # optional: post into an existing thread
+    #   prompt: "Summarize open TODOs and suggest top 3 coding tasks."
+    #   agent: codex                         # optional: force a specific agent
+    #   interval_seconds: 86400
+    #   initial_delay_seconds: 10
+    #   author: "scheduler"
 
 gateway:
   channels:

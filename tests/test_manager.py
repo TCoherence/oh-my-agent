@@ -7,13 +7,15 @@ from oh_my_agent.agents.base import AgentResponse
 from oh_my_agent.agents.registry import AgentRegistry
 
 
-def _make_msg(thread_id=None, content="hello") -> IncomingMessage:
+def _make_msg(thread_id=None, content="hello", author_id=None, system=False) -> IncomingMessage:
     return IncomingMessage(
         platform="discord",
         channel_id="100",
         thread_id=thread_id,
         author="alice",
+        author_id=author_id,
         content=content,
+        system=system,
     )
 
 
@@ -166,3 +168,56 @@ async def test_handle_message_appends_to_history():
     assert history[0]["role"] == "user"
     assert history[1]["role"] == "assistant"
     assert history[1]["agent"] == "claude"
+
+
+@pytest.mark.asyncio
+async def test_owner_gate_ignores_unauthorized_user():
+    channel = MagicMock()
+    channel.platform = "discord"
+    channel.channel_id = "100"
+    channel.create_thread = AsyncMock(return_value="t1")
+    channel.send = AsyncMock()
+    channel.typing = MagicMock()
+    channel.typing.return_value.__aenter__ = AsyncMock(return_value=None)
+    channel.typing.return_value.__aexit__ = AsyncMock(return_value=False)
+
+    mock_agent = MagicMock()
+    mock_agent.name = "claude"
+    registry = MagicMock(spec=AgentRegistry)
+    registry.run = AsyncMock(return_value=(mock_agent, AgentResponse(text="answer")))
+
+    session = _make_session(channel=channel, registry=registry)
+    gm = GatewayManager([], owner_user_ids={"42"})
+
+    msg = _make_msg(thread_id=None, content="question", author_id="99")
+    await gm.handle_message(session, registry, msg)
+
+    registry.run.assert_not_called()
+    channel.create_thread.assert_not_called()
+    channel.send.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_owner_gate_allows_system_messages():
+    channel = MagicMock()
+    channel.platform = "discord"
+    channel.channel_id = "100"
+    channel.create_thread = AsyncMock(return_value="t1")
+    channel.send = AsyncMock()
+    channel.typing = MagicMock()
+    channel.typing.return_value.__aenter__ = AsyncMock(return_value=None)
+    channel.typing.return_value.__aexit__ = AsyncMock(return_value=False)
+
+    mock_agent = MagicMock()
+    mock_agent.name = "claude"
+    registry = MagicMock(spec=AgentRegistry)
+    registry.run = AsyncMock(return_value=(mock_agent, AgentResponse(text="answer")))
+
+    session = _make_session(channel=channel, registry=registry)
+    gm = GatewayManager([], owner_user_ids={"42"})
+
+    msg = _make_msg(thread_id=None, content="scheduled", author_id=None, system=True)
+    await gm.handle_message(session, registry, msg)
+
+    registry.run.assert_called_once()
+    channel.send.assert_called()
