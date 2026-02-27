@@ -30,6 +30,8 @@ class DiscordChannel(BaseChannel):
         self._session = None  # ChannelSession
         self._registry = None  # AgentRegistry
         self._memory_store = None  # MemoryStore
+        self._skill_syncer = None  # SkillSync
+        self._workspace_skills_dirs = None  # list[Path] | None
 
     @property
     def platform(self) -> str:
@@ -44,6 +46,11 @@ class DiscordChannel(BaseChannel):
         self._session = session
         self._registry = registry
         self._memory_store = memory_store
+
+    def set_skill_syncer(self, syncer, workspace_skills_dirs=None) -> None:
+        """Inject skill syncer for the ``/reload-skills`` slash command."""
+        self._skill_syncer = syncer
+        self._workspace_skills_dirs = workspace_skills_dirs
 
     async def start(self, handler: MessageHandler) -> None:
         _handler = handler
@@ -212,19 +219,86 @@ class DiscordChannel(BaseChannel):
                 return
 
             await interaction.response.defer()
-            results = await self._memory_store.search(query, limit=min(limit, 20))
+            cap = min(limit, 20)
+            results = await self._memory_store.search(query, limit=cap)
             if not results:
                 await interaction.followup.send(f"No results for **{query}**.")
                 return
 
-            lines = [f"**Search results for** \"{query}\" ({len(results)} found):"]
-            for r in results:
+            display = results[:10]
+            header = f'**Search:** "{query}"'
+            if len(results) > len(display):
+                header += f" — showing first {len(display)} of {len(results)}"
+            else:
+                header += f" — {len(results)} result(s)"
+
+            lines = [header]
+            for r in display:
                 role = r.get("role", "?")
-                content = r.get("content", "")[:200]
+                agent = r.get("agent") or ""
                 thread = r.get("thread_id", "?")
-                lines.append(f"- [{role}] {content}... (thread: `{thread}`)")
+                raw_date = r.get("created_at", "")
+                date_str = raw_date[:10] if raw_date else "?"
+                by = f"{role}/{agent}" if agent else role
+                content = r.get("content", "")[:160].replace("\n", " ")
+                if len(r.get("content", "")) > 160:
+                    content += "…"
+                lines.append(f"`{date_str}` **[{by}]** {content}\n> thread `{thread}`")
 
             await interaction.followup.send("\n".join(lines)[:2000])
+
+        @tree.command(name="reload-skills", description="Manually trigger skill sync and validation")
+        async def slash_reload_skills(interaction: discord.Interaction):
+            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
+                await interaction.response.send_message(
+                    "This command is restricted to the configured owner.",
+                    ephemeral=True,
+                )
+                return
+
+            if not self._skill_syncer:
+                await interaction.response.send_message(
+                    "Skill syncer not configured (enable skills in config.yaml).",
+                    ephemeral=True,
+                )
+                return
+
+            await interaction.response.defer()
+            try:
+                forward, reverse = self._skill_syncer.full_sync(
+                    extra_source_dirs=self._workspace_skills_dirs
+                )
+
+                from oh_my_agent.skills.validator import SkillValidator
+                validator = SkillValidator()
+                skills_path = self._skill_syncer._skills_path
+
+                validation_lines = []
+                if skills_path.is_dir():
+                    for skill_dir in sorted(skills_path.iterdir()):
+                        if not skill_dir.is_dir() or not (skill_dir / "SKILL.md").exists():
+                            continue
+                        result = validator.validate(skill_dir)
+                        icon = "✅" if result.valid else "⚠️"
+                        line = f"{icon} **{skill_dir.name}**"
+                        if result.errors:
+                            line += f" — {len(result.errors)} error(s)"
+                        if result.warnings:
+                            line += f" — {len(result.warnings)} warning(s)"
+                        validation_lines.append(line)
+
+                summary = [
+                    f"**Skill reload complete** — {forward} synced, {reverse} reverse-imported",
+                ]
+                if validation_lines:
+                    summary.append("**Skills:**")
+                    summary.extend(validation_lines)
+                else:
+                    summary.append("No skills found.")
+
+                await interaction.followup.send("\n".join(summary)[:2000])
+            except Exception as exc:
+                await interaction.followup.send(f"Skill reload failed: {exc}")
 
         # ---- Events --------------------------------------------------------
 

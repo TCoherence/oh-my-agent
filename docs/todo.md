@@ -35,10 +35,10 @@ graph TD
     STREAM["Streaming Responses"]
 
     %% ── v0.5.0 ─────────────────────────────────────
-    SKILLCREATE["Agent-Driven Skill Creation"]
-    SKILLTEST["Skill Testing / Validation"]
+    SKILLCREATE["✅ Agent-Driven Skill Creation"]
+    SKILLTEST["✅ Skill Testing / Validation"]
     SKILLPERM["Skill Permission Manifest"]
-    XMEM["Cross-Session Memory Search"]
+    XMEM["✅ Cross-Session Memory Search"]
 
     %% ── v0.6.0 ─────────────────────────────────────
     ROUTING["Smart Agent Routing"]
@@ -88,9 +88,9 @@ graph TD
     classDef v06 fill:#7b2cbf,stroke:#9d4edd,color:#fff
     classDef backlog fill:#495057,stroke:#6c757d,color:#fff
 
-    class MEM,COMP,SKILL,FALLBACK,DEPRECATE,CODEX,WORKSPACE,ENVSANITIZE,SKILLCOPY,WRITE,REVERSE,SLASH,DIRECTMENTION,SCHED,README,RESUME,MEMIO done
+    class MEM,COMP,SKILL,FALLBACK,DEPRECATE,CODEX,WORKSPACE,ENVSANITIZE,SKILLCOPY,WRITE,REVERSE,SLASH,DIRECTMENTION,SCHED,README,RESUME,MEMIO,SKILLCREATE,SKILLTEST,XMEM done
     class STREAM v04
-    class SKILLCREATE,SKILLTEST,SKILLPERM,XMEM v05
+    class SKILLPERM v05
     class ROUTING,COLLAB,MENTION v06
     class DOCKER,RATELIMIT backlog
 ```
@@ -156,21 +156,22 @@ Deferred to backlog:
 
 ## v0.5.0 — Self-Evolution
 
-- [ ] **Agent-driven skill creation** — user requests skill → agent creates it → auto sync. *(⬅ depends on: ✅ SkillSync reverse sync, ✅ Write tool)*
-- [ ] **Skill testing / validation** — auto-verify newly created skills. *(⬅ depends on: Agent-driven skill creation)*
+- [x] **Agent-driven skill creation** — user requests skill → agent creates it in `.claude/skills/` → auto detected, reverse-synced, and hot-reloaded after each response. Discord notification with validation results. `skill-creator` meta-skill teaches agents the format. *(⬅ depends on: ✅ SkillSync reverse sync, ✅ Write tool)*
+- [x] **Skill testing / validation** — `SkillValidator` checks SKILL.md frontmatter (name + description), bash/python syntax, and executable permissions. Warn-but-import strategy. `/reload-skills` slash command for manual trigger. *(⬅ depends on: Agent-driven skill creation)*
 - [ ] **Skill permission manifest** — `permissions:` in SKILL.md frontmatter (network, filesystem, env_vars). Declarative capability control. *(⬅ depends on: Agent-driven skill creation)*
-- [ ] **Cross-session memory search** — FTS5 search across threads via `/search`. *(⬅ depends on: ✅ Memory v0.3, ✅ Slash commands `/search`)*
+- [x] **Cross-session memory search** — FTS5 search across threads via `/search` with improved format: date, agent attribution, aligned output, "showing first N of M" for large result sets. *(⬅ depends on: ✅ Memory v0.3, ✅ Slash commands `/search`)*
 
 ## v0.6.0 — Multi-Agent Intelligence
 
 - [ ] **Smart agent routing** — route by task type instead of simple fallback. *(⬅ depends on: ✅ Agent Registry v0.3, Add Codex — need ≥3 agents for routing to matter)*
-- [ ] **Agent collaboration** — multi-agent workflows (write + review). *(⬅ depends on: Smart agent routing)*
+- [ ] **Agent collaboration** — multi-agent pipelines: write→review (one agent drafts, another critiques) and plan→execute (planner decomposes task, executor runs subtasks). Each stage result is fed as context to the next agent. *(⬅ depends on: Smart agent routing)*
 - [ ] **Intent-based agent selection** — automatically choose/override agent by query type (beyond explicit `@agent`). *(⬅ depends on: Smart agent routing)*
 - [ ] **Telegram adapter** — `gateway/platforms/telegram.py`. *(independent from agent features)*
 - [ ] **Feishu/Lark adapter** — `gateway/platforms/feishu.py`. *(independent from agent features)*
 
 ## Backlog (Unprioritized)
 
+- [ ] **Event-driven automation** — trigger jobs from webhooks, RSS feeds, or filesystem changes rather than purely interval-based. Complements the Scheduler MVP with reactive triggers. *(⬅ depends on: ✅ Scheduler MVP)*
 - [ ] **Slack adapter** — implement `slack_sdk` async client. *(independent)*
 - [ ] **Rate limiting / request queue** — per-session queue. *(⬅ soft dependency: Add Codex — more agents = more concurrency pressure)*
 - [ ] **File attachment support** — download Discord attachments, pass to agent. *(independent)*

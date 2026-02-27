@@ -26,12 +26,16 @@ class GatewayManager:
         compressor=None,
         scheduler: Scheduler | None = None,
         owner_user_ids: set[str] | None = None,
+        skill_syncer=None,
+        workspace_skills_dirs=None,
     ) -> None:
         self._channels = channels
         self._compressor = compressor
         self._scheduler = scheduler
         self._owner_user_ids = owner_user_ids or set()
         self._memory_store_ref = None  # set by set_memory_store()
+        self._skill_syncer = skill_syncer
+        self._workspace_skills_dirs = workspace_skills_dirs  # list[Path] | None
         # key: "platform:channel_id" → ChannelSession
         self._sessions: dict[str, ChannelSession] = {}
 
@@ -86,6 +90,10 @@ class GatewayManager:
                     registry,
                     getattr(self, "_memory_store", None),
                 )
+
+            # Inject skill syncer for /reload-skills (Discord-specific)
+            if hasattr(channel, "set_skill_syncer") and self._skill_syncer:
+                channel.set_skill_syncer(self._skill_syncer, self._workspace_skills_dirs)
 
             async def make_handler(s: ChannelSession, r: AgentRegistry):
                 async def handler(msg: IncomingMessage) -> None:
@@ -282,6 +290,76 @@ class GatewayManager:
             asyncio.create_task(
                 self._try_compress(session, registry, thread_id, req_id)
             )
+
+        # Async: detect and hot-reload new skills created by agents
+        if self._skill_syncer:
+            asyncio.create_task(
+                self._try_skill_sync(session, thread_id, req_id)
+            )
+
+    async def _try_skill_sync(
+        self,
+        session: ChannelSession,
+        thread_id: str,
+        req_id: str,
+    ) -> None:
+        """Detect new agent-created skills, sync them, validate, and notify via Discord."""
+        try:
+            new_skills = self._skill_syncer.find_new_skills(self._workspace_skills_dirs)
+            if not new_skills:
+                return
+
+            logger.info("[%s] SKILL_SYNC new skills detected: %s", req_id, new_skills)
+            forward, reverse = self._skill_syncer.full_sync(
+                extra_source_dirs=self._workspace_skills_dirs
+            )
+            logger.info(
+                "[%s] SKILL_SYNC complete forward=%d reverse=%d", req_id, forward, reverse
+            )
+
+            # Validate each new skill
+            from oh_my_agent.skills.validator import SkillValidator
+            validator = SkillValidator()
+            skills_path = self._skill_syncer._skills_path
+
+            validation_lines = []
+            for skill_name in new_skills:
+                skill_dir = skills_path / skill_name
+                if not skill_dir.is_dir():
+                    continue
+                result = validator.validate(skill_dir)
+                icon = "✅" if result.valid else "⚠️"
+                line = f"{icon} **{skill_name}**"
+                if result.errors:
+                    line += f" — {len(result.errors)} error(s): {'; '.join(result.errors[:2])}"
+                if result.warnings:
+                    line += f" — {len(result.warnings)} warning(s)"
+                validation_lines.append(line)
+
+            # Copy validated skills into workspace CLI dirs
+            if self._workspace_skills_dirs:
+                import shutil
+                for skill_name in new_skills:
+                    skill_dir = skills_path / skill_name
+                    if not skill_dir.is_dir():
+                        continue
+                    for ws_dir in self._workspace_skills_dirs:
+                        dest = ws_dir / skill_name
+                        if dest.exists():
+                            shutil.rmtree(dest)
+                        shutil.copytree(skill_dir, dest)
+                        logger.debug(
+                            "[%s] SKILL_SYNC copied '%s' to workspace %s",
+                            req_id, skill_name, ws_dir,
+                        )
+
+            # Notify via the current thread
+            lines = [f"🔧 **New skill(s) synced** ({len(new_skills)}):"]
+            lines.extend(validation_lines)
+            await session.channel.send(thread_id, "\n".join(lines)[:2000])
+
+        except Exception as exc:
+            logger.warning("[%s] SKILL_SYNC failed: %s", req_id, exc)
 
     async def _try_compress(
         self,

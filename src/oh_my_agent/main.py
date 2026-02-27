@@ -225,12 +225,21 @@ async def _async_main(config: dict, logger: logging.Logger) -> None:
 
     # Sync skills
     skills_cfg = config.get("skills", {})
+    skill_syncer = None
+    workspace_skills_dirs = None
     if skills_cfg.get("enabled", False):
         from oh_my_agent.skills.skill_sync import SkillSync
 
         skills_path = skills_cfg.get("path", "skills/")
-        syncer = SkillSync(skills_path)
-        forward, reverse = syncer.full_sync()
+        skill_syncer = SkillSync(skills_path)
+
+        if workspace is not None:
+            workspace_skills_dirs = [
+                workspace / ".claude" / "skills",
+                workspace / ".gemini" / "skills",
+            ]
+
+        forward, reverse = skill_syncer.full_sync(extra_source_dirs=workspace_skills_dirs)
         logger.info("Skills: %d synced, %d reverse-imported", forward, reverse)
 
     # Build scheduler (optional)
@@ -283,6 +292,8 @@ async def _async_main(config: dict, logger: logging.Logger) -> None:
         compressor=compressor,
         scheduler=scheduler,
         owner_user_ids=owner_user_ids,
+        skill_syncer=skill_syncer,
+        workspace_skills_dirs=workspace_skills_dirs,
     )
     if memory_store:
         gateway.set_memory_store(memory_store)

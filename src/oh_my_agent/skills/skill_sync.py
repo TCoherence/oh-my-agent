@@ -60,7 +60,55 @@ class SkillSync:
             )
         return len(skills)
 
-    def reverse_sync(self) -> int:
+    def find_new_skills(self, extra_source_dirs: list[Path] | None = None) -> list[str]:
+        """Detect new skills in CLI dirs that are not yet in ``skills/``.
+
+        Scans ``.claude/skills/``, ``.gemini/skills/``, and any *extra_source_dirs*
+        for non-symlink directories containing ``SKILL.md`` that don't already exist
+        in the canonical ``skills/`` path.
+
+        **Does not copy or sync — detection only.**  Call :meth:`full_sync` to import.
+
+        Args:
+            extra_source_dirs: Additional directories to scan (e.g. workspace CLI skill dirs).
+
+        Returns:
+            Sorted list of new skill directory names.
+        """
+        existing_names = (
+            {d.name for d in self._skills_path.iterdir() if d.is_dir()}
+            if self._skills_path.is_dir()
+            else set()
+        )
+
+        sources = [
+            self._project_root / ".gemini" / "skills",
+            self._project_root / ".claude" / "skills",
+        ]
+        if extra_source_dirs:
+            sources.extend(extra_source_dirs)
+
+        new_skills: list[str] = []
+        seen: set[str] = set()
+        for src_dir in sources:
+            if not src_dir.is_dir():
+                continue
+            for child in sorted(src_dir.iterdir()):
+                if not child.is_dir():
+                    continue
+                if child.is_symlink():
+                    continue
+                if not (child / "SKILL.md").exists():
+                    continue
+                if child.name in existing_names:
+                    continue
+                if child.name not in seen:
+                    new_skills.append(child.name)
+                    seen.add(child.name)
+
+        return sorted(new_skills)
+
+    def reverse_sync(self, extra_source_dirs: list[Path] | None = None) -> int:
         """Copy new skills from CLI directories back to ``skills/``.
 
         Only copies directories that:
@@ -68,7 +116,12 @@ class SkillSync:
         - Contain a ``SKILL.md`` file
         - Do not already exist in ``skills/``
 
-        Returns the number of skills imported.
+        Args:
+            extra_source_dirs: Additional source directories to import from
+                (e.g. workspace CLI skill dirs).
+
+        Returns:
+            The number of skills imported.
         """
         import shutil
 
@@ -83,6 +136,8 @@ class SkillSync:
             self._project_root / ".gemini" / "skills",
             self._project_root / ".claude" / "skills",
         ]
+        if extra_source_dirs:
+            sources.extend(extra_source_dirs)
 
         imported = 0
         for src_dir in sources:
@@ -114,9 +169,9 @@ class SkillSync:
             logger.info("Reverse-synced %d new skill(s) into %s", imported, self._skills_path)
         return imported
 
-    def full_sync(self) -> tuple[int, int]:
+    def full_sync(self, extra_source_dirs: list[Path] | None = None) -> tuple[int, int]:
         """Run reverse sync first, then forward sync. Returns (forward, reverse) counts."""
-        reverse_count = self.reverse_sync()
+        reverse_count = self.reverse_sync(extra_source_dirs=extra_source_dirs)
         forward_count = self.sync()
         return forward_count, reverse_count
 
