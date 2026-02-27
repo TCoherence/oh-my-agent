@@ -140,6 +140,7 @@ runtime:
   test_heartbeat_seconds: 15
   test_timeout_seconds: 600
   progress_notice_seconds: 30
+  progress_persist_seconds: 60
   log_event_limit: 12
   log_tail_chars: 1200
   cleanup:
@@ -254,7 +255,7 @@ Claude session IDs are persisted per `(platform, channel_id, thread_id, agent)` 
 - Execution completion now enters `WAITING_MERGE`; final apply requires `Merge/Discard/Request Changes`.
 - Reactions are non-blocking status signals only (`⏳`, `👀`, `🧪`, `✅`, `⚠️`, `🗑️`).
 - Short `/ask` conversations use per-thread transient workspaces under `short_workspace.root` and are TTL-cleaned (default 24h, metadata persisted in SQLite).
-- Long-running agent/test phases emit heartbeat logs/events; `/task_logs` shows recent phase events plus last agent/test output tail.
+- Long-running agent/test phases emit full heartbeat logs, but only sampled progress snapshots are persisted to SQLite; `/task_logs` shows recent phase/progress events plus last agent/test output tail.
 
 ## Agents
 

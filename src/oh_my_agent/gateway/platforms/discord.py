@@ -13,6 +13,7 @@ from oh_my_agent.runtime.types import TaskDecisionEvent
 logger = logging.getLogger(__name__)
 
 THREAD_ARCHIVE_MINUTES = 60
+STATUS_MESSAGE_PREFIX = "**Task Status**"
 
 
 class DiscordChannel(BaseChannel):
@@ -798,6 +799,41 @@ class DiscordChannel(BaseChannel):
 
     async def send(self, thread_id: str, text: str) -> str | None:
         thread = await self._resolve_channel(thread_id)
+        msg = await thread.send(text)
+        return str(msg.id)
+
+    async def upsert_status_message(
+        self,
+        thread_id: str,
+        text: str,
+        *,
+        message_id: str | None = None,
+    ) -> str | None:
+        thread = await self._resolve_channel(thread_id)
+
+        if message_id:
+            try:
+                existing = await thread.fetch_message(int(message_id))
+                if existing.author == self._client.user:
+                    await existing.edit(content=text)
+                    return str(existing.id)
+            except Exception:
+                logger.debug("Failed to edit status message %s", message_id, exc_info=True)
+
+        try:
+            latest = None
+            async for item in thread.history(limit=1):
+                latest = item
+            if (
+                latest is not None
+                and latest.author == self._client.user
+                and (latest.content or "").startswith(STATUS_MESSAGE_PREFIX)
+            ):
+                await latest.edit(content=text)
+                return str(latest.id)
+        except Exception:
+            logger.debug("Failed to inspect latest thread message for status upsert", exc_info=True)
+
         msg = await thread.send(text)
         return str(msg.id)
 

@@ -29,6 +29,8 @@ class _FakeChannel:
     channel_id: str = "100"
     _next_msg_id: int = 1
     sent: list[tuple[str, str]] = field(default_factory=list)
+    status_messages: dict[str, tuple[str, str]] = field(default_factory=dict)
+    status_history: list[tuple[str, str, str]] = field(default_factory=list)
     drafts: list[dict] = field(default_factory=list)
     signals: list[tuple[str, str | None, str]] = field(default_factory=list)
 
@@ -36,6 +38,23 @@ class _FakeChannel:
         self.sent.append((thread_id, text))
         msg_id = f"m-{self._next_msg_id}"
         self._next_msg_id += 1
+        return msg_id
+
+    async def upsert_status_message(
+        self,
+        thread_id: str,
+        text: str,
+        *,
+        message_id: str | None = None,
+    ) -> str:
+        if message_id and message_id in self.status_messages:
+            self.status_messages[message_id] = (thread_id, text)
+            self.status_history.append(("edit", message_id, text))
+            return message_id
+        msg_id = f"s-{self._next_msg_id}"
+        self._next_msg_id += 1
+        self.status_messages[msg_id] = (thread_id, text)
+        self.status_history.append(("send", msg_id, text))
         return msg_id
 
     async def send_task_draft(
@@ -221,6 +240,7 @@ async def runtime_env(tmp_path):
         "test_heartbeat_seconds": 0.1,
         "test_timeout_seconds": 0.6,
         "progress_notice_seconds": 0.1,
+        "progress_persist_seconds": 0.1,
         "log_event_limit": 20,
         "log_tail_chars": 400,
         "cleanup": {
@@ -513,9 +533,10 @@ async def test_runtime_logs_capture_heartbeats_and_tails(runtime_env):
 
     text = await runtime.get_task_logs(task.id)
     assert "Recent events" in text
-    assert "agent_heartbeat" in text or "test_heartbeat" in text
+    assert "agent_progress" in text or "test_progress" in text
     assert "test-start" in text or "test-end" in text
-    assert any("still running" in msg for _, msg in channel.sent)
+    assert any("still running" in text for _, _, text in channel.status_history)
+    assert len(channel.status_messages) == 1
 
 
 @pytest.mark.asyncio

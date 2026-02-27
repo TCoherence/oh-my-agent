@@ -287,6 +287,7 @@ CREATE TABLE IF NOT EXISTS runtime_tasks (
     test_command        TEXT NOT NULL,
     workspace_path      TEXT,
     decision_message_id TEXT,
+    status_message_id   TEXT,
     blocked_reason      TEXT,
     error               TEXT,
     summary             TEXT,
@@ -396,6 +397,7 @@ class SQLiteMemoryStore(MemoryStore):
             self._db = None
 
     async def _migrate_runtime_schema(self) -> None:
+        await self._ensure_column("runtime_tasks", "status_message_id", "TEXT")
         await self._ensure_column("runtime_tasks", "merge_commit_hash", "TEXT")
         await self._ensure_column("runtime_tasks", "merge_error", "TEXT")
         await self._ensure_column("runtime_tasks", "workspace_cleaned_at", "TIMESTAMP")

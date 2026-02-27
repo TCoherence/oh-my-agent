@@ -67,6 +67,7 @@ runtime:
   test_heartbeat_seconds: 15
   test_timeout_seconds: 600
   progress_notice_seconds: 30
+  progress_persist_seconds: 60
   log_event_limit: 12
   log_tail_chars: 1200
   cleanup:

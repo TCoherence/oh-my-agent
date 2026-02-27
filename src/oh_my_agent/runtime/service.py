@@ -42,6 +42,8 @@ from oh_my_agent.runtime.worktree import WorktreeError, WorktreeManager
 
 logger = logging.getLogger(__name__)
 
+_STATUS_MESSAGE_PREFIX = "**Task Status**"
+
 _TERMINAL_CLEANUP_STATUSES = {
     TASK_STATUS_APPLIED,  # legacy
     TASK_STATUS_MERGED,
@@ -83,6 +85,7 @@ class RuntimeService:
         self._test_heartbeat_seconds = float(cfg.get("test_heartbeat_seconds", 15))
         self._test_timeout_seconds = float(cfg.get("test_timeout_seconds", 600))
         self._progress_notice_seconds = float(cfg.get("progress_notice_seconds", 30))
+        self._progress_persist_seconds = float(cfg.get("progress_persist_seconds", 60))
         self._log_event_limit = int(cfg.get("log_event_limit", 12))
         self._log_tail_chars = int(cfg.get("log_tail_chars", 1200))
 
@@ -253,18 +256,16 @@ class RuntimeService:
             )
             if msg_id:
                 await self._store.update_runtime_task(task.id, decision_message_id=msg_id)
-            await session.channel.send(
-                thread_id,
+            await self._notify(
+                task,
                 f"Task `{task.id}` is waiting for approval. Use buttons or `/task_approve {task.id}`.",
             )
             await self._signal_status_by_id(task, TASK_STATUS_DRAFT)
         else:
-            msg_id = await session.channel.send(
-                thread_id,
+            await self._notify(
+                task,
                 f"Task `{task.id}` queued (`{chosen_agent}`), max {steps} steps / {minutes} min.",
             )
-            if msg_id:
-                await self._store.update_runtime_task(task.id, decision_message_id=msg_id)
             await self._signal_status_by_id(task, TASK_STATUS_PENDING)
 
         return task
@@ -782,14 +783,9 @@ class RuntimeService:
                 f"Task `{task.id}` step {step}: agent finished. Running tests: `{task.test_command}`",
             )
             await self._signal_status_by_id(task, TASK_STATUS_VALIDATING)
-            test_notice_state = {"last_notice": 0.0}
+            test_notice_state = {"last_notice": 0.0, "last_persist": 0.0}
 
             async def _on_test_heartbeat(elapsed: float) -> None:
-                await self._store.add_runtime_event(
-                    task.id,
-                    "task.test_heartbeat",
-                    {"step": step, "elapsed_seconds": round(elapsed, 2), "command": task.test_command},
-                )
                 logger.info(
                     "Runtime task=%s step=%d TEST_RUNNING elapsed=%.2fs command=%r",
                     task.id,
@@ -797,6 +793,13 @@ class RuntimeService:
                     elapsed,
                     task.test_command,
                 )
+                if elapsed - test_notice_state["last_persist"] >= self._progress_persist_seconds:
+                    test_notice_state["last_persist"] = elapsed
+                    await self._store.add_runtime_event(
+                        task.id,
+                        "task.test_progress",
+                        {"step": step, "elapsed_seconds": round(elapsed, 2), "command": task.test_command},
+                    )
                 if elapsed - test_notice_state["last_notice"] >= self._progress_notice_seconds:
                     test_notice_state["last_notice"] = elapsed
                     await self._notify(
@@ -987,6 +990,7 @@ class RuntimeService:
         run_task = asyncio.create_task(agent.run(prompt, [], **kwargs))
         started = asyncio.get_running_loop().time()
         last_notice = 0.0
+        last_persist = 0.0
         while True:
             try:
                 return await asyncio.wait_for(
@@ -995,11 +999,6 @@ class RuntimeService:
                 )
             except asyncio.TimeoutError:
                 elapsed = asyncio.get_running_loop().time() - started
-                await self._store.add_runtime_event(
-                    task.id,
-                    "task.agent_heartbeat",
-                    {"step": step, "agent": agent.name, "elapsed_seconds": round(elapsed, 2)},
-                )
                 logger.info(
                     "Runtime task=%s step=%d AGENT_RUNNING agent=%s elapsed=%.2fs",
                     task.id,
@@ -1007,6 +1006,13 @@ class RuntimeService:
                     agent.name,
                     elapsed,
                 )
+                if elapsed - last_persist >= self._progress_persist_seconds:
+                    last_persist = elapsed
+                    await self._store.add_runtime_event(
+                        task.id,
+                        "task.agent_progress",
+                        {"step": step, "agent": agent.name, "elapsed_seconds": round(elapsed, 2)},
+                    )
                 if elapsed - last_notice >= self._progress_notice_seconds:
                     last_notice = elapsed
                     await self._notify(
@@ -1176,11 +1182,17 @@ class RuntimeService:
         session = self._session_for(task)
         if session is None:
             return
-        msg_id = await session.channel.send(task.thread_id, text[:1900])
+        current = await self._store.get_runtime_task(task.id)
+        status_message_id = current.status_message_id if current else task.status_message_id
+        body = self._format_status_message(text)
+        upsert = getattr(session.channel, "upsert_status_message", None)
+        if upsert and callable(upsert):
+            msg_id = await upsert(task.thread_id, body[:1900], message_id=status_message_id)
+        else:
+            msg_id = await session.channel.send(task.thread_id, body[:1900])
         if msg_id:
-            current = await self._store.get_runtime_task(task.id)
-            if current and not current.decision_message_id:
-                await self._store.update_runtime_task(task.id, decision_message_id=msg_id)
+            if not current or current.status_message_id != msg_id:
+                await self._store.update_runtime_task(task.id, status_message_id=msg_id)
 
     async def _signal_status_by_id(self, task: RuntimeTask, status: str) -> None:
         emoji = self._emoji_for_status(status)
@@ -1190,7 +1202,11 @@ class RuntimeService:
         if session is None:
             return
         current = await self._store.get_runtime_task(task.id)
-        message_id = current.decision_message_id if current else task.decision_message_id
+        message_id = None
+        if current:
+            message_id = current.status_message_id or current.decision_message_id
+        else:
+            message_id = task.status_message_id or task.decision_message_id
         if not message_id:
             return
         signaler = getattr(session.channel, "signal_task_status", None)
@@ -1222,6 +1238,10 @@ class RuntimeService:
         if len(text) <= self._log_tail_chars:
             return text
         return text[-self._log_tail_chars :]
+
+    @staticmethod
+    def _format_status_message(text: str) -> str:
+        return f"{_STATUS_MESSAGE_PREFIX}\n{text}"
 
     @staticmethod
     def _summarize_event_payload(payload: dict[str, Any]) -> str:

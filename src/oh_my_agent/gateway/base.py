@@ -74,6 +74,17 @@ class BaseChannel(ABC):
         """Send *text* to the given thread and optionally return message id."""
         ...
 
+    async def upsert_status_message(
+        self,
+        thread_id: str,
+        text: str,
+        *,
+        message_id: str | None = None,
+    ) -> str | None:
+        """Create or update a platform status message. Default fallback sends a new message."""
+        del message_id
+        return await self.send(thread_id, text)
+
     @asynccontextmanager
     async def typing(self, thread_id: str) -> AsyncIterator[None]:
         """Show a typing indicator while the body executes. Optional — default is no-op."""

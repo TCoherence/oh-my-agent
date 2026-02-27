@@ -62,6 +62,7 @@ class RuntimeTask:
     test_command: str
     workspace_path: str | None
     decision_message_id: str | None
+    status_message_id: str | None
     blocked_reason: str | None
     error: str | None
     summary: str | None
@@ -91,6 +92,7 @@ class RuntimeTask:
             test_command=str(row.get("test_command", "pytest -q")),
             workspace_path=row.get("workspace_path"),
             decision_message_id=row.get("decision_message_id"),
+            status_message_id=row.get("status_message_id"),
             blocked_reason=row.get("blocked_reason"),
             error=row.get("error"),
             summary=row.get("summary"),

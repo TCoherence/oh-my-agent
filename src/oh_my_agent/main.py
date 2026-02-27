@@ -188,6 +188,7 @@ def _apply_v052_defaults(config: dict) -> None:
     runtime_cfg.setdefault("test_heartbeat_seconds", 15)
     runtime_cfg.setdefault("test_timeout_seconds", 600)
     runtime_cfg.setdefault("progress_notice_seconds", 30)
+    runtime_cfg.setdefault("progress_persist_seconds", 60)
     runtime_cfg.setdefault("log_event_limit", 12)
     runtime_cfg.setdefault("log_tail_chars", 1200)
 
