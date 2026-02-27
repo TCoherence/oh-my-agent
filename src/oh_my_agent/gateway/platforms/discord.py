@@ -546,6 +546,24 @@ class DiscordChannel(BaseChannel):
             text = await self._runtime_service.get_task_changes(task_id)
             await interaction.response.send_message(text[:1900], ephemeral=True)
 
+        @tree.command(name="task_logs", description="Show recent logs/events for a runtime task")
+        @app_commands.describe(task_id="Task ID")
+        async def slash_task_logs(interaction: discord.Interaction, task_id: str):
+            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
+                await interaction.response.send_message(
+                    "This command is restricted to the configured owner.",
+                    ephemeral=True,
+                )
+                return
+            if not self._runtime_service:
+                await interaction.response.send_message(
+                    "Runtime service is not enabled.",
+                    ephemeral=True,
+                )
+                return
+            text = await self._runtime_service.get_task_logs(task_id)
+            await interaction.response.send_message(text[:1900], ephemeral=True)
+
         @tree.command(name="task_cleanup", description="Cleanup runtime task workspace(s)")
         @app_commands.describe(task_id="Optional task ID for immediate cleanup")
         async def slash_task_cleanup(

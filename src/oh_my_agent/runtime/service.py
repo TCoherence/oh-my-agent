@@ -79,6 +79,12 @@ class RuntimeService:
         )
         self._denied_paths = list(cfg.get("denied_paths", [".env", "config.yaml", ".workspace/**", ".git/**"]))
         self._decision_ttl_minutes = int(cfg.get("decision_ttl_minutes", 1440))
+        self._agent_heartbeat_seconds = float(cfg.get("agent_heartbeat_seconds", 20))
+        self._test_heartbeat_seconds = float(cfg.get("test_heartbeat_seconds", 15))
+        self._test_timeout_seconds = float(cfg.get("test_timeout_seconds", 600))
+        self._progress_notice_seconds = float(cfg.get("progress_notice_seconds", 30))
+        self._log_event_limit = int(cfg.get("log_event_limit", 12))
+        self._log_tail_chars = int(cfg.get("log_tail_chars", 1200))
 
         cleanup_cfg = cfg.get("cleanup", {})
         self._cleanup_enabled = bool(cleanup_cfg.get("enabled", True))
@@ -402,6 +408,47 @@ class RuntimeService:
             lines.append(f"- ... and {len(changes) - 80} more")
         return "\n".join(lines)[:1900]
 
+    async def get_task_logs(self, task_id: str) -> str:
+        task = await self._store.get_runtime_task(task_id)
+        if task is None:
+            return f"Task `{task_id}` not found."
+
+        lines = [
+            f"**Task Logs** `{task.id}`",
+            f"- Status: `{task.status}`",
+            f"- Step: {task.step_no}/{task.max_steps}",
+        ]
+        if task.summary:
+            lines.append(f"- Summary: {task.summary[:240]}")
+        if task.error:
+            lines.append(f"- Error: {task.error[:240]}")
+
+        events = await self._store.list_runtime_events(task.id, limit=self._log_event_limit)
+        if events:
+            lines.append("")
+            lines.append("**Recent events**")
+            for event in events[-8:]:
+                payload = event.get("payload", {})
+                summary = self._summarize_event_payload(payload)
+                lines.append(
+                    f"- `{event['event_type']}`"
+                    + (f": {summary}" if summary else "")
+                )
+
+        ckpt = await self._store.get_last_runtime_checkpoint(task.id)
+        if ckpt:
+            agent_tail = self._tail_text(str(ckpt.get("agent_result", "")))
+            test_tail = self._tail_text(str(ckpt.get("test_result", "")))
+            if agent_tail:
+                lines.append("")
+                lines.append("**Last agent output tail**")
+                lines.append(f"```text\n{agent_tail}\n```")
+            if test_tail:
+                lines.append("")
+                lines.append("**Last test output tail**")
+                lines.append(f"```text\n{test_tail}\n```")
+        return "\n".join(lines)[:3800]
+
     async def cleanup_tasks(self, *, actor_id: str, task_id: str | None = None) -> str:
         if not self._is_authorized(actor_id):
             return "Only configured owners can clean runtime tasks."
@@ -627,6 +674,12 @@ class RuntimeService:
             workspace,
             task.goal[:140],
         )
+        await self._store.add_runtime_event(
+            task.id,
+            "task.started",
+            {"workspace": str(workspace), "goal": task.goal[:200]},
+        )
+        await self._notify(task, f"Task `{task.id}` started. Workspace is ready; entering autonomous loop.")
         await self._signal_status_by_id(task, TASK_STATUS_RUNNING)
 
         start = time.monotonic()
@@ -665,6 +718,15 @@ class RuntimeService:
                 step,
                 task.max_steps,
             )
+            await self._store.add_runtime_event(
+                task.id,
+                "task.phase",
+                {"step": step, "phase": "agent_running"},
+            )
+            await self._notify(
+                task,
+                f"Task `{task.id}` step {step}/{task.max_steps}: running agent `{task.preferred_agent or self._default_agent}`.",
+            )
             prompt = build_runtime_prompt(
                 goal=task.goal,
                 step_no=step,
@@ -679,6 +741,7 @@ class RuntimeService:
                 task=task,
                 prompt=prompt,
                 workspace=workspace,
+                step=step,
             )
             elapsed_agent = time.perf_counter() - t_agent
             if response.error:
@@ -709,8 +772,45 @@ class RuntimeService:
                 task.test_command,
                 len(changed_files),
             )
+            await self._store.add_runtime_event(
+                task.id,
+                "task.phase",
+                {"step": step, "phase": "test_running", "command": task.test_command},
+            )
+            await self._notify(
+                task,
+                f"Task `{task.id}` step {step}: agent finished. Running tests: `{task.test_command}`",
+            )
             await self._signal_status_by_id(task, TASK_STATUS_VALIDATING)
-            rc, out, err = await self._worktree.run_shell(workspace, task.test_command)
+            test_notice_state = {"last_notice": 0.0}
+
+            async def _on_test_heartbeat(elapsed: float) -> None:
+                await self._store.add_runtime_event(
+                    task.id,
+                    "task.test_heartbeat",
+                    {"step": step, "elapsed_seconds": round(elapsed, 2), "command": task.test_command},
+                )
+                logger.info(
+                    "Runtime task=%s step=%d TEST_RUNNING elapsed=%.2fs command=%r",
+                    task.id,
+                    step,
+                    elapsed,
+                    task.test_command,
+                )
+                if elapsed - test_notice_state["last_notice"] >= self._progress_notice_seconds:
+                    test_notice_state["last_notice"] = elapsed
+                    await self._notify(
+                        task,
+                        f"Task `{task.id}` step {step}: tests still running ({int(elapsed)}s elapsed).",
+                    )
+
+            rc, out, err, test_timed_out = await self._worktree.run_shell(
+                workspace,
+                task.test_command,
+                timeout_seconds=self._test_timeout_seconds,
+                heartbeat_seconds=self._test_heartbeat_seconds,
+                on_heartbeat=_on_test_heartbeat,
+            )
             test_ok = rc == 0
             test_summary = (out + ("\n" + err if err else "")).strip()
             if not test_summary:
@@ -721,6 +821,26 @@ class RuntimeService:
                 step,
                 rc,
             )
+            if test_timed_out:
+                timeout_msg = (
+                    f"Test command exceeded timeout ({int(self._test_timeout_seconds)}s). "
+                    f"Recent output:\n{self._tail_text(test_summary)}"
+                )
+                await self._store.add_runtime_event(
+                    task.id,
+                    "task.test_timeout",
+                    {"step": step, "timeout_seconds": self._test_timeout_seconds},
+                )
+                await self._store.update_runtime_task(
+                    task.id,
+                    status=TASK_STATUS_TIMEOUT,
+                    ended_at_now=True,
+                    summary="Test command timed out.",
+                    error=timeout_msg[:2000],
+                )
+                await self._notify(task, f"Task `{task.id}` timed out during tests.\n```text\n{self._tail_text(test_summary)}\n```")
+                await self._signal_status_by_id(task, TASK_STATUS_TIMEOUT)
+                return
 
             await self._store.add_runtime_checkpoint(
                 task_id=task.id,
@@ -739,6 +859,7 @@ class RuntimeService:
                     "agent": agent_name,
                     "test_exit_code": rc,
                     "changed_files": changed_files,
+                    "test_output_tail": self._tail_text(test_summary),
                 },
             )
 
@@ -830,17 +951,18 @@ class RuntimeService:
         task: RuntimeTask,
         prompt: str,
         workspace: Path,
+        step: int,
     ) -> tuple[str, AgentResponse]:
         if task.preferred_agent:
             forced = registry.get_agent(task.preferred_agent)
             if forced is not None:
-                response = await self._invoke_agent(forced, prompt, workspace, task.id)
+                response = await self._invoke_agent(forced, prompt, workspace, task.id, task, step)
                 return forced.name, response
 
         last_name = registry.agents[-1].name
         last_response = AgentResponse(text="", error="No agents available.")
         for agent in registry.agents:
-            response = await self._invoke_agent(agent, prompt, workspace, task.id)
+            response = await self._invoke_agent(agent, prompt, workspace, task.id, task, step)
             if not response.error:
                 return agent.name, response
             last_name = agent.name
@@ -853,6 +975,8 @@ class RuntimeService:
         prompt: str,
         workspace: Path,
         runtime_thread_id: str,
+        task: RuntimeTask,
+        step: int,
     ) -> AgentResponse:
         sig = inspect.signature(agent.run)
         kwargs = {}
@@ -860,7 +984,35 @@ class RuntimeService:
             kwargs["thread_id"] = runtime_thread_id
         if "workspace_override" in sig.parameters:
             kwargs["workspace_override"] = workspace
-        return await agent.run(prompt, [], **kwargs)
+        run_task = asyncio.create_task(agent.run(prompt, [], **kwargs))
+        started = asyncio.get_running_loop().time()
+        last_notice = 0.0
+        while True:
+            try:
+                return await asyncio.wait_for(
+                    asyncio.shield(run_task),
+                    timeout=self._agent_heartbeat_seconds,
+                )
+            except asyncio.TimeoutError:
+                elapsed = asyncio.get_running_loop().time() - started
+                await self._store.add_runtime_event(
+                    task.id,
+                    "task.agent_heartbeat",
+                    {"step": step, "agent": agent.name, "elapsed_seconds": round(elapsed, 2)},
+                )
+                logger.info(
+                    "Runtime task=%s step=%d AGENT_RUNNING agent=%s elapsed=%.2fs",
+                    task.id,
+                    step,
+                    agent.name,
+                    elapsed,
+                )
+                if elapsed - last_notice >= self._progress_notice_seconds:
+                    last_notice = elapsed
+                    await self._notify(
+                        task,
+                        f"Task `{task.id}` step {step}: agent `{agent.name}` still running ({int(elapsed)}s elapsed).",
+                    )
 
     async def _execute_merge(self, task: RuntimeTask, *, actor_id: str, source: str) -> str:
         if task.status not in {TASK_STATUS_WAITING_MERGE, TASK_STATUS_APPLIED}:
@@ -1062,6 +1214,34 @@ class RuntimeService:
         if not self._owner_user_ids:
             return True
         return actor_id in self._owner_user_ids
+
+    def _tail_text(self, text: str) -> str:
+        if not text:
+            return ""
+        text = text.strip()
+        if len(text) <= self._log_tail_chars:
+            return text
+        return text[-self._log_tail_chars :]
+
+    @staticmethod
+    def _summarize_event_payload(payload: dict[str, Any]) -> str:
+        if not payload:
+            return ""
+        interesting = []
+        for key in (
+            "phase",
+            "step",
+            "agent",
+            "elapsed_seconds",
+            "test_exit_code",
+            "timeout_seconds",
+            "command",
+            "status",
+            "error",
+        ):
+            if key in payload and payload[key] not in (None, ""):
+                interesting.append(f"{key}={payload[key]}")
+        return ", ".join(interesting)[:220]
 
     def _draft_text(self, task: RuntimeTask, *, reasons: list[str]) -> str:
         reason_text = ", ".join(reasons) if reasons else "requires explicit approval"

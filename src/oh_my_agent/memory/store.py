@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -151,6 +152,9 @@ class MemoryStore(ABC):
 
     async def add_runtime_event(self, task_id: str, event_type: str, payload: dict[str, Any]) -> None:
         return None
+
+    async def list_runtime_events(self, task_id: str, *, limit: int = 20) -> list[dict[str, Any]]:
+        return []
 
     async def add_runtime_checkpoint(
         self,
@@ -366,6 +370,7 @@ class SQLiteMemoryStore(MemoryStore):
     def __init__(self, db_path: str | Path) -> None:
         self._db_path = Path(db_path)
         self._db: aiosqlite.Connection | None = None
+        self._runtime_write_lock = asyncio.Lock()
 
     async def _conn(self) -> aiosqlite.Connection:
         if self._db is None:
@@ -584,27 +589,28 @@ class SQLiteMemoryStore(MemoryStore):
     # -- runtime tasks -----------------------------------------------------
 
     async def create_runtime_task(self, **kwargs) -> RuntimeTask:
-        db = await self._conn()
-        await db.execute(
-            "INSERT INTO runtime_tasks "
-            "(id, platform, channel_id, thread_id, created_by, goal, preferred_agent, "
-            " status, max_steps, max_minutes, test_command) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                kwargs["task_id"],
-                kwargs["platform"],
-                kwargs["channel_id"],
-                kwargs["thread_id"],
-                kwargs["created_by"],
-                kwargs["goal"],
-                kwargs.get("preferred_agent"),
-                kwargs["status"],
-                int(kwargs["max_steps"]),
-                int(kwargs["max_minutes"]),
-                kwargs["test_command"],
-            ),
-        )
-        await db.commit()
+        async with self._runtime_write_lock:
+            db = await self._conn()
+            await db.execute(
+                "INSERT INTO runtime_tasks "
+                "(id, platform, channel_id, thread_id, created_by, goal, preferred_agent, "
+                " status, max_steps, max_minutes, test_command) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    kwargs["task_id"],
+                    kwargs["platform"],
+                    kwargs["channel_id"],
+                    kwargs["thread_id"],
+                    kwargs["created_by"],
+                    kwargs["goal"],
+                    kwargs.get("preferred_agent"),
+                    kwargs["status"],
+                    int(kwargs["max_steps"]),
+                    int(kwargs["max_minutes"]),
+                    kwargs["test_command"],
+                ),
+            )
+            await db.commit()
         task = await self.get_runtime_task(kwargs["task_id"])
         if task is None:
             raise RuntimeError("Failed to create runtime task")
@@ -694,81 +700,111 @@ class SQLiteMemoryStore(MemoryStore):
     async def update_runtime_task(self, task_id: str, **updates) -> RuntimeTask | None:
         if not updates:
             return await self.get_runtime_task(task_id)
-        db = await self._conn()
+        async with self._runtime_write_lock:
+            db = await self._conn()
 
-        sets: list[str] = []
-        values: list[Any] = []
-        ended_at_now = bool(updates.pop("ended_at_now", False))
-        if ended_at_now:
-            updates["ended_at"] = "__NOW__"
+            sets: list[str] = []
+            values: list[Any] = []
+            ended_at_now = bool(updates.pop("ended_at_now", False))
+            if ended_at_now:
+                updates["ended_at"] = "__NOW__"
 
-        for key, value in updates.items():
-            if value == "__NOW__":
-                sets.append(f"{key}=CURRENT_TIMESTAMP")
-            else:
-                sets.append(f"{key}=?")
-                values.append(value)
-        sets.append("updated_at=CURRENT_TIMESTAMP")
+            for key, value in updates.items():
+                if value == "__NOW__":
+                    sets.append(f"{key}=CURRENT_TIMESTAMP")
+                else:
+                    sets.append(f"{key}=?")
+                    values.append(value)
+            sets.append("updated_at=CURRENT_TIMESTAMP")
 
-        values.append(task_id)
-        await db.execute(
-            f"UPDATE runtime_tasks SET {', '.join(sets)} WHERE id=?",
-            tuple(values),
-        )
-        await db.commit()
+            values.append(task_id)
+            await db.execute(
+                f"UPDATE runtime_tasks SET {', '.join(sets)} WHERE id=?",
+                tuple(values),
+            )
+            await db.commit()
         return await self.get_runtime_task(task_id)
 
     async def claim_pending_runtime_task(self) -> RuntimeTask | None:
-        db = await self._conn()
-        await db.execute("BEGIN IMMEDIATE")
-        try:
-            cursor = await db.execute(
-                "SELECT id FROM runtime_tasks "
-                "WHERE status=? "
-                "ORDER BY created_at ASC LIMIT 1",
-                ("PENDING",),
-            )
-            row = await cursor.fetchone()
-            if row is None:
-                await db.commit()
-                return None
+        async with self._runtime_write_lock:
+            db = await self._conn()
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await db.execute(
+                    "SELECT id FROM runtime_tasks "
+                    "WHERE status=? "
+                    "ORDER BY created_at ASC LIMIT 1",
+                    ("PENDING",),
+                )
+                row = await cursor.fetchone()
+                if row is None:
+                    await db.commit()
+                    return None
 
-            task_id = row["id"]
-            await db.execute(
-                "UPDATE runtime_tasks "
-                "SET status=?, started_at=COALESCE(started_at, CURRENT_TIMESTAMP), updated_at=CURRENT_TIMESTAMP "
-                "WHERE id=? AND status=?",
-                ("RUNNING", task_id, "PENDING"),
-            )
-            await db.commit()
-        except Exception:
-            await db.rollback()
-            raise
+                task_id = row["id"]
+                await db.execute(
+                    "UPDATE runtime_tasks "
+                    "SET status=?, started_at=COALESCE(started_at, CURRENT_TIMESTAMP), updated_at=CURRENT_TIMESTAMP "
+                    "WHERE id=? AND status=?",
+                    ("RUNNING", task_id, "PENDING"),
+                )
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
         return await self.get_runtime_task(task_id)
 
     async def requeue_inflight_runtime_tasks(self) -> int:
-        db = await self._conn()
-        cursor = await db.execute(
-            "UPDATE runtime_tasks SET status='PENDING', updated_at=CURRENT_TIMESTAMP "
-            "WHERE status IN ('RUNNING', 'VALIDATING')"
-        )
-        await db.commit()
+        async with self._runtime_write_lock:
+            db = await self._conn()
+            cursor = await db.execute(
+                "UPDATE runtime_tasks SET status='PENDING', updated_at=CURRENT_TIMESTAMP "
+                "WHERE status IN ('RUNNING', 'VALIDATING')"
+            )
+            await db.commit()
         return int(cursor.rowcount or 0)
 
     async def add_runtime_event(self, task_id: str, event_type: str, payload: dict[str, Any]) -> None:
+        async with self._runtime_write_lock:
+            db = await self._conn()
+            cursor = await db.execute(
+                "SELECT COALESCE(MAX(seq), 0) + 1 FROM runtime_task_events WHERE task_id=?",
+                (task_id,),
+            )
+            row = await cursor.fetchone()
+            next_seq = int(row[0] if row else 1)
+            await db.execute(
+                "INSERT INTO runtime_task_events (task_id, seq, event_type, payload_json) "
+                "VALUES (?, ?, ?, ?)",
+                (task_id, next_seq, event_type, json.dumps(payload, ensure_ascii=False)),
+            )
+            await db.commit()
+
+    async def list_runtime_events(self, task_id: str, *, limit: int = 20) -> list[dict[str, Any]]:
         db = await self._conn()
         cursor = await db.execute(
-            "SELECT COALESCE(MAX(seq), 0) + 1 FROM runtime_task_events WHERE task_id=?",
-            (task_id,),
+            "SELECT seq, event_type, payload_json, created_at "
+            "FROM runtime_task_events WHERE task_id=? "
+            "ORDER BY seq DESC LIMIT ?",
+            (task_id, int(limit)),
         )
-        row = await cursor.fetchone()
-        next_seq = int(row[0] if row else 1)
-        await db.execute(
-            "INSERT INTO runtime_task_events (task_id, seq, event_type, payload_json) "
-            "VALUES (?, ?, ?, ?)",
-            (task_id, next_seq, event_type, json.dumps(payload, ensure_ascii=False)),
-        )
-        await db.commit()
+        rows = await cursor.fetchall()
+        items: list[dict[str, Any]] = []
+        for row in reversed(rows):
+            payload: dict[str, Any]
+            try:
+                payload = json.loads(str(row["payload_json"]))
+            except Exception:
+                payload = {"raw": row["payload_json"]}
+            items.append(
+                {
+                    "seq": int(row["seq"]),
+                    "event_type": str(row["event_type"]),
+                    "payload": payload,
+                    "created_at": str(row["created_at"]),
+                }
+            )
+        return items
 
     async def add_runtime_checkpoint(
         self,
@@ -781,22 +817,23 @@ class SQLiteMemoryStore(MemoryStore):
         test_result: str,
         files_changed: list[str],
     ) -> None:
-        db = await self._conn()
-        await db.execute(
-            "INSERT INTO runtime_task_checkpoints "
-            "(task_id, step_no, status, prompt_digest, agent_result, test_result, files_changed_json) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (
-                task_id,
-                step_no,
-                status,
-                prompt_digest,
-                agent_result,
-                test_result,
-                json.dumps(files_changed, ensure_ascii=False),
-            ),
-        )
-        await db.commit()
+        async with self._runtime_write_lock:
+            db = await self._conn()
+            await db.execute(
+                "INSERT INTO runtime_task_checkpoints "
+                "(task_id, step_no, status, prompt_digest, agent_result, test_result, files_changed_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    task_id,
+                    step_no,
+                    status,
+                    prompt_digest,
+                    agent_result,
+                    test_result,
+                    json.dumps(files_changed, ensure_ascii=False),
+                ),
+            )
+            await db.commit()
 
     async def get_last_runtime_checkpoint(self, task_id: str) -> dict[str, Any] | None:
         db = await self._conn()
@@ -809,14 +846,15 @@ class SQLiteMemoryStore(MemoryStore):
         return dict(row) if row else None
 
     async def create_runtime_decision_nonce(self, task_id: str, *, ttl_minutes: int) -> str:
-        db = await self._conn()
-        nonce = uuid.uuid4().hex[:8]
-        await db.execute(
-            "INSERT INTO runtime_task_decisions (task_id, nonce, expires_at) "
-            "VALUES (?, ?, datetime('now', ?))",
-            (task_id, nonce, f"+{int(ttl_minutes)} minutes"),
-        )
-        await db.commit()
+        async with self._runtime_write_lock:
+            db = await self._conn()
+            nonce = uuid.uuid4().hex[:8]
+            await db.execute(
+                "INSERT INTO runtime_task_decisions (task_id, nonce, expires_at) "
+                "VALUES (?, ?, datetime('now', ?))",
+                (task_id, nonce, f"+{int(ttl_minutes)} minutes"),
+            )
+            await db.commit()
         return nonce
 
     async def get_active_runtime_decision_nonce(self, task_id: str) -> str | None:
@@ -840,14 +878,15 @@ class SQLiteMemoryStore(MemoryStore):
         source: str,
         result: str,
     ) -> bool:
-        db = await self._conn()
-        cursor = await db.execute(
-            "UPDATE runtime_task_decisions "
-            "SET consumed=1, action=?, actor_id=?, source=?, result=?, consumed_at=CURRENT_TIMESTAMP "
-            "WHERE task_id=? AND nonce=? AND consumed=0 AND expires_at > CURRENT_TIMESTAMP",
-            (action, actor_id, source, result, task_id, nonce),
-        )
-        await db.commit()
+        async with self._runtime_write_lock:
+            db = await self._conn()
+            cursor = await db.execute(
+                "UPDATE runtime_task_decisions "
+                "SET consumed=1, action=?, actor_id=?, source=?, result=?, consumed_at=CURRENT_TIMESTAMP "
+                "WHERE task_id=? AND nonce=? AND consumed=0 AND expires_at > CURRENT_TIMESTAMP",
+                (action, actor_id, source, result, task_id, nonce),
+            )
+            await db.commit()
         return int(cursor.rowcount or 0) > 0
 
     async def list_runtime_cleanup_candidates(

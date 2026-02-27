@@ -63,6 +63,12 @@ runtime:
   path_policy_mode: allow_all_with_denylist
   denied_paths: [".env", "config.yaml", ".workspace/**", ".git/**"]
   decision_ttl_minutes: 1440
+  agent_heartbeat_seconds: 20
+  test_heartbeat_seconds: 15
+  test_timeout_seconds: 600
+  progress_notice_seconds: 30
+  log_event_limit: 12
+  log_tail_chars: 1200
   cleanup:
     enabled: true
     interval_minutes: 60

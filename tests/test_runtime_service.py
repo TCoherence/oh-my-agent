@@ -18,6 +18,7 @@ from oh_my_agent.runtime import (
     TASK_STATUS_DRAFT,
     TASK_STATUS_FAILED,
     TASK_STATUS_MERGED,
+    TASK_STATUS_TIMEOUT,
     TASK_STATUS_WAITING_MERGE,
 )
 
@@ -149,6 +150,28 @@ class _DeniedPathAgent(BaseAgent):
         return AgentResponse(text="changed sensitive file\nTASK_STATE: DONE")
 
 
+class _SlowDoneAgent(BaseAgent):
+    @property
+    def name(self) -> str:
+        return "slow-done"
+
+    async def run(
+        self,
+        prompt: str,
+        history: list[dict] | None = None,
+        *,
+        thread_id: str | None = None,
+        workspace_override: Path | None = None,
+    ) -> AgentResponse:
+        del history, thread_id
+        assert workspace_override is not None
+        await asyncio.sleep(0.25)
+        out = workspace_override / "docs" / "slow.txt"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text("slow", encoding="utf-8")
+        return AgentResponse(text=f"{prompt}\nTASK_STATE: DONE")
+
+
 def _init_git_repo(root: Path) -> None:
     root.mkdir(parents=True, exist_ok=True)
     (root / "README.md").write_text("# runtime test\n", encoding="utf-8")
@@ -194,6 +217,12 @@ async def runtime_env(tmp_path):
         "allowed_paths": ["src/**", "tests/**", "docs/**", "skills/**", "pyproject.toml"],
         "denied_paths": ["config.yaml", ".env", ".workspace/**", ".git/**"],
         "decision_ttl_minutes": 60,
+        "agent_heartbeat_seconds": 0.1,
+        "test_heartbeat_seconds": 0.1,
+        "test_timeout_seconds": 0.6,
+        "progress_notice_seconds": 0.1,
+        "log_event_limit": 20,
+        "log_tail_chars": 400,
         "cleanup": {
             "enabled": False,
             "interval_minutes": 60,
@@ -453,3 +482,68 @@ async def test_runtime_legacy_applied_is_mergeable(runtime_env):
 
     merged = await _wait_for_status(store, task.id, {TASK_STATUS_MERGED})
     assert merged.status == TASK_STATUS_MERGED
+
+
+@pytest.mark.asyncio
+async def test_runtime_logs_capture_heartbeats_and_tails(runtime_env):
+    store: SQLiteMemoryStore = runtime_env["store"]
+    runtime: RuntimeService = runtime_env["runtime"]
+    channel: _FakeChannel = runtime_env["channel"]
+    registry = AgentRegistry([_SlowDoneAgent()])
+    session = ChannelSession(
+        platform="discord",
+        channel_id="100",
+        channel=channel,
+        registry=registry,
+    )
+    runtime.register_session(session, registry)
+    await runtime.start()
+
+    task = await runtime.create_task(
+        session=session,
+        registry=registry,
+        thread_id="thread-7",
+        goal="create a slow doc artifact and run tests",
+        created_by="owner-1",
+        test_command="python -c \"import time; print('test-start'); time.sleep(0.25); print('test-end')\"",
+        source="slash",
+    )
+    waiting = await _wait_for_status(store, task.id, {TASK_STATUS_WAITING_MERGE})
+    assert waiting.status == TASK_STATUS_WAITING_MERGE
+
+    text = await runtime.get_task_logs(task.id)
+    assert "Recent events" in text
+    assert "agent_heartbeat" in text or "test_heartbeat" in text
+    assert "test-start" in text or "test-end" in text
+    assert any("still running" in msg for _, msg in channel.sent)
+
+
+@pytest.mark.asyncio
+async def test_runtime_test_timeout_marks_timeout(runtime_env):
+    store: SQLiteMemoryStore = runtime_env["store"]
+    runtime: RuntimeService = runtime_env["runtime"]
+    channel: _FakeChannel = runtime_env["channel"]
+    registry = AgentRegistry([_DoneAgent()])
+    session = ChannelSession(
+        platform="discord",
+        channel_id="100",
+        channel=channel,
+        registry=registry,
+    )
+    runtime.register_session(session, registry)
+    await runtime.start()
+
+    task = await runtime.create_task(
+        session=session,
+        registry=registry,
+        thread_id="thread-8",
+        goal="write file and hang in tests",
+        created_by="owner-1",
+        test_command="python -c \"import time; print('before-timeout'); time.sleep(1.0)\"",
+        source="slash",
+    )
+    timed_out = await _wait_for_status(store, task.id, {TASK_STATUS_TIMEOUT}, timeout=5.0)
+    assert timed_out.status == TASK_STATUS_TIMEOUT
+    assert "timed out" in (timed_out.summary or "").lower() or "timed out" in (timed_out.error or "").lower()
+    text = await runtime.get_task_logs(task.id)
+    assert "before-timeout" in text

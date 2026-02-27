@@ -37,15 +37,65 @@ class WorktreeManager:
             files.append(raw_path)
         return files
 
-    async def run_shell(self, workspace: Path, command: str) -> tuple[int, str, str]:
+    async def run_shell(
+        self,
+        workspace: Path,
+        command: str,
+        *,
+        timeout_seconds: float | None = None,
+        heartbeat_seconds: float | None = None,
+        on_heartbeat=None,
+    ) -> tuple[int, str, str, bool]:
         proc = await asyncio.create_subprocess_shell(
             command,
             cwd=str(workspace),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await proc.communicate()
-        return proc.returncode, stdout.decode(errors="replace"), stderr.decode(errors="replace")
+        communicate_task = asyncio.create_task(proc.communicate())
+        started = asyncio.get_running_loop().time()
+        interval = heartbeat_seconds if heartbeat_seconds and heartbeat_seconds > 0 else None
+
+        while True:
+            now = asyncio.get_running_loop().time()
+            wait_timeout = interval
+            if timeout_seconds is not None:
+                remaining = float(timeout_seconds) - (now - started)
+                if remaining <= 0:
+                    proc.kill()
+                    stdout, stderr = await communicate_task
+                    return (
+                        proc.returncode,
+                        stdout.decode(errors="replace"),
+                        stderr.decode(errors="replace"),
+                        True,
+                    )
+                wait_timeout = remaining if wait_timeout is None else min(wait_timeout, remaining)
+
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    asyncio.shield(communicate_task),
+                    timeout=wait_timeout,
+                )
+                return (
+                    proc.returncode,
+                    stdout.decode(errors="replace"),
+                    stderr.decode(errors="replace"),
+                    False,
+                )
+            except asyncio.TimeoutError:
+                elapsed = asyncio.get_running_loop().time() - started
+                if timeout_seconds is not None and elapsed >= float(timeout_seconds):
+                    proc.kill()
+                    stdout, stderr = await communicate_task
+                    return (
+                        proc.returncode,
+                        stdout.decode(errors="replace"),
+                        stderr.decode(errors="replace"),
+                        True,
+                    )
+                if on_heartbeat is not None:
+                    await on_heartbeat(elapsed)
 
     async def repo_is_clean(self) -> bool:
         out = await self._run_git("-C", str(self._repo_root), "status", "--porcelain")

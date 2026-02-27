@@ -184,6 +184,12 @@ def _apply_v052_defaults(config: dict) -> None:
     runtime_cfg.setdefault("path_policy_mode", "allow_all_with_denylist")
     runtime_cfg.setdefault("denied_paths", [".env", "config.yaml", ".workspace/**", ".git/**"])
     runtime_cfg.setdefault("decision_ttl_minutes", 1440)
+    runtime_cfg.setdefault("agent_heartbeat_seconds", 20)
+    runtime_cfg.setdefault("test_heartbeat_seconds", 15)
+    runtime_cfg.setdefault("test_timeout_seconds", 600)
+    runtime_cfg.setdefault("progress_notice_seconds", 30)
+    runtime_cfg.setdefault("log_event_limit", 12)
+    runtime_cfg.setdefault("log_tail_chars", 1200)
 
     cleanup_cfg = runtime_cfg.setdefault("cleanup", {})
     cleanup_cfg.setdefault("enabled", True)

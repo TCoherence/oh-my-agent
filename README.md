@@ -136,6 +136,12 @@ runtime:
   path_policy_mode: allow_all_with_denylist
   denied_paths: [".env", "config.yaml", ".workspace/**", ".git/**"]
   decision_ttl_minutes: 1440
+  agent_heartbeat_seconds: 20
+  test_heartbeat_seconds: 15
+  test_timeout_seconds: 600
+  progress_notice_seconds: 30
+  log_event_limit: 12
+  log_tail_chars: 1200
   cleanup:
     enabled: true
     interval_minutes: 60
@@ -215,6 +221,7 @@ oh-my-agent
 | `/task_merge <task_id>` | Merge a `WAITING_MERGE` task into current branch |
 | `/task_discard <task_id>` | Discard a `WAITING_MERGE` task |
 | `/task_changes <task_id>` | Show task workspace changes |
+| `/task_logs <task_id>` | Show recent runtime events and output tails |
 | `/task_cleanup [task_id]` | Cleanup expired/specified task workspace |
 
 ### Agent Targeting
@@ -247,6 +254,7 @@ Claude session IDs are persisted per `(platform, channel_id, thread_id, agent)` 
 - Execution completion now enters `WAITING_MERGE`; final apply requires `Merge/Discard/Request Changes`.
 - Reactions are non-blocking status signals only (`⏳`, `👀`, `🧪`, `✅`, `⚠️`, `🗑️`).
 - Short `/ask` conversations use per-thread transient workspaces under `short_workspace.root` and are TTL-cleaned (default 24h, metadata persisted in SQLite).
+- Long-running agent/test phases emit heartbeat logs/events; `/task_logs` shows recent phase events plus last agent/test output tail.
 
 ## Agents
 
