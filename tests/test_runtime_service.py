@@ -319,6 +319,13 @@ async def test_runtime_message_intent_draft_to_merge(runtime_env):
 
     waiting = await _wait_for_status(store, tasks[0].id, {TASK_STATUS_WAITING_MERGE})
     assert waiting.status == TASK_STATUS_WAITING_MERGE
+    merge_draft = channel.drafts[-1]
+    assert merge_draft["task_id"] == tasks[0].id
+    assert "Ready to Merge" in merge_draft["draft_text"]
+    assert "Changed files:" in merge_draft["draft_text"]
+    assert "src/runtime.txt" in merge_draft["draft_text"]
+    assert "Latest test output:" in merge_draft["draft_text"]
+    assert "exit=0" in merge_draft["draft_text"]
 
     merge_event = await runtime.build_slash_decision_event(
         platform="discord",

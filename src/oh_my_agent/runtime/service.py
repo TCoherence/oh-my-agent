@@ -383,24 +383,7 @@ class RuntimeService:
         if task is None:
             return f"Task `{task_id}` not found."
 
-        changes: list[str] = []
-        if task.workspace_path:
-            workspace = Path(task.workspace_path)
-            if workspace.exists():
-                try:
-                    changes = await self._worktree.list_workspace_changes(workspace)
-                except Exception as exc:
-                    logger.warning("Failed to list workspace changes for %s: %s", task.id, exc)
-
-        if not changes:
-            ckpt = await self._store.get_last_runtime_checkpoint(task.id)
-            raw = ckpt.get("files_changed_json") if ckpt else None
-            if raw:
-                try:
-                    files = json.loads(raw)
-                    changes = [f"M\t{p}" for p in files][:200]
-                except Exception:
-                    changes = []
+        changes = await self._collect_task_changes(task, limit=200)
 
         if not changes:
             return f"Task `{task.id}` has no detectable file changes."
@@ -913,7 +896,9 @@ class RuntimeService:
                         task.id,
                         ttl_minutes=self._decision_ttl_minutes,
                     )
-                    text = self._merge_gate_text(task.id)
+                    refreshed = await self._store.get_runtime_task(task.id)
+                    merge_task = refreshed or task
+                    text = await self._merge_gate_text(merge_task)
                     msg_id = await self._send_decision_surface(
                         session,
                         task.thread_id,
@@ -1308,14 +1293,66 @@ class RuntimeService:
             "Use Approve / Reject / Suggest."
         )
 
-    def _merge_gate_text(self, task_id: str) -> str:
-        return (
-            f"### Runtime Task `{task_id}` Ready to Merge\n"
-            "Task finished in isolated workspace. Choose one action:\n"
-            "- Merge: apply patch to current branch and auto commit\n"
-            "- Discard: keep audit metadata, drop this task result\n"
-            "- Request Changes: send task back to BLOCKED for another iteration"
+    async def _merge_gate_text(self, task: RuntimeTask) -> str:
+        lines = [
+            f"### Runtime Task `{task.id}` Ready to Merge",
+            f"Goal: {task.goal[:220]}",
+            f"Agent: `{task.preferred_agent or self._default_agent}`",
+            f"Completed step: {task.step_no}/{task.max_steps}",
+            f"Test command: `{task.test_command}`",
+        ]
+
+        changes = await self._collect_task_changes(task, limit=10)
+        if changes:
+            lines.append("")
+            lines.append("Changed files:")
+            lines.extend(f"- `{line}`" for line in changes[:8])
+            if len(changes) > 8:
+                lines.append(f"- ... and {len(changes) - 8} more")
+
+        ckpt = await self._store.get_last_runtime_checkpoint(task.id)
+        if ckpt:
+            test_tail = self._tail_text(str(ckpt.get("test_result", "")))
+            if test_tail:
+                lines.append("")
+                lines.append("Latest test output:")
+                lines.append(f"```text\n{test_tail[:500]}\n```")
+
+        lines.extend(
+            [
+                "",
+                "Choose one action:",
+                "- Merge: apply patch to current branch and auto commit",
+                "- Discard: keep audit metadata, drop this task result",
+                "- Request Changes: send task back to BLOCKED for another iteration",
+                "",
+                "Use `/task_changes` or `/task_logs` for full details.",
+            ]
         )
+        return "\n".join(lines)[:1900]
+
+    async def _collect_task_changes(self, task: RuntimeTask, *, limit: int = 80) -> list[str]:
+        changes: list[str] = []
+        if task.workspace_path:
+            workspace = Path(task.workspace_path)
+            if workspace.exists():
+                try:
+                    changes = await self._worktree.list_workspace_changes(workspace, limit=limit)
+                except Exception as exc:
+                    logger.warning("Failed to list workspace changes for %s: %s", task.id, exc)
+
+        if changes:
+            return changes[:limit]
+
+        ckpt = await self._store.get_last_runtime_checkpoint(task.id)
+        raw = ckpt.get("files_changed_json") if ckpt else None
+        if not raw:
+            return []
+        try:
+            files = json.loads(raw)
+        except Exception:
+            return []
+        return [f"M\t{p}" for p in files][:limit]
 
     @staticmethod
     def _goal_short(goal: str) -> str:
