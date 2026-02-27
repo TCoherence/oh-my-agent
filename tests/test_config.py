@@ -1,6 +1,9 @@
 import os
 import textwrap
+from pathlib import Path
+
 import pytest
+import yaml
 from oh_my_agent.config import load_config, _substitute
 
 
@@ -51,3 +54,45 @@ def test_load_config_parses_yaml(tmp_path, monkeypatch):
 def test_load_config_missing_file_raises(tmp_path):
     with pytest.raises(FileNotFoundError):
         load_config(tmp_path / "nonexistent.yaml")
+
+
+def _flatten_key_paths(value, prefix=""):
+    paths = set()
+    if isinstance(value, dict):
+        for key, child in value.items():
+            current = f"{prefix}.{key}" if prefix else str(key)
+            paths.add(current)
+            paths.update(_flatten_key_paths(child, current))
+    elif isinstance(value, list) and value:
+        current = f"{prefix}[]"
+        paths.add(current)
+        paths.update(_flatten_key_paths(value[0], current))
+    return paths
+
+
+def test_local_config_covers_example_keys():
+    example_path = Path("config.yaml.example")
+    local_path = Path("config.yaml")
+    if not local_path.exists():
+        pytest.skip("local config.yaml not present")
+
+    example = yaml.safe_load(example_path.read_text(encoding="utf-8"))
+    local = yaml.safe_load(local_path.read_text(encoding="utf-8"))
+
+    example_paths = _flatten_key_paths(example)
+    local_paths = _flatten_key_paths(local)
+
+    ignored_prefixes = {
+        "gateway.channels[].token",
+        "gateway.channels[].channel_id",
+        "access.owner_user_ids",
+        "router.api_key_env",
+    }
+    required_paths = {
+        path
+        for path in example_paths
+        if path not in ignored_prefixes and not any(path.startswith(f"{prefix}.") for prefix in ignored_prefixes)
+    }
+
+    missing = sorted(path for path in required_paths if path not in local_paths)
+    assert not missing, f"config.yaml is missing keys from config.yaml.example: {missing}"
