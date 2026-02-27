@@ -1326,7 +1326,7 @@ class RuntimeService:
                 "- Discard: keep audit metadata, drop this task result",
                 "- Request Changes: send task back to BLOCKED for another iteration",
                 "",
-                "Use `/task_changes` or `/task_logs` for full details.",
+                "Use `/task_changes` or `/task_logs` for full details, if available.",
             ]
         )
         return "\n".join(lines)[:1900]

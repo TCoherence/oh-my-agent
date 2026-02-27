@@ -637,11 +637,12 @@ class DiscordChannel(BaseChannel):
 
         @client.event
         async def on_ready() -> None:
-            await tree.sync()
+            scope = await self._sync_command_tree(tree, target_id)
             logger.info(
-                "[discord] Online as %s, listening on channel %s, slash commands synced",
+                "[discord] Online as %s, listening on channel %s, slash commands synced (%s)",
                 client.user,
                 self._channel_id,
+                scope,
             )
 
         @client.event
@@ -876,3 +877,39 @@ class DiscordChannel(BaseChannel):
         if dm is None:
             dm = await user.create_dm()
         return str(dm.id)
+
+    async def _sync_command_tree(
+        self,
+        tree: app_commands.CommandTree,
+        target_id: int,
+    ) -> str:
+        guild_id = await self._resolve_target_guild_id(target_id)
+        if guild_id is not None:
+            guild = discord.Object(id=guild_id)
+            tree.clear_commands(guild=guild)
+            tree.copy_global_to(guild=guild)
+            await tree.sync(guild=guild)
+            return f"guild:{guild_id}"
+
+        await tree.sync()
+        return "global"
+
+    async def _resolve_target_guild_id(self, target_id: int) -> int | None:
+        channel = self._client.get_channel(target_id)
+        if channel is None:
+            try:
+                channel = await self._client.fetch_channel(target_id)
+            except Exception:
+                logger.debug("Failed to fetch target channel %s for guild sync", target_id, exc_info=True)
+                return None
+        return self._extract_guild_id(channel)
+
+    @staticmethod
+    def _extract_guild_id(channel) -> int | None:
+        guild = getattr(channel, "guild", None)
+        if guild is not None and getattr(guild, "id", None):
+            return int(guild.id)
+        guild_id = getattr(channel, "guild_id", None)
+        if guild_id:
+            return int(guild_id)
+        return None
