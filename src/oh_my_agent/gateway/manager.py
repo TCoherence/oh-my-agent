@@ -34,6 +34,7 @@ class GatewayManager:
         workspace_skills_dirs=None,
         runtime_service=None,
         short_workspace: dict | None = None,
+        intent_router=None,
     ) -> None:
         self._channels = channels
         self._compressor = compressor
@@ -43,6 +44,7 @@ class GatewayManager:
         self._skill_syncer = skill_syncer
         self._workspace_skills_dirs = workspace_skills_dirs  # list[Path] | None
         self._runtime_service = runtime_service
+        self._intent_router = intent_router
         short_cfg = short_workspace or {}
         self._short_workspace_enabled = bool(short_cfg.get("enabled", True))
         self._short_workspace_ttl_hours = int(short_cfg.get("ttl_hours", 24))
@@ -252,7 +254,41 @@ class GatewayManager:
             logger.info("[%s] THREAD created thread_id=%s name=%r", req_id, thread_id, name)
 
         # Runtime interception for long-running autonomous tasks.
-        if self._runtime_service:
+        router_decision = None
+        if (not msg.system) and self._intent_router and self._runtime_service:
+            router_decision = await self._intent_router.route(msg.content)
+            if (
+                router_decision
+                and router_decision.decision == "propose_task"
+                and router_decision.confidence >= self._intent_router.confidence_threshold
+            ):
+                goal = router_decision.goal or msg.content
+                await self._runtime_service.create_task(
+                    session=session,
+                    registry=registry,
+                    thread_id=thread_id,
+                    goal=goal,
+                    created_by=msg.author_id or msg.author,
+                    preferred_agent=msg.preferred_agent,
+                    source="router",
+                    force_draft=True,
+                )
+                await channel.send(
+                    thread_id,
+                    (
+                        "Router suggested this as a long task and created a draft. "
+                        "Approve to start autonomous execution, or reject/suggest to keep it in chat flow."
+                    ),
+                )
+                logger.info(
+                    "[%s] ROUTER propose_task confidence=%.2f goal=%r",
+                    req_id,
+                    router_decision.confidence,
+                    goal[:120],
+                )
+                return
+
+        if self._runtime_service and not router_decision:
             handled = await self._runtime_service.maybe_handle_incoming(
                 session,
                 registry,

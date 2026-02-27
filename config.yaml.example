@@ -24,6 +24,16 @@ short_workspace:
   ttl_hours: 24
   cleanup_interval_minutes: 1440
 
+router:
+  enabled: false
+  provider: openai_compatible
+  base_url: "https://<openai-compatible-endpoint>/v1"
+  api_key_env: DEEPSEEK_API_KEY
+  model: deepseek-chat
+  timeout_seconds: 3
+  confidence_threshold: 0.55
+  require_user_confirm: true
+
 automations:
   enabled: false                      # global scheduler switch
   jobs:

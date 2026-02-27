@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import logging.handlers
+import os
 import shutil
 import sys
 from datetime import datetime
@@ -155,6 +156,16 @@ def _apply_v052_defaults(config: dict) -> None:
     short_ws_cfg.setdefault("ttl_hours", 24)
     short_ws_cfg.setdefault("cleanup_interval_minutes", 1440)
     short_ws_cfg.setdefault("root", "~/.oh-my-agent/agent-workspace/sessions")
+
+    router_cfg = config.setdefault("router", {})
+    router_cfg.setdefault("enabled", False)
+    router_cfg.setdefault("provider", "openai_compatible")
+    router_cfg.setdefault("base_url", "https://api.deepseek.com/v1")
+    router_cfg.setdefault("api_key_env", "DEEPSEEK_API_KEY")
+    router_cfg.setdefault("model", "deepseek-chat")
+    router_cfg.setdefault("timeout_seconds", 3)
+    router_cfg.setdefault("confidence_threshold", 0.55)
+    router_cfg.setdefault("require_user_confirm", True)
 
     memory_cfg = config.setdefault("memory", {})
     memory_cfg.setdefault("backend", "sqlite")
@@ -377,6 +388,35 @@ async def _async_main(config: dict, logger: logging.Logger) -> None:
     elif not memory_store:
         logger.warning("Runtime disabled: memory backend is required.")
 
+    intent_router = None
+    router_cfg = config.get("router", {})
+    if bool(router_cfg.get("enabled", False)):
+        if str(router_cfg.get("provider", "openai_compatible")) != "openai_compatible":
+            logger.warning("Unsupported router provider: %s", router_cfg.get("provider"))
+        else:
+            api_key = os.environ.get(str(router_cfg.get("api_key_env", "DEEPSEEK_API_KEY")), "").strip()
+            if not api_key:
+                logger.warning(
+                    "Router enabled but API key env %s is empty; router disabled.",
+                    router_cfg.get("api_key_env", "DEEPSEEK_API_KEY"),
+                )
+            else:
+                from oh_my_agent.gateway.router import OpenAICompatibleRouter
+
+                intent_router = OpenAICompatibleRouter(
+                    base_url=str(router_cfg.get("base_url", "https://api.deepseek.com/v1")),
+                    api_key=api_key,
+                    model=str(router_cfg.get("model", "deepseek-chat")),
+                    timeout_seconds=int(router_cfg.get("timeout_seconds", 3)),
+                    confidence_threshold=float(router_cfg.get("confidence_threshold", 0.55)),
+                )
+                logger.info(
+                    "Intent router enabled model=%s base=%s threshold=%.2f",
+                    router_cfg.get("model", "deepseek-chat"),
+                    router_cfg.get("base_url", "https://api.deepseek.com/v1"),
+                    float(router_cfg.get("confidence_threshold", 0.55)),
+                )
+
     # Build (channel, registry) pairs
     from oh_my_agent.agents.registry import AgentRegistry
     from oh_my_agent.gateway.manager import GatewayManager
@@ -419,6 +459,7 @@ async def _async_main(config: dict, logger: logging.Logger) -> None:
             **config.get("short_workspace", {}),
             "base_workspace": str(workspace) if workspace is not None else None,
         },
+        intent_router=intent_router,
     )
     if memory_store:
         gateway.set_memory_store(memory_store)

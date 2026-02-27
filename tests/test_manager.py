@@ -8,6 +8,7 @@ from oh_my_agent.agents.base import AgentResponse
 from oh_my_agent.agents.registry import AgentRegistry
 from oh_my_agent.automation import ScheduledJob
 from oh_my_agent.memory.store import SQLiteMemoryStore
+from oh_my_agent.gateway.router import RouteDecision
 
 
 def _make_msg(thread_id=None, content="hello", author_id=None, system=False) -> IncomingMessage:
@@ -427,3 +428,47 @@ async def test_short_workspace_cleanup_uses_db_ttl(tmp_path):
     assert not ws.exists()
 
     await store.close()
+
+
+@pytest.mark.asyncio
+async def test_router_propose_task_creates_runtime_draft_and_skips_reply():
+    channel = MagicMock()
+    channel.platform = "discord"
+    channel.channel_id = "100"
+    channel.create_thread = AsyncMock(return_value="t1")
+    channel.send = AsyncMock()
+    channel.typing = MagicMock()
+    channel.typing.return_value.__aenter__ = AsyncMock(return_value=None)
+    channel.typing.return_value.__aexit__ = AsyncMock(return_value=False)
+
+    mock_agent = MagicMock()
+    mock_agent.name = "codex"
+    registry = MagicMock(spec=AgentRegistry)
+    registry.run = AsyncMock(return_value=(mock_agent, AgentResponse(text="answer")))
+
+    runtime = MagicMock()
+    runtime.maybe_handle_incoming = AsyncMock(return_value=False)
+    runtime.create_task = AsyncMock()
+
+    router = MagicMock()
+    router.confidence_threshold = 0.55
+    router.route = AsyncMock(
+        return_value=RouteDecision(
+            decision="propose_task",
+            confidence=0.91,
+            goal="create a new skill and validate it",
+            risk_hints=[],
+            raw_text="{}",
+        )
+    )
+
+    session = _make_session(channel=channel, registry=registry)
+    gm = GatewayManager([], runtime_service=runtime, intent_router=router)
+    msg = _make_msg(thread_id="t1", content="帮我创建一个skill并验证")
+    await gm.handle_message(session, registry, msg)
+
+    runtime.create_task.assert_called_once()
+    kwargs = runtime.create_task.call_args.kwargs
+    assert kwargs["source"] == "router"
+    assert kwargs["force_draft"] is True
+    registry.run.assert_not_called()

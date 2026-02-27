@@ -98,6 +98,16 @@ short_workspace:
   ttl_hours: 24
   cleanup_interval_minutes: 1440
 
+router:
+  enabled: true
+  provider: openai_compatible
+  base_url: "https://api.deepseek.com/v1"
+  api_key_env: DEEPSEEK_API_KEY
+  model: deepseek-chat
+  timeout_seconds: 3
+  confidence_threshold: 0.55
+  require_user_confirm: true
+
 automations:
   enabled: true
   jobs:
@@ -232,6 +242,7 @@ Claude session IDs are persisted per `(platform, channel_id, thread_id, agent)` 
 - Loop contract: code changes -> tests -> retry, until `TASK_STATE: DONE` + passing tests.
 - Risk policy (`strict`): low-risk tasks auto-run; high-risk tasks enter `DRAFT` and require approval.
 - Decision surface: Discord buttons first + slash fallback.
+- Optional LLM intent router can classify incoming messages (`reply_once` vs `propose_task`) before heuristic intent checks.
 - Execution completion now enters `WAITING_MERGE`; final apply requires `Merge/Discard/Request Changes`.
 - Reactions are non-blocking status signals only (`⏳`, `👀`, `🧪`, `✅`, `⚠️`, `🗑️`).
 - Short `/ask` conversations use per-thread transient workspaces under `short_workspace.root` and are TTL-cleaned (default 24h, metadata persisted in SQLite).

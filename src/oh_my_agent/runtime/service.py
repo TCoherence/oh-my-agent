@@ -184,6 +184,7 @@ class RuntimeService:
         max_steps: int | None = None,
         max_minutes: int | None = None,
         source: str,
+        force_draft: bool = False,
     ) -> RuntimeTask:
         self.register_session(session, registry)
 
@@ -200,7 +201,7 @@ class RuntimeService:
             reasons = risk.reasons
 
         task_id = uuid.uuid4().hex[:12]
-        status = TASK_STATUS_DRAFT if require_approval else TASK_STATUS_PENDING
+        status = TASK_STATUS_DRAFT if (force_draft or require_approval) else TASK_STATUS_PENDING
 
         task = await self._store.create_runtime_task(
             task_id=task_id,
@@ -218,7 +219,7 @@ class RuntimeService:
         await self._store.add_runtime_event(
             task.id,
             "task.created",
-            {"source": source, "status": status, "risk_reasons": reasons},
+            {"source": source, "status": status, "risk_reasons": reasons, "force_draft": force_draft},
         )
         logger.info(
             "Runtime task created id=%s status=%s source=%s agent=%s budget=%d/%d",
