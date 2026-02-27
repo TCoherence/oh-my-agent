@@ -103,6 +103,12 @@ runtime:
   progress_persist_seconds: 60
   log_event_limit: 12
   log_tail_chars: 1200
+  cleanup:
+    enabled: true
+    interval_minutes: 60
+    retention_hours: 72
+    prune_git_worktrees: true
+    merged_immediate: true
 ```
 
 敏感信息可以放在 `.env` 文件中，`config.yaml` 里的 `${VAR}` 会自动替换。
@@ -154,6 +160,7 @@ oh-my-agent
 - 循环协议是：改代码 -> 跑测试 -> 失败后继续修，直到 `TASK_STATE: DONE` 且测试通过。
 - `strict` 风险策略下，高风险任务进入 `DRAFT`，低风险任务可自动开跑。
 - 执行成功后不会直接落地主仓库，而是进入 `WAITING_MERGE`，需要 merge/discard/request-changes。
+- `MERGED` 任务在合并成功后会立即清理 worktree；其他终态任务默认保留 72 小时，再由 janitor 清理。
 - 短对话 `/ask` 使用按 thread 隔离的临时 workspace，并按 TTL 清理。
 - `/task_logs` 用来查看最近 runtime 事件和输出 tail。
 - Discord 中 runtime 进度会尽量复用并更新同一条状态消息，避免刷屏。

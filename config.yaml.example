@@ -73,8 +73,9 @@ runtime:
   cleanup:
     enabled: true
     interval_minutes: 60
-    retention_hours: 24
+    retention_hours: 72
     prune_git_worktrees: true
+    merged_immediate: true
   merge_gate:
     enabled: true
     auto_commit: true

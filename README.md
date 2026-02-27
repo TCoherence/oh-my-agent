@@ -103,6 +103,12 @@ runtime:
   progress_persist_seconds: 60
   log_event_limit: 12
   log_tail_chars: 1200
+  cleanup:
+    enabled: true
+    interval_minutes: 60
+    retention_hours: 72
+    prune_git_worktrees: true
+    merged_immediate: true
 ```
 
 Secrets can live in `.env`; `${VAR}` placeholders are substituted automatically.
@@ -154,6 +160,7 @@ oh-my-agent
 - Loop contract: code changes -> tests -> retry until `TASK_STATE: DONE` and tests pass.
 - High-risk tasks go to `DRAFT`; low-risk tasks can auto-run under `strict` policy.
 - Completed execution enters `WAITING_MERGE`; final apply requires merge/discard/request-changes.
+- `MERGED` tasks clean their worktree immediately after merge; other terminal states are retained for 72 hours before janitor cleanup.
 - Short `/ask` conversations use transient per-thread workspaces with TTL cleanup.
 - `/task_logs` exposes recent runtime events plus output tails.
 - Discord progress prefers updating one status message instead of spamming many messages.

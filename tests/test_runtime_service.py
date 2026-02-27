@@ -335,6 +335,8 @@ async def test_runtime_message_intent_draft_to_merge(runtime_env):
     merged = await _wait_for_status(store, tasks[0].id, {TASK_STATUS_MERGED})
     assert merged.status == TASK_STATUS_MERGED
     assert merged.merge_commit_hash
+    assert merged.workspace_path is None
+    assert merged.workspace_cleaned_at is not None
     assert (repo / "src" / "runtime.txt").exists()
 
 
@@ -502,6 +504,8 @@ async def test_runtime_legacy_applied_is_mergeable(runtime_env):
 
     merged = await _wait_for_status(store, task.id, {TASK_STATUS_MERGED})
     assert merged.status == TASK_STATUS_MERGED
+    assert merged.workspace_path is None
+    assert merged.workspace_cleaned_at is not None
 
 
 @pytest.mark.asyncio

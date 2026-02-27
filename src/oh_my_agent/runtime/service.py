@@ -92,8 +92,9 @@ class RuntimeService:
         cleanup_cfg = cfg.get("cleanup", {})
         self._cleanup_enabled = bool(cleanup_cfg.get("enabled", True))
         self._cleanup_interval_minutes = int(cleanup_cfg.get("interval_minutes", 60))
-        self._cleanup_retention_hours = int(cleanup_cfg.get("retention_hours", 24))
+        self._cleanup_retention_hours = int(cleanup_cfg.get("retention_hours", 72))
         self._cleanup_prune_worktrees = bool(cleanup_cfg.get("prune_git_worktrees", True))
+        self._cleanup_merged_immediately = bool(cleanup_cfg.get("merged_immediate", True))
 
         merge_cfg = cfg.get("merge_gate", {})
         self._merge_gate_enabled = bool(merge_cfg.get("enabled", True))
@@ -1076,6 +1077,15 @@ class RuntimeService:
             )
             extra = f" commit `{commit_hash}`" if commit_hash else ""
             logger.info("Runtime task=%s MERGED commit=%s", task.id, commit_hash or "none")
+            if self._cleanup_merged_immediately:
+                cleaned = await self._cleanup_single_task(task)
+                if cleaned:
+                    logger.info("Runtime task=%s workspace cleaned immediately after merge", task.id)
+                    if self._cleanup_prune_worktrees:
+                        try:
+                            await self._worktree.prune_worktrees()
+                        except Exception:
+                            logger.debug("git worktree prune failed after immediate merge cleanup", exc_info=True)
             await self._notify(task, f"Task `{task.id}` merged successfully.{extra}")
             await self._signal_status_by_id(task, TASK_STATUS_MERGED)
             return f"Task `{task.id}` merged successfully.{extra}"
@@ -1099,13 +1109,34 @@ class RuntimeService:
         return f"Task `{task.id}` merge failed: {error[:200]}"
 
     async def _cleanup_expired_tasks(self) -> int:
-        candidates = await self._store.list_runtime_cleanup_candidates(
-            statuses=sorted(_TERMINAL_CLEANUP_STATUSES),
-            older_than_hours=self._cleanup_retention_hours,
-            limit=200,
+        candidates: list[RuntimeTask] = []
+        delayed_statuses = sorted(
+            status
+            for status in _TERMINAL_CLEANUP_STATUSES
+            if not (self._cleanup_merged_immediately and status == TASK_STATUS_MERGED)
         )
+        if delayed_statuses:
+            candidates.extend(
+                await self._store.list_runtime_cleanup_candidates(
+                    statuses=delayed_statuses,
+                    older_than_hours=self._cleanup_retention_hours,
+                    limit=200,
+                )
+            )
+        if self._cleanup_merged_immediately:
+            candidates.extend(
+                await self._store.list_runtime_cleanup_candidates(
+                    statuses=[TASK_STATUS_MERGED],
+                    older_than_hours=0,
+                    limit=200,
+                )
+            )
         cleaned = 0
+        seen: set[str] = set()
         for task in candidates:
+            if task.id in seen:
+                continue
+            seen.add(task.id)
             if await self._cleanup_single_task(task):
                 cleaned += 1
         if cleaned and self._cleanup_prune_worktrees:
