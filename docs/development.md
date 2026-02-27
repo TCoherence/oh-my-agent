@@ -139,7 +139,7 @@ Three-layer defense model (Layers 0–2) now in place:
 
 **Layer 0 — Workspace directory isolation** (`config.yaml` + `main.py` + `BaseCLIAgent`)
 
-Add `workspace: ~/oh-my-agent-workspace` to `config.yaml`. On startup, `_setup_workspace()` in `main.py`:
+Add `workspace: .workspace/agent` to `config.yaml` when you want sandboxed agent cwd. On startup, `_setup_workspace()` in `main.py`:
 1. Creates the directory.
 2. Copies `AGENT.md` / `CLAUDE.md` / `GEMINI.md` (resolving symlinks) so agents have project context.
 3. Copies skills from `skills/` into `workspace/.claude/skills/` and `workspace/.gemini/skills/` (real files, not symlinks).
@@ -210,7 +210,7 @@ See [todo.md](todo.md) for the full versioned roadmap (v0.4 → v0.5 → v0.6).
 
 ### What Changed
 
-1. **Memory layer** — `MemoryStore` ABC + `SQLiteMemoryStore` persists all conversation turns to `data/memory.db`. WAL mode, FTS5 full-text search, thread-level CRUD.
+1. **Memory layer** — `MemoryStore` ABC + `SQLiteMemoryStore` persists all conversation turns to `.workspace/memory.db` (default). WAL mode, FTS5 full-text search, thread-level CRUD.
 2. **History compression** — `HistoryCompressor` auto-summarises old turns when `len(turns) > max_turns`. Uses the first available agent to generate a summary; falls back to truncation if all agents fail. Runs asynchronously after each response.
 3. **Skill system** — `SkillSync` symlinks skills from `skills/` to `.gemini/skills/` and `.claude/skills/` on startup. Both CLIs auto-discover `SKILL.md` files via the Agent Skills standard.
 4. **Async session API** — `ChannelSession.get_history()`, `append_user()`, `append_assistant()` are now async. In-memory cache avoids repeated DB reads.
@@ -245,7 +245,7 @@ summaries(id, platform, channel_id, thread_id, summary, turns_start, turns_end, 
 ```yaml
 memory:
   backend: sqlite
-  path: data/memory.db
+  path: .workspace/memory.db
   max_turns: 20
   summary_max_chars: 500
 

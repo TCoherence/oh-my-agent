@@ -1,6 +1,6 @@
 memory:
   backend: sqlite
-  path: data/memory.db
+  path: .workspace/memory.db
   max_turns: 20
   summary_max_chars: 500
 
@@ -9,10 +9,11 @@ skills:
   path: skills/
 
 # Optional: workspace directory for agent sandbox isolation (Layer 0).
-# When set, all CLI agents run with cwd=workspace instead of the dev repo.
+# When set, all CLI agents run with cwd=workspace instead of the repo root.
 # AGENT.md and skills are copied into the workspace on startup.
 # Environment variables are also sanitized (whitelist mode) when this is set.
-# workspace: ~/oh-my-agent-workspace
+# Leave unset if you want agents to edit this repository directly.
+# workspace: .workspace/agent
 
 gateway:
   channels:

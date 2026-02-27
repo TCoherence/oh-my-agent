@@ -1,6 +1,7 @@
 .env
 .venv/
 logs/
+.workspace/
 __pycache__/
 *.pyc
 *.egg-info/

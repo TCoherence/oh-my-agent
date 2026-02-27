@@ -71,16 +71,17 @@ Edit `config.yaml`:
 ```yaml
 memory:
   backend: sqlite
-  path: data/memory.db
+  path: .workspace/memory.db
   max_turns: 20
 
 skills:
   enabled: true
   path: skills/
 
-# Sandbox isolation: agents run in this dir instead of the dev repo.
+# Sandbox isolation: agents run in this dir instead of the repo root.
 # AGENT.md and skills are copied here on startup. Env vars are sanitized.
-workspace: ~/oh-my-agent-workspace
+# Leave unset if you want agents to edit this repository directly.
+# workspace: .workspace/agent
 
 gateway:
   channels:
@@ -109,6 +110,8 @@ agents:
 ```
 
 Secrets can live in a `.env` file — `${VAR}` placeholders are substituted automatically.
+
+Runtime files (SQLite DB, WAL/SHM, log files) are expected under `.workspace/`, which should be gitignored.
 
 ### 4. Run
 

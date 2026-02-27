@@ -143,7 +143,7 @@ def _build_channel(cfg: dict):
     raise ValueError(f"Unknown platform '{platform}'")
 
 
-def _setup_logging() -> None:
+def _setup_logging(runtime_root: Path | None = None) -> None:
     log_format = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
     root = logging.getLogger()
     root.setLevel(logging.INFO)
@@ -154,8 +154,10 @@ def _setup_logging() -> None:
     root.addHandler(console)
 
     # Rotating file handler — one file per day, keep 7 days
-    log_dir = Path("logs")
-    log_dir.mkdir(exist_ok=True)
+    # Runtime artifacts live under .workspace/ by default.
+    runtime_root = runtime_root or Path(".workspace")
+    log_dir = runtime_root / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
     file_handler = logging.handlers.TimedRotatingFileHandler(
         log_dir / "oh-my-agent.log",
         when="midnight",
@@ -198,7 +200,7 @@ async def _async_main(config: dict, logger: logging.Logger) -> None:
         from oh_my_agent.memory.store import SQLiteMemoryStore
         from oh_my_agent.memory.compressor import HistoryCompressor
 
-        db_path = memory_cfg.get("path", "data/memory.db")
+        db_path = memory_cfg.get("path", ".workspace/memory.db")
         memory_store = SQLiteMemoryStore(db_path)
         await memory_store.init()
         logger.info("Memory store ready: %s", db_path)

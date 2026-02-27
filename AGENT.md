@@ -47,7 +47,7 @@ The system has four abstraction layers between the user (chat platform) and the 
 
 **Memory layer** (`src/oh_my_agent/memory/`)
 
-- `MemoryStore` ABC + `SQLiteMemoryStore`: persists all turns to `data/memory.db` with WAL mode, FTS5 full-text search, thread-level CRUD, and `export_data()`/`import_data()` for backup.
+- `MemoryStore` ABC + `SQLiteMemoryStore`: persists all turns to `.workspace/memory.db` (default) with WAL mode, FTS5 full-text search, thread-level CRUD, and `export_data()`/`import_data()` for backup.
 - `agent_sessions` table persists CLI session IDs with primary key `(platform, channel_id, thread_id, agent)`.
 - `GatewayManager` loads persisted session IDs on message handling and upserts/deletes them based on agent outcome.
 - `HistoryCompressor`: when a thread exceeds `max_turns`, compresses old turns into a summary (via agent) or truncates (fallback). Runs asynchronously after each response.
