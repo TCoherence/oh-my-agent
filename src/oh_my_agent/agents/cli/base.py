@@ -1,15 +1,58 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from abc import abstractmethod
+from pathlib import Path
 
 from oh_my_agent.agents.base import AgentResponse, BaseAgent
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT_SECONDS = 300
+
+# Environment variable keys considered safe to pass to CLI subprocesses.
+# Everything else is stripped unless explicitly listed in passthrough_env.
+_SAFE_ENV_KEYS = frozenset({
+    "PATH", "HOME", "USER", "LANG", "LC_ALL", "LC_CTYPE",
+    "TERM", "SHELL", "TMPDIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
+    "XDG_RUNTIME_DIR",
+})
+
+
+def _extract_cli_error(stderr_raw: bytes, stdout_raw: bytes) -> str:
+    """Best-effort extraction of useful CLI error text.
+
+    Some CLIs (e.g. Claude) return structured error details on stdout while
+    exiting non-zero, leaving stderr empty.
+    """
+    stderr_text = stderr_raw.decode(errors="replace").strip()
+    if stderr_text:
+        return stderr_text
+
+    stdout_text = stdout_raw.decode(errors="replace").strip()
+    if not stdout_text:
+        return "(no stdout/stderr)"
+
+    try:
+        data = json.loads(stdout_text)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return stdout_text
+
+    if isinstance(data, dict):
+        for key in ("error", "result", "message"):
+            val = data.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+        err_obj = data.get("error")
+        if isinstance(err_obj, dict):
+            msg = err_obj.get("message")
+            if isinstance(msg, str) and msg.strip():
+                return msg.strip()
+
+    return stdout_text
 
 
 def _build_prompt_with_history(prompt: str, history: list[dict] | None) -> str:
@@ -31,11 +74,35 @@ def _build_prompt_with_history(prompt: str, history: list[dict] | None) -> str:
 
 
 class BaseCLIAgent(BaseAgent):
-    """Base class for agents that wrap a CLI tool as a subprocess."""
+    """Base class for agents that wrap a CLI tool as a subprocess.
 
-    def __init__(self, cli_path: str, timeout: int = DEFAULT_TIMEOUT_SECONDS) -> None:
+    Args:
+        cli_path: Path or name of the CLI executable.
+        timeout: Seconds before the subprocess is killed.
+        workspace: Working directory for the subprocess. When set, the agent
+            is confined to this directory (all CLI sandboxes are cwd-scoped).
+            Also activates environment variable sanitization.
+        passthrough_env: Additional env var names to forward to the subprocess
+            beyond the safe-key whitelist. Only meaningful when ``workspace``
+            is set; ignored in legacy (no-workspace) mode.
+    """
+
+    def __init__(
+        self,
+        cli_path: str,
+        timeout: int = DEFAULT_TIMEOUT_SECONDS,
+        workspace: Path | None = None,
+        passthrough_env: list[str] | None = None,
+    ) -> None:
         self._cli_path = cli_path
         self._timeout = timeout
+        self._workspace = workspace
+        self._passthrough_env = passthrough_env  # None = not configured
+
+    @property
+    def _cwd(self) -> str | None:
+        """Working directory for subprocesses, or None to inherit."""
+        return str(self._workspace) if self._workspace else None
 
     @abstractmethod
     def _build_command(self, prompt: str) -> list[str]:
@@ -43,8 +110,24 @@ class BaseCLIAgent(BaseAgent):
         ...
 
     def _build_env(self) -> dict[str, str]:
-        env = os.environ.copy()
-        # Allow nesting when running inside Claude Code
+        """Build the environment dict for the subprocess.
+
+        When ``workspace`` or ``passthrough_env`` is configured, uses a
+        whitelist model: only ``_SAFE_ENV_KEYS`` plus explicit
+        ``passthrough_env`` keys are forwarded.  Otherwise falls back to the
+        full inherited environment (backward-compatible default).
+        """
+        if self._workspace is None and self._passthrough_env is None:
+            # Legacy mode: no workspace configured → inherit full environment.
+            env = os.environ.copy()
+            env.pop("CLAUDECODE", None)
+            return env
+
+        # Whitelist mode: strip secrets from the subprocess environment.
+        env = {k: v for k, v in os.environ.items() if k in _SAFE_ENV_KEYS}
+        for key in (self._passthrough_env or []):
+            if key in os.environ:
+                env[key] = os.environ[key]
         env.pop("CLAUDECODE", None)
         return env
 
@@ -60,6 +143,7 @@ class BaseCLIAgent(BaseAgent):
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
+                cwd=self._cwd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=self._build_env(),
@@ -78,11 +162,19 @@ class BaseCLIAgent(BaseAgent):
             )
 
         if proc.returncode != 0:
-            err_msg = stderr.decode(errors="replace").strip()
+            err_msg = _extract_cli_error(stderr, stdout)
             logger.error("%s CLI failed (rc=%d): %s", self.name, proc.returncode, err_msg)
             return AgentResponse(
                 text="",
                 error=f"{self.name} exited {proc.returncode}: {err_msg[:400]}",
             )
 
-        return AgentResponse(text=stdout.decode(errors="replace").strip())
+        return self._parse_output(stdout.decode(errors="replace").strip())
+
+    def _parse_output(self, raw: str) -> AgentResponse:
+        """Parse subprocess stdout into an AgentResponse.
+
+        Override in subclasses that emit structured (JSON/JSONL) output.
+        The default implementation treats stdout as plain text.
+        """
+        return AgentResponse(text=raw)

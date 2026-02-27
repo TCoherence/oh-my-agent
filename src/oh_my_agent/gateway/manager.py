@@ -25,6 +25,7 @@ class GatewayManager:
     ) -> None:
         self._channels = channels
         self._compressor = compressor
+        self._memory_store_ref = None  # set by set_memory_store()
         # key: "platform:channel_id" → ChannelSession
         self._sessions: dict[str, ChannelSession] = {}
 
@@ -47,8 +48,21 @@ class GatewayManager:
     def set_memory_store(self, store) -> None:
         """Inject a MemoryStore into all current and future sessions."""
         self._memory_store = store
+        self._memory_store_ref = store  # kept for session persistence
         for session in self._sessions.values():
             session.memory_store = store
+
+    async def _sync_session(self, session, thread_id: str, agent) -> None:
+        """Persist or delete an agent's CLI session ID in the memory store."""
+        store = getattr(self, "_memory_store_ref", None)
+        if not store or not hasattr(agent, "get_session_id"):
+            return
+        current = agent.get_session_id(thread_id)
+        if current:
+            await store.save_session(session.platform, session.channel_id, thread_id, agent.name, current)
+        else:
+            # Session was cleared (e.g. failed resume) — remove stale DB entry
+            await store.delete_session(session.platform, session.channel_id, thread_id, agent.name)
 
     async def start(self) -> None:
         """Start all platform channels concurrently."""
@@ -119,10 +133,26 @@ class GatewayManager:
             len(prior_history),
         )
 
-        # Run agent (with fallback)
+        # Pre-load persisted CLI session IDs so agents can resume after restart
+        if self._memory_store_ref:
+            for agent in registry.agents:
+                if hasattr(agent, "set_session_id") and agent.get_session_id(thread_id) is None:
+                    stored = await self._memory_store_ref.load_session(
+                        session.platform, session.channel_id, thread_id, agent.name
+                    )
+                    if stored:
+                        agent.set_session_id(thread_id, stored)
+                        logger.debug("Restored session %s for %s thread %s", stored[:12], agent.name, thread_id)
+
+        # Run agent (with fallback, or targeted if preferred_agent is set)
         t_agent = time.perf_counter()
         async with channel.typing(thread_id):
-            agent_used, response = await registry.run(msg.content, prior_history, thread_id=thread_id)
+            agent_used, response = await registry.run(
+                msg.content,
+                prior_history,
+                thread_id=thread_id,
+                force_agent=msg.preferred_agent,
+            )
         elapsed_agent = time.perf_counter() - t_agent
 
         if response.error:
@@ -133,6 +163,8 @@ class GatewayManager:
                 elapsed_agent,
                 response.error,
             )
+            # If the agent cleared its session (failed resume), remove stale DB entry
+            await self._sync_session(session, thread_id, agent_used)
             await channel.send(thread_id, f"**Error** ({agent_used.name}): {response.error[:1800]}")
             # Remove the failed user turn so history stays clean
             history = await session.get_history(thread_id)
@@ -148,11 +180,16 @@ class GatewayManager:
             len(response.text),
         )
 
+        # Persist updated CLI session ID to DB (for resume after restart)
+        await self._sync_session(session, thread_id, agent_used)
+
         # Record assistant response in history
         await session.append_assistant(thread_id, response.text, agent_used.name)
 
         # Send with attribution header + chunked content
         attribution = f"-# via **{agent_used.name}**"
+        if response.usage:
+            attribution += f" · {self._format_usage(response.usage)}"
         chunks = chunk_message(response.text)
         if chunks:
             await channel.send(thread_id, f"{attribution}\n{chunks[0]}")
@@ -200,3 +237,27 @@ class GatewayManager:
         if len(content) > THREAD_NAME_MAX:
             name += "..."
         return name
+
+    @staticmethod
+    def _format_usage(usage: dict) -> str:
+        """Format token usage and cost into a compact string for Discord attribution.
+
+        Example: "1,234 in / 567 out · $0.0042"
+        """
+        parts = []
+        input_tok = usage.get("input_tokens", 0)
+        output_tok = usage.get("output_tokens", 0)
+        if input_tok or output_tok:
+            parts.append(f"{input_tok:,} in / {output_tok:,} out")
+        cache_read = usage.get("cache_read_input_tokens", 0)
+        cache_write = usage.get("cache_creation_input_tokens", 0)
+        if cache_read and cache_write:
+            parts.append(f"cache {cache_read:,}r/{cache_write:,}w")
+        elif cache_read:
+            parts.append(f"cache {cache_read:,}r")
+        elif cache_write:
+            parts.append(f"cache {cache_write:,}w")
+        cost = usage.get("cost_usd")
+        if cost is not None:
+            parts.append(f"${cost:.4f}")
+        return " · ".join(parts)

@@ -1,6 +1,6 @@
 # Oh My Agent
 
-Multi-platform bot that routes messages to CLI-based AI agents (Claude, Gemini, Codex). Each platform channel maps to an independent agent session with persistent conversation memory, streaming responses, and slash commands.
+Multi-platform bot that routes messages to CLI-based AI agents (Claude, Gemini, Codex). Each platform channel maps to an independent agent session with persistent conversation memory and slash commands.
 
 Inspired by [OpenClaw](https://openclaw.dev).
 
@@ -8,27 +8,27 @@ Inspired by [OpenClaw](https://openclaw.dev).
 
 ```
 User (Discord / Slack / ...)
-         │ message or /ask command
+         │ message, @agent mention, or /ask command
          ▼
    GatewayManager
          │ routes to ChannelSession (per channel, isolated)
          ▼
    AgentRegistry ── [claude, gemini, codex]
-         │ tries in order, auto-fallback on error
+         │ fallback order, or force specific agent
          ▼
    BaseCLIAgent.run(prompt, history)
-     ├── ClaudeAgent   (claude CLI, session resume)
+     ├── ClaudeAgent    (claude CLI, session resume via --resume)
      ├── GeminiCLIAgent (gemini CLI)
-     └── CodexCLIAgent  (codex CLI, sandboxed)
+     └── CodexCLIAgent  (codex CLI, built-in OS-level sandbox)
          │
-         ▼
+         ▼   cwd = workspace/  (isolated from dev repo)
    Response → chunk → thread.send()
    (-# via **agent-name** attribution)
 ```
 
 **Key layers:**
-- **Gateway** — platform adapters (Discord, Slack stub) with slash commands
-- **Agents** — CLI subprocess wrappers with ordered fallback
+- **Gateway** — platform adapters (Discord implemented, Slack stub) with slash commands
+- **Agents** — CLI subprocess wrappers with workspace isolation and ordered fallback
 - **Memory** — SQLite + FTS5 persistent conversation history with auto-compression
 - **Skills** — bidirectional sync between `skills/` and CLI-native directories
 
@@ -78,24 +78,34 @@ skills:
   enabled: true
   path: skills/
 
+# Sandbox isolation: agents run in this dir instead of the dev repo.
+# AGENT.md and skills are copied here on startup. Env vars are sanitized.
+workspace: ~/oh-my-agent-workspace
+
 gateway:
   channels:
     - platform: discord
       token: ${DISCORD_BOT_TOKEN}
       channel_id: "${DISCORD_CHANNEL_ID}"
-      agents: [claude, gemini]    # fallback order
+      agents: [claude, codex, gemini]    # fallback order
 
 agents:
   claude:
     type: cli
     model: sonnet
+    timeout: 300
     allowed_tools: [Bash, Read, Write, Edit, Glob, Grep]
+    env_passthrough: [ANTHROPIC_API_KEY]   # only these env vars reach the subprocess
   gemini:
     type: cli
-    model: gemini-2.0-flash
+    model: gemini-3-flash-preview
+    timeout: 120
   codex:
     type: cli
-    model: o4-mini
+    model: gpt-5.3-codex
+    timeout: 300
+    skip_git_repo_check: true
+    env_passthrough: [OPENAI_API_KEY]
 ```
 
 Secrets can live in a `.env` file — `${VAR}` placeholders are substituted automatically.
@@ -112,27 +122,60 @@ oh-my-agent
 ### Messages
 - **Post a message** in the configured channel → bot creates a thread and replies
 - **Reply in the thread** → bot responds with full conversation context
+- **Prefix with `@agent`** (for example `@gemini`, `@claude`, `@codex`) to force a specific agent for that message
 - Each reply is prefixed with `-# via **agent-name**`
 - If an agent fails, the next one in the fallback chain takes over
 
 ### Slash Commands
 | Command | Description |
 |---------|-------------|
-| `/ask <question>` | Ask the AI (creates a new thread) |
+| `/ask <question> [agent]` | Ask the AI (creates a new thread, optional agent override) |
 | `/reset` | Clear conversation history for current thread |
+| `/history` | Show thread history (debug helper) |
 | `/agent` | Show available agents and their status |
 | `/search <query>` | Search across all conversation history |
 
+### Agent Targeting
+- **In-thread targeting**: send `@codex fix this` to run only Codex for that turn
+- **New-thread targeting**: use `/ask` with the optional `agent` argument
+- Prefix is stripped before dispatch, so the model receives only your actual question
+- Unknown names are rejected early in `/ask` with a list of valid agents
+
 ### Session Resume
-Claude agent tracks session IDs per thread. Subsequent messages in the same thread use `--resume` to continue the session without re-flattening history.
+Claude session IDs are persisted per `(platform, channel_id, thread_id, agent)` in SQLite `agent_sessions`.
+- On successful reply, latest `session_id` is upserted
+- On bot restart, session IDs are loaded before handling the next message
+- If `--resume` fails, in-memory + DB session entries are cleared and next turn falls back to flattened history
 
 ## Agents
 
 | Agent | CLI | Sandbox | Notes |
 |-------|-----|---------|-------|
-| Claude | `claude` | `--allowedTools` | Session resume via `--resume` |
-| Gemini | `gemini` | `--sandbox` (optional) | `--yolo` for auto-approve |
-| Codex | `codex` | `--full-auto` (built-in) | OS-level sandbox by default |
+| Claude | `claude` | `--allowedTools` + workspace cwd | Session resume via `--resume`, persisted in DB |
+| Gemini | `gemini` | `--yolo` + workspace cwd | Auto-approve all tool calls, shorter default timeout for faster fallback |
+| Codex | `codex` | `--full-auto` (OS-level, built-in) | Uses `--json` parsing and `--skip-git-repo-check` by default |
+
+## Sandbox Isolation
+
+When `workspace` is set in `config.yaml`, three layers activate:
+
+| Layer | What it does |
+|-------|-------------|
+| **L0 — Workspace cwd** | Agents run with `cwd=workspace` — CLI sandboxes (Codex `--full-auto`, Gemini cwd-write) are scoped to workspace, not the dev repo |
+| **L1 — Env sanitization** | Only `PATH`, `HOME`, `LANG` etc. pass through; secrets require explicit `env_passthrough` per agent |
+| **L2 — CLI-native sandbox** | Codex `--full-auto` (network blocked), Gemini `--yolo`, Claude `--allowedTools` |
+
+Without `workspace`, the bot falls back to inheriting the full environment and running in the process cwd (backward-compatible).
+
+## Skills
+
+Skills are Markdown-described tools in `skills/{name}/SKILL.md` that CLI agents auto-discover. `SkillSync` runs bidirectional sync on startup:
+
+- **Forward**: symlinks `skills/` → `.claude/skills/` and `.gemini/skills/` (dev mode)
+- **Reverse**: copies agent-created skills back to `skills/` (canonical source)
+- **Workspace**: copies skills into `workspace/.claude/skills/` and `workspace/.gemini/skills/` when workspace is configured
+
+To add a skill: create `skills/{name}/SKILL.md`. It will be picked up on the next startup.
 
 ## Development
 

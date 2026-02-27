@@ -101,6 +101,24 @@ class MemoryStore(ABC):
     async def close(self) -> None:
         ...
 
+    # -- session persistence (optional, concrete no-op defaults) -----------
+
+    async def save_session(
+        self, platform: str, channel_id: str, thread_id: str, agent: str, session_id: str
+    ) -> None:
+        """Persist an agent CLI session ID so it can be resumed after restart."""
+
+    async def load_session(
+        self, platform: str, channel_id: str, thread_id: str, agent: str
+    ) -> str | None:
+        """Load a persisted agent session ID. Returns None if not found."""
+        return None
+
+    async def delete_session(
+        self, platform: str, channel_id: str, thread_id: str, agent: str
+    ) -> None:
+        """Remove a persisted session (e.g. after a failed resume)."""
+
 
 # --------------------------------------------------------------------------- #
 #  SQLite implementation                                                        #
@@ -146,6 +164,16 @@ CREATE TABLE IF NOT EXISTS summaries (
     turns_start INTEGER NOT NULL,
     turns_end   INTEGER NOT NULL,
     created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS agent_sessions (
+    platform    TEXT NOT NULL,
+    channel_id  TEXT NOT NULL,
+    thread_id   TEXT NOT NULL,
+    agent       TEXT NOT NULL,
+    session_id  TEXT NOT NULL,
+    updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (platform, channel_id, thread_id, agent)
 );
 """
 
@@ -314,6 +342,45 @@ class SQLiteMemoryStore(MemoryStore):
         await db.execute(
             "DELETE FROM summaries WHERE platform=? AND channel_id=? AND thread_id=?",
             (platform, channel_id, thread_id),
+        )
+        await db.execute(
+            "DELETE FROM agent_sessions WHERE platform=? AND channel_id=? AND thread_id=?",
+            (platform, channel_id, thread_id),
+        )
+        await db.commit()
+
+    async def save_session(
+        self, platform: str, channel_id: str, thread_id: str, agent: str, session_id: str
+    ) -> None:
+        db = await self._conn()
+        await db.execute(
+            "INSERT OR REPLACE INTO agent_sessions "
+            "(platform, channel_id, thread_id, agent, session_id, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+            (platform, channel_id, thread_id, agent, session_id),
+        )
+        await db.commit()
+
+    async def load_session(
+        self, platform: str, channel_id: str, thread_id: str, agent: str
+    ) -> str | None:
+        db = await self._conn()
+        cursor = await db.execute(
+            "SELECT session_id FROM agent_sessions "
+            "WHERE platform=? AND channel_id=? AND thread_id=? AND agent=?",
+            (platform, channel_id, thread_id, agent),
+        )
+        row = await cursor.fetchone()
+        return row[0] if row else None
+
+    async def delete_session(
+        self, platform: str, channel_id: str, thread_id: str, agent: str
+    ) -> None:
+        db = await self._conn()
+        await db.execute(
+            "DELETE FROM agent_sessions "
+            "WHERE platform=? AND channel_id=? AND thread_id=? AND agent=?",
+            (platform, channel_id, thread_id, agent),
         )
         await db.commit()
 

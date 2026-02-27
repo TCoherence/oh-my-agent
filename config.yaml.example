@@ -8,6 +8,12 @@ skills:
   enabled: true
   path: skills/
 
+# Optional: workspace directory for agent sandbox isolation (Layer 0).
+# When set, all CLI agents run with cwd=workspace instead of the dev repo.
+# AGENT.md and skills are copied into the workspace on startup.
+# Environment variables are also sanitized (whitelist mode) when this is set.
+# workspace: ~/oh-my-agent-workspace
+
 gateway:
   channels:
     - platform: discord
@@ -27,18 +33,25 @@ agents:
     cli_path: claude             # PATH 里的可执行文件名，或绝对路径
     max_turns: 25
     model: sonnet
+    timeout: 300                 # 秒，超时后 fallback 下一个 agent
     allowed_tools: [Bash, Read, Write, Edit, Glob, Grep]
+    # env_passthrough: [ANTHROPIC_API_KEY]  # env vars forwarded when workspace is set
 
   gemini:
     type: cli
     cli_path: gemini
     max_turns: 10
     model: gemini-3.0-flash
+    timeout: 120                 # 默认比其他 agent 短，避免长时间卡住 fallback
+    # env_passthrough: []
 
   codex:
     type: cli
     cli_path: codex
     model: gpt-5.3-codex
+    timeout: 300
+    skip_git_repo_check: true    # 非 trusted git 目录时可继续运行
+    # env_passthrough: [OPENAI_API_KEY]
 
   # ----- API agents (deprecated since v0.4.0, use CLI agents instead) -----
   # anthropic_api:

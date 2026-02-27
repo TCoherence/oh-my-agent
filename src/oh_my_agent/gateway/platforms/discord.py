@@ -58,14 +58,31 @@ class DiscordChannel(BaseChannel):
         # ---- Slash commands ------------------------------------------------
 
         @tree.command(name="ask", description="Ask the AI agent a question (creates a new thread)")
-        @app_commands.describe(question="Your question for the AI agent")
-        async def slash_ask(interaction: discord.Interaction, question: str):
+        @app_commands.describe(
+            question="Your question for the AI agent",
+            agent="Agent to use (e.g. claude, gemini, codex). Defaults to fallback order.",
+        )
+        async def slash_ask(
+            interaction: discord.Interaction,
+            question: str,
+            agent: str | None = None,
+        ):
             if interaction.channel_id != target_id:
                 await interaction.response.send_message(
                     "This command only works in the configured channel.",
                     ephemeral=True,
                 )
                 return
+
+            # Validate agent name early so the user gets immediate feedback
+            if agent and self._registry:
+                if self._registry.get_agent(agent) is None:
+                    names = [a.name for a in self._registry.agents]
+                    await interaction.response.send_message(
+                        f"Unknown agent `{agent}`. Available: {', '.join(f'`{n}`' for n in names)}",
+                        ephemeral=True,
+                    )
+                    return
 
             await interaction.response.send_message(question)
             response_msg = await interaction.original_response()
@@ -77,6 +94,7 @@ class DiscordChannel(BaseChannel):
                 author=str(interaction.user.display_name),
                 content=question,
                 raw=response_msg,
+                preferred_agent=agent,
             )
             await _handler(msg)
 
@@ -94,6 +112,39 @@ class DiscordChannel(BaseChannel):
                 await self._session.clear_history(str(ch.id))
 
             await interaction.response.send_message("History cleared for this thread.")
+
+        @tree.command(name="history", description="Show conversation history for this thread (for debugging)")
+        async def slash_history(interaction: discord.Interaction):
+            ch = interaction.channel
+            if not isinstance(ch, discord.Thread) or ch.parent_id != target_id:
+                await interaction.response.send_message(
+                    "Use this command inside a conversation thread.",
+                    ephemeral=True,
+                )
+                return
+
+            if not self._session:
+                await interaction.response.send_message("No session available.", ephemeral=True)
+                return
+
+            history = await self._session.get_history(str(ch.id))
+            if not history:
+                await interaction.response.send_message(
+                    "No history for this thread yet.", ephemeral=True
+                )
+                return
+
+            lines = [f"**Thread history** — {len(history)} turns:"]
+            for i, turn in enumerate(history, 1):
+                role = turn.get("role", "?")
+                label = turn.get("author") or turn.get("agent") or role
+                content = turn.get("content", "")
+                preview = content[:120] + ("…" if len(content) > 120 else "")
+                lines.append(f"`{i}` **{label}** [{role}]: {preview}")
+
+            await interaction.response.send_message(
+                "\n".join(lines)[:2000], ephemeral=True
+            )
 
         @tree.command(name="agent", description="Show available agents and their status")
         async def slash_agent(interaction: discord.Interaction):
@@ -155,6 +206,16 @@ class DiscordChannel(BaseChannel):
                 return
 
             ch = message.channel
+            content = message.content.strip()
+
+            # Detect "@agentname" prefix for per-message agent selection.
+            # e.g. "@gemini does this look right?" routes only to gemini.
+            preferred_agent: str | None = None
+            if content.startswith("@") and self._registry:
+                first, _, rest = content[1:].partition(" ")
+                if first and self._registry.get_agent(first):
+                    preferred_agent = first
+                    content = rest.strip()
 
             # Message in a thread whose parent is our target channel
             if isinstance(ch, discord.Thread) and ch.parent_id == target_id:
@@ -163,8 +224,9 @@ class DiscordChannel(BaseChannel):
                     channel_id=self._channel_id,
                     thread_id=str(ch.id),
                     author=str(message.author.display_name),
-                    content=message.content.strip(),
+                    content=content,
                     raw=message,
+                    preferred_agent=preferred_agent,
                 )
             # Message directly in our target channel → needs new thread
             elif ch.id == target_id:
@@ -173,8 +235,9 @@ class DiscordChannel(BaseChannel):
                     channel_id=self._channel_id,
                     thread_id=None,
                     author=str(message.author.display_name),
-                    content=message.content.strip(),
+                    content=content,
                     raw=message,
+                    preferred_agent=preferred_agent,
                 )
             else:
                 return

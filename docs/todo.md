@@ -16,30 +16,33 @@ graph TD
     SKILL["✅ Skill System (SkillSync)"]
     FALLBACK["✅ Agent Registry Fallback"]
 
-    %% ── v0.4.0 ─────────────────────────────────────
-    DEPRECATE["Deprecate API Agents"]
-    CODEX["Add Codex CLI Agent"]
-    WORKSPACE["Workspace Directory Isolation"]
-    ENVSANITIZE["Env Variable Sanitization"]
-    SKILLCOPY["Skill Copy to Workspace"]
-    WRITE["Add Write to Claude Tools"]
-    REVERSE["SkillSync Reverse Sync"]
+    %% ── v0.4.0 (Done) ──────────────────────────────
+    DEPRECATE["✅ Deprecate API Agents"]
+    CODEX["✅ Add Codex CLI Agent"]
+    WORKSPACE["✅ Workspace Directory Isolation"]
+    ENVSANITIZE["✅ Env Variable Sanitization"]
+    SKILLCOPY["✅ Skill Copy to Workspace"]
+    WRITE["✅ Add Write to Claude Tools"]
+    REVERSE["✅ SkillSync Reverse Sync"]
+    SLASH["✅ Slash Commands"]
+    DIRECTMENTION["✅ Direct Agent Selection (@mention + /ask agent)"]
+    README["✅ Update README"]
+    RESUME["✅ CLI Session Resume"]
+    MEMIO["✅ Memory Export/Import"]
+
+    %% ── v0.4.0 (Deferred) ──────────────────────────
     STREAM["Streaming Responses"]
-    SLASH["Slash Commands"]
-    README["Update README"]
 
     %% ── v0.5.0 ─────────────────────────────────────
     SKILLCREATE["Agent-Driven Skill Creation"]
     SKILLTEST["Skill Testing / Validation"]
     SKILLPERM["Skill Permission Manifest"]
-    RESUME["CLI Session Resume"]
     XMEM["Cross-Session Memory Search"]
-    MEMIO["Memory Export/Import"]
 
     %% ── v0.6.0 ─────────────────────────────────────
     ROUTING["Smart Agent Routing"]
     COLLAB["Agent Collaboration"]
-    MENTION["Agent Selection @mention"]
+    MENTION["Intent-Based Agent Selection"]
 
     %% ── Backlog ─────────────────────────────────────
     DOCKER["Docker-Based Isolation"]
@@ -71,7 +74,6 @@ graph TD
     FALLBACK --> ROUTING
     ROUTING --> COLLAB
     ROUTING --> MENTION
-    SLASH -->|"/agent command"| MENTION
 
     %% Backlog
     WORKSPACE --> DOCKER
@@ -85,9 +87,9 @@ graph TD
     classDef v06 fill:#7b2cbf,stroke:#9d4edd,color:#fff
     classDef backlog fill:#495057,stroke:#6c757d,color:#fff
 
-    class MEM,COMP,SKILL,FALLBACK done
-    class DEPRECATE,CODEX,WORKSPACE,ENVSANITIZE,SKILLCOPY,WRITE,REVERSE,STREAM,SLASH,README v04
-    class SKILLCREATE,SKILLTEST,SKILLPERM,RESUME,XMEM,MEMIO v05
+    class MEM,COMP,SKILL,FALLBACK,DEPRECATE,CODEX,WORKSPACE,ENVSANITIZE,SKILLCOPY,WRITE,REVERSE,SLASH,DIRECTMENTION,README,RESUME,MEMIO done
+    class STREAM v04
+    class SKILLCREATE,SKILLTEST,SKILLPERM,XMEM v05
     class ROUTING,COLLAB,MENTION v06
     class DOCKER,RATELIMIT backlog
 ```
@@ -105,6 +107,7 @@ graph TD
 | **SkillSync reverse sync**        | ✅ Skill System (v0.3)                                                    | —                                   |
 | **Streaming responses**           | None (independent)                                                       | —                                   |
 | **Slash commands**                | None (independent, but `/search` only useful after cross-session memory) | Cross-session memory                |
+| **Direct agent selection**        | ✅ Slash commands (`/ask agent`), ✅ Agent registry                       | —                                   |
 | **Update README**                 | Deprecate API agents, Add Codex (wait for arch to settle)                | —                                   |
 | **Agent-driven skill creation**   | ⬅ SkillSync reverse sync, ⬅ Add `Write` to Claude tools                  | Skill testing                       |
 | **Skill testing / validation**    | ⬅ Agent-driven skill creation                                            | —                                   |
@@ -114,7 +117,7 @@ graph TD
 | **Memory export/import**          | ✅ Memory (v0.3)                                                          | —                                   |
 | **Smart agent routing**           | ✅ Agent Registry (v0.3), ⬅ Add Codex (need ≥3 agents)                    | —                                   |
 | **Agent collaboration**           | ⬅ Smart agent routing                                                    | —                                   |
-| **Agent selection @mention**      | ⬅ Smart agent routing, ⬅ Slash commands (`/agent`)                       | —                                   |
+| **Intent-based agent selection**  | ⬅ Smart agent routing                                                     | —                                   |
 | **Docker-based isolation**        | ⬅ Workspace isolation, ⬅ Env sanitization (understand app-level first)   | —                                   |
 | **Rate limiting**                 | ⬅ Add Codex (multi-agent concurrency increases load)                     | —                                   |
 
@@ -122,49 +125,32 @@ graph TD
 
 ```
 Path 1 (Self-Evolution):
-  Skill System (✅) → SkillSync Reverse Sync → Agent-Driven Skill Creation → Skill Testing
-                       Write Tool (config) ───↗
+  ✅ Skill System → ✅ SkillSync Reverse Sync → Agent-Driven Skill Creation → Skill Testing
+                    ✅ Write Tool ────────────↗
 
 Path 2 (Multi-Agent Intelligence):
-  Codex CLI Agent ──→ Smart Agent Routing → Agent Collaboration
-  Agent Registry (✅) ↗                   → Agent Selection @mention
-                                             ↑
-  Slash Commands (/agent) ──────────────────↗
+  ✅ Codex CLI Agent ──→ Smart Agent Routing → Agent Collaboration
+  ✅ Agent Registry ──↗                      → Intent-Based Agent Selection
 
 Path 3 (Memory Evolution):
-  Memory (✅) → Cross-Session Memory Search ← Slash Commands (/search)
-             → Memory Export/Import
+  ✅ Memory → Cross-Session Memory Search ← ✅ Slash Commands (/search)
 ```
 
-### Parallelizable Work (No Dependencies)
+### Unblocked Work (v0.5.0)
 
-These features can be worked on **immediately and in parallel** — no blockers:
+All v0.5.0 features are now unblocked:
 
-1. Deprecate API agents
-2. Add Codex CLI agent
-3. Add `Write` to Claude allowed_tools (config change)
-4. Streaming responses
-5. Slash commands
-6. CLI session resume
-7. Memory export/import
+1. **Agent-driven skill creation** (deps: ✅ reverse sync, ✅ Write tool)
+2. **Cross-session memory search** (deps: ✅ Memory, ✅ `/search` command)
 
 ---
 
-## v0.4.0 — CLI-First Cleanup + Skill Sync
+## v0.4.0 — CLI-First Cleanup + Skill Sync ✅
 
-- [x] **Deprecate API agent layer** — `agents/api/` marked deprecated with warnings. Removed from `config.yaml.example`.
-- [x] **Add `Write` to Claude allowed_tools** — config updated to `[Bash, Read, Write, Edit, Glob, Grep]`.
-- [x] **Add Codex CLI agent** — `agents/cli/codex.py` using `codex exec --full-auto`.
-- [ ] **Sandbox isolation** — layered defense model. See [future_planning_discussion.md](future_planning_discussion.md#-sandbox-隔离策略讨论2025-02-26-补充) for full analysis.
-  - [ ] **Workspace directory isolation** — config `workspace` field, `BaseCLIAgent` sets `cwd` to dedicated workspace. Agent files (`AGENT.md`, skills) copied into workspace.
-  - [ ] **Environment variable sanitization** — `_build_env()` whitelist mode. Only `PATH`/`HOME`/`LANG` etc. passed by default; agent-specific keys via `env_passthrough` config.
-  - [ ] **Skill copy to workspace** — `SkillSync` copies skills into workspace dir (not symlink to dev repo) in production mode.
-- [x] **SkillSync reverse sync** — `SkillSync.reverse_sync()` detects new skills in CLI dirs, copies back to `skills/`. `full_sync()` runs both directions on startup.
-- [ ] **Streaming responses** — deferred; planned as status monitor in a future release.
-- [x] **Slash commands** — `/ask`, `/reset`, `/agent`, `/search` via `discord.app_commands`.
-- [x] **CLI session resume** — `ClaudeAgent` tracks session IDs per thread, uses `--resume` for subsequent messages.
-- [x] **Memory export/import** — `MemoryStore.export_data()` / `import_data()` for JSON backup/restore.
-- [x] **Update README.md** — rewritten for v0.4.0 CLI-first architecture.
+All v0.4.0 items complete. See **Done (v0.4.0)** section below for the full list.
+
+Deferred to backlog:
+- [ ] **Streaming responses** — planned as a status-monitor feature in a future release.
 
 ## v0.5.0 — Self-Evolution
 
@@ -177,7 +163,7 @@ These features can be worked on **immediately and in parallel** — no blockers:
 
 - [ ] **Smart agent routing** — route by task type instead of simple fallback. *(⬅ depends on: ✅ Agent Registry v0.3, Add Codex — need ≥3 agents for routing to matter)*
 - [ ] **Agent collaboration** — multi-agent workflows (write + review). *(⬅ depends on: Smart agent routing)*
-- [ ] **Agent selection via @mention** — `@claude fix this`. *(⬅ depends on: Smart agent routing, Slash commands `/agent`)*
+- [ ] **Intent-based agent selection** — automatically choose/override agent by query type (beyond explicit `@agent`). *(⬅ depends on: Smart agent routing)*
 - [ ] **Telegram adapter** — `gateway/platforms/telegram.py`. *(independent from agent features)*
 - [ ] **Feishu/Lark adapter** — `gateway/platforms/feishu.py`. *(independent from agent features)*
 
@@ -196,6 +182,22 @@ These features can be worked on **immediately and in parallel** — no blockers:
 - [ ] **Linting / formatting** — add `ruff` to dev deps. *(independent)*
 - [ ] **Type checking** — add `mypy` or `pyright`. *(independent)*
 - [ ] **GitHub Actions CI** — `pytest` on push/PR. *(⬅ soft dependency: Linting/formatting — nice to lint in CI too)*
+
+## Done (v0.4.0)
+
+- [x] **Deprecate API agent layer** — `agents/api/` marked deprecated with warnings. Removed from `config.yaml.example`.
+- [x] **Add `Write` to Claude allowed_tools** — config updated to `[Bash, Read, Write, Edit, Glob, Grep]`.
+- [x] **Add Codex CLI agent** — `agents/cli/codex.py` using `codex exec --full-auto`.
+- [x] **Sandbox isolation** — three-layer model (workspace cwd + env sanitization + CLI-native sandbox).
+  - [x] **Workspace directory isolation** — top-level `workspace` config; `_setup_workspace()` creates dir, copies `AGENT.md` and skills; `BaseCLIAgent` sets `cwd=workspace`.
+  - [x] **Environment variable sanitization** — `_build_env()` whitelist via `_SAFE_ENV_KEYS`; per-agent `env_passthrough` for explicit key forwarding.
+  - [x] **Skill copy to workspace** — `_setup_workspace()` copies skills into `workspace/.claude/skills/` and `workspace/.gemini/skills/`.
+- [x] **SkillSync reverse sync** — `reverse_sync()` imports agent-created skills back to `skills/`; `full_sync()` runs both directions on startup.
+- [x] **Slash commands** — `/ask`, `/reset`, `/agent`, `/search` via `discord.app_commands`.
+- [x] **Direct agent selection** — thread-level `@claude/@gemini/@codex` and `/ask` optional `agent` override.
+- [x] **CLI session resume** — `ClaudeAgent` tracks session IDs per thread, uses `--resume` for subsequent messages.
+- [x] **Memory export/import** — `MemoryStore.export_data()` / `import_data()` for JSON backup/restore.
+- [x] **Update README.md** — rewritten for v0.4.0 CLI-first architecture with sandbox docs.
 
 ## Done (v0.3.0)
 

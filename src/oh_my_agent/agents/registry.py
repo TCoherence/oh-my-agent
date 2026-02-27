@@ -19,19 +19,41 @@ class AgentRegistry:
     def agents(self) -> list[BaseAgent]:
         return list(self._agents)
 
+    def get_agent(self, name: str) -> BaseAgent | None:
+        """Return the agent with the given name, or None if not found."""
+        return next((a for a in self._agents if a.name == name), None)
+
     async def run(
         self,
         prompt: str,
         history: list[dict] | None = None,
         *,
         thread_id: str | None = None,
+        force_agent: str | None = None,
     ) -> tuple[BaseAgent, AgentResponse]:
         """Try each agent in order. Return the first successful (agent, response) pair.
 
         If all agents fail, returns the last agent and its error response.
 
         *thread_id* is forwarded to agents that accept it (e.g. for session resume).
+        *force_agent* bypasses fallback and runs only the named agent.
         """
+        if force_agent is not None:
+            agent = self.get_agent(force_agent)
+            if agent is None:
+                names = [a.name for a in self._agents]
+                return self._agents[0], AgentResponse(
+                    text="",
+                    error=f"Agent '{force_agent}' not found. Available: {names}",
+                )
+            import inspect
+            sig = inspect.signature(agent.run)
+            if "thread_id" in sig.parameters:
+                response = await agent.run(prompt, history, thread_id=thread_id)
+            else:
+                response = await agent.run(prompt, history)
+            return agent, response
+
         last_agent = self._agents[-1]
         last_response = AgentResponse(text="", error="No agents available")
 

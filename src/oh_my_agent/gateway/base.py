@@ -17,6 +17,8 @@ class IncomingMessage:
     author: str             # Display name of the sender
     content: str            # Message text
     raw: Any = field(default=None, repr=False)  # Original platform object
+    # When set, bypass fallback and run only this named agent
+    preferred_agent: str | None = None
 
 
 MessageHandler = Callable[[IncomingMessage], Awaitable[None]]

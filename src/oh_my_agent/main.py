@@ -3,37 +3,100 @@ from __future__ import annotations
 import asyncio
 import logging
 import logging.handlers
+import shutil
 import sys
 from pathlib import Path
 
 
-def _build_agent(name: str, cfg: dict):
+def _setup_workspace(workspace_path: str, project_root: Path, skills_path: Path | None = None) -> Path:
+    """Create and populate the agent workspace directory.
+
+    Copies ``AGENT.md`` (resolved through symlinks) so CLI agents have project
+    context without access to the full dev repo.  Also copies skills into
+    ``.claude/skills/`` and ``.gemini/skills/`` under the workspace so that
+    CLI-native skill discovery works from the new cwd.
+
+    Args:
+        workspace_path: Path string from config (may contain ``~``).
+        project_root: The application's working directory (where config.yaml lives).
+        skills_path: Canonical skills directory to copy into workspace.
+
+    Returns:
+        Resolved absolute ``Path`` to the workspace.
+    """
+    ws = Path(workspace_path).expanduser().resolve()
+    ws.mkdir(parents=True, exist_ok=True)
+
+    # Copy AGENT.md / CLAUDE.md / GEMINI.md so agents have project context.
+    for filename in ("AGENT.md", "CLAUDE.md", "GEMINI.md"):
+        src = project_root / filename
+        if not src.exists():
+            continue
+        # Resolve symlinks so we copy the actual content, not a dangling link.
+        resolved = src.resolve() if src.is_symlink() else src
+        if resolved.exists():
+            shutil.copy2(resolved, ws / filename)
+
+    # Copy skills into workspace CLI directories (not symlinks — real copies).
+    if skills_path and skills_path.is_dir():
+        for cli_skills_dir in (ws / ".claude" / "skills", ws / ".gemini" / "skills"):
+            cli_skills_dir.mkdir(parents=True, exist_ok=True)
+            for skill_dir in skills_path.iterdir():
+                if not skill_dir.is_dir():
+                    continue
+                resolved_skill = skill_dir.resolve() if skill_dir.is_symlink() else skill_dir
+                if not (resolved_skill / "SKILL.md").exists():
+                    continue
+                dest = cli_skills_dir / skill_dir.name
+                if dest.exists():
+                    shutil.rmtree(dest)
+                shutil.copytree(resolved_skill, dest)
+
+    return ws
+
+
+def _build_agent(name: str, cfg: dict, workspace: Path | None = None):
     """Instantiate an agent from its config dict."""
     agent_type = cfg.get("type", "cli")
+
+    passthrough_env: list[str] | None = cfg.get("env_passthrough")
 
     if agent_type == "cli":
         provider = cfg.get("provider", name)
         if provider == "gemini":
             from oh_my_agent.agents.cli.gemini import GeminiCLIAgent
+            timeout = int(cfg.get("timeout", 120))
             return GeminiCLIAgent(
                 cli_path=cfg.get("cli_path", "gemini"),
                 model=cfg.get("model", "gemini-3-flash-preview"),
+                timeout=timeout,
+                workspace=workspace,
+                passthrough_env=passthrough_env,
             )
         elif provider == "codex":
             from oh_my_agent.agents.cli.codex import CodexCLIAgent
+            timeout = int(cfg.get("timeout", 300))
             return CodexCLIAgent(
                 cli_path=cfg.get("cli_path", "codex"),
                 model=cfg.get("model", "o4-mini"),
+                skip_git_repo_check=bool(cfg.get("skip_git_repo_check", True)),
+                timeout=timeout,
+                workspace=workspace,
+                passthrough_env=passthrough_env,
             )
         else:
             # Default to claude for any unknown CLI type
             from oh_my_agent.agents.cli.claude import ClaudeAgent
+            timeout = int(cfg.get("timeout", 300))
             tools = cfg.get("allowed_tools", ["Bash", "Read", "Write", "Edit", "Glob", "Grep"])
             return ClaudeAgent(
                 cli_path=cfg.get("cli_path", "claude"),
                 max_turns=int(cfg.get("max_turns", 25)),
                 allowed_tools=tools,
                 model=cfg.get("model", "sonnet"),
+                timeout=timeout,
+                workspace=workspace,
+                passthrough_env=passthrough_env,
             )
 
     if agent_type == "api":
@@ -106,12 +169,21 @@ def _setup_logging() -> None:
 async def _async_main(config: dict, logger: logging.Logger) -> None:
     """Async entry point — builds agents, memory, and starts gateway."""
 
+    # Setup workspace (optional — Layer 0 sandbox isolation)
+    project_root = Path.cwd()
+    workspace: Path | None = None
+    if "workspace" in config:
+        skills_cfg_for_ws = config.get("skills", {})
+        skills_path_for_ws = Path(skills_cfg_for_ws.get("path", "skills/")).resolve() if skills_cfg_for_ws.get("enabled") else None
+        workspace = _setup_workspace(config["workspace"], project_root, skills_path_for_ws)
+        logger.info("Workspace: %s", workspace)
+
     # Build agent registry map
     agents_cfg: dict = config.get("agents", {})
     agent_instances: dict = {}
     for agent_name, agent_cfg in agents_cfg.items():
         try:
-            agent_instances[agent_name] = _build_agent(agent_name, agent_cfg)
+            agent_instances[agent_name] = _build_agent(agent_name, agent_cfg, workspace=workspace)
             logger.info("Loaded agent '%s' (%s)", agent_name, agent_cfg.get("type"))
         except Exception as exc:
             logger.error("Failed to build agent '%s': %s", agent_name, exc)

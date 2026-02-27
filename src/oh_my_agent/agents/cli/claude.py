@@ -3,9 +3,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from pathlib import Path
 
 from oh_my_agent.agents.base import AgentResponse
-from oh_my_agent.agents.cli.base import BaseCLIAgent, _build_prompt_with_history
+from oh_my_agent.agents.cli.base import BaseCLIAgent, _build_prompt_with_history, _extract_cli_error
 
 logger = logging.getLogger(__name__)
 
@@ -27,8 +28,10 @@ class ClaudeAgent(BaseCLIAgent):
         allowed_tools: list[str] | None = None,
         model: str = "sonnet",
         timeout: int = 300,
+        workspace: Path | None = None,
+        passthrough_env: list[str] | None = None,
     ) -> None:
-        super().__init__(cli_path=cli_path, timeout=timeout)
+        super().__init__(cli_path=cli_path, timeout=timeout, workspace=workspace, passthrough_env=passthrough_env)
         self._max_turns = max_turns
         self._allowed_tools = allowed_tools or []
         self._model = model
@@ -108,6 +111,7 @@ class ClaudeAgent(BaseCLIAgent):
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
+                cwd=self._cwd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=self._build_env(),
@@ -126,7 +130,7 @@ class ClaudeAgent(BaseCLIAgent):
             )
 
         if proc.returncode != 0:
-            err_msg = stderr.decode(errors="replace").strip()
+            err_msg = _extract_cli_error(stderr, stdout)
             logger.error("%s CLI failed (rc=%d): %s", self.name, proc.returncode, err_msg)
             # If resume fails, clear the session so next attempt starts fresh
             if session_id and thread_id:
@@ -138,7 +142,7 @@ class ClaudeAgent(BaseCLIAgent):
 
         raw = stdout.decode(errors="replace").strip()
 
-        # Try to parse JSON output to extract session_id
+        # Parse JSON output to extract result, session_id, and usage
         try:
             data = json.loads(raw)
             text = data.get("result", raw)
@@ -146,6 +150,16 @@ class ClaudeAgent(BaseCLIAgent):
             if new_session_id and thread_id:
                 self._session_ids[thread_id] = new_session_id
                 logger.info("Stored session %s for thread %s", new_session_id[:12], thread_id)
-            return AgentResponse(text=text, raw=data)
+
+            # Collect usage info: token counts + optional cost.
+            # Claude CLI outputs "total_cost_usd" (not "cost_usd").
+            usage: dict | None = None
+            cost = data.get("total_cost_usd") or data.get("cost_usd")
+            if "usage" in data or cost is not None:
+                usage = {**data.get("usage", {})}
+                if cost is not None:
+                    usage["cost_usd"] = cost
+
+            return AgentResponse(text=text, raw=data, usage=usage)
         except (json.JSONDecodeError, TypeError):
             return AgentResponse(text=raw)

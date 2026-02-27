@@ -8,6 +8,35 @@
 
 ---
 
+## v0.4.1 — Reliability + Routing UX
+
+### What Changed
+
+1. **Thread-level agent targeting (`@mention`)** — Discord thread messages now support `@claude`, `@gemini`, and `@codex` prefix to force a specific agent for that turn. The prefix is removed before prompt dispatch.
+2. **`/ask` agent override** — slash command now accepts optional `agent` parameter, with early validation against registry names.
+3. **Session ID persistence in DB** — added `agent_sessions` table keyed by `(platform, channel_id, thread_id, agent)`. Successful runs upsert `session_id`; failed resume clears both in-memory and persisted session entries.
+4. **Resume across restarts** — `GatewayManager` now loads persisted session IDs before agent execution so `ClaudeAgent` can continue with `--resume` after process restart.
+5. **Codex compatibility hardening**:
+   - Added `--skip-git-repo-check` by default to avoid trusted-dir failures in isolated workspaces.
+   - Parses modern Codex JSONL event shapes (`item.completed` with `agent_message`) and filters out reasoning-only events.
+6. **CLI error observability** — non-zero exits now extract error text from `stderr` first, then fall back to `stdout` (including JSON `result/error/message` fields), preventing empty `exited 1:` messages.
+7. **Timeouts are configurable per agent** — `timeout` is now read from config for all CLI agents (Gemini defaults shorter for quicker fallback).
+
+### Config Additions
+
+```yaml
+agents:
+  claude:
+    timeout: 300
+  gemini:
+    timeout: 120
+  codex:
+    timeout: 300
+    skip_git_repo_check: true
+```
+
+---
+
 ## v0.4.0 — CLI-First Cleanup + Skill Sync
 
 ### What Changed
@@ -16,7 +45,7 @@
 2. **Added `Write` to Claude allowed_tools** — config default now `[Bash, Read, Write, Edit, Glob, Grep]`.
 3. **Added Codex CLI agent** — `agents/cli/codex.py` using `codex exec --full-auto` (auto-approve + OS-level sandbox).
 4. **SkillSync reverse sync** — `SkillSync.reverse_sync()` detects non-symlink skill directories in `.gemini/skills/` and `.claude/skills/`, copies them back to `skills/`. `full_sync()` runs reverse then forward on startup.
-5. **Slash commands** — `/ask`, `/reset`, `/agent`, `/search` via `discord.app_commands.CommandTree`. Synced on bot startup.
+5. **Slash commands** — `/ask`, `/reset`, `/history`, `/agent`, `/search` via `discord.app_commands.CommandTree`. Synced on bot startup.
 6. **CLI session resume** — `ClaudeAgent` tracks session IDs per thread. Uses `--resume <session_id>` + `--output-format json` to continue sessions without re-flattening history. Falls back to fresh session if resume fails.
 7. **Memory export/import** — `MemoryStore.export_data()` returns all turns + summaries as JSON. `import_data()` restores from backup.
 8. **Updated README** — rewritten for CLI-first architecture with agent comparison table.
@@ -78,19 +107,20 @@ OpenAI Codex CLI (`codex`) is a local coding agent similar to Claude CLI and Gem
 - **Shortcut**: `--full-auto` = `--ask-for-approval on-request` + `--sandbox workspace-write` — the ideal mode for oh-my-agent
 - **Quiet mode**: `-q` suppresses interactive prompts, good for subprocess
 
-Proposed implementation for `agents/cli/codex.py`:
+Current implementation for `agents/cli/codex.py`:
 
 ```python
 class CodexCLIAgent(BaseCLIAgent):
     def _build_command(self, prompt: str) -> list[str]:
         cmd = [
             self._cli_path,
-            "exec", prompt,          # non-interactive mode
+            "exec",
             "--full-auto",           # auto-approve + workspace sandbox
-            "-q",                    # suppress prompts for subprocess
+            "--model", self._model,
+            "--json",                # JSONL event stream
+            "--skip-git-repo-check", # avoid trusted-dir failures in workspace mode
+            prompt,
         ]
-        if self._model:
-            cmd.extend(["--model", self._model])
         return cmd
 ```
 
@@ -102,6 +132,36 @@ agents:
     cli_path: codex
     model: gpt-5-codex        # or o4-mini, etc.
 ```
+
+### Sandbox Isolation (v0.4.0, implemented)
+
+Three-layer defense model (Layers 0–2) now in place:
+
+**Layer 0 — Workspace directory isolation** (`config.yaml` + `main.py` + `BaseCLIAgent`)
+
+Add `workspace: ~/oh-my-agent-workspace` to `config.yaml`. On startup, `_setup_workspace()` in `main.py`:
+1. Creates the directory.
+2. Copies `AGENT.md` / `CLAUDE.md` / `GEMINI.md` (resolving symlinks) so agents have project context.
+3. Copies skills from `skills/` into `workspace/.claude/skills/` and `workspace/.gemini/skills/` (real files, not symlinks).
+
+`BaseCLIAgent` gains a `workspace` parameter and a `_cwd` property. All subprocesses run with `cwd=workspace`, which scopes every CLI sandbox (Codex `--full-auto`, Gemini `--sandbox`, Claude Seatbelt) to the workspace dir instead of the dev repo.
+
+**Layer 1 — Environment variable sanitization** (`BaseCLIAgent._build_env()`)
+
+When `workspace` is configured, `_build_env()` switches to whitelist mode: only `_SAFE_ENV_KEYS` (`PATH`, `HOME`, `LANG`, etc.) plus per-agent `env_passthrough` keys are forwarded to the subprocess. Secrets (`DISCORD_BOT_TOKEN`, `ANTHROPIC_API_KEY`, etc.) are no longer inherited unless explicitly declared.
+
+```yaml
+agents:
+  claude:
+    env_passthrough: [ANTHROPIC_API_KEY]  # only this key reaches claude CLI
+  codex:
+    env_passthrough: [OPENAI_API_KEY]
+```
+
+**Layer 2 — CLI-native sandbox** (already in place)
+- Codex: `--full-auto` (sandbox + network block)
+- Gemini: `--yolo` (no network block, but file writes scoped to cwd)
+- Claude: `--dangerously-skip-permissions` + `--allowedTools`
 
 ### Discussion: Sandbox / Isolation
 
