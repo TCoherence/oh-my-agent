@@ -1,10 +1,14 @@
-# Development Log
+# Development Log / 开发记录
 
-## Project Overview
+## Project Overview / 项目概览
 
-**Oh My Agent** — a multi-platform bot that uses CLI-based AI agents (Claude, Gemini, etc.) as the execution layer, instead of calling model APIs directly. Inspired by OpenClaw.
+**Oh My Agent** — a multi-platform bot that uses CLI-based AI agents (Claude, Gemini, Codex, etc.) as the execution layer, instead of calling model APIs directly. Inspired by OpenClaw.
+
+**Oh My Agent** 是一个多平台 bot，执行层直接使用 CLI Agent（Claude、Gemini、Codex 等），而不是直接调用模型 API。灵感来自 OpenClaw。
 
 > **Architecture direction (v0.4+):** CLI-first. API agents (`agents/api/`) are deprecated — CLI agents provide a complete agentic loop (tool use, skills, context management) that API SDK calls cannot match without significant reimplementation. See [future_planning_discussion.md](future_planning_discussion.md) for full rationale.
+
+> **架构方向（v0.4+）**：CLI-first。API agent（`agents/api/`）已经进入弃用路径，因为 CLI agent 自带更完整的 agentic loop（工具调用、skills、上下文管理），如果用 API SDK 复刻，代价会显著更高。完整讨论见 [future_planning_discussion.md](future_planning_discussion.md)。
 
 ---
 
@@ -15,6 +19,44 @@
 3. **v0.5 runtime spec**: `docs/v0.5_runtime_plan.md`
 
 If a historical note conflicts with the runtime spec, follow `docs/v0.5_runtime_plan.md`.
+
+如果历史记录与 runtime 设计文档冲突，以 `docs/v0.5_runtime_plan.md` 为准。
+
+---
+
+## v0.5.3-ish — Runtime Hardening / Runtime 加固（当前基线）
+
+### What Is Implemented Now / 当前已实现
+
+1. **Optional LLM intent routing** — incoming messages can be classified as `reply_once` or `propose_task`, and task-like requests enter a human-confirmed draft flow before execution.
+2. **Short conversation transient workspaces** — `/ask` conversations use per-thread temporary directories with TTL cleanup, persisted in SQLite so cleanup still works after restart.
+3. **Runtime observability baseline**:
+   - `/task_logs` shows recent runtime events and output tails.
+   - full heartbeat remains in process logs.
+   - SQLite stores sampled progress snapshots instead of every heartbeat.
+4. **Discord status message upsert** — runtime progress prefers editing one status message instead of continuously appending new messages.
+
+### 已实现的当前能力
+
+1. **可选 LLM 意图路由** —— 消息可被分类为 `reply_once` 或 `propose_task`，任务类请求会先进入人工确认的 draft 流程。
+2. **短对话临时 workspace** —— `/ask` 会为每个 thread 使用独立临时目录，按 TTL 清理，且元数据写入 SQLite，因此进程重启后清理仍然有效。
+3. **Runtime 可观测性基线**：
+   - `/task_logs` 可查看最近 runtime 事件和输出 tail。
+   - 全量 heartbeat 保留在进程日志里。
+   - SQLite 只持久化采样后的 progress snapshot，而不是每次 heartbeat。
+4. **Discord 状态消息 upsert** —— runtime 会优先更新同一条状态消息，而不是不断新增消息刷屏。
+
+### What Is Still Missing / 仍未完成
+
+1. **True stop/pause/resume** — current `stop` changes task state but does not guarantee immediate interruption of a running agent/test subprocess.
+2. **Message-driven runtime control** — control still primarily relies on slash commands.
+3. **Skill generation as a runtime-native flow** — skill tooling exists, but “learn from samples/docs and generate a reusable skill” is not yet a first-class task kind.
+
+### 仍缺少的关键能力
+
+1. **真正的 stop/pause/resume** —— 当前 `stop` 只会改任务状态，还不能保证立即中断正在跑的 agent/test 子进程。
+2. **消息驱动的 runtime 控制** —— 现在控制入口仍主要依赖 slash command。
+3. **作为 runtime 一等能力的 skill 生成** —— skill 工具链存在，但“基于样本/文档学习并生成可复用 skill”还不是一类一等任务。
 
 ---
 

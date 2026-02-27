@@ -6,6 +6,9 @@
 - ✅ SkillSync reverse sync is already implemented (`full_sync()` on startup).
 - ✅ Core CLI-first foundations are in place (workspace isolation, env sanitization, scheduler, slash commands).
 - 🎯 v0.5 is now **runtime-first**: durable autonomous task loops.
+- ✅ Optional LLM router is implemented (`reply_once` vs `propose_task` with human confirmation).
+- ✅ Runtime observability baseline is implemented (`/task_logs`, sampled progress events, single status message upsert).
+- 🎯 Next hardening priority is runtime control + skill generation workflow.
 
 ---
 
@@ -56,9 +59,12 @@
 ### Remaining v0.5 Hardening
 
 - [ ] **Task resume UX refinement** — richer unblock prompts and partial context replay.
+- [ ] **True runtime interruption** — stop/pause should be able to interrupt the active agent/test subprocess, not only flip task state.
+- [ ] **Message-driven runtime control** — support thread messages like “stop current task”, “resume with this instruction”, not only slash commands.
 - [ ] **Suggestion UX refinement** — regenerate draft/button surface cleanly after suggest.
 - [ ] **Task output summarization** — structured completion summary (changed files, test outcome, next steps).
 - [ ] **Runtime metrics** — per-task latency/step stats in logs.
+- [ ] **Task control state cleanup** — introduce clearer paused/interrupted semantics if stop/resume becomes truly preemptive.
 
 ---
 
@@ -67,6 +73,9 @@
 - [ ] **Smart agent routing** — route by task profile instead of plain fallback.
 - [ ] **Agent collaboration** — write/review and planner/executor pipelines.
 - [ ] **Intent-based agent selection** — auto select model by query/task type.
+- [ ] **Skill-oriented task type** — first-class runtime task for “learn from samples/docs and generate a reusable skill”.
+- [ ] **Skill routing** — detect requests such as “turn this workflow into a skill” and route them into a validated skill-creation flow.
+- [ ] **Skill validation loop** — generated skill should run validation + at least one smoke trigger before merge.
 
 ---
 
@@ -79,6 +88,8 @@
 - [ ] **Rate limiting / request queue**
 - [ ] **Docker-based agent isolation**
 - [ ] **Semantic memory retrieval** (current `/search` is lexical FTS5)
+- [ ] **Cross-agent skill abstraction** — avoid binding core skill behavior to only one CLI vendor’s native mechanism.
+- [ ] **Codex-native skill integration strategy** — decide whether to use platform-level skills, Codex-native skills, or a hybrid.
 
 ---
 
