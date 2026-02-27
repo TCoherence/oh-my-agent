@@ -36,6 +36,7 @@ Each job supports:
 - `prompt` (string)
 - `interval_seconds` (int, must be > 0)
 - `thread_id` (optional string)
+  Omit to post directly in the parent channel.
 - `agent` (optional string)
 - `initial_delay_seconds` (optional int, >= 0)
 - `author` (optional string, defaults to `scheduler`)

@@ -169,7 +169,7 @@ Claude session IDs are persisted per `(platform, channel_id, thread_id, agent)` 
 ### Automations (MVP)
 - Configure recurring jobs in `automations.jobs` (interval-based scheduler)
 - Jobs reuse the same routing stack (`GatewayManager -> AgentRegistry`)
-- Set `thread_id` to post into an existing thread, or omit to create a new thread each run
+- Set `thread_id` to post into an existing thread; omit it to post directly in the parent channel
 - Use `agent` to force a specific model for the job
 
 ## Agents

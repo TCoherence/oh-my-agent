@@ -26,7 +26,7 @@ automations:
     # - name: "daily-standup"
     #   platform: discord
     #   channel_id: "${DISCORD_CHANNEL_ID}"
-    #   thread_id: "1234567890123456789"   # optional: post into an existing thread
+    #   thread_id: "1234567890123456789"   # optional: post into an existing thread (else parent channel)
     #   prompt: "Summarize open TODOs and suggest top 3 coding tasks."
     #   agent: codex                         # optional: force a specific agent
     #   interval_seconds: 86400

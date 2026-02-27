@@ -122,7 +122,9 @@ class GatewayManager:
         msg = IncomingMessage(
             platform=job.platform,
             channel_id=job.channel_id,
-            thread_id=job.thread_id,
+            # Scheduler jobs without explicit thread_id post to the parent
+            # channel by using channel_id as the target "thread".
+            thread_id=job.thread_id or job.channel_id,
             author=job.author,
             content=job.prompt,
             preferred_agent=job.agent,

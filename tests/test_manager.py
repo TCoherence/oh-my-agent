@@ -5,6 +5,7 @@ from oh_my_agent.gateway.base import IncomingMessage
 from oh_my_agent.gateway.session import ChannelSession
 from oh_my_agent.agents.base import AgentResponse
 from oh_my_agent.agents.registry import AgentRegistry
+from oh_my_agent.automation import ScheduledJob
 
 
 def _make_msg(thread_id=None, content="hello", author_id=None, system=False) -> IncomingMessage:
@@ -221,3 +222,38 @@ async def test_owner_gate_allows_system_messages():
 
     registry.run.assert_called_once()
     channel.send.assert_called()
+
+
+@pytest.mark.asyncio
+async def test_scheduler_dispatch_defaults_to_channel_id_when_thread_missing():
+    channel = MagicMock()
+    channel.platform = "discord"
+    channel.channel_id = "100"
+    channel.create_thread = AsyncMock(return_value="t1")
+    channel.send = AsyncMock()
+    channel.typing = MagicMock()
+    channel.typing.return_value.__aenter__ = AsyncMock(return_value=None)
+    channel.typing.return_value.__aexit__ = AsyncMock(return_value=False)
+
+    mock_agent = MagicMock()
+    mock_agent.name = "codex"
+    registry = MagicMock(spec=AgentRegistry)
+    registry.run = AsyncMock(return_value=(mock_agent, AgentResponse(text="done")))
+
+    session = _make_session(channel=channel, registry=registry)
+    gm = GatewayManager([])
+    gm._sessions["discord:100"] = session
+
+    job = ScheduledJob(
+        name="tick",
+        platform="discord",
+        channel_id="100",
+        thread_id=None,
+        prompt="run",
+        interval_seconds=60,
+    )
+    await gm._dispatch_scheduled_job(job)
+
+    channel.create_thread.assert_not_called()
+    call_args = channel.send.call_args[0]
+    assert call_args[0] == "100"
