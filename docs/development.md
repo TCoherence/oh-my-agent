@@ -8,6 +8,51 @@
 
 ---
 
+## Source of Truth / 真相来源
+
+1. **Current execution truth**: `README.md` + `docs/todo.md`
+2. **Design history / rationale archive**: `docs/future_planning_discussion.md`
+3. **v0.5 runtime spec**: `docs/v0.5_runtime_plan.md`
+
+If a historical note conflicts with the runtime spec, follow `docs/v0.5_runtime_plan.md`.
+
+---
+
+## v0.5.0 — Runtime-First Scope Lock / 范围锁定
+
+### Why One-Turn Is Not Enough / 为什么单轮问答不够
+
+The previous model is user-triggered request/response, which cannot sustain uninterrupted long loops like:
+
+`write code -> run tests -> fix -> repeat`.
+
+To reach OpenClaw/OpenHands-like behavior, we need a durable runtime layer with persisted task state and worker execution.
+
+### In Scope
+
+1. Durable task state machine + checkpoints/events in SQLite.
+2. Concurrent workers with per-task git worktree isolation.
+3. Risk-gated task start (`strict` profile): auto-run low risk, draft approval for high risk.
+4. Discord decision surface: **buttons first + slash fallback**.
+5. Reactions are status signals only (not decision actions).
+
+### Out of Scope
+
+1. Automatic PR creation.
+2. Multi-agent collaboration orchestration.
+3. Smart routing / intent-based model selection (v0.6).
+
+### Doc Reconciliation / 文档对齐
+
+This repository now treats the following as already implemented:
+
+- `/search` cross-thread search (FTS5)
+- `SkillSync` reverse sync on startup
+
+These are no longer tracked as pending v0.5 items.
+
+---
+
 ## v0.4.2 — Owner Gate + Scheduler MVP
 
 ### What Changed

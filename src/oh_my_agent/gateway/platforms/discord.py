@@ -8,6 +8,7 @@ import discord
 from discord import app_commands
 
 from oh_my_agent.gateway.base import BaseChannel, IncomingMessage, MessageHandler
+from oh_my_agent.runtime.types import TaskDecisionEvent
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,7 @@ class DiscordChannel(BaseChannel):
         self._memory_store = None  # MemoryStore
         self._skill_syncer = None  # SkillSync
         self._workspace_skills_dirs = None  # list[Path] | None
+        self._runtime_service = None  # RuntimeService
 
     @property
     def platform(self) -> str:
@@ -51,6 +53,13 @@ class DiscordChannel(BaseChannel):
         """Inject skill syncer for the ``/reload-skills`` slash command."""
         self._skill_syncer = syncer
         self._workspace_skills_dirs = workspace_skills_dirs
+
+    def set_runtime_service(self, runtime_service) -> None:
+        """Inject runtime service for /task_* commands and decision buttons."""
+        self._runtime_service = runtime_service
+
+    def supports_buttons(self) -> bool:
+        return True
 
     async def start(self, handler: MessageHandler) -> None:
         _handler = handler
@@ -300,6 +309,248 @@ class DiscordChannel(BaseChannel):
             except Exception as exc:
                 await interaction.followup.send(f"Skill reload failed: {exc}")
 
+        @tree.command(name="task_start", description="Create an autonomous runtime task")
+        @app_commands.describe(
+            goal="Task goal",
+            agent="Preferred agent name (optional)",
+            test_command="Test command to run each step (optional)",
+            max_steps="Max task loop steps (optional)",
+            max_minutes="Max task runtime in minutes (optional)",
+        )
+        async def slash_task_start(
+            interaction: discord.Interaction,
+            goal: str,
+            agent: str | None = None,
+            test_command: str | None = None,
+            max_steps: int | None = None,
+            max_minutes: int | None = None,
+        ):
+            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
+                await interaction.response.send_message(
+                    "This command is restricted to the configured owner.",
+                    ephemeral=True,
+                )
+                return
+            if not self._runtime_service:
+                await interaction.response.send_message(
+                    "Runtime service is not enabled.",
+                    ephemeral=True,
+                )
+                return
+            if not self._session or not self._registry:
+                await interaction.response.send_message(
+                    "Session/registry not ready.",
+                    ephemeral=True,
+                )
+                return
+
+            ch = interaction.channel
+            if isinstance(ch, discord.Thread):
+                if ch.parent_id != target_id:
+                    await interaction.response.send_message(
+                        "Use this command in the configured channel or its threads.",
+                        ephemeral=True,
+                    )
+                    return
+                thread_id = str(ch.id)
+            elif interaction.channel_id == target_id:
+                thread_id = str(interaction.channel_id)
+            else:
+                await interaction.response.send_message(
+                    "Use this command in the configured channel.",
+                    ephemeral=True,
+                )
+                return
+
+            await interaction.response.defer(ephemeral=True)
+            task = await self._runtime_service.create_task(
+                session=self._session,
+                registry=self._registry,
+                thread_id=thread_id,
+                goal=goal,
+                created_by=str(interaction.user.id),
+                preferred_agent=agent,
+                test_command=test_command,
+                max_steps=max_steps,
+                max_minutes=max_minutes,
+                source="slash",
+            )
+            await interaction.followup.send(
+                f"Created task `{task.id}` with status `{task.status}`.",
+                ephemeral=True,
+            )
+
+        @tree.command(name="task_status", description="Show runtime task status")
+        @app_commands.describe(task_id="Task ID")
+        async def slash_task_status(interaction: discord.Interaction, task_id: str):
+            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
+                await interaction.response.send_message(
+                    "This command is restricted to the configured owner.",
+                    ephemeral=True,
+                )
+                return
+            if not self._runtime_service:
+                await interaction.response.send_message(
+                    "Runtime service is not enabled.",
+                    ephemeral=True,
+                )
+                return
+            task = await self._runtime_service.get_task(task_id)
+            if not task:
+                await interaction.response.send_message(f"Task `{task_id}` not found.", ephemeral=True)
+                return
+            lines = [
+                f"**Task** `{task.id}`",
+                f"- Status: `{task.status}`",
+                f"- Goal: {task.goal[:200]}",
+                f"- Step: {task.step_no}/{task.max_steps}",
+                f"- Budget: {task.max_minutes} min",
+                f"- Agent: `{task.preferred_agent or 'fallback'}`",
+            ]
+            if task.blocked_reason:
+                lines.append(f"- Blocked: {task.blocked_reason[:300]}")
+            if task.error:
+                lines.append(f"- Error: {task.error[:300]}")
+            await interaction.response.send_message("\n".join(lines)[:1900], ephemeral=True)
+
+        @tree.command(name="task_list", description="List runtime tasks for this channel")
+        @app_commands.describe(status="Optional status filter", limit="Max rows (default 10)")
+        async def slash_task_list(
+            interaction: discord.Interaction,
+            status: str | None = None,
+            limit: int = 10,
+        ):
+            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
+                await interaction.response.send_message(
+                    "This command is restricted to the configured owner.",
+                    ephemeral=True,
+                )
+                return
+            if not self._runtime_service:
+                await interaction.response.send_message(
+                    "Runtime service is not enabled.",
+                    ephemeral=True,
+                )
+                return
+            tasks = await self._runtime_service.list_tasks(
+                platform=self.platform,
+                channel_id=self._channel_id,
+                status=status,
+                limit=max(1, min(limit, 30)),
+            )
+            if not tasks:
+                await interaction.response.send_message("No runtime tasks found.", ephemeral=True)
+                return
+            lines = [f"**Runtime tasks** ({len(tasks)})"]
+            for t in tasks:
+                lines.append(f"- `{t.id}` [{t.status}] step {t.step_no}/{t.max_steps} · {t.goal[:80]}")
+            await interaction.response.send_message("\n".join(lines)[:1900], ephemeral=True)
+
+        async def _slash_decide(
+            interaction: discord.Interaction,
+            *,
+            action: str,
+            task_id: str,
+            suggestion: str | None = None,
+        ):
+            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
+                await interaction.response.send_message(
+                    "This command is restricted to the configured owner.",
+                    ephemeral=True,
+                )
+                return
+            if not self._runtime_service:
+                await interaction.response.send_message(
+                    "Runtime service is not enabled.",
+                    ephemeral=True,
+                )
+                return
+            event = await self._runtime_service.build_slash_decision_event(
+                platform=self.platform,
+                channel_id=self._channel_id,
+                thread_id=str(interaction.channel_id),
+                task_id=task_id,
+                action=action,
+                actor_id=str(interaction.user.id),
+                suggestion=suggestion,
+            )
+            if not event:
+                await interaction.response.send_message(
+                    "No active approval token found for this task.",
+                    ephemeral=True,
+                )
+                return
+            result = await self._runtime_service.handle_decision_event(event)
+            await interaction.response.send_message(result, ephemeral=True)
+
+        @tree.command(name="task_approve", description="Approve a runtime task draft")
+        @app_commands.describe(task_id="Task ID")
+        async def slash_task_approve(interaction: discord.Interaction, task_id: str):
+            await _slash_decide(interaction, action="approve", task_id=task_id)
+
+        @tree.command(name="task_reject", description="Reject a runtime task draft")
+        @app_commands.describe(task_id="Task ID")
+        async def slash_task_reject(interaction: discord.Interaction, task_id: str):
+            await _slash_decide(interaction, action="reject", task_id=task_id)
+
+        @tree.command(name="task_suggest", description="Suggest changes for a runtime task draft")
+        @app_commands.describe(task_id="Task ID", suggestion="Suggested change")
+        async def slash_task_suggest(
+            interaction: discord.Interaction,
+            task_id: str,
+            suggestion: str,
+        ):
+            await _slash_decide(
+                interaction,
+                action="suggest",
+                task_id=task_id,
+                suggestion=suggestion,
+            )
+
+        @tree.command(name="task_resume", description="Resume a blocked runtime task")
+        @app_commands.describe(task_id="Task ID", instruction="Instruction to unblock and continue")
+        async def slash_task_resume(
+            interaction: discord.Interaction,
+            task_id: str,
+            instruction: str,
+        ):
+            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
+                await interaction.response.send_message(
+                    "This command is restricted to the configured owner.",
+                    ephemeral=True,
+                )
+                return
+            if not self._runtime_service:
+                await interaction.response.send_message(
+                    "Runtime service is not enabled.",
+                    ephemeral=True,
+                )
+                return
+            result = await self._runtime_service.resume_task(
+                task_id,
+                instruction,
+                actor_id=str(interaction.user.id),
+            )
+            await interaction.response.send_message(result, ephemeral=True)
+
+        @tree.command(name="task_stop", description="Stop a runtime task")
+        @app_commands.describe(task_id="Task ID")
+        async def slash_task_stop(interaction: discord.Interaction, task_id: str):
+            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
+                await interaction.response.send_message(
+                    "This command is restricted to the configured owner.",
+                    ephemeral=True,
+                )
+                return
+            if not self._runtime_service:
+                await interaction.response.send_message(
+                    "Runtime service is not enabled.",
+                    ephemeral=True,
+                )
+                return
+            result = await self._runtime_service.stop_task(task_id, actor_id=str(interaction.user.id))
+            await interaction.response.send_message(result, ephemeral=True)
+
         # ---- Events --------------------------------------------------------
 
         @client.event
@@ -363,6 +614,95 @@ class DiscordChannel(BaseChannel):
             await _handler(msg)
 
         await client.start(self._token)
+
+    async def send_task_draft(
+        self,
+        *,
+        thread_id: str,
+        draft_text: str,
+        task_id: str,
+        nonce: str,
+        actions: list[str],
+    ) -> str | None:
+        if not self._runtime_service:
+            await self.send(thread_id, draft_text)
+            return None
+
+        target = await self._resolve_channel(thread_id)
+
+        view = discord.ui.View(timeout=3600)
+        action_meta = {
+            "approve": ("Approve", discord.ButtonStyle.success),
+            "reject": ("Reject", discord.ButtonStyle.danger),
+            "suggest": ("Suggest", discord.ButtonStyle.secondary),
+        }
+
+        for action in actions:
+            if action not in action_meta:
+                continue
+            label, style = action_meta[action]
+            button = discord.ui.Button(
+                label=label,
+                style=style,
+                custom_id=f"tdec:{task_id}:{action}:{nonce}",
+            )
+
+            async def _callback(
+                interaction: discord.Interaction,
+                *,
+                action_name: str = action,
+                action_nonce: str = nonce,
+                action_task_id: str = task_id,
+            ) -> None:
+                if not self._runtime_service:
+                    await interaction.response.send_message(
+                        "Runtime service not configured.",
+                        ephemeral=True,
+                    )
+                    return
+
+                event = TaskDecisionEvent(
+                    platform=self.platform,
+                    channel_id=self._channel_id,
+                    thread_id=str(interaction.channel_id),
+                    task_id=action_task_id,
+                    action=action_name,  # type: ignore[arg-type]
+                    actor_id=str(interaction.user.id),
+                    nonce=action_nonce,
+                    source="button",
+                )
+                result = await self._runtime_service.handle_decision_event(event)
+                if interaction.response.is_done():
+                    await interaction.followup.send(result, ephemeral=True)
+                else:
+                    await interaction.response.send_message(result, ephemeral=True)
+
+            button.callback = _callback
+            view.add_item(button)
+
+        message = await target.send(draft_text, view=view)
+        return str(message.id)
+
+    def parse_decision_event(self, raw):
+        if not isinstance(raw, str):
+            return None
+        if not raw.startswith("tdec:"):
+            return None
+        parts = raw.split(":")
+        if len(parts) != 4:
+            return None
+        _, task_id, action, nonce = parts
+        return {"task_id": task_id, "action": action, "nonce": nonce}
+
+    async def signal_task_status(self, thread_id: str, message_id: str | None, emoji: str) -> None:
+        if not message_id:
+            return
+        try:
+            target = await self._resolve_channel(thread_id)
+            msg = await target.fetch_message(int(message_id))
+            await msg.add_reaction(emoji)
+        except Exception:
+            logger.debug("Failed to add reaction %s to %s", emoji, message_id, exc_info=True)
 
     async def create_thread(self, msg: IncomingMessage, name: str) -> str:
         original: discord.Message = msg.raw

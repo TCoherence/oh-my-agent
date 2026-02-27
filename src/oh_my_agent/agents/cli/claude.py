@@ -89,6 +89,7 @@ class ClaudeAgent(BaseCLIAgent):
         history: list[dict] | None = None,
         *,
         thread_id: str | None = None,
+        workspace_override: Path | None = None,
     ) -> AgentResponse:
         """Run the Claude CLI.
 
@@ -111,7 +112,7 @@ class ClaudeAgent(BaseCLIAgent):
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
-                cwd=self._cwd,
+                cwd=self._resolve_cwd(workspace_override),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=self._build_env(),

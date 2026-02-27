@@ -104,6 +104,11 @@ class BaseCLIAgent(BaseAgent):
         """Working directory for subprocesses, or None to inherit."""
         return str(self._workspace) if self._workspace else None
 
+    def _resolve_cwd(self, workspace_override: Path | None = None) -> str | None:
+        if workspace_override is not None:
+            return str(workspace_override)
+        return self._cwd
+
     @abstractmethod
     def _build_command(self, prompt: str) -> list[str]:
         """Return the full command to run, with prompt included."""
@@ -135,6 +140,8 @@ class BaseCLIAgent(BaseAgent):
         self,
         prompt: str,
         history: list[dict] | None = None,
+        *,
+        workspace_override: Path | None = None,
     ) -> AgentResponse:
         full_prompt = _build_prompt_with_history(prompt, history)
         cmd = self._build_command(full_prompt)
@@ -143,7 +150,7 @@ class BaseCLIAgent(BaseAgent):
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
-                cwd=self._cwd,
+                cwd=self._resolve_cwd(workspace_override),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=self._build_env(),

@@ -257,6 +257,26 @@ async def _async_main(config: dict, logger: logging.Logger) -> None:
         logger.error("Failed to build scheduler from config: %s", exc)
         sys.exit(1)
 
+    # Build runtime service (optional, defaults enabled when memory store exists)
+    runtime_cfg = config.get("runtime", {"enabled": True})
+    runtime_service = None
+    if memory_store and bool(runtime_cfg.get("enabled", True)):
+        from oh_my_agent.runtime import RuntimeService
+
+        runtime_service = RuntimeService(
+            memory_store,
+            config=runtime_cfg,
+            owner_user_ids=owner_user_ids,
+            repo_root=project_root,
+        )
+        logger.info(
+            "Runtime enabled (workers=%s, default_agent=%s)",
+            runtime_cfg.get("worker_concurrency", 3),
+            runtime_cfg.get("default_agent", "codex"),
+        )
+    elif not memory_store:
+        logger.warning("Runtime disabled: memory backend is required.")
+
     # Build (channel, registry) pairs
     from oh_my_agent.agents.registry import AgentRegistry
     from oh_my_agent.gateway.manager import GatewayManager
@@ -294,6 +314,7 @@ async def _async_main(config: dict, logger: logging.Logger) -> None:
         owner_user_ids=owner_user_ids,
         skill_syncer=skill_syncer,
         workspace_skills_dirs=workspace_skills_dirs,
+        runtime_service=runtime_service,
     )
     if memory_store:
         gateway.set_memory_store(memory_store)

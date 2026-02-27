@@ -36,12 +36,25 @@ automations:
     #   initial_delay_seconds: 10
     #   author: "scheduler"
 
+runtime:
+  enabled: true
+  worker_concurrency: 3
+  worktree_root: .workspace/tasks
+  default_agent: codex
+  default_test_command: "pytest -q"
+  default_max_steps: 8
+  default_max_minutes: 20
+  risk_profile: strict
+  allowed_paths: ["src/**", "tests/**", "docs/**", "skills/**", "pyproject.toml"]
+  denied_paths: ["config.yaml", ".env", ".workspace/**"]
+  decision_ttl_minutes: 1440
+
 gateway:
   channels:
     - platform: discord
       token: ${DISCORD_BOT_TOKEN}
       channel_id: "${DISCORD_CHANNEL_ID}"
-      agents: [claude, gemini]   # fallback 顺序，第一个失败自动切下一个
+      agents: [claude, codex, gemini]   # fallback 顺序，第一个失败自动切下一个
 
     # Slack 示例（暂未实现，留作占位）
     # - platform: slack

@@ -4,6 +4,13 @@ Multi-platform bot that routes messages to CLI-based AI agents (Claude, Gemini, 
 
 Inspired by [OpenClaw](https://openclaw.dev).
 
+## Status Snapshot / 当前状态 (2026-02-27)
+
+- `/search` is already implemented with SQLite FTS5 across all threads.
+- `SkillSync` reverse sync is already implemented and runs on startup.
+- v0.5 focus is now **runtime-first**: durable autonomous task loops (`DRAFT -> RUNNING -> APPLIED/BLOCKED/...`), not smart routing.
+- Task approvals use **buttons first + slash fallback** on Discord; reactions are status-only signals.
+
 ## Architecture
 
 ```
@@ -101,6 +108,19 @@ automations:
       interval_seconds: 86400
       initial_delay_seconds: 10
 
+runtime:
+  enabled: true
+  worker_concurrency: 3
+  worktree_root: .workspace/tasks
+  default_agent: codex
+  default_test_command: "pytest -q"
+  default_max_steps: 8
+  default_max_minutes: 20
+  risk_profile: strict
+  allowed_paths: ["src/**", "tests/**", "docs/**", "skills/**", "pyproject.toml"]
+  denied_paths: ["config.yaml", ".env", ".workspace/**"]
+  decision_ttl_minutes: 1440
+
 gateway:
   channels:
     - platform: discord
@@ -156,6 +176,14 @@ oh-my-agent
 | `/history` | Show thread history (debug helper) |
 | `/agent` | Show available agents and their status |
 | `/search <query>` | Search across all conversation history |
+| `/task_start` | Create a runtime task (manual entry) |
+| `/task_status <task_id>` | Inspect a runtime task |
+| `/task_list [status]` | List runtime tasks for the channel |
+| `/task_approve <task_id>` | Approve a DRAFT/BLOCKED task |
+| `/task_reject <task_id>` | Reject a task |
+| `/task_suggest <task_id> <suggestion>` | Keep draft, attach suggestion |
+| `/task_resume <task_id> <instruction>` | Resume a blocked task |
+| `/task_stop <task_id>` | Stop a running task |
 
 ### Agent Targeting
 - **In-thread targeting**: send `@codex fix this` to run only Codex for that turn
@@ -171,11 +199,19 @@ Claude session IDs are persisted per `(platform, channel_id, thread_id, agent)` 
 
 ### Automations (MVP)
 - Configure recurring jobs in `automations.jobs` (interval-based scheduler)
-- Jobs reuse the same routing stack (`GatewayManager -> AgentRegistry`)
+- Jobs can route to runtime tasks when runtime is enabled (same risk policy applies)
 - Set `thread_id` to post into an existing thread; omit it to post directly in the parent channel
 - Use `delivery: dm` to send directly to a user; set `target_user_id` (or rely on first `owner_user_ids`)
 - Each job has its own `enabled` flag, so you can pause jobs without turning off `automations.enabled`
 - Use `agent` to force a specific model for the job
+
+### Autonomous Runtime / 自主任务运行时
+- Message intent can auto-create runtime tasks for long coding requests.
+- Runtime tasks execute in per-task git worktrees under `.workspace/tasks/<task_id>`.
+- Loop contract: code changes -> tests -> retry, until `TASK_STATE: DONE` + passing tests.
+- Risk policy (`strict`): low-risk tasks auto-run; high-risk tasks enter `DRAFT` and require approval.
+- Decision surface: Discord buttons first (`Approve/Reject/Suggest`), slash commands as fallback.
+- Reactions are non-blocking status signals only (`👀`, `✅`, `⚠️`).
 
 ## Agents
 
@@ -216,4 +252,4 @@ pytest                        # run all tests
 pytest -k "test_fallback"     # run a specific test
 ```
 
-See [`docs/todo.md`](docs/todo.md) for the roadmap and [`docs/development.md`](docs/development.md) for architecture decisions.
+See [`docs/todo.md`](docs/todo.md) for the roadmap, [`docs/development.md`](docs/development.md) for architecture decisions, and [`docs/v0.5_runtime_plan.md`](docs/v0.5_runtime_plan.md) for the runtime-first implementation spec.

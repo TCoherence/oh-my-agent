@@ -28,6 +28,7 @@ class GatewayManager:
         owner_user_ids: set[str] | None = None,
         skill_syncer=None,
         workspace_skills_dirs=None,
+        runtime_service=None,
     ) -> None:
         self._channels = channels
         self._compressor = compressor
@@ -36,6 +37,7 @@ class GatewayManager:
         self._memory_store_ref = None  # set by set_memory_store()
         self._skill_syncer = skill_syncer
         self._workspace_skills_dirs = workspace_skills_dirs  # list[Path] | None
+        self._runtime_service = runtime_service
         # key: "platform:channel_id" → ChannelSession
         self._sessions: dict[str, ChannelSession] = {}
 
@@ -95,6 +97,13 @@ class GatewayManager:
             if hasattr(channel, "set_skill_syncer") and self._skill_syncer:
                 channel.set_skill_syncer(self._skill_syncer, self._workspace_skills_dirs)
 
+            # Inject runtime service for /task_* (Discord-specific)
+            if hasattr(channel, "set_runtime_service") and self._runtime_service:
+                channel.set_runtime_service(self._runtime_service)
+
+            if self._runtime_service:
+                self._runtime_service.register_session(session, registry)
+
             async def make_handler(s: ChannelSession, r: AgentRegistry):
                 async def handler(msg: IncomingMessage) -> None:
                     await self.handle_message(s, r, msg)
@@ -109,6 +118,9 @@ class GatewayManager:
         if self._scheduler:
             tasks.append(asyncio.create_task(self._run_scheduler()))
             logger.info("Scheduler started with %d job(s)", len(self._scheduler.jobs))
+
+        if self._runtime_service:
+            await self._runtime_service.start()
 
         await asyncio.gather(*tasks)
 
@@ -160,6 +172,16 @@ class GatewayManager:
             preferred_agent=job.agent,
             system=True,
         )
+        if self._runtime_service and self._runtime_service.enabled:
+            await self._runtime_service.enqueue_scheduler_task(
+                session=session,
+                registry=session.registry,
+                thread_id=thread_id,
+                prompt=job.prompt,
+                author=job.author,
+                preferred_agent=job.agent,
+            )
+            return
         await self.handle_message(session, session.registry, msg)
 
     async def handle_message(
@@ -198,6 +220,17 @@ class GatewayManager:
             name = self._thread_name(msg.content)
             thread_id = await channel.create_thread(msg, name)
             logger.info("[%s] THREAD created thread_id=%s name=%r", req_id, thread_id, name)
+
+        # Runtime interception for long-running autonomous tasks.
+        if self._runtime_service:
+            handled = await self._runtime_service.maybe_handle_incoming(
+                session,
+                registry,
+                msg,
+                thread_id=thread_id,
+            )
+            if handled:
+                return
 
         # Append user turn to history
         await session.append_user(thread_id, msg.content, msg.author)
@@ -409,3 +442,10 @@ class GatewayManager:
         if cost is not None:
             parts.append(f"${cost:.4f}")
         return " · ".join(parts)
+
+    def resolve_session(self, platform: str, channel_id: str) -> ChannelSession | None:
+        return self._sessions.get(self._session_key(platform, channel_id))
+
+    def resolve_channel(self, platform: str, channel_id: str) -> BaseChannel | None:
+        session = self.resolve_session(platform, channel_id)
+        return session.channel if session else None

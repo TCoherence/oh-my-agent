@@ -1,0 +1,652 @@
+from __future__ import annotations
+
+import asyncio
+import fnmatch
+import inspect
+import logging
+import time
+import uuid
+from pathlib import Path
+from typing import Any
+
+from oh_my_agent.agents.base import AgentResponse
+from oh_my_agent.agents.registry import AgentRegistry
+from oh_my_agent.gateway.base import IncomingMessage
+from oh_my_agent.gateway.session import ChannelSession
+from oh_my_agent.runtime.policy import (
+    build_runtime_prompt,
+    evaluate_strict_risk,
+    is_long_task_intent,
+    parse_task_state,
+)
+from oh_my_agent.runtime.types import (
+    TASK_STATUS_APPLIED,
+    TASK_STATUS_BLOCKED,
+    TASK_STATUS_DRAFT,
+    TASK_STATUS_FAILED,
+    TASK_STATUS_PENDING,
+    TASK_STATUS_REJECTED,
+    TASK_STATUS_RUNNING,
+    TASK_STATUS_STOPPED,
+    TASK_STATUS_TIMEOUT,
+    TASK_STATUS_VALIDATING,
+    RuntimeTask,
+    TaskDecisionEvent,
+)
+from oh_my_agent.runtime.worktree import WorktreeError, WorktreeManager
+
+logger = logging.getLogger(__name__)
+
+
+class RuntimeService:
+    """Autonomous task runtime for multi-step coding loops."""
+
+    def __init__(
+        self,
+        store,
+        *,
+        config: dict[str, Any] | None = None,
+        owner_user_ids: set[str] | None = None,
+        repo_root: Path | None = None,
+    ) -> None:
+        cfg = config or {}
+        self._enabled = bool(cfg.get("enabled", True))
+        self._worker_concurrency = int(cfg.get("worker_concurrency", 3))
+        self._default_agent = str(cfg.get("default_agent", "codex"))
+        self._default_test_command = str(cfg.get("default_test_command", "pytest -q"))
+        self._default_max_steps = int(cfg.get("default_max_steps", 8))
+        self._default_max_minutes = int(cfg.get("default_max_minutes", 20))
+        self._risk_profile = str(cfg.get("risk_profile", "strict"))
+        self._allowed_paths = list(cfg.get("allowed_paths", ["src/**", "tests/**", "docs/**", "skills/**", "pyproject.toml"]))
+        self._denied_paths = list(cfg.get("denied_paths", ["config.yaml", ".env", ".workspace/**"]))
+        self._decision_ttl_minutes = int(cfg.get("decision_ttl_minutes", 1440))
+
+        self._store = store
+        self._owner_user_ids = owner_user_ids or set()
+        self._repo_root = (repo_root or Path.cwd()).resolve()
+        worktree_root = Path(cfg.get("worktree_root", ".workspace/tasks")).resolve()
+        self._worktree = WorktreeManager(self._repo_root, worktree_root)
+
+        self._sessions: dict[str, ChannelSession] = {}
+        self._registries: dict[str, AgentRegistry] = {}
+        self._workers: list[asyncio.Task] = []
+        self._stop_event = asyncio.Event()
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
+
+    def register_session(self, session: ChannelSession, registry: AgentRegistry) -> None:
+        key = self._key(session.platform, session.channel_id)
+        self._sessions[key] = session
+        self._registries[key] = registry
+
+    async def start(self) -> None:
+        if not self._enabled:
+            return
+        await self._store.requeue_inflight_runtime_tasks()
+        for idx in range(self._worker_concurrency):
+            self._workers.append(
+                asyncio.create_task(self._worker_loop(idx), name=f"runtime-worker-{idx}")
+            )
+        logger.info("Runtime started with %d worker(s)", len(self._workers))
+
+    async def stop(self) -> None:
+        self._stop_event.set()
+        for task in self._workers:
+            task.cancel()
+        if self._workers:
+            await asyncio.gather(*self._workers, return_exceptions=True)
+
+    async def maybe_handle_incoming(
+        self,
+        session: ChannelSession,
+        registry: AgentRegistry,
+        msg: IncomingMessage,
+        *,
+        thread_id: str,
+    ) -> bool:
+        if not self._enabled:
+            return False
+        if msg.system:
+            return False
+        if not is_long_task_intent(msg.content):
+            return False
+
+        await self.create_task(
+            session=session,
+            registry=registry,
+            thread_id=thread_id,
+            goal=msg.content,
+            created_by=msg.author_id or msg.author,
+            preferred_agent=msg.preferred_agent,
+            source="message",
+        )
+        return True
+
+    async def create_task(
+        self,
+        *,
+        session: ChannelSession,
+        registry: AgentRegistry,
+        thread_id: str,
+        goal: str,
+        created_by: str,
+        preferred_agent: str | None = None,
+        test_command: str | None = None,
+        max_steps: int | None = None,
+        max_minutes: int | None = None,
+        source: str,
+    ) -> RuntimeTask:
+        self.register_session(session, registry)
+
+        steps = int(max_steps or self._default_max_steps)
+        minutes = int(max_minutes or self._default_max_minutes)
+        command = test_command or self._default_test_command
+        chosen_agent = preferred_agent or self._default_agent
+
+        require_approval = False
+        reasons: list[str] = []
+        if self._risk_profile == "strict":
+            risk = evaluate_strict_risk(goal, max_steps=steps, max_minutes=minutes)
+            require_approval = risk.require_approval
+            reasons = risk.reasons
+
+        task_id = uuid.uuid4().hex[:12]
+        status = TASK_STATUS_DRAFT if require_approval else TASK_STATUS_PENDING
+
+        task = await self._store.create_runtime_task(
+            task_id=task_id,
+            platform=session.platform,
+            channel_id=session.channel_id,
+            thread_id=thread_id,
+            created_by=created_by,
+            goal=goal,
+            preferred_agent=chosen_agent,
+            status=status,
+            max_steps=steps,
+            max_minutes=minutes,
+            test_command=command,
+        )
+        await self._store.add_runtime_event(
+            task.id,
+            "task.created",
+            {"source": source, "status": status, "risk_reasons": reasons},
+        )
+
+        if status == TASK_STATUS_DRAFT:
+            nonce = await self._store.create_runtime_decision_nonce(
+                task.id,
+                ttl_minutes=self._decision_ttl_minutes,
+            )
+            draft_text = self._draft_text(task, reasons=reasons)
+            msg_id = await self._send_task_draft(session, thread_id, draft_text, task.id, nonce)
+            if msg_id:
+                await self._store.update_runtime_task(task.id, decision_message_id=msg_id)
+            await session.channel.send(
+                thread_id,
+                f"Task `{task.id}` is waiting for approval. Use buttons or `/task_approve {task.id}`.",
+            )
+        else:
+            await session.channel.send(
+                thread_id,
+                f"Task `{task.id}` queued (`{chosen_agent}`), max {steps} steps / {minutes} min.",
+            )
+
+        return task
+
+    async def enqueue_scheduler_task(
+        self,
+        *,
+        session: ChannelSession,
+        registry: AgentRegistry,
+        thread_id: str,
+        prompt: str,
+        author: str,
+        preferred_agent: str | None,
+    ) -> RuntimeTask:
+        return await self.create_task(
+            session=session,
+            registry=registry,
+            thread_id=thread_id,
+            goal=prompt,
+            created_by=author,
+            preferred_agent=preferred_agent,
+            source="scheduler",
+        )
+
+    async def get_task(self, task_id: str) -> RuntimeTask | None:
+        return await self._store.get_runtime_task(task_id)
+
+    async def list_tasks(
+        self,
+        *,
+        platform: str,
+        channel_id: str,
+        status: str | None = None,
+        limit: int = 20,
+    ) -> list[RuntimeTask]:
+        return await self._store.list_runtime_tasks(
+            platform=platform,
+            channel_id=channel_id,
+            status=status,
+            limit=limit,
+        )
+
+    async def stop_task(self, task_id: str, *, actor_id: str) -> str:
+        if not self._is_authorized(actor_id):
+            return "Only configured owners can stop tasks."
+        task = await self._store.get_runtime_task(task_id)
+        if task is None:
+            return f"Task `{task_id}` not found."
+        await self._store.update_runtime_task(
+            task_id,
+            status=TASK_STATUS_STOPPED,
+            summary="Stopped by user.",
+            ended_at_now=True,
+        )
+        await self._store.add_runtime_event(task_id, "task.stopped", {"actor_id": actor_id})
+        session = self._session_for(task)
+        if session:
+            await session.channel.send(task.thread_id, f"Task `{task.id}` stopped.")
+        return f"Task `{task.id}` stopped."
+
+    async def resume_task(self, task_id: str, instruction: str, *, actor_id: str) -> str:
+        if not self._is_authorized(actor_id):
+            return "Only configured owners can resume tasks."
+        task = await self._store.get_runtime_task(task_id)
+        if task is None:
+            return f"Task `{task_id}` not found."
+        if task.status != TASK_STATUS_BLOCKED:
+            return f"Task `{task.id}` is not blocked (current status: {task.status})."
+        await self._store.update_runtime_task(
+            task.id,
+            status=TASK_STATUS_PENDING,
+            blocked_reason=None,
+            resume_instruction=instruction.strip() or None,
+            ended_at=None,
+        )
+        await self._store.add_runtime_event(
+            task.id,
+            "task.resumed",
+            {"actor_id": actor_id, "instruction": instruction},
+        )
+        return f"Task `{task.id}` resumed and queued."
+
+    async def handle_decision_event(self, event: TaskDecisionEvent) -> str:
+        if not self._is_authorized(event.actor_id):
+            return "Only configured owners can approve/reject/suggest."
+
+        task = await self._store.get_runtime_task(event.task_id)
+        if task is None:
+            return f"Task `{event.task_id}` not found."
+        if task.status not in {TASK_STATUS_DRAFT, TASK_STATUS_BLOCKED}:
+            return f"Task `{task.id}` is not waiting for decision (status: {task.status})."
+
+        if not await self._store.consume_runtime_decision_nonce(
+            task_id=task.id,
+            nonce=event.nonce,
+            action=event.action,
+            actor_id=event.actor_id,
+            source=event.source,
+            result="accepted",
+        ):
+            return "Decision token is invalid or expired."
+
+        if event.action == "approve":
+            await self._store.update_runtime_task(
+                task.id,
+                status=TASK_STATUS_PENDING,
+                blocked_reason=None,
+            )
+            await self._store.add_runtime_event(
+                task.id,
+                "task.approved",
+                {"actor_id": event.actor_id, "source": event.source},
+            )
+            await self._notify(task, f"Task `{task.id}` approved and queued.")
+            await self._signal_status(task, "👀")
+            return f"Task `{task.id}` approved."
+
+        if event.action == "reject":
+            await self._store.update_runtime_task(
+                task.id,
+                status=TASK_STATUS_REJECTED,
+                ended_at_now=True,
+                summary="Rejected by user.",
+            )
+            await self._store.add_runtime_event(
+                task.id,
+                "task.rejected",
+                {"actor_id": event.actor_id, "source": event.source},
+            )
+            await self._notify(task, f"Task `{task.id}` rejected.")
+            await self._signal_status(task, "⚠️")
+            return f"Task `{task.id}` rejected."
+
+        suggestion = (event.suggestion or "").strip()
+        new_nonce = await self._store.create_runtime_decision_nonce(
+            task.id,
+            ttl_minutes=self._decision_ttl_minutes,
+        )
+        await self._store.update_runtime_task(
+            task.id,
+            resume_instruction=suggestion or task.resume_instruction,
+        )
+        await self._store.add_runtime_event(
+            task.id,
+            "task.suggested",
+            {"actor_id": event.actor_id, "source": event.source, "suggestion": suggestion},
+        )
+        await self._notify(
+            task,
+            (
+                f"Suggestion recorded for task `{task.id}`. It remains in `{task.status}`. "
+                f"Use a fresh decision token `{new_nonce}` via buttons or slash."
+            ),
+        )
+        return f"Task `{task.id}` suggestion recorded."
+
+    async def build_slash_decision_event(
+        self,
+        *,
+        platform: str,
+        channel_id: str,
+        thread_id: str,
+        task_id: str,
+        action: str,
+        actor_id: str,
+        suggestion: str | None = None,
+    ) -> TaskDecisionEvent | None:
+        nonce = await self._store.get_active_runtime_decision_nonce(task_id)
+        if not nonce:
+            return None
+        return TaskDecisionEvent(
+            platform=platform,
+            channel_id=channel_id,
+            thread_id=thread_id,
+            task_id=task_id,
+            action=action,  # type: ignore[arg-type]
+            actor_id=actor_id,
+            nonce=nonce,
+            source="slash",
+            suggestion=suggestion,
+        )
+
+    async def _worker_loop(self, idx: int) -> None:
+        while not self._stop_event.is_set():
+            try:
+                task = await self._store.claim_pending_runtime_task()
+                if task is None:
+                    await asyncio.sleep(0.8)
+                    continue
+                await self._run_task(task)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.exception("Runtime worker %s crashed: %s", idx, exc)
+                await asyncio.sleep(1.5)
+
+    async def _run_task(self, task: RuntimeTask) -> None:
+        session = self._session_for(task)
+        registry = self._registry_for(task)
+        if session is None or registry is None:
+            await self._store.update_runtime_task(
+                task.id,
+                status=TASK_STATUS_BLOCKED,
+                blocked_reason="No active session/registry for platform+channel.",
+            )
+            return
+
+        try:
+            workspace = await self._worktree.ensure_worktree(task.id)
+        except WorktreeError as exc:
+            await self._fail(task, f"Failed to prepare worktree: {exc}")
+            return
+
+        await self._store.update_runtime_task(task.id, workspace_path=str(workspace))
+        await self._signal_status(task, "👀")
+
+        start = time.monotonic()
+        step = task.step_no
+        prior_failure: str | None = None
+        latest = await self._store.get_last_runtime_checkpoint(task.id)
+        if latest:
+            prior_failure = latest.get("test_result")
+
+        while step < task.max_steps:
+            current = await self._store.get_runtime_task(task.id)
+            if current is None:
+                return
+            if current.status == TASK_STATUS_STOPPED:
+                return
+            if (time.monotonic() - start) > (task.max_minutes * 60):
+                await self._store.update_runtime_task(
+                    task.id,
+                    status=TASK_STATUS_TIMEOUT,
+                    ended_at_now=True,
+                    summary="Task exceeded runtime budget.",
+                )
+                await self._notify(task, f"Task `{task.id}` timed out.")
+                await self._signal_status(task, "⚠️")
+                return
+
+            step += 1
+            await self._store.update_runtime_task(
+                task.id,
+                status=TASK_STATUS_RUNNING,
+                step_no=step,
+            )
+            prompt = build_runtime_prompt(
+                goal=task.goal,
+                step_no=step,
+                max_steps=task.max_steps,
+                prior_failure=prior_failure,
+                resume_instruction=current.resume_instruction,
+            )
+
+            agent_name, response = await self._run_agent(
+                registry=registry,
+                task=task,
+                prompt=prompt,
+                workspace=workspace,
+            )
+            if response.error:
+                await self._fail(task, f"{agent_name}: {response.error}")
+                return
+
+            state, block_reason = parse_task_state(response.text)
+            changed_files = await self._worktree.changed_files(workspace)
+            guard_error = self._validate_changed_paths(changed_files)
+            if guard_error:
+                await self._fail(task, guard_error)
+                return
+
+            await self._store.update_runtime_task(task.id, status=TASK_STATUS_VALIDATING)
+            rc, out, err = await self._worktree.run_shell(workspace, task.test_command)
+            test_ok = rc == 0
+            test_summary = (out + ("\n" + err if err else "")).strip()
+            if not test_summary:
+                test_summary = f"exit={rc}"
+
+            await self._store.add_runtime_checkpoint(
+                task_id=task.id,
+                step_no=step,
+                status=TASK_STATUS_VALIDATING,
+                prompt_digest=prompt[:500],
+                agent_result=response.text[:4000],
+                test_result=test_summary[:2000],
+                files_changed=changed_files,
+            )
+            await self._store.add_runtime_event(
+                task.id,
+                "task.step",
+                {
+                    "step": step,
+                    "agent": agent_name,
+                    "test_exit_code": rc,
+                    "changed_files": changed_files,
+                },
+            )
+
+            if state == "BLOCKED":
+                await self._store.update_runtime_task(
+                    task.id,
+                    status=TASK_STATUS_BLOCKED,
+                    blocked_reason=block_reason or "Agent reported blocked.",
+                )
+                await self._notify(
+                    task,
+                    f"Task `{task.id}` blocked: {block_reason or 'unknown reason'}",
+                )
+                await self._signal_status(task, "⚠️")
+                return
+
+            if test_ok and state == "DONE":
+                await self._store.update_runtime_task(
+                    task.id,
+                    status=TASK_STATUS_APPLIED,
+                    ended_at_now=True,
+                    summary=f"Completed in {step} step(s).",
+                    blocked_reason=None,
+                )
+                await self._notify(task, f"Task `{task.id}` completed successfully.")
+                await self._signal_status(task, "✅")
+                return
+
+            prior_failure = test_summary if not test_ok else None
+
+        await self._store.update_runtime_task(
+            task.id,
+            status=TASK_STATUS_TIMEOUT,
+            ended_at_now=True,
+            summary="Task exceeded step budget.",
+        )
+        await self._notify(task, f"Task `{task.id}` reached max steps and stopped.")
+        await self._signal_status(task, "⚠️")
+
+    async def _run_agent(
+        self,
+        *,
+        registry: AgentRegistry,
+        task: RuntimeTask,
+        prompt: str,
+        workspace: Path,
+    ) -> tuple[str, AgentResponse]:
+        if task.preferred_agent:
+            forced = registry.get_agent(task.preferred_agent)
+            if forced is not None:
+                response = await self._invoke_agent(forced, prompt, workspace, task.id)
+                return forced.name, response
+
+        last_name = registry.agents[-1].name
+        last_response = AgentResponse(text="", error="No agents available.")
+        for agent in registry.agents:
+            response = await self._invoke_agent(agent, prompt, workspace, task.id)
+            if not response.error:
+                return agent.name, response
+            last_name = agent.name
+            last_response = response
+        return last_name, last_response
+
+    async def _invoke_agent(
+        self,
+        agent,
+        prompt: str,
+        workspace: Path,
+        runtime_thread_id: str,
+    ) -> AgentResponse:
+        sig = inspect.signature(agent.run)
+        kwargs = {}
+        if "thread_id" in sig.parameters:
+            kwargs["thread_id"] = runtime_thread_id
+        if "workspace_override" in sig.parameters:
+            kwargs["workspace_override"] = workspace
+        return await agent.run(prompt, [], **kwargs)
+
+    async def _fail(self, task: RuntimeTask, error: str) -> None:
+        await self._store.update_runtime_task(
+            task.id,
+            status=TASK_STATUS_FAILED,
+            error=error[:2000],
+            ended_at_now=True,
+        )
+        await self._store.add_runtime_event(task.id, "task.failed", {"error": error[:1000]})
+        await self._notify(task, f"Task `{task.id}` failed: {error[:400]}")
+        await self._signal_status(task, "⚠️")
+
+    def _validate_changed_paths(self, paths: list[str]) -> str | None:
+        for raw in paths:
+            path = raw.replace("\\", "/")
+            if any(fnmatch.fnmatch(path, pat) for pat in self._denied_paths):
+                return f"Changed forbidden path: {path}"
+            if self._allowed_paths and not any(fnmatch.fnmatch(path, pat) for pat in self._allowed_paths):
+                return f"Changed path outside allow-list: {path}"
+        return None
+
+    async def _send_task_draft(
+        self,
+        session: ChannelSession,
+        thread_id: str,
+        draft_text: str,
+        task_id: str,
+        nonce: str,
+    ) -> str | None:
+        sender = getattr(session.channel, "send_task_draft", None)
+        if sender and callable(sender):
+            try:
+                return await sender(
+                    thread_id=thread_id,
+                    draft_text=draft_text,
+                    task_id=task_id,
+                    nonce=nonce,
+                    actions=["approve", "reject", "suggest"],
+                )
+            except Exception as exc:
+                logger.warning("send_task_draft failed, falling back to plain text: %s", exc)
+        await session.channel.send(thread_id, draft_text)
+        return None
+
+    async def _notify(self, task: RuntimeTask, text: str) -> None:
+        session = self._session_for(task)
+        if session is None:
+            return
+        await session.channel.send(task.thread_id, text[:1900])
+
+    async def _signal_status(self, task: RuntimeTask, emoji: str) -> None:
+        session = self._session_for(task)
+        if session is None:
+            return
+        signaler = getattr(session.channel, "signal_task_status", None)
+        if signaler and callable(signaler):
+            try:
+                await signaler(task.thread_id, task.decision_message_id, emoji)
+            except Exception:
+                logger.debug("signal_task_status failed for task %s", task.id, exc_info=True)
+
+    def _session_for(self, task: RuntimeTask) -> ChannelSession | None:
+        return self._sessions.get(self._key(task.platform, task.channel_id))
+
+    def _registry_for(self, task: RuntimeTask) -> AgentRegistry | None:
+        return self._registries.get(self._key(task.platform, task.channel_id))
+
+    @staticmethod
+    def _key(platform: str, channel_id: str) -> str:
+        return f"{platform}:{channel_id}"
+
+    def _is_authorized(self, actor_id: str) -> bool:
+        if not self._owner_user_ids:
+            return True
+        return actor_id in self._owner_user_ids
+
+    def _draft_text(self, task: RuntimeTask, *, reasons: list[str]) -> str:
+        reason_text = ", ".join(reasons) if reasons else "requires explicit approval"
+        return (
+            f"### Runtime Task Draft `{task.id}`\n"
+            f"Goal: {task.goal}\n"
+            f"Agent: `{task.preferred_agent or self._default_agent}`\n"
+            f"Budget: {task.max_steps} steps / {task.max_minutes} min\n"
+            f"Test command: `{task.test_command}`\n"
+            f"Reason: {reason_text}\n"
+            "Use Approve / Reject / Suggest."
+        )

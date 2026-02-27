@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol
 
 
 @dataclass
@@ -30,6 +30,22 @@ MessageHandler = Callable[[IncomingMessage], Awaitable[None]]
 SlashResetHandler = Callable[[str, str, str], Awaitable[str]]           # (platform, channel_id, thread_id) → confirmation
 SlashAgentHandler = Callable[[str, str], Awaitable[str]]                # (platform, channel_id) → agent list info
 SlashSearchHandler = Callable[[str, int], Awaitable[list[dict]]]        # (query, limit) → results
+
+
+class TaskDecisionSurface(Protocol):
+    def supports_buttons(self) -> bool: ...
+
+    async def send_task_draft(
+        self,
+        *,
+        thread_id: str,
+        draft_text: str,
+        task_id: str,
+        nonce: str,
+        actions: list[str],
+    ) -> str | None: ...
+
+    def parse_decision_event(self, raw: Any) -> Any | None: ...
 
 
 class BaseChannel(ABC):
@@ -62,3 +78,23 @@ class BaseChannel(ABC):
     async def typing(self, thread_id: str) -> AsyncIterator[None]:
         """Show a typing indicator while the body executes. Optional — default is no-op."""
         yield
+
+    def supports_buttons(self) -> bool:
+        return False
+
+    async def send_task_draft(
+        self,
+        *,
+        thread_id: str,
+        draft_text: str,
+        task_id: str,
+        nonce: str,
+        actions: list[str],
+    ) -> str | None:
+        del task_id, nonce, actions
+        await self.send(thread_id, draft_text)
+        return None
+
+    def parse_decision_event(self, raw: Any) -> Any | None:
+        del raw
+        return None
