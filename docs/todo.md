@@ -172,6 +172,10 @@ Deferred to backlog:
 ## Backlog (Unprioritized)
 
 - [ ] **Slack adapter** — implement `slack_sdk` async client. *(independent)*
+- [ ] **Automation delivery mode (`channel | dm`)** — allow each `automations.jobs[]` item to choose destination type:
+  - `channel`: existing `channel_id` + optional `thread_id`
+  - `dm`: direct-message `target_user_id` (defaulting to owner)
+  *(⬅ depends on: ✅ Scheduler MVP, recommended with owner-only mode)*
 - [ ] **Rate limiting / request queue** — per-session queue. *(⬅ soft dependency: Add Codex — more agents = more concurrency pressure)*
 - [ ] **File attachment support** — download Discord attachments, pass to agent. *(independent)*
 - [ ] **Markdown-aware chunking** — track code fence state in `chunker.py`. *(independent)*

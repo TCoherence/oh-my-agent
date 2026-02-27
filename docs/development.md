@@ -36,6 +36,10 @@ automations:
       initial_delay_seconds: 10
 ```
 
+### Future Note
+
+Planned extension: per-job delivery mode in automations (`delivery: channel | dm`), so some scheduled outputs can be posted to channels while sensitive outputs go directly to owner DM.
+
 ---
 
 ## v0.4.1 — Reliability + Routing UX
