@@ -28,6 +28,7 @@ def main() -> int:
 
     data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     automations = data.get("automations", {})
+    owner_user_ids = data.get("access", {}).get("owner_user_ids", [])
     enabled = bool(automations.get("enabled", False))
     jobs = automations.get("jobs", [])
 
@@ -45,9 +46,21 @@ def main() -> int:
         if not isinstance(job, dict):
             errors.append(f"jobs[{idx}] must be a mapping")
             continue
+        if not bool(job.get("enabled", True)):
+            continue
         for key in required_keys:
             if key not in job:
                 errors.append(f"jobs[{idx}] missing required key: {key}")
+        delivery = str(job.get("delivery", "channel")).strip().lower()
+        if delivery not in {"channel", "dm"}:
+            errors.append(f"jobs[{idx}].delivery must be 'channel' or 'dm'")
+        if delivery == "dm":
+            target = job.get("target_user_id")
+            if (target is None or str(target).strip() == "") and not owner_user_ids:
+                errors.append(
+                    f"jobs[{idx}].target_user_id is required for delivery='dm' "
+                    "when access.owner_user_ids is empty"
+                )
         if "interval_seconds" in job:
             try:
                 interval = int(job["interval_seconds"])

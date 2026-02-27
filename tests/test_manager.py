@@ -257,3 +257,76 @@ async def test_scheduler_dispatch_defaults_to_channel_id_when_thread_missing():
     channel.create_thread.assert_not_called()
     call_args = channel.send.call_args[0]
     assert call_args[0] == "100"
+
+
+@pytest.mark.asyncio
+async def test_scheduler_dispatch_dm_uses_dm_channel_id():
+    channel = MagicMock()
+    channel.platform = "discord"
+    channel.channel_id = "100"
+    channel.create_thread = AsyncMock(return_value="t1")
+    channel.ensure_dm_channel = AsyncMock(return_value="dm-42")
+    channel.send = AsyncMock()
+    channel.typing = MagicMock()
+    channel.typing.return_value.__aenter__ = AsyncMock(return_value=None)
+    channel.typing.return_value.__aexit__ = AsyncMock(return_value=False)
+
+    mock_agent = MagicMock()
+    mock_agent.name = "codex"
+    registry = MagicMock(spec=AgentRegistry)
+    registry.run = AsyncMock(return_value=(mock_agent, AgentResponse(text="done")))
+
+    session = _make_session(channel=channel, registry=registry)
+    gm = GatewayManager([])
+    gm._sessions["discord:100"] = session
+
+    job = ScheduledJob(
+        name="dm",
+        platform="discord",
+        channel_id="100",
+        delivery="dm",
+        target_user_id="42",
+        prompt="run",
+        interval_seconds=60,
+    )
+    await gm._dispatch_scheduled_job(job)
+
+    channel.ensure_dm_channel.assert_called_once_with("42")
+    channel.create_thread.assert_not_called()
+    call_args = channel.send.call_args[0]
+    assert call_args[0] == "dm-42"
+
+
+@pytest.mark.asyncio
+async def test_scheduler_dispatch_dm_skips_when_channel_unsupported():
+    channel = MagicMock()
+    channel.platform = "slack"
+    channel.channel_id = "100"
+    channel.create_thread = AsyncMock(return_value="t1")
+    channel.send = AsyncMock()
+    channel.typing = MagicMock()
+    channel.typing.return_value.__aenter__ = AsyncMock(return_value=None)
+    channel.typing.return_value.__aexit__ = AsyncMock(return_value=False)
+
+    mock_agent = MagicMock()
+    mock_agent.name = "codex"
+    registry = MagicMock(spec=AgentRegistry)
+    registry.run = AsyncMock(return_value=(mock_agent, AgentResponse(text="done")))
+
+    session = _make_session(channel=channel, registry=registry)
+    gm = GatewayManager([])
+    gm._sessions["discord:100"] = session
+
+    job = ScheduledJob(
+        name="dm",
+        platform="discord",
+        channel_id="100",
+        delivery="dm",
+        target_user_id="42",
+        prompt="run",
+        interval_seconds=60,
+    )
+    await gm._dispatch_scheduled_job(job)
+
+    registry.run.assert_not_called()
+    channel.send.assert_not_called()

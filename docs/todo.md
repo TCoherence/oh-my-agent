@@ -172,10 +172,6 @@ Deferred to backlog:
 ## Backlog (Unprioritized)
 
 - [ ] **Slack adapter** — implement `slack_sdk` async client. *(independent)*
-- [ ] **Automation delivery mode (`channel | dm`)** — allow each `automations.jobs[]` item to choose destination type:
-  - `channel`: existing `channel_id` + optional `thread_id`
-  - `dm`: direct-message `target_user_id` (defaulting to owner)
-  *(⬅ depends on: ✅ Scheduler MVP, recommended with owner-only mode)*
 - [ ] **Rate limiting / request queue** — per-session queue. *(⬅ soft dependency: Add Codex — more agents = more concurrency pressure)*
 - [ ] **File attachment support** — download Discord attachments, pass to agent. *(independent)*
 - [ ] **Markdown-aware chunking** — track code fence state in `chunker.py`. *(independent)*
@@ -202,6 +198,7 @@ Deferred to backlog:
 - [x] **Slash commands** — `/ask`, `/reset`, `/agent`, `/search` via `discord.app_commands`.
 - [x] **Direct agent selection** — thread-level `@claude/@gemini/@codex` and `/ask` optional `agent` override.
 - [x] **Scheduler MVP** — `automations.jobs` interval-based recurring execution via `GatewayManager`.
+- [x] **Automation delivery mode (`channel | dm`)** — per-job destination routing with `target_user_id` support for DM delivery.
 - [x] **CLI session resume** — `ClaudeAgent` tracks session IDs per thread, uses `--resume` for subsequent messages.
 - [x] **Memory export/import** — `MemoryStore.export_data()` / `import_data()` for JSON backup/restore.
 - [x] **Update README.md** — rewritten for v0.4.0 CLI-first architecture with sandbox docs.

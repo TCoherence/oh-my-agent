@@ -17,7 +17,9 @@ class ScheduledJob:
     channel_id: str
     prompt: str
     interval_seconds: int
+    delivery: str = "channel"  # "channel" | "dm"
     thread_id: str | None = None
+    target_user_id: str | None = None
     agent: str | None = None
     initial_delay_seconds: int = 0
     author: str = "scheduler"
@@ -78,7 +80,11 @@ class Scheduler:
             await asyncio.sleep(job.interval_seconds)
 
 
-def build_scheduler_from_config(config: dict) -> Scheduler | None:
+def build_scheduler_from_config(
+    config: dict,
+    *,
+    default_target_user_id: str | None = None,
+) -> Scheduler | None:
     """Parse scheduler config and return a Scheduler if enabled."""
     sched_cfg = config.get("automations", {})
     if not sched_cfg.get("enabled", False):
@@ -90,10 +96,31 @@ def build_scheduler_from_config(config: dict) -> Scheduler | None:
     for idx, raw in enumerate(raw_jobs):
         if not isinstance(raw, dict):
             raise ValueError(f"automations.jobs[{idx}] must be a mapping")
+        if not bool(raw.get("enabled", True)):
+            continue
         name = str(raw.get("name", f"job-{idx + 1}")).strip()
         platform = str(raw["platform"]).strip()
         channel_id = str(raw["channel_id"]).strip()
         prompt = str(raw["prompt"]).strip()
+        delivery = str(raw.get("delivery", "channel")).strip().lower()
+        if delivery not in {"channel", "dm"}:
+            raise ValueError(f"automations.jobs[{idx}].delivery must be 'channel' or 'dm'")
+
+        target_user_id = None
+        if delivery == "dm":
+            target_user_id = (
+                str(raw.get("target_user_id")).strip()
+                if raw.get("target_user_id") is not None
+                else None
+            )
+            if not target_user_id and default_target_user_id:
+                target_user_id = default_target_user_id
+            if not target_user_id:
+                raise ValueError(
+                    f"automations.jobs[{idx}].target_user_id is required for delivery='dm' "
+                    "(or set access.owner_user_ids)"
+                )
+
         interval_seconds = int(raw["interval_seconds"])
         if interval_seconds <= 0:
             raise ValueError(f"automations.jobs[{idx}].interval_seconds must be > 0")
@@ -106,7 +133,9 @@ def build_scheduler_from_config(config: dict) -> Scheduler | None:
                 name=name,
                 platform=platform,
                 channel_id=channel_id,
+                delivery=delivery,
                 thread_id=(str(raw["thread_id"]) if "thread_id" in raw and raw["thread_id"] is not None else None),
+                target_user_id=target_user_id,
                 prompt=prompt,
                 agent=(str(raw["agent"]) if raw.get("agent") else None),
                 interval_seconds=interval_seconds,

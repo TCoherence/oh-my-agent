@@ -90,9 +90,12 @@ automations:
   enabled: true
   jobs:
     - name: daily-refactor
+      enabled: true
       platform: discord
       channel_id: "${DISCORD_CHANNEL_ID}"
-      thread_id: "1476736679120207983"      # optional
+      delivery: channel                      # "channel" (default) | "dm"
+      thread_id: "1476736679120207983"      # optional for channel delivery
+      # target_user_id: "123456789012345678" # optional for dm; defaults to first owner_user_ids
       prompt: "Review TODOs and implement one coding task."
       agent: codex                            # optional
       interval_seconds: 86400
@@ -170,6 +173,8 @@ Claude session IDs are persisted per `(platform, channel_id, thread_id, agent)` 
 - Configure recurring jobs in `automations.jobs` (interval-based scheduler)
 - Jobs reuse the same routing stack (`GatewayManager -> AgentRegistry`)
 - Set `thread_id` to post into an existing thread; omit it to post directly in the parent channel
+- Use `delivery: dm` to send directly to a user; set `target_user_id` (or rely on first `owner_user_ids`)
+- Each job has its own `enabled` flag, so you can pause jobs without turning off `automations.enabled`
 - Use `agent` to force a specific model for the job
 
 ## Agents

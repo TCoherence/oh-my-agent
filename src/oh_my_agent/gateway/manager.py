@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import time
 import uuid
@@ -119,12 +120,33 @@ class GatewayManager:
                 job.channel_id,
             )
             return
+
+        thread_id: str
+        if job.delivery == "dm":
+            if not job.target_user_id:
+                logger.warning(
+                    "Scheduler job '%s' skipped: delivery=dm requires target_user_id",
+                    job.name,
+                )
+                return
+            dm_resolver = getattr(session.channel, "ensure_dm_channel", None)
+            if dm_resolver is None or not inspect.iscoroutinefunction(dm_resolver):
+                logger.warning(
+                    "Scheduler job '%s' skipped: channel %s does not support DM delivery",
+                    job.name,
+                    session.channel.platform,
+                )
+                return
+            thread_id = await dm_resolver(job.target_user_id)
+        else:
+            # Scheduler jobs without explicit thread_id post to the parent
+            # channel by using channel_id as the target "thread".
+            thread_id = job.thread_id or job.channel_id
+
         msg = IncomingMessage(
             platform=job.platform,
             channel_id=job.channel_id,
-            # Scheduler jobs without explicit thread_id post to the parent
-            # channel by using channel_id as the target "thread".
-            thread_id=job.thread_id or job.channel_id,
+            thread_id=thread_id,
             author=job.author,
             content=job.prompt,
             preferred_agent=job.agent,

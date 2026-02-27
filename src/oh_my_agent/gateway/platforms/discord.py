@@ -313,3 +313,14 @@ class DiscordChannel(BaseChannel):
         if thread is None:
             thread = await self._client.fetch_channel(int(thread_id))
         return thread
+
+    async def ensure_dm_channel(self, user_id: str) -> str:
+        """Return a DM channel id for the target user, creating it if needed."""
+        uid = int(user_id)
+        user = self._client.get_user(uid)
+        if user is None:
+            user = await self._client.fetch_user(uid)
+        dm = user.dm_channel
+        if dm is None:
+            dm = await user.create_dm()
+        return str(dm.id)

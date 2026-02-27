@@ -14,8 +14,12 @@
 
 1. **Owner-only access control** — new `access.owner_user_ids` config. Non-owner messages/commands are ignored (or rejected for slash commands).
 2. **Automation scheduler (MVP)** — new `automations` config section with interval-based recurring jobs.
-3. **System dispatch path** — scheduler jobs are dispatched as internal `IncomingMessage(system=True)` through existing `GatewayManager` and `AgentRegistry`.
-4. **Scheduler skill** — added `skills/scheduler/` so any CLI agent can create/update automation jobs and validate schema with a local script.
+3. **Per-job toggles** — each automation job supports `enabled: true/false` so jobs can be paused individually without disabling the scheduler globally.
+4. **Delivery mode per job** — `delivery: channel | dm` supports mixed destinations:
+   - `channel`: existing channel/thread behavior
+   - `dm`: direct-message to `target_user_id` (fallback to first owner ID if omitted)
+5. **System dispatch path** — scheduler jobs are dispatched as internal `IncomingMessage(system=True)` through existing `GatewayManager` and `AgentRegistry`.
+6. **Scheduler skill** — added `skills/scheduler/` so any CLI agent can create/update automation jobs and validate schema with a local script.
 
 ### Config Additions
 
@@ -27,18 +31,16 @@ automations:
   enabled: true
   jobs:
     - name: daily-refactor
+      enabled: true
       platform: discord
       channel_id: "767174280856600621"
+      delivery: channel
       thread_id: "1476736679120207983"  # optional
       prompt: "Review TODOs and implement one coding task."
       agent: codex                       # optional
       interval_seconds: 86400
       initial_delay_seconds: 10
 ```
-
-### Future Note
-
-Planned extension: per-job delivery mode in automations (`delivery: channel | dm`), so some scheduled outputs can be posted to channels while sensitive outputs go directly to owner DM.
 
 ---
 

@@ -237,7 +237,11 @@ async def _async_main(config: dict, logger: logging.Logger) -> None:
     from oh_my_agent.automation import build_scheduler_from_config
 
     try:
-        scheduler = build_scheduler_from_config(config)
+        default_target_user_id = sorted(owner_user_ids)[0] if owner_user_ids else None
+        scheduler = build_scheduler_from_config(
+            config,
+            default_target_user_id=default_target_user_id,
+        )
         if scheduler:
             logger.info("Loaded scheduler with %d job(s)", len(scheduler.jobs))
     except Exception as exc:

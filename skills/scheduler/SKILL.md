@@ -31,12 +31,16 @@ Use this skill to manage `automations` in `config.yaml`.
 Each job supports:
 
 - `name` (string)
+- `enabled` (optional bool, default `true`)
 - `platform` (string, e.g. `discord`)
 - `channel_id` (string)
+- `delivery` (optional string, `channel` or `dm`, default `channel`)
 - `prompt` (string)
 - `interval_seconds` (int, must be > 0)
-- `thread_id` (optional string)
+- `thread_id` (optional string, for `delivery=channel`)
   Omit to post directly in the parent channel.
+- `target_user_id` (optional string, for `delivery=dm`)
+  If omitted, scheduler falls back to the first `access.owner_user_ids`.
 - `agent` (optional string)
 - `initial_delay_seconds` (optional int, >= 0)
 - `author` (optional string, defaults to `scheduler`)
@@ -51,9 +55,11 @@ automations:
   enabled: true
   jobs:
     - name: daily-refactor
+      enabled: true
       platform: discord
       channel_id: "767174280856600621"
-      thread_id: "1476736679120207983"
+      delivery: dm
+      target_user_id: "123456789012345678"
       prompt: "Review TODOs, pick one coding task, implement and summarize changes."
       agent: codex
       interval_seconds: 86400
