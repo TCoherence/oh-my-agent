@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import fnmatch
 import inspect
+import json
 import logging
 import time
 import uuid
@@ -22,20 +23,35 @@ from oh_my_agent.runtime.policy import (
 from oh_my_agent.runtime.types import (
     TASK_STATUS_APPLIED,
     TASK_STATUS_BLOCKED,
+    TASK_STATUS_DISCARDED,
     TASK_STATUS_DRAFT,
     TASK_STATUS_FAILED,
+    TASK_STATUS_MERGED,
+    TASK_STATUS_MERGE_FAILED,
     TASK_STATUS_PENDING,
     TASK_STATUS_REJECTED,
     TASK_STATUS_RUNNING,
     TASK_STATUS_STOPPED,
     TASK_STATUS_TIMEOUT,
     TASK_STATUS_VALIDATING,
+    TASK_STATUS_WAITING_MERGE,
     RuntimeTask,
     TaskDecisionEvent,
 )
 from oh_my_agent.runtime.worktree import WorktreeError, WorktreeManager
 
 logger = logging.getLogger(__name__)
+
+_TERMINAL_CLEANUP_STATUSES = {
+    TASK_STATUS_APPLIED,  # legacy
+    TASK_STATUS_MERGED,
+    TASK_STATUS_DISCARDED,
+    TASK_STATUS_MERGE_FAILED,
+    TASK_STATUS_FAILED,
+    TASK_STATUS_TIMEOUT,
+    TASK_STATUS_STOPPED,
+    TASK_STATUS_REJECTED,
+}
 
 
 class RuntimeService:
@@ -57,19 +73,39 @@ class RuntimeService:
         self._default_max_steps = int(cfg.get("default_max_steps", 8))
         self._default_max_minutes = int(cfg.get("default_max_minutes", 20))
         self._risk_profile = str(cfg.get("risk_profile", "strict"))
-        self._allowed_paths = list(cfg.get("allowed_paths", ["src/**", "tests/**", "docs/**", "skills/**", "pyproject.toml"]))
-        self._denied_paths = list(cfg.get("denied_paths", ["config.yaml", ".env", ".workspace/**"]))
+        self._path_policy_mode = str(cfg.get("path_policy_mode", "allow_all_with_denylist"))
+        self._allowed_paths = list(
+            cfg.get("allowed_paths", ["src/**", "tests/**", "docs/**", "skills/**", "pyproject.toml"])
+        )
+        self._denied_paths = list(cfg.get("denied_paths", [".env", "config.yaml", ".workspace/**", ".git/**"]))
         self._decision_ttl_minutes = int(cfg.get("decision_ttl_minutes", 1440))
+
+        cleanup_cfg = cfg.get("cleanup", {})
+        self._cleanup_enabled = bool(cleanup_cfg.get("enabled", True))
+        self._cleanup_interval_minutes = int(cleanup_cfg.get("interval_minutes", 60))
+        self._cleanup_retention_hours = int(cleanup_cfg.get("retention_hours", 24))
+        self._cleanup_prune_worktrees = bool(cleanup_cfg.get("prune_git_worktrees", True))
+
+        merge_cfg = cfg.get("merge_gate", {})
+        self._merge_gate_enabled = bool(merge_cfg.get("enabled", True))
+        self._merge_auto_commit = bool(merge_cfg.get("auto_commit", True))
+        self._merge_require_clean_repo = bool(merge_cfg.get("require_clean_repo", True))
+        self._merge_preflight_check = bool(merge_cfg.get("preflight_check", True))
+        self._merge_target_branch_mode = str(merge_cfg.get("target_branch_mode", "current"))
+        self._merge_commit_template = str(
+            merge_cfg.get("commit_message_template", "runtime(task:{task_id}): {goal_short}")
+        )
 
         self._store = store
         self._owner_user_ids = owner_user_ids or set()
         self._repo_root = (repo_root or Path.cwd()).resolve()
-        worktree_root = Path(cfg.get("worktree_root", ".workspace/tasks")).resolve()
+        worktree_root = Path(cfg.get("worktree_root", "~/.oh-my-agent/runtime/tasks")).expanduser().resolve()
         self._worktree = WorktreeManager(self._repo_root, worktree_root)
 
         self._sessions: dict[str, ChannelSession] = {}
         self._registries: dict[str, AgentRegistry] = {}
         self._workers: list[asyncio.Task] = []
+        self._janitor_task: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
 
     @property
@@ -89,14 +125,25 @@ class RuntimeService:
             self._workers.append(
                 asyncio.create_task(self._worker_loop(idx), name=f"runtime-worker-{idx}")
             )
-        logger.info("Runtime started with %d worker(s)", len(self._workers))
+        if self._cleanup_enabled:
+            self._janitor_task = asyncio.create_task(self._janitor_loop(), name="runtime-janitor")
+        logger.info(
+            "Runtime started with %d worker(s)%s",
+            len(self._workers),
+            " + janitor" if self._janitor_task else "",
+        )
 
     async def stop(self) -> None:
         self._stop_event.set()
+        if self._janitor_task:
+            self._janitor_task.cancel()
         for task in self._workers:
             task.cancel()
-        if self._workers:
-            await asyncio.gather(*self._workers, return_exceptions=True)
+        waiters = [*self._workers]
+        if self._janitor_task:
+            waiters.append(self._janitor_task)
+        if waiters:
+            await asyncio.gather(*waiters, return_exceptions=True)
 
     async def maybe_handle_incoming(
         self,
@@ -189,13 +236,21 @@ class RuntimeService:
                 ttl_minutes=self._decision_ttl_minutes,
             )
             draft_text = self._draft_text(task, reasons=reasons)
-            msg_id = await self._send_task_draft(session, thread_id, draft_text, task.id, nonce)
+            msg_id = await self._send_decision_surface(
+                session,
+                thread_id,
+                draft_text,
+                task.id,
+                nonce,
+                ["approve", "reject", "suggest"],
+            )
             if msg_id:
                 await self._store.update_runtime_task(task.id, decision_message_id=msg_id)
             await session.channel.send(
                 thread_id,
                 f"Task `{task.id}` is waiting for approval. Use buttons or `/task_approve {task.id}`.",
             )
+            await self._signal_status_by_id(task, TASK_STATUS_DRAFT)
         else:
             msg_id = await session.channel.send(
                 thread_id,
@@ -203,6 +258,7 @@ class RuntimeService:
             )
             if msg_id:
                 await self._store.update_runtime_task(task.id, decision_message_id=msg_id)
+            await self._signal_status_by_id(task, TASK_STATUS_PENDING)
 
         return task
 
@@ -257,9 +313,8 @@ class RuntimeService:
             ended_at_now=True,
         )
         await self._store.add_runtime_event(task_id, "task.stopped", {"actor_id": actor_id})
-        session = self._session_for(task)
-        if session:
-            await session.channel.send(task.thread_id, f"Task `{task.id}` stopped.")
+        await self._notify(task, f"Task `{task.id}` stopped.")
+        await self._signal_status_by_id(task, TASK_STATUS_STOPPED)
         return f"Task `{task.id}` stopped."
 
     async def resume_task(self, task_id: str, instruction: str, *, actor_id: str) -> str:
@@ -282,17 +337,106 @@ class RuntimeService:
             "task.resumed",
             {"actor_id": actor_id, "instruction": instruction},
         )
+        await self._notify(task, f"Task `{task.id}` resumed and queued.")
+        await self._signal_status_by_id(task, TASK_STATUS_PENDING)
         return f"Task `{task.id}` resumed and queued."
+
+    async def merge_task(self, task_id: str, *, actor_id: str) -> str:
+        if not self._is_authorized(actor_id):
+            return "Only configured owners can merge tasks."
+        task = await self._store.get_runtime_task(task_id)
+        if task is None:
+            return f"Task `{task_id}` not found."
+        return await self._execute_merge(task, actor_id=actor_id, source="slash")
+
+    async def discard_task(self, task_id: str, *, actor_id: str) -> str:
+        if not self._is_authorized(actor_id):
+            return "Only configured owners can discard tasks."
+        task = await self._store.get_runtime_task(task_id)
+        if task is None:
+            return f"Task `{task_id}` not found."
+        if task.status not in {TASK_STATUS_WAITING_MERGE, TASK_STATUS_APPLIED}:
+            return f"Task `{task.id}` is not waiting merge (status: {task.status})."
+        await self._store.update_runtime_task(
+            task.id,
+            status=TASK_STATUS_DISCARDED,
+            summary="Discarded by user.",
+            ended_at_now=True,
+        )
+        await self._store.add_runtime_event(task.id, "task.discarded", {"actor_id": actor_id})
+        await self._notify(task, f"Task `{task.id}` discarded.")
+        await self._signal_status_by_id(task, TASK_STATUS_DISCARDED)
+        return f"Task `{task.id}` discarded."
+
+    async def get_task_changes(self, task_id: str) -> str:
+        task = await self._store.get_runtime_task(task_id)
+        if task is None:
+            return f"Task `{task_id}` not found."
+
+        changes: list[str] = []
+        if task.workspace_path:
+            workspace = Path(task.workspace_path)
+            if workspace.exists():
+                try:
+                    changes = await self._worktree.list_workspace_changes(workspace)
+                except Exception as exc:
+                    logger.warning("Failed to list workspace changes for %s: %s", task.id, exc)
+
+        if not changes:
+            ckpt = await self._store.get_last_runtime_checkpoint(task.id)
+            raw = ckpt.get("files_changed_json") if ckpt else None
+            if raw:
+                try:
+                    files = json.loads(raw)
+                    changes = [f"M\t{p}" for p in files][:200]
+                except Exception:
+                    changes = []
+
+        if not changes:
+            return f"Task `{task.id}` has no detectable file changes."
+
+        lines = [f"Task `{task.id}` changes ({len(changes)}):"]
+        lines.extend(f"- `{line}`" for line in changes[:80])
+        if len(changes) > 80:
+            lines.append(f"- ... and {len(changes) - 80} more")
+        return "\n".join(lines)[:1900]
+
+    async def cleanup_tasks(self, *, actor_id: str, task_id: str | None = None) -> str:
+        if not self._is_authorized(actor_id):
+            return "Only configured owners can clean runtime tasks."
+
+        if task_id:
+            task = await self._store.get_runtime_task(task_id)
+            if task is None:
+                return f"Task `{task_id}` not found."
+            if task.status not in _TERMINAL_CLEANUP_STATUSES:
+                return f"Task `{task.id}` is not in cleanable terminal state (status: {task.status})."
+            cleaned = await self._cleanup_single_task(task)
+            if cleaned:
+                return f"Task `{task.id}` workspace cleaned."
+            return f"Task `{task.id}` had no workspace to clean."
+
+        cleaned = await self._cleanup_expired_tasks()
+        return f"Cleanup completed. {cleaned} task workspace(s) removed."
 
     async def handle_decision_event(self, event: TaskDecisionEvent) -> str:
         if not self._is_authorized(event.actor_id):
-            return "Only configured owners can approve/reject/suggest."
+            return "Only configured owners can perform task decisions."
 
         task = await self._store.get_runtime_task(event.task_id)
         if task is None:
             return f"Task `{event.task_id}` not found."
-        if task.status not in {TASK_STATUS_DRAFT, TASK_STATUS_BLOCKED}:
-            return f"Task `{task.id}` is not waiting for decision (status: {task.status})."
+
+        if event.action in {"approve", "reject", "suggest"}:
+            valid = {TASK_STATUS_DRAFT, TASK_STATUS_BLOCKED}
+            if task.status not in valid:
+                return f"Task `{task.id}` is not waiting approval (status: {task.status})."
+        elif event.action in {"merge", "discard", "request_changes"}:
+            valid = {TASK_STATUS_WAITING_MERGE, TASK_STATUS_APPLIED}
+            if task.status not in valid:
+                return f"Task `{task.id}` is not waiting merge (status: {task.status})."
+        else:
+            return f"Unsupported decision action: {event.action}"
 
         if not await self._store.consume_runtime_decision_nonce(
             task_id=task.id,
@@ -316,7 +460,7 @@ class RuntimeService:
                 {"actor_id": event.actor_id, "source": event.source},
             )
             await self._notify(task, f"Task `{task.id}` approved and queued.")
-            await self._signal_status(task, "👀")
+            await self._signal_status_by_id(task, TASK_STATUS_PENDING)
             return f"Task `{task.id}` approved."
 
         if event.action == "reject":
@@ -332,31 +476,75 @@ class RuntimeService:
                 {"actor_id": event.actor_id, "source": event.source},
             )
             await self._notify(task, f"Task `{task.id}` rejected.")
-            await self._signal_status(task, "⚠️")
+            await self._signal_status_by_id(task, TASK_STATUS_REJECTED)
             return f"Task `{task.id}` rejected."
 
+        if event.action == "suggest":
+            suggestion = (event.suggestion or "").strip()
+            new_nonce = await self._store.create_runtime_decision_nonce(
+                task.id,
+                ttl_minutes=self._decision_ttl_minutes,
+            )
+            await self._store.update_runtime_task(
+                task.id,
+                resume_instruction=suggestion or task.resume_instruction,
+            )
+            await self._store.add_runtime_event(
+                task.id,
+                "task.suggested",
+                {"actor_id": event.actor_id, "source": event.source, "suggestion": suggestion},
+            )
+            await self._notify(
+                task,
+                (
+                    f"Suggestion recorded for task `{task.id}`. It remains in `{task.status}`. "
+                    f"Use a fresh decision token `{new_nonce}` via buttons or slash."
+                ),
+            )
+            return f"Task `{task.id}` suggestion recorded."
+
+        if event.action == "merge":
+            return await self._execute_merge(task, actor_id=event.actor_id, source=event.source)
+
+        if event.action == "discard":
+            await self._store.update_runtime_task(
+                task.id,
+                status=TASK_STATUS_DISCARDED,
+                summary="Discarded by user.",
+                ended_at_now=True,
+            )
+            await self._store.add_runtime_event(
+                task.id,
+                "task.discarded",
+                {"actor_id": event.actor_id, "source": event.source},
+            )
+            await self._notify(task, f"Task `{task.id}` discarded.")
+            await self._signal_status_by_id(task, TASK_STATUS_DISCARDED)
+            return f"Task `{task.id}` discarded."
+
+        # request_changes: move back to BLOCKED and keep suggestion as resume hint.
         suggestion = (event.suggestion or "").strip()
-        new_nonce = await self._store.create_runtime_decision_nonce(
-            task.id,
-            ttl_minutes=self._decision_ttl_minutes,
-        )
         await self._store.update_runtime_task(
             task.id,
+            status=TASK_STATUS_BLOCKED,
+            blocked_reason="Requested changes before merge.",
             resume_instruction=suggestion or task.resume_instruction,
+            ended_at=None,
         )
         await self._store.add_runtime_event(
             task.id,
-            "task.suggested",
+            "task.request_changes",
             {"actor_id": event.actor_id, "source": event.source, "suggestion": suggestion},
         )
         await self._notify(
             task,
             (
-                f"Suggestion recorded for task `{task.id}`. It remains in `{task.status}`. "
-                f"Use a fresh decision token `{new_nonce}` via buttons or slash."
+                f"Task `{task.id}` marked as BLOCKED for additional changes. "
+                f"Use `/task_resume {task.id} <instruction>` to continue."
             ),
         )
-        return f"Task `{task.id}` suggestion recorded."
+        await self._signal_status_by_id(task, TASK_STATUS_BLOCKED)
+        return f"Task `{task.id}` moved to BLOCKED."
 
     async def build_slash_decision_event(
         self,
@@ -371,7 +559,10 @@ class RuntimeService:
     ) -> TaskDecisionEvent | None:
         nonce = await self._store.get_active_runtime_decision_nonce(task_id)
         if not nonce:
-            return None
+            nonce = await self._store.create_runtime_decision_nonce(
+                task_id,
+                ttl_minutes=self._decision_ttl_minutes,
+            )
         return TaskDecisionEvent(
             platform=platform,
             channel_id=channel_id,
@@ -399,6 +590,18 @@ class RuntimeService:
                 logger.exception("Runtime worker %s crashed: %s", idx, exc)
                 await asyncio.sleep(1.5)
 
+    async def _janitor_loop(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                await asyncio.sleep(max(1, self._cleanup_interval_minutes) * 60)
+                cleaned = await self._cleanup_expired_tasks()
+                if cleaned:
+                    logger.info("Runtime janitor cleaned %d expired task workspace(s)", cleaned)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.exception("Runtime janitor failed: %s", exc)
+
     async def _run_task(self, task: RuntimeTask) -> None:
         session = self._session_for(task)
         registry = self._registry_for(task)
@@ -423,7 +626,7 @@ class RuntimeService:
             workspace,
             task.goal[:140],
         )
-        await self._signal_status(task, "👀")
+        await self._signal_status_by_id(task, TASK_STATUS_RUNNING)
 
         start = time.monotonic()
         step = task.step_no
@@ -446,7 +649,7 @@ class RuntimeService:
                     summary="Task exceeded runtime budget.",
                 )
                 await self._notify(task, f"Task `{task.id}` timed out.")
-                await self._signal_status(task, "⚠️")
+                await self._signal_status_by_id(task, TASK_STATUS_TIMEOUT)
                 return
 
             step += 1
@@ -505,6 +708,7 @@ class RuntimeService:
                 task.test_command,
                 len(changed_files),
             )
+            await self._signal_status_by_id(task, TASK_STATUS_VALIDATING)
             rc, out, err = await self._worktree.run_shell(workspace, task.test_command)
             test_ok = rc == 0
             test_summary = (out + ("\n" + err if err else "")).strip()
@@ -552,24 +756,58 @@ class RuntimeService:
                     task,
                     f"Task `{task.id}` blocked: {block_reason or 'unknown reason'}",
                 )
-                await self._signal_status(task, "⚠️")
+                await self._signal_status_by_id(task, TASK_STATUS_BLOCKED)
                 return
 
             if test_ok and state == "DONE":
+                if self._merge_gate_enabled:
+                    new_state = TASK_STATUS_WAITING_MERGE
+                    summary = f"Execution completed in {step} step(s), waiting merge confirmation."
+                else:
+                    new_state = TASK_STATUS_APPLIED
+                    summary = f"Completed in {step} step(s)."
+
                 await self._store.update_runtime_task(
                     task.id,
-                    status=TASK_STATUS_APPLIED,
+                    status=new_state,
                     ended_at_now=True,
-                    summary=f"Completed in {step} step(s).",
+                    summary=summary,
                     blocked_reason=None,
+                    merge_error=None,
                 )
-                logger.info(
-                    "Runtime task=%s APPLIED step=%d",
+                await self._store.add_runtime_event(
                     task.id,
-                    step,
+                    "task.completed",
+                    {"status": new_state, "step": step},
                 )
+
+                if self._merge_gate_enabled:
+                    merge_nonce = await self._store.create_runtime_decision_nonce(
+                        task.id,
+                        ttl_minutes=self._decision_ttl_minutes,
+                    )
+                    text = self._merge_gate_text(task.id)
+                    msg_id = await self._send_decision_surface(
+                        session,
+                        task.thread_id,
+                        text,
+                        task.id,
+                        merge_nonce,
+                        ["merge", "discard", "request_changes"],
+                    )
+                    if msg_id:
+                        await self._store.update_runtime_task(task.id, decision_message_id=msg_id)
+                    await self._notify(
+                        task,
+                        f"Task `{task.id}` completed in workspace and is waiting merge decision.",
+                    )
+                    await self._signal_status_by_id(task, TASK_STATUS_WAITING_MERGE)
+                    logger.info("Runtime task=%s WAITING_MERGE step=%d", task.id, step)
+                    return
+
+                logger.info("Runtime task=%s APPLIED step=%d", task.id, step)
                 await self._notify(task, f"Task `{task.id}` completed successfully.")
-                await self._signal_status(task, "✅")
+                await self._signal_status_by_id(task, TASK_STATUS_APPLIED)
                 return
 
             prior_failure = test_summary if not test_ok else None
@@ -582,7 +820,7 @@ class RuntimeService:
         )
         logger.info("Runtime task=%s TIMEOUT max_steps=%d", task.id, task.max_steps)
         await self._notify(task, f"Task `{task.id}` reached max steps and stopped.")
-        await self._signal_status(task, "⚠️")
+        await self._signal_status_by_id(task, TASK_STATUS_TIMEOUT)
 
     async def _run_agent(
         self,
@@ -623,6 +861,117 @@ class RuntimeService:
             kwargs["workspace_override"] = workspace
         return await agent.run(prompt, [], **kwargs)
 
+    async def _execute_merge(self, task: RuntimeTask, *, actor_id: str, source: str) -> str:
+        if task.status not in {TASK_STATUS_WAITING_MERGE, TASK_STATUS_APPLIED}:
+            return f"Task `{task.id}` is not waiting merge (status: {task.status})."
+        if not self._merge_gate_enabled:
+            return "Merge gate is disabled."
+        if self._merge_target_branch_mode != "current":
+            return "Only target_branch_mode=current is supported in v0.5.2."
+
+        workspace = Path(task.workspace_path) if task.workspace_path else None
+        if workspace is None or not workspace.exists():
+            return await self._mark_merge_failed(task, "Workspace path is missing; cannot build patch.")
+
+        try:
+            if self._merge_require_clean_repo and not await self._worktree.repo_is_clean():
+                return await self._mark_merge_failed(
+                    task,
+                    "Main repository is not clean. Commit/stash changes before merging runtime task.",
+                )
+
+            patch = await self._worktree.create_patch(workspace)
+            if not patch.strip():
+                return await self._mark_merge_failed(task, "No patch produced from task workspace.")
+
+            if self._merge_preflight_check:
+                await self._worktree.apply_patch_check(patch)
+            await self._worktree.apply_patch(patch)
+
+            commit_hash: str | None = None
+            if self._merge_auto_commit:
+                msg = self._merge_commit_template.format(
+                    task_id=task.id,
+                    goal_short=self._goal_short(task.goal),
+                )
+                commit_hash = await self._worktree.commit_repo_changes(msg)
+
+            await self._store.update_runtime_task(
+                task.id,
+                status=TASK_STATUS_MERGED,
+                merge_commit_hash=commit_hash,
+                merge_error=None,
+                summary="Merged into current branch.",
+                ended_at_now=True,
+            )
+            await self._store.add_runtime_event(
+                task.id,
+                "task.merged",
+                {
+                    "actor_id": actor_id,
+                    "source": source,
+                    "commit_hash": commit_hash,
+                    "auto_commit": self._merge_auto_commit,
+                },
+            )
+            extra = f" commit `{commit_hash}`" if commit_hash else ""
+            await self._notify(task, f"Task `{task.id}` merged successfully.{extra}")
+            await self._signal_status_by_id(task, TASK_STATUS_MERGED)
+            return f"Task `{task.id}` merged successfully.{extra}"
+        except WorktreeError as exc:
+            return await self._mark_merge_failed(task, str(exc))
+        except Exception as exc:
+            return await self._mark_merge_failed(task, f"Unexpected merge error: {exc}")
+
+    async def _mark_merge_failed(self, task: RuntimeTask, error: str) -> str:
+        await self._store.update_runtime_task(
+            task.id,
+            status=TASK_STATUS_MERGE_FAILED,
+            merge_error=error[:2000],
+            summary="Merge failed.",
+            ended_at_now=True,
+        )
+        await self._store.add_runtime_event(task.id, "task.merge_failed", {"error": error[:1000]})
+        logger.error("Runtime task=%s MERGE_FAILED error=%s", task.id, error[:600])
+        await self._notify(task, f"Task `{task.id}` merge failed: {error[:400]}")
+        await self._signal_status_by_id(task, TASK_STATUS_MERGE_FAILED)
+        return f"Task `{task.id}` merge failed: {error[:200]}"
+
+    async def _cleanup_expired_tasks(self) -> int:
+        candidates = await self._store.list_runtime_cleanup_candidates(
+            statuses=sorted(_TERMINAL_CLEANUP_STATUSES),
+            older_than_hours=self._cleanup_retention_hours,
+            limit=200,
+        )
+        cleaned = 0
+        for task in candidates:
+            if await self._cleanup_single_task(task):
+                cleaned += 1
+        if cleaned and self._cleanup_prune_worktrees:
+            try:
+                await self._worktree.prune_worktrees()
+            except Exception:
+                logger.debug("git worktree prune failed", exc_info=True)
+        return cleaned
+
+    async def _cleanup_single_task(self, task: RuntimeTask) -> bool:
+        if not task.workspace_path:
+            return False
+        workspace = Path(task.workspace_path)
+        if workspace.exists():
+            try:
+                await self._worktree.remove_worktree(workspace)
+            except Exception as exc:
+                logger.warning("Failed to remove worktree for task=%s: %s", task.id, exc)
+                return False
+        await self._store.update_runtime_task(
+            task.id,
+            workspace_path=None,
+            workspace_cleaned_at="__NOW__",
+        )
+        await self._store.add_runtime_event(task.id, "task.workspace_cleaned", {"workspace": str(workspace)})
+        return True
+
     async def _fail(self, task: RuntimeTask, error: str) -> None:
         await self._store.update_runtime_task(
             task.id,
@@ -633,38 +982,41 @@ class RuntimeService:
         await self._store.add_runtime_event(task.id, "task.failed", {"error": error[:1000]})
         logger.error("Runtime task=%s FAILED error=%s", task.id, error[:600])
         await self._notify(task, f"Task `{task.id}` failed: {error[:400]}")
-        await self._signal_status(task, "⚠️")
+        await self._signal_status_by_id(task, TASK_STATUS_FAILED)
 
     def _validate_changed_paths(self, paths: list[str]) -> str | None:
         for raw in paths:
             path = raw.replace("\\", "/")
             if any(fnmatch.fnmatch(path, pat) for pat in self._denied_paths):
                 return f"Changed forbidden path: {path}"
+            if self._path_policy_mode == "allow_all_with_denylist":
+                continue
             if self._allowed_paths and not any(fnmatch.fnmatch(path, pat) for pat in self._allowed_paths):
                 return f"Changed path outside allow-list: {path}"
         return None
 
-    async def _send_task_draft(
+    async def _send_decision_surface(
         self,
         session: ChannelSession,
         thread_id: str,
-        draft_text: str,
+        text: str,
         task_id: str,
         nonce: str,
+        actions: list[str],
     ) -> str | None:
         sender = getattr(session.channel, "send_task_draft", None)
         if sender and callable(sender):
             try:
                 return await sender(
                     thread_id=thread_id,
-                    draft_text=draft_text,
+                    draft_text=text,
                     task_id=task_id,
                     nonce=nonce,
-                    actions=["approve", "reject", "suggest"],
+                    actions=actions,
                 )
             except Exception as exc:
                 logger.warning("send_task_draft failed, falling back to plain text: %s", exc)
-        await session.channel.send(thread_id, draft_text)
+        await session.channel.send(thread_id, text)
         return None
 
     async def _notify(self, task: RuntimeTask, text: str) -> None:
@@ -677,7 +1029,10 @@ class RuntimeService:
             if current and not current.decision_message_id:
                 await self._store.update_runtime_task(task.id, decision_message_id=msg_id)
 
-    async def _signal_status(self, task: RuntimeTask, emoji: str) -> None:
+    async def _signal_status_by_id(self, task: RuntimeTask, status: str) -> None:
+        emoji = self._emoji_for_status(status)
+        if not emoji:
+            return
         session = self._session_for(task)
         if session is None:
             return
@@ -718,3 +1073,40 @@ class RuntimeService:
             f"Reason: {reason_text}\n"
             "Use Approve / Reject / Suggest."
         )
+
+    def _merge_gate_text(self, task_id: str) -> str:
+        return (
+            f"### Runtime Task `{task_id}` Ready to Merge\n"
+            "Task finished in isolated workspace. Choose one action:\n"
+            "- Merge: apply patch to current branch and auto commit\n"
+            "- Discard: keep audit metadata, drop this task result\n"
+            "- Request Changes: send task back to BLOCKED for another iteration"
+        )
+
+    @staticmethod
+    def _goal_short(goal: str) -> str:
+        one_line = " ".join(goal.strip().split())
+        return one_line[:72] if one_line else "task"
+
+    @staticmethod
+    def _emoji_for_status(status: str) -> str | None:
+        if status == TASK_STATUS_RUNNING:
+            return "👀"
+        if status == TASK_STATUS_VALIDATING:
+            return "🧪"
+        if status in {TASK_STATUS_DRAFT, TASK_STATUS_PENDING, TASK_STATUS_WAITING_MERGE}:
+            return "⏳"
+        if status in {TASK_STATUS_MERGED, TASK_STATUS_APPLIED}:
+            return "✅"
+        if status == TASK_STATUS_DISCARDED:
+            return "🗑️"
+        if status in {
+            TASK_STATUS_BLOCKED,
+            TASK_STATUS_FAILED,
+            TASK_STATUS_TIMEOUT,
+            TASK_STATUS_STOPPED,
+            TASK_STATUS_REJECTED,
+            TASK_STATUS_MERGE_FAILED,
+        }:
+            return "⚠️"
+        return None

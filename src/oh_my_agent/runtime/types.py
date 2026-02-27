@@ -8,6 +8,10 @@ TASK_STATUS_PENDING = "PENDING"
 TASK_STATUS_RUNNING = "RUNNING"
 TASK_STATUS_VALIDATING = "VALIDATING"
 TASK_STATUS_APPLIED = "APPLIED"
+TASK_STATUS_WAITING_MERGE = "WAITING_MERGE"
+TASK_STATUS_MERGED = "MERGED"
+TASK_STATUS_MERGE_FAILED = "MERGE_FAILED"
+TASK_STATUS_DISCARDED = "DISCARDED"
 TASK_STATUS_BLOCKED = "BLOCKED"
 TASK_STATUS_FAILED = "FAILED"
 TASK_STATUS_TIMEOUT = "TIMEOUT"
@@ -20,6 +24,10 @@ TaskStatus = Literal[
     "RUNNING",
     "VALIDATING",
     "APPLIED",
+    "WAITING_MERGE",
+    "MERGED",
+    "MERGE_FAILED",
+    "DISCARDED",
     "BLOCKED",
     "FAILED",
     "TIMEOUT",
@@ -27,7 +35,14 @@ TaskStatus = Literal[
     "REJECTED",
 ]
 
-DecisionAction = Literal["approve", "reject", "suggest"]
+DecisionAction = Literal[
+    "approve",
+    "reject",
+    "suggest",
+    "merge",
+    "discard",
+    "request_changes",
+]
 DecisionSource = Literal["button", "slash"]
 
 
@@ -51,6 +66,9 @@ class RuntimeTask:
     error: str | None
     summary: str | None
     resume_instruction: str | None
+    merge_commit_hash: str | None
+    merge_error: str | None
+    workspace_cleaned_at: str | None
     created_at: str | None
     started_at: str | None
     updated_at: str | None
@@ -77,6 +95,9 @@ class RuntimeTask:
             error=row.get("error"),
             summary=row.get("summary"),
             resume_instruction=row.get("resume_instruction"),
+            merge_commit_hash=row.get("merge_commit_hash"),
+            merge_error=row.get("merge_error"),
+            workspace_cleaned_at=row.get("workspace_cleaned_at"),
             created_at=row.get("created_at"),
             started_at=row.get("started_at"),
             updated_at=row.get("updated_at"),

@@ -186,6 +186,15 @@ class MemoryStore(ABC):
     ) -> bool:
         return False
 
+    async def list_runtime_cleanup_candidates(
+        self,
+        *,
+        statuses: list[str],
+        older_than_hours: int,
+        limit: int = 100,
+    ) -> list[RuntimeTask]:
+        return []
+
 
 # --------------------------------------------------------------------------- #
 #  SQLite implementation                                                        #
@@ -262,6 +271,9 @@ CREATE TABLE IF NOT EXISTS runtime_tasks (
     error               TEXT,
     summary             TEXT,
     resume_instruction  TEXT,
+    merge_commit_hash   TEXT,
+    merge_error         TEXT,
+    workspace_cleaned_at TIMESTAMP,
     created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     started_at          TIMESTAMP,
     updated_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -342,6 +354,7 @@ class SQLiteMemoryStore(MemoryStore):
     async def init(self) -> None:
         db = await self._conn()
         await db.executescript(_SCHEMA)
+        await self._migrate_runtime_schema()
         await db.commit()
         logger.info("Memory store initialised at %s", self._db_path)
 
@@ -349,6 +362,20 @@ class SQLiteMemoryStore(MemoryStore):
         if self._db:
             await self._db.close()
             self._db = None
+
+    async def _migrate_runtime_schema(self) -> None:
+        await self._ensure_column("runtime_tasks", "merge_commit_hash", "TEXT")
+        await self._ensure_column("runtime_tasks", "merge_error", "TEXT")
+        await self._ensure_column("runtime_tasks", "workspace_cleaned_at", "TIMESTAMP")
+
+    async def _ensure_column(self, table: str, column: str, ddl_type: str) -> None:
+        db = await self._conn()
+        cursor = await db.execute(f"PRAGMA table_info({table})")
+        rows = await cursor.fetchall()
+        existing = {str(row["name"]) for row in rows}
+        if column in existing:
+            return
+        await db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}")
 
     # -- read --------------------------------------------------------------
 
@@ -749,6 +776,30 @@ class SQLiteMemoryStore(MemoryStore):
         )
         await db.commit()
         return int(cursor.rowcount or 0) > 0
+
+    async def list_runtime_cleanup_candidates(
+        self,
+        *,
+        statuses: list[str],
+        older_than_hours: int,
+        limit: int = 100,
+    ) -> list[RuntimeTask]:
+        if not statuses:
+            return []
+        db = await self._conn()
+        placeholders = ", ".join("?" for _ in statuses)
+        cursor = await db.execute(
+            f"SELECT * FROM runtime_tasks "
+            f"WHERE status IN ({placeholders}) "
+            "AND workspace_path IS NOT NULL "
+            "AND workspace_cleaned_at IS NULL "
+            "AND ended_at IS NOT NULL "
+            "AND ended_at <= datetime('now', ?) "
+            "ORDER BY ended_at ASC LIMIT ?",
+            (*statuses, f"-{int(older_than_hours)} hours", int(limit)),
+        )
+        rows = await cursor.fetchall()
+        return [RuntimeTask.from_row(dict(r)) for r in rows]
 
     # -- search ------------------------------------------------------------
 

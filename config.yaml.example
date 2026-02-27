@@ -1,6 +1,6 @@
 memory:
   backend: sqlite
-  path: .workspace/memory.db
+  path: ~/.oh-my-agent/runtime/memory.db
   max_turns: 20
   summary_max_chars: 500
 
@@ -13,12 +13,8 @@ access:
   # For Discord, use the numeric user ID as string.
   owner_user_ids: []
 
-# Optional: workspace directory for agent sandbox isolation (Layer 0).
-# When set, all CLI agents run with cwd=workspace instead of the repo root.
-# AGENT.md and skills are copied into the workspace on startup.
-# Environment variables are also sanitized (whitelist mode) when this is set.
-# Leave unset if you want agents to edit this repository directly.
-# workspace: .workspace/agent
+# Agent workspace (Layer 0 sandbox). Defaults to external path.
+workspace: ~/.oh-my-agent/agent-workspace
 
 automations:
   enabled: false                      # global scheduler switch
@@ -39,15 +35,27 @@ automations:
 runtime:
   enabled: true
   worker_concurrency: 3
-  worktree_root: .workspace/tasks
+  worktree_root: ~/.oh-my-agent/runtime/tasks
   default_agent: codex
   default_test_command: "pytest -q"
   default_max_steps: 8
   default_max_minutes: 20
   risk_profile: strict
-  allowed_paths: ["src/**", "tests/**", "docs/**", "skills/**", "pyproject.toml"]
-  denied_paths: ["config.yaml", ".env", ".workspace/**"]
+  path_policy_mode: allow_all_with_denylist
+  denied_paths: [".env", "config.yaml", ".workspace/**", ".git/**"]
   decision_ttl_minutes: 1440
+  cleanup:
+    enabled: true
+    interval_minutes: 60
+    retention_hours: 24
+    prune_git_worktrees: true
+  merge_gate:
+    enabled: true
+    auto_commit: true
+    require_clean_repo: true
+    preflight_check: true
+    target_branch_mode: current
+    commit_message_template: "runtime(task:{task_id}): {goal_short}"
 
 gateway:
   channels:

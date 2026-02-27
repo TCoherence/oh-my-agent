@@ -3,6 +3,7 @@ import pytest
 from oh_my_agent.memory.store import SQLiteMemoryStore
 from oh_my_agent.runtime.types import (
     TASK_STATUS_DRAFT,
+    TASK_STATUS_MERGED,
     TASK_STATUS_PENDING,
     TASK_STATUS_RUNNING,
 )
@@ -123,3 +124,33 @@ async def test_runtime_decision_nonce_lifecycle(store):
 
     active_after = await store.get_active_runtime_decision_nonce("task-3")
     assert active_after is None
+
+
+@pytest.mark.asyncio
+async def test_runtime_cleanup_candidate_filter(store):
+    await store.create_runtime_task(
+        task_id="task-4",
+        platform="discord",
+        channel_id="100",
+        thread_id="100",
+        created_by="u1",
+        goal="merge-ready task",
+        preferred_agent="codex",
+        status=TASK_STATUS_MERGED,
+        max_steps=8,
+        max_minutes=20,
+        test_command="pytest -q",
+    )
+    await store.update_runtime_task(
+        "task-4",
+        workspace_path="/tmp/workspace-task-4",
+        ended_at="2000-01-01 00:00:00",
+    )
+
+    candidates = await store.list_runtime_cleanup_candidates(
+        statuses=[TASK_STATUS_MERGED],
+        older_than_hours=1,
+        limit=10,
+    )
+    assert len(candidates) == 1
+    assert candidates[0].id == "task-4"

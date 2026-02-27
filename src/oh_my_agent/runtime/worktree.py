@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
 from pathlib import Path
 
 
@@ -46,6 +47,59 @@ class WorktreeManager:
         stdout, stderr = await proc.communicate()
         return proc.returncode, stdout.decode(errors="replace"), stderr.decode(errors="replace")
 
+    async def repo_is_clean(self) -> bool:
+        out = await self._run_git("-C", str(self._repo_root), "status", "--porcelain")
+        return not bool(out.strip())
+
+    async def create_patch(self, workspace: Path) -> str:
+        await self._run_git("-C", str(workspace), "add", "-A")
+        return await self._run_git("-C", str(workspace), "diff", "--cached", "--binary", "HEAD")
+
+    async def apply_patch_check(self, patch: str) -> None:
+        await self._run_git_with_input(
+            patch,
+            "-C",
+            str(self._repo_root),
+            "apply",
+            "--check",
+            "--whitespace=nowarn",
+            "-",
+        )
+
+    async def apply_patch(self, patch: str) -> None:
+        await self._run_git_with_input(
+            patch,
+            "-C",
+            str(self._repo_root),
+            "apply",
+            "--whitespace=nowarn",
+            "-",
+        )
+
+    async def commit_repo_changes(self, message: str) -> str:
+        await self._run_git("-C", str(self._repo_root), "add", "-A")
+        await self._run_git("-C", str(self._repo_root), "commit", "-m", message)
+        commit_hash = await self._run_git("-C", str(self._repo_root), "rev-parse", "HEAD")
+        return commit_hash.strip()
+
+    async def list_workspace_changes(self, workspace: Path, *, limit: int = 200) -> list[str]:
+        await self._run_git("-C", str(workspace), "add", "-A")
+        out = await self._run_git("-C", str(workspace), "diff", "--cached", "--name-status", "HEAD")
+        lines = [line.strip() for line in out.splitlines() if line.strip()]
+        return lines[:limit]
+
+    async def remove_worktree(self, workspace: Path) -> None:
+        if not workspace.exists():
+            return
+        try:
+            await self._run_git("worktree", "remove", "--force", str(workspace))
+        except WorktreeError:
+            # Fall back to filesystem cleanup if git metadata is already stale.
+            shutil.rmtree(workspace, ignore_errors=True)
+
+    async def prune_worktrees(self) -> None:
+        await self._run_git("worktree", "prune")
+
     async def _run_git(self, *args: str) -> str:
         proc = await asyncio.create_subprocess_exec(
             "git",
@@ -55,6 +109,23 @@ class WorktreeManager:
             stderr=asyncio.subprocess.PIPE,
         )
         stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            raise WorktreeError(
+                f"git {' '.join(args)} failed ({proc.returncode}): "
+                f"{stderr.decode(errors='replace').strip()}"
+            )
+        return stdout.decode(errors="replace")
+
+    async def _run_git_with_input(self, stdin: str, *args: str) -> str:
+        proc = await asyncio.create_subprocess_exec(
+            "git",
+            *args,
+            cwd=str(self._repo_root),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate(stdin.encode("utf-8"))
         if proc.returncode != 0:
             raise WorktreeError(
                 f"git {' '.join(args)} failed ({proc.returncode}): "

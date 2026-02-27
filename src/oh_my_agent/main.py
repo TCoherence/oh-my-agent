@@ -5,6 +5,7 @@ import logging
 import logging.handlers
 import shutil
 import sys
+from datetime import datetime
 from pathlib import Path
 
 
@@ -147,19 +148,109 @@ def _build_channel(cfg: dict, *, owner_user_ids: set[str] | None = None):
     raise ValueError(f"Unknown platform '{platform}'")
 
 
+def _apply_v052_defaults(config: dict) -> None:
+    config.setdefault("workspace", "~/.oh-my-agent/agent-workspace")
+
+    memory_cfg = config.setdefault("memory", {})
+    memory_cfg.setdefault("backend", "sqlite")
+    memory_cfg.setdefault("path", "~/.oh-my-agent/runtime/memory.db")
+
+    runtime_cfg = config.setdefault("runtime", {})
+    runtime_cfg.setdefault("enabled", True)
+    runtime_cfg.setdefault("worker_concurrency", 3)
+    runtime_cfg.setdefault("worktree_root", "~/.oh-my-agent/runtime/tasks")
+    runtime_cfg.setdefault("default_agent", "codex")
+    runtime_cfg.setdefault("default_test_command", "pytest -q")
+    runtime_cfg.setdefault("default_max_steps", 8)
+    runtime_cfg.setdefault("default_max_minutes", 20)
+    runtime_cfg.setdefault("risk_profile", "strict")
+    runtime_cfg.setdefault("path_policy_mode", "allow_all_with_denylist")
+    runtime_cfg.setdefault("denied_paths", [".env", "config.yaml", ".workspace/**", ".git/**"])
+    runtime_cfg.setdefault("decision_ttl_minutes", 1440)
+
+    cleanup_cfg = runtime_cfg.setdefault("cleanup", {})
+    cleanup_cfg.setdefault("enabled", True)
+    cleanup_cfg.setdefault("interval_minutes", 60)
+    cleanup_cfg.setdefault("retention_hours", 24)
+    cleanup_cfg.setdefault("prune_git_worktrees", True)
+
+    merge_cfg = runtime_cfg.setdefault("merge_gate", {})
+    merge_cfg.setdefault("enabled", True)
+    merge_cfg.setdefault("auto_commit", True)
+    merge_cfg.setdefault("require_clean_repo", True)
+    merge_cfg.setdefault("preflight_check", True)
+    merge_cfg.setdefault("target_branch_mode", "current")
+    merge_cfg.setdefault("commit_message_template", "runtime(task:{task_id}): {goal_short}")
+
+
+def _runtime_root(config: dict) -> Path:
+    runtime_cfg = config.get("runtime", {})
+    worktree_root = Path(runtime_cfg.get("worktree_root", "~/.oh-my-agent/runtime/tasks"))
+    return worktree_root.expanduser().resolve().parent
+
+
+def _maybe_move(src: Path, dst: Path) -> bool:
+    if not src.exists() or dst.exists():
+        return False
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(src), str(dst))
+    return True
+
+
+def _migrate_legacy_workspace(config: dict, project_root: Path, logger: logging.Logger) -> None:
+    old_root = project_root / ".workspace"
+    if not old_root.exists():
+        return
+
+    runtime_root = _runtime_root(config)
+    marker = runtime_root / ".migration_v052_done"
+    if marker.exists():
+        return
+
+    memory_path = Path(config.get("memory", {}).get("path", "~/.oh-my-agent/runtime/memory.db")).expanduser().resolve()
+    worktree_root = Path(config.get("runtime", {}).get("worktree_root", "~/.oh-my-agent/runtime/tasks")).expanduser().resolve()
+    workspace_path = Path(config.get("workspace", "~/.oh-my-agent/agent-workspace")).expanduser().resolve()
+    logs_dir = runtime_root / "logs"
+
+    targets = [memory_path, worktree_root, workspace_path, logs_dir]
+    if all(p.exists() for p in targets):
+        runtime_root.mkdir(parents=True, exist_ok=True)
+        marker.write_text("skip: targets already exist\n", encoding="utf-8")
+        return
+
+    ts = datetime.now().strftime("%Y%m%d%H%M%S")
+    backup = project_root / f".workspace.migrated.{ts}"
+    shutil.move(str(old_root), str(backup))
+
+    moved = 0
+    moved += int(_maybe_move(backup / "memory.db", memory_path))
+    moved += int(_maybe_move(backup / "memory.db-wal", memory_path.with_name(f"{memory_path.name}-wal")))
+    moved += int(_maybe_move(backup / "memory.db-shm", memory_path.with_name(f"{memory_path.name}-shm")))
+    moved += int(_maybe_move(backup / "tasks", worktree_root))
+    moved += int(_maybe_move(backup / "agent", workspace_path))
+    moved += int(_maybe_move(backup / "logs", logs_dir))
+
+    runtime_root.mkdir(parents=True, exist_ok=True)
+    marker.write_text(
+        f"migrated_from={backup}\nmoved_items={moved}\nat={datetime.now().isoformat()}\n",
+        encoding="utf-8",
+    )
+    logger.info("Migrated legacy .workspace to external runtime root: %s", runtime_root)
+
+
 def _setup_logging(runtime_root: Path | None = None) -> None:
     log_format = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
     root = logging.getLogger()
     root.setLevel(logging.INFO)
+    root.handlers.clear()
 
     # Console handler — always on
     console = logging.StreamHandler(sys.stderr)
     console.setFormatter(logging.Formatter(log_format))
     root.addHandler(console)
 
-    # Rotating file handler — one file per day, keep 7 days
-    # Runtime artifacts live under .workspace/ by default.
-    runtime_root = runtime_root or Path(".workspace")
+    # Rotating file handler — one file per day, keep 7 days.
+    runtime_root = runtime_root or Path("~/.oh-my-agent/runtime").expanduser().resolve()
     log_dir = runtime_root / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     file_handler = logging.handlers.TimedRotatingFileHandler(
@@ -183,13 +274,17 @@ async def _async_main(config: dict, logger: logging.Logger) -> None:
     if owner_user_ids:
         logger.info("Owner-only mode enabled for %d user(s)", len(owner_user_ids))
 
-    # Setup workspace (optional — Layer 0 sandbox isolation)
+    # Setup workspace (Layer 0 sandbox isolation)
     project_root = Path.cwd()
     workspace: Path | None = None
-    if "workspace" in config:
+    if config.get("workspace"):
         skills_cfg_for_ws = config.get("skills", {})
-        skills_path_for_ws = Path(skills_cfg_for_ws.get("path", "skills/")).resolve() if skills_cfg_for_ws.get("enabled") else None
-        workspace = _setup_workspace(config["workspace"], project_root, skills_path_for_ws)
+        skills_path_for_ws = (
+            Path(skills_cfg_for_ws.get("path", "skills/")).resolve()
+            if skills_cfg_for_ws.get("enabled")
+            else None
+        )
+        workspace = _setup_workspace(str(config["workspace"]), project_root, skills_path_for_ws)
         logger.info("Workspace: %s", workspace)
 
     # Build agent registry map
@@ -212,7 +307,7 @@ async def _async_main(config: dict, logger: logging.Logger) -> None:
         from oh_my_agent.memory.store import SQLiteMemoryStore
         from oh_my_agent.memory.compressor import HistoryCompressor
 
-        db_path = memory_cfg.get("path", ".workspace/memory.db")
+        db_path = str(Path(memory_cfg.get("path", "~/.oh-my-agent/runtime/memory.db")).expanduser().resolve())
         memory_store = SQLiteMemoryStore(db_path)
         await memory_store.init()
         logger.info("Memory store ready: %s", db_path)
@@ -328,12 +423,11 @@ async def _async_main(config: dict, logger: logging.Logger) -> None:
 
 
 def main() -> None:
-    _setup_logging()
-    logger = logging.getLogger(__name__)
-
     # Locate config.yaml (next to cwd or project root)
     config_path = Path("config.yaml")
     if not config_path.exists():
+        _setup_logging()
+        logger = logging.getLogger(__name__)
         logger.error("config.yaml not found. Copy config.yaml.example and fill in your values.")
         sys.exit(1)
 
@@ -341,8 +435,16 @@ def main() -> None:
         from oh_my_agent.config import load_config
         config = load_config(config_path)
     except Exception as exc:
+        _setup_logging()
+        logger = logging.getLogger(__name__)
         logger.error("Failed to load config.yaml: %s", exc)
         sys.exit(1)
+
+    _apply_v052_defaults(config)
+    runtime_root = _runtime_root(config)
+    _setup_logging(runtime_root)
+    logger = logging.getLogger(__name__)
+    _migrate_legacy_workspace(config, Path.cwd(), logger)
 
     asyncio.run(_async_main(config, logger))
 

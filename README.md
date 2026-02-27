@@ -8,7 +8,7 @@ Inspired by [OpenClaw](https://openclaw.dev).
 
 - `/search` is already implemented with SQLite FTS5 across all threads.
 - `SkillSync` reverse sync is already implemented and runs on startup.
-- v0.5 focus is now **runtime-first**: durable autonomous task loops (`DRAFT -> RUNNING -> APPLIED/BLOCKED/...`), not smart routing.
+- v0.5 focus is now **runtime-first**: durable autonomous task loops (`DRAFT -> RUNNING -> WAITING_MERGE -> MERGED/...`), not smart routing.
 - Task approvals use **buttons first + slash fallback** on Discord; reactions are status-only signals.
 
 ## Architecture
@@ -78,7 +78,7 @@ Edit `config.yaml`:
 ```yaml
 memory:
   backend: sqlite
-  path: .workspace/memory.db
+  path: ~/.oh-my-agent/runtime/memory.db
   max_turns: 20
 
 skills:
@@ -90,8 +90,7 @@ access:
 
 # Sandbox isolation: agents run in this dir instead of the repo root.
 # AGENT.md and skills are copied here on startup. Env vars are sanitized.
-# Leave unset if you want agents to edit this repository directly.
-# workspace: .workspace/agent
+workspace: ~/.oh-my-agent/agent-workspace
 
 automations:
   enabled: true
@@ -111,15 +110,27 @@ automations:
 runtime:
   enabled: true
   worker_concurrency: 3
-  worktree_root: .workspace/tasks
+  worktree_root: ~/.oh-my-agent/runtime/tasks
   default_agent: codex
   default_test_command: "pytest -q"
   default_max_steps: 8
   default_max_minutes: 20
   risk_profile: strict
-  allowed_paths: ["src/**", "tests/**", "docs/**", "skills/**", "pyproject.toml"]
-  denied_paths: ["config.yaml", ".env", ".workspace/**"]
+  path_policy_mode: allow_all_with_denylist
+  denied_paths: [".env", "config.yaml", ".workspace/**", ".git/**"]
   decision_ttl_minutes: 1440
+  cleanup:
+    enabled: true
+    interval_minutes: 60
+    retention_hours: 24
+    prune_git_worktrees: true
+  merge_gate:
+    enabled: true
+    auto_commit: true
+    require_clean_repo: true
+    preflight_check: true
+    target_branch_mode: current
+    commit_message_template: "runtime(task:{task_id}): {goal_short}"
 
 gateway:
   channels:
@@ -149,7 +160,7 @@ agents:
 
 Secrets can live in a `.env` file — `${VAR}` placeholders are substituted automatically.
 
-Runtime files (SQLite DB, WAL/SHM, log files) are expected under `.workspace/`, which should be gitignored.
+Runtime artifacts default to `~/.oh-my-agent/runtime/` (memory DB, logs, task worktrees). Legacy `.workspace/` is migrated automatically on startup.
 
 ### 4. Run
 
@@ -184,6 +195,10 @@ oh-my-agent
 | `/task_suggest <task_id> <suggestion>` | Keep draft, attach suggestion |
 | `/task_resume <task_id> <instruction>` | Resume a blocked task |
 | `/task_stop <task_id>` | Stop a running task |
+| `/task_merge <task_id>` | Merge a `WAITING_MERGE` task into current branch |
+| `/task_discard <task_id>` | Discard a `WAITING_MERGE` task |
+| `/task_changes <task_id>` | Show task workspace changes |
+| `/task_cleanup [task_id]` | Cleanup expired/specified task workspace |
 
 ### Agent Targeting
 - **In-thread targeting**: send `@codex fix this` to run only Codex for that turn
@@ -207,11 +222,12 @@ Claude session IDs are persisted per `(platform, channel_id, thread_id, agent)` 
 
 ### Autonomous Runtime / 自主任务运行时
 - Message intent can auto-create runtime tasks for long coding requests.
-- Runtime tasks execute in per-task git worktrees under `.workspace/tasks/<task_id>`.
+- Runtime tasks execute in per-task git worktrees under `~/.oh-my-agent/runtime/tasks/<task_id>`.
 - Loop contract: code changes -> tests -> retry, until `TASK_STATE: DONE` + passing tests.
 - Risk policy (`strict`): low-risk tasks auto-run; high-risk tasks enter `DRAFT` and require approval.
-- Decision surface: Discord buttons first (`Approve/Reject/Suggest`), slash commands as fallback.
-- Reactions are non-blocking status signals only (`👀`, `✅`, `⚠️`).
+- Decision surface: Discord buttons first + slash fallback.
+- Execution completion now enters `WAITING_MERGE`; final apply requires `Merge/Discard/Request Changes`.
+- Reactions are non-blocking status signals only (`⏳`, `👀`, `🧪`, `✅`, `⚠️`, `🗑️`).
 
 ## Agents
 

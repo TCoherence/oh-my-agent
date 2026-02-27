@@ -18,7 +18,7 @@ If a historical note conflicts with the runtime spec, follow `docs/v0.5_runtime_
 
 ---
 
-## v0.5.0 — Runtime-First Scope Lock / 范围锁定
+## v0.5.2 — Runtime-First Scope Lock / 范围锁定
 
 ### Why One-Turn Is Not Enough / 为什么单轮问答不够
 
@@ -33,8 +33,10 @@ To reach OpenClaw/OpenHands-like behavior, we need a durable runtime layer with 
 1. Durable task state machine + checkpoints/events in SQLite.
 2. Concurrent workers with per-task git worktree isolation.
 3. Risk-gated task start (`strict` profile): auto-run low risk, draft approval for high risk.
-4. Discord decision surface: **buttons first + slash fallback**.
-5. Reactions are status signals only (not decision actions).
+4. Merge gate after execution success (`WAITING_MERGE` -> `MERGED|DISCARDED|MERGE_FAILED`).
+5. Discord decision surface: **buttons first + slash fallback**.
+6. Runtime directory fully externalized by default (`~/.oh-my-agent/...`) with startup migration from legacy `.workspace`.
+7. Reactions are status signals only (not decision actions).
 
 ### Out of Scope
 
@@ -220,7 +222,7 @@ Three-layer defense model (Layers 0–2) now in place:
 
 **Layer 0 — Workspace directory isolation** (`config.yaml` + `main.py` + `BaseCLIAgent`)
 
-Add `workspace: .workspace/agent` to `config.yaml` when you want sandboxed agent cwd. On startup, `_setup_workspace()` in `main.py`:
+Use `workspace: ~/.oh-my-agent/agent-workspace` (default in v0.5.2) for sandboxed agent cwd. On startup, `_setup_workspace()` in `main.py`:
 1. Creates the directory.
 2. Copies `AGENT.md` / `CLAUDE.md` / `GEMINI.md` (resolving symlinks) so agents have project context.
 3. Copies skills from `skills/` into `workspace/.claude/skills/` and `workspace/.gemini/skills/` (real files, not symlinks).

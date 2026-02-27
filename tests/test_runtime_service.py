@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
@@ -14,10 +14,11 @@ from oh_my_agent.gateway.session import ChannelSession
 from oh_my_agent.memory.store import SQLiteMemoryStore
 from oh_my_agent.runtime import (
     RuntimeService,
-    TASK_STATUS_APPLIED,
     TASK_STATUS_BLOCKED,
     TASK_STATUS_DRAFT,
     TASK_STATUS_FAILED,
+    TASK_STATUS_MERGED,
+    TASK_STATUS_WAITING_MERGE,
 )
 
 
@@ -25,14 +26,16 @@ from oh_my_agent.runtime import (
 class _FakeChannel:
     platform: str = "discord"
     channel_id: str = "100"
+    _next_msg_id: int = 1
+    sent: list[tuple[str, str]] = field(default_factory=list)
+    drafts: list[dict] = field(default_factory=list)
+    signals: list[tuple[str, str | None, str]] = field(default_factory=list)
 
-    def __post_init__(self) -> None:
-        self.sent: list[tuple[str, str]] = []
-        self.drafts: list[dict] = []
-        self.signals: list[tuple[str, str | None, str]] = []
-
-    async def send(self, thread_id: str, text: str) -> None:
+    async def send(self, thread_id: str, text: str) -> str:
         self.sent.append((thread_id, text))
+        msg_id = f"m-{self._next_msg_id}"
+        self._next_msg_id += 1
+        return msg_id
 
     async def send_task_draft(
         self,
@@ -52,7 +55,9 @@ class _FakeChannel:
                 "actions": actions,
             }
         )
-        return f"msg-{task_id}"
+        msg_id = f"d-{self._next_msg_id}"
+        self._next_msg_id += 1
+        return msg_id
 
     async def signal_task_status(self, thread_id: str, message_id: str | None, emoji: str) -> None:
         self.signals.append((thread_id, message_id, emoji))
@@ -77,6 +82,25 @@ class _DoneAgent(BaseAgent):
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text("ok", encoding="utf-8")
         return AgentResponse(text=f"{prompt}\nTASK_STATE: DONE")
+
+
+class _RootReadmeAgent(BaseAgent):
+    @property
+    def name(self) -> str:
+        return "root-readme-agent"
+
+    async def run(
+        self,
+        prompt: str,
+        history: list[dict] | None = None,
+        *,
+        thread_id: str | None = None,
+        workspace_override: Path | None = None,
+    ) -> AgentResponse:
+        del prompt, history, thread_id
+        assert workspace_override is not None
+        (workspace_override / "README.md").write_text("# updated\n", encoding="utf-8")
+        return AgentResponse(text="done\nTASK_STATE: DONE")
 
 
 class _BlockedOnceAgent(BaseAgent):
@@ -121,7 +145,6 @@ class _DeniedPathAgent(BaseAgent):
     ) -> AgentResponse:
         del prompt, history, thread_id
         assert workspace_override is not None
-        # Should trigger denied path guard.
         (workspace_override / "config.yaml").write_text("oops: true\n", encoding="utf-8")
         return AgentResponse(text="changed sensitive file\nTASK_STATE: DONE")
 
@@ -167,9 +190,24 @@ async def runtime_env(tmp_path):
         "default_max_steps": 8,
         "default_max_minutes": 20,
         "risk_profile": "strict",
+        "path_policy_mode": "allow_all_with_denylist",
         "allowed_paths": ["src/**", "tests/**", "docs/**", "skills/**", "pyproject.toml"],
-        "denied_paths": ["config.yaml", ".env", ".workspace/**"],
+        "denied_paths": ["config.yaml", ".env", ".workspace/**", ".git/**"],
         "decision_ttl_minutes": 60,
+        "cleanup": {
+            "enabled": False,
+            "interval_minutes": 60,
+            "retention_hours": 0,
+            "prune_git_worktrees": True,
+        },
+        "merge_gate": {
+            "enabled": True,
+            "auto_commit": True,
+            "require_clean_repo": True,
+            "preflight_check": True,
+            "target_branch_mode": "current",
+            "commit_message_template": "runtime(task:{task_id}): {goal_short}",
+        },
     }
     runtime = RuntimeService(store, config=cfg, owner_user_ids={"owner-1"}, repo_root=repo)
     channel = _FakeChannel()
@@ -186,10 +224,12 @@ async def runtime_env(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_runtime_message_intent_draft_and_approve_flow(runtime_env):
+async def test_runtime_message_intent_draft_to_merge(runtime_env):
     store: SQLiteMemoryStore = runtime_env["store"]
     runtime: RuntimeService = runtime_env["runtime"]
     channel: _FakeChannel = runtime_env["channel"]
+    repo: Path = runtime_env["repo"]
+
     registry = AgentRegistry([_DoneAgent()])
     session = ChannelSession(
         platform="discord",
@@ -216,7 +256,7 @@ async def test_runtime_message_intent_draft_and_approve_flow(runtime_env):
     assert len(tasks) == 1
     assert tasks[0].status == TASK_STATUS_DRAFT
 
-    event = await runtime.build_slash_decision_event(
+    approve_event = await runtime.build_slash_decision_event(
         platform="discord",
         channel_id="100",
         thread_id="thread-1",
@@ -224,13 +264,29 @@ async def test_runtime_message_intent_draft_and_approve_flow(runtime_env):
         action="approve",
         actor_id="owner-1",
     )
-    assert event is not None
-    result = await runtime.handle_decision_event(event)
+    assert approve_event is not None
+    result = await runtime.handle_decision_event(approve_event)
     assert "approved" in result.lower()
 
-    done = await _wait_for_status(store, tasks[0].id, {TASK_STATUS_APPLIED})
-    assert done.status == TASK_STATUS_APPLIED
-    assert any(sig[2] == "✅" for sig in channel.signals)
+    waiting = await _wait_for_status(store, tasks[0].id, {TASK_STATUS_WAITING_MERGE})
+    assert waiting.status == TASK_STATUS_WAITING_MERGE
+
+    merge_event = await runtime.build_slash_decision_event(
+        platform="discord",
+        channel_id="100",
+        thread_id="thread-1",
+        task_id=tasks[0].id,
+        action="merge",
+        actor_id="owner-1",
+    )
+    assert merge_event is not None
+    merge_result = await runtime.handle_decision_event(merge_event)
+    assert "merged successfully" in merge_result.lower()
+
+    merged = await _wait_for_status(store, tasks[0].id, {TASK_STATUS_MERGED})
+    assert merged.status == TASK_STATUS_MERGED
+    assert merged.merge_commit_hash
+    assert (repo / "src" / "runtime.txt").exists()
 
 
 @pytest.mark.asyncio
@@ -263,8 +319,8 @@ async def test_runtime_blocked_then_resume(runtime_env):
     resume = await runtime.resume_task(task.id, "fixture is available now", actor_id="owner-1")
     assert "resumed" in resume.lower()
 
-    applied = await _wait_for_status(store, task.id, {TASK_STATUS_APPLIED})
-    assert applied.status == TASK_STATUS_APPLIED
+    waiting = await _wait_for_status(store, task.id, {TASK_STATUS_WAITING_MERGE})
+    assert waiting.status == TASK_STATUS_WAITING_MERGE
     assert agent.calls >= 2
 
 
@@ -294,3 +350,106 @@ async def test_runtime_path_guard_marks_failed(runtime_env):
     failed = await _wait_for_status(store, task.id, {TASK_STATUS_FAILED})
     assert failed.status == TASK_STATUS_FAILED
     assert "forbidden path" in (failed.error or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_runtime_allow_all_policy_permits_repo_root_changes(runtime_env):
+    store: SQLiteMemoryStore = runtime_env["store"]
+    runtime: RuntimeService = runtime_env["runtime"]
+    channel: _FakeChannel = runtime_env["channel"]
+    registry = AgentRegistry([_RootReadmeAgent()])
+    session = ChannelSession(
+        platform="discord",
+        channel_id="100",
+        channel=channel,
+        registry=registry,
+    )
+    runtime.register_session(session, registry)
+    await runtime.start()
+
+    task = await runtime.create_task(
+        session=session,
+        registry=registry,
+        thread_id="thread-4",
+        goal="fix typo in readme and run tests",
+        created_by="owner-1",
+        source="slash",
+    )
+    waiting = await _wait_for_status(store, task.id, {TASK_STATUS_WAITING_MERGE})
+    assert waiting.status == TASK_STATUS_WAITING_MERGE
+
+
+@pytest.mark.asyncio
+async def test_runtime_manual_cleanup_removes_workspace(runtime_env):
+    store: SQLiteMemoryStore = runtime_env["store"]
+    runtime: RuntimeService = runtime_env["runtime"]
+    channel: _FakeChannel = runtime_env["channel"]
+    registry = AgentRegistry([_DoneAgent()])
+    session = ChannelSession(
+        platform="discord",
+        channel_id="100",
+        channel=channel,
+        registry=registry,
+    )
+    runtime.register_session(session, registry)
+    await runtime.start()
+
+    task = await runtime.create_task(
+        session=session,
+        registry=registry,
+        thread_id="thread-5",
+        goal="touch code and run tests",
+        created_by="owner-1",
+        source="slash",
+    )
+    waiting = await _wait_for_status(store, task.id, {TASK_STATUS_WAITING_MERGE})
+    assert waiting.workspace_path
+    ws = Path(waiting.workspace_path)
+    assert ws.exists()
+
+    discard_result = await runtime.discard_task(task.id, actor_id="owner-1")
+    assert "discarded" in discard_result.lower()
+
+    # Mark as old enough for retention window (0h in fixture, explicit timestamp for clarity).
+    await store.update_runtime_task(task.id, ended_at="2000-01-01 00:00:00")
+    cleanup_result = await runtime.cleanup_tasks(actor_id="owner-1")
+    assert "completed" in cleanup_result.lower()
+
+    cleaned = await store.get_runtime_task(task.id)
+    assert cleaned is not None
+    assert cleaned.workspace_path is None
+    assert cleaned.workspace_cleaned_at is not None
+
+
+@pytest.mark.asyncio
+async def test_runtime_legacy_applied_is_mergeable(runtime_env):
+    store: SQLiteMemoryStore = runtime_env["store"]
+    runtime: RuntimeService = runtime_env["runtime"]
+    channel: _FakeChannel = runtime_env["channel"]
+    registry = AgentRegistry([_DoneAgent()])
+    session = ChannelSession(
+        platform="discord",
+        channel_id="100",
+        channel=channel,
+        registry=registry,
+    )
+    runtime.register_session(session, registry)
+    await runtime.start()
+
+    task = await runtime.create_task(
+        session=session,
+        registry=registry,
+        thread_id="thread-6",
+        goal="legacy applied merge compatibility",
+        created_by="owner-1",
+        source="slash",
+    )
+    waiting = await _wait_for_status(store, task.id, {TASK_STATUS_WAITING_MERGE})
+    assert waiting.workspace_path
+
+    await store.update_runtime_task(task.id, status="APPLIED")
+    result = await runtime.merge_task(task.id, actor_id="owner-1")
+    assert "merged successfully" in result.lower()
+
+    merged = await _wait_for_status(store, task.id, {TASK_STATUS_MERGED})
+    assert merged.status == TASK_STATUS_MERGED

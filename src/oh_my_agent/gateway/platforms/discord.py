@@ -411,6 +411,12 @@ class DiscordChannel(BaseChannel):
                 lines.append(f"- Blocked: {task.blocked_reason[:300]}")
             if task.error:
                 lines.append(f"- Error: {task.error[:300]}")
+            if task.merge_commit_hash:
+                lines.append(f"- Commit: `{task.merge_commit_hash}`")
+            if task.merge_error:
+                lines.append(f"- Merge error: {task.merge_error[:300]}")
+            if task.workspace_path:
+                lines.append(f"- Workspace: `{task.workspace_path}`")
             await interaction.response.send_message("\n".join(lines)[:1900], ephemeral=True)
 
         @tree.command(name="task_list", description="List runtime tasks for this channel")
@@ -500,12 +506,69 @@ class DiscordChannel(BaseChannel):
             task_id: str,
             suggestion: str,
         ):
+            resolved_action = "suggest"
+            if self._runtime_service:
+                task = await self._runtime_service.get_task(task_id)
+                if task and task.status in {"WAITING_MERGE", "APPLIED"}:
+                    resolved_action = "request_changes"
             await _slash_decide(
                 interaction,
-                action="suggest",
+                action=resolved_action,
                 task_id=task_id,
                 suggestion=suggestion,
             )
+
+        @tree.command(name="task_merge", description="Merge a completed runtime task into current branch")
+        @app_commands.describe(task_id="Task ID")
+        async def slash_task_merge(interaction: discord.Interaction, task_id: str):
+            await _slash_decide(interaction, action="merge", task_id=task_id)
+
+        @tree.command(name="task_discard", description="Discard a completed runtime task result")
+        @app_commands.describe(task_id="Task ID")
+        async def slash_task_discard(interaction: discord.Interaction, task_id: str):
+            await _slash_decide(interaction, action="discard", task_id=task_id)
+
+        @tree.command(name="task_changes", description="Show file changes for a runtime task")
+        @app_commands.describe(task_id="Task ID")
+        async def slash_task_changes(interaction: discord.Interaction, task_id: str):
+            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
+                await interaction.response.send_message(
+                    "This command is restricted to the configured owner.",
+                    ephemeral=True,
+                )
+                return
+            if not self._runtime_service:
+                await interaction.response.send_message(
+                    "Runtime service is not enabled.",
+                    ephemeral=True,
+                )
+                return
+            text = await self._runtime_service.get_task_changes(task_id)
+            await interaction.response.send_message(text[:1900], ephemeral=True)
+
+        @tree.command(name="task_cleanup", description="Cleanup runtime task workspace(s)")
+        @app_commands.describe(task_id="Optional task ID for immediate cleanup")
+        async def slash_task_cleanup(
+            interaction: discord.Interaction,
+            task_id: str | None = None,
+        ):
+            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
+                await interaction.response.send_message(
+                    "This command is restricted to the configured owner.",
+                    ephemeral=True,
+                )
+                return
+            if not self._runtime_service:
+                await interaction.response.send_message(
+                    "Runtime service is not enabled.",
+                    ephemeral=True,
+                )
+                return
+            result = await self._runtime_service.cleanup_tasks(
+                actor_id=str(interaction.user.id),
+                task_id=task_id,
+            )
+            await interaction.response.send_message(result, ephemeral=True)
 
         @tree.command(name="task_resume", description="Resume a blocked runtime task")
         @app_commands.describe(task_id="Task ID", instruction="Instruction to unblock and continue")
@@ -635,6 +698,9 @@ class DiscordChannel(BaseChannel):
             "approve": ("Approve", discord.ButtonStyle.success),
             "reject": ("Reject", discord.ButtonStyle.danger),
             "suggest": ("Suggest", discord.ButtonStyle.secondary),
+            "merge": ("Merge", discord.ButtonStyle.success),
+            "discard": ("Discard", discord.ButtonStyle.danger),
+            "request_changes": ("Request Changes", discord.ButtonStyle.secondary),
         }
 
         for action in actions:

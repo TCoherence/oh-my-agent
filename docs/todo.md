@@ -9,11 +9,11 @@
 
 ---
 
-## v0.5.0 — Autonomous Runtime (Primary)
+## v0.5.2 — Autonomous Runtime (Primary)
 
 ### Core Loop
 
-- [x] **Runtime task state machine** — `DRAFT -> PENDING -> RUNNING -> VALIDATING -> APPLIED/BLOCKED/FAILED/TIMEOUT/STOPPED/REJECTED`.
+- [x] **Runtime task state machine** — `DRAFT -> PENDING -> RUNNING -> VALIDATING -> WAITING_MERGE -> MERGED|MERGE_FAILED|DISCARDED` (+ `BLOCKED/FAILED/TIMEOUT/STOPPED/REJECTED`).
 - [x] **Checkpoint + event persistence** — runtime tables in SQLite:
   - `runtime_tasks`
   - `runtime_task_checkpoints`
@@ -23,17 +23,27 @@
 
 ### Autonomous Execution
 
-- [x] **Per-task worktree isolation** — one git worktree per task under `.workspace/tasks/<task_id>`.
+- [x] **Per-task worktree isolation** — one git worktree per task under `~/.oh-my-agent/runtime/tasks/<task_id>`.
 - [x] **Step loop execution** — code change -> test command -> retry until done or budget exhausted.
 - [x] **Budget guards** — step budget + wall-time budget.
-- [x] **Path guards** — allow/deny path checks (`allowed_paths`, `denied_paths`).
+- [x] **Path guards** — default `allow_all_with_denylist` (`denied_paths` only, supports root docs/code edits).
 
 ### Approval Surface
 
-- [x] **Decision model** — nonce-based task decisions (`approve/reject/suggest`).
-- [x] **Discord buttons (primary)** — Approve/Reject/Suggest message buttons.
-- [x] **Slash fallback** — `/task_approve`, `/task_reject`, `/task_suggest`.
-- [x] **Reaction policy** — reactions are status-only signals (`👀`, `✅`, `⚠️`), not approval actions.
+- [x] **Decision model** — nonce-based task decisions (`approve/reject/suggest/merge/discard/request_changes`).
+- [x] **Discord buttons (primary)** — Approve/Reject/Suggest + Merge/Discard/Request Changes.
+- [x] **Slash fallback** — `/task_approve`, `/task_reject`, `/task_suggest`, `/task_merge`, `/task_discard`.
+- [x] **Reaction policy** — reactions are status-only signals (`⏳`, `👀`, `🧪`, `✅`, `⚠️`, `🗑️`), not approval actions.
+
+### Merge Gate / Cleanup / External Runtime
+
+- [x] **Merge gate** — runtime completion lands in `WAITING_MERGE`, not direct apply.
+- [x] **Merge execution** — patch from task worktree -> `git apply --check` -> apply -> auto commit to current branch.
+- [x] **Strict merge guardrails** — owner-only, clean repo required, merge failure tracked as `MERGE_FAILED`.
+- [x] **Externalized runtime paths** — workspace/memory/worktrees/logs default to `~/.oh-my-agent/...`.
+- [x] **Legacy migration** — startup migrates `.workspace` to external layout with backup + marker.
+- [x] **Janitor cleanup** — retention-based cleanup removes worktree artifacts and keeps DB audit metadata.
+- [x] **Manual cleanup** — `/task_cleanup [task_id]` for immediate admin cleanup.
 
 ### Runtime Entry Points
 
