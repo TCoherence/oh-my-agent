@@ -104,6 +104,7 @@ def build_runtime_prompt(
         "Rules:",
         "- Make concrete repository changes toward the goal.",
         "- Run or update tests as needed.",
+        "- User approval/merge happens outside your loop. If the workspace changes are ready and tests pass, emit TASK_STATE: DONE instead of waiting for more user input.",
         "- If blocked by missing dependency/permission/context, emit TASK_STATE: BLOCKED.",
         "- When the goal is complete and tests pass, emit TASK_STATE: DONE.",
         "- Otherwise emit TASK_STATE: CONTINUE.",

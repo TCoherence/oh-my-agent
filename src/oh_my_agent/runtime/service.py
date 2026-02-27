@@ -129,7 +129,7 @@ class RuntimeService:
     async def start(self) -> None:
         if not self._enabled:
             return
-        await self._store.requeue_inflight_runtime_tasks()
+        requeued = await self._store.requeue_inflight_runtime_tasks()
         for idx in range(self._worker_concurrency):
             self._workers.append(
                 asyncio.create_task(self._worker_loop(idx), name=f"runtime-worker-{idx}")
@@ -137,9 +137,10 @@ class RuntimeService:
         if self._cleanup_enabled:
             self._janitor_task = asyncio.create_task(self._janitor_loop(), name="runtime-janitor")
         logger.info(
-            "Runtime started with %d worker(s)%s",
+            "Runtime started with %d worker(s)%s%s",
             len(self._workers),
             " + janitor" if self._janitor_task else "",
+            f"; requeued {requeued} inflight task(s)" if requeued else "",
         )
 
     async def stop(self) -> None:
@@ -1074,6 +1075,7 @@ class RuntimeService:
                 },
             )
             extra = f" commit `{commit_hash}`" if commit_hash else ""
+            logger.info("Runtime task=%s MERGED commit=%s", task.id, commit_hash or "none")
             await self._notify(task, f"Task `{task.id}` merged successfully.{extra}")
             await self._signal_status_by_id(task, TASK_STATUS_MERGED)
             return f"Task `{task.id}` merged successfully.{extra}"

@@ -48,3 +48,4 @@ def test_build_runtime_prompt_includes_loop_context():
     assert "Current step: 2/8" in prompt
     assert "assert x == y" in prompt
     assert "focus on parser module" in prompt
+    assert "User approval/merge happens outside your loop" in prompt

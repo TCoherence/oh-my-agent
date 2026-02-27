@@ -738,6 +738,7 @@ class DiscordChannel(BaseChannel):
                 action_name: str = action,
                 action_nonce: str = nonce,
                 action_task_id: str = task_id,
+                original_text: str = draft_text,
             ) -> None:
                 if not self._runtime_service:
                     await interaction.response.send_message(
@@ -756,11 +757,27 @@ class DiscordChannel(BaseChannel):
                     nonce=action_nonce,
                     source="button",
                 )
+                await interaction.response.defer(ephemeral=True)
                 result = await self._runtime_service.handle_decision_event(event)
-                if interaction.response.is_done():
-                    await interaction.followup.send(result, ephemeral=True)
-                else:
-                    await interaction.response.send_message(result, ephemeral=True)
+
+                task_after = await self._runtime_service.get_task(action_task_id)
+                for child in view.children:
+                    child.disabled = True
+                status = task_after.status if task_after else "UNKNOWN"
+                summary_bits = [f"Status: `{status}`"]
+                if task_after and task_after.merge_commit_hash:
+                    summary_bits.append(f"Commit: `{task_after.merge_commit_hash}`")
+                updated_content = (
+                    f"{original_text}\n\n---\n"
+                    + "\n".join(summary_bits)
+                    + f"\nResult: {result}"
+                )[:1900]
+                try:
+                    await interaction.message.edit(content=updated_content, view=view)
+                except Exception:
+                    logger.debug("Failed to update decision message for task %s", action_task_id, exc_info=True)
+
+                await interaction.followup.send(result, ephemeral=True)
 
             button.callback = _callback
             view.add_item(button)
