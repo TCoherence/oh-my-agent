@@ -29,14 +29,16 @@ class OpenAICompatibleRouter:
         base_url: str,
         api_key: str,
         model: str,
-        timeout_seconds: int = 3,
+        timeout_seconds: int = 8,
         confidence_threshold: float = 0.55,
+        max_retries: int = 1,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._model = model
         self._timeout_seconds = int(timeout_seconds)
         self._confidence_threshold = float(confidence_threshold)
+        self._max_retries = max(0, int(max_retries))
 
     @property
     def confidence_threshold(self) -> float:
@@ -63,17 +65,47 @@ class OpenAICompatibleRouter:
                 {"role": "user", "content": message[:1500]},
             ],
         }
-        try:
-            data = await asyncio.to_thread(self._post_json, payload)
-        except Exception as exc:
-            logger.warning("Router request failed: %s", exc)
+        attempts = self._max_retries + 1
+        data: dict[str, Any] | None = None
+        last_exc: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                data = await asyncio.to_thread(self._post_json, payload)
+                break
+            except Exception as exc:
+                last_exc = exc
+                logger.warning(
+                    "Router request failed model=%s base=%s timeout=%ss attempt=%d/%d err_type=%s err=%s",
+                    self._model,
+                    self._base_url,
+                    self._timeout_seconds,
+                    attempt,
+                    attempts,
+                    type(exc).__name__,
+                    exc,
+                )
+                if attempt < attempts:
+                    await asyncio.sleep(0.25 * attempt)
+        if data is None:
+            if last_exc:
+                logger.debug("Router final failure detail", exc_info=last_exc)
             return None
 
         text = self._extract_content(data)
         if not text:
+            logger.warning(
+                "Router returned empty content model=%s base=%s",
+                self._model,
+                self._base_url,
+            )
             return None
         parsed = self._parse_json(text)
         if not parsed:
+            logger.warning(
+                "Router returned non-JSON content model=%s sample=%r",
+                self._model,
+                text[:200],
+            )
             return None
 
         decision = str(parsed.get("decision", "reply_once")).strip().lower()

@@ -104,7 +104,8 @@ router:
   base_url: "https://api.deepseek.com/v1"
   api_key_env: DEEPSEEK_API_KEY
   model: deepseek-chat
-  timeout_seconds: 3
+  timeout_seconds: 8
+  max_retries: 1
   confidence_threshold: 0.55
   require_user_confirm: true
 

@@ -163,7 +163,8 @@ def _apply_v052_defaults(config: dict) -> None:
     router_cfg.setdefault("base_url", "https://api.deepseek.com/v1")
     router_cfg.setdefault("api_key_env", "DEEPSEEK_API_KEY")
     router_cfg.setdefault("model", "deepseek-chat")
-    router_cfg.setdefault("timeout_seconds", 3)
+    router_cfg.setdefault("timeout_seconds", 8)
+    router_cfg.setdefault("max_retries", 1)
     router_cfg.setdefault("confidence_threshold", 0.55)
     router_cfg.setdefault("require_user_confirm", True)
 
@@ -407,14 +408,17 @@ async def _async_main(config: dict, logger: logging.Logger) -> None:
                     base_url=str(router_cfg.get("base_url", "https://api.deepseek.com/v1")),
                     api_key=api_key,
                     model=str(router_cfg.get("model", "deepseek-chat")),
-                    timeout_seconds=int(router_cfg.get("timeout_seconds", 3)),
+                    timeout_seconds=int(router_cfg.get("timeout_seconds", 8)),
                     confidence_threshold=float(router_cfg.get("confidence_threshold", 0.55)),
+                    max_retries=int(router_cfg.get("max_retries", 1)),
                 )
                 logger.info(
-                    "Intent router enabled model=%s base=%s threshold=%.2f",
+                    "Intent router enabled model=%s base=%s threshold=%.2f timeout=%ss retries=%s",
                     router_cfg.get("model", "deepseek-chat"),
                     router_cfg.get("base_url", "https://api.deepseek.com/v1"),
                     float(router_cfg.get("confidence_threshold", 0.55)),
+                    int(router_cfg.get("timeout_seconds", 8)),
+                    int(router_cfg.get("max_retries", 1)),
                 )
 
     # Build (channel, registry) pairs

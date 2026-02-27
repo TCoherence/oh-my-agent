@@ -257,6 +257,16 @@ class GatewayManager:
         router_decision = None
         if (not msg.system) and self._intent_router and self._runtime_service:
             router_decision = await self._intent_router.route(msg.content)
+            if router_decision is None:
+                logger.info("[%s] ROUTER unavailable; fallback to heuristic/normal flow", req_id)
+            else:
+                logger.info(
+                    "[%s] ROUTER decision=%s confidence=%.2f threshold=%.2f",
+                    req_id,
+                    router_decision.decision,
+                    router_decision.confidence,
+                    self._intent_router.confidence_threshold,
+                )
             if (
                 router_decision
                 and router_decision.decision == "propose_task"

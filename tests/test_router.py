@@ -63,3 +63,35 @@ async def test_router_extracts_json_from_wrapped_text(monkeypatch):
     assert out is not None
     assert out.decision == "reply_once"
     assert out.confidence == 0.74
+
+
+@pytest.mark.asyncio
+async def test_router_retries_once_then_succeeds(monkeypatch):
+    router = OpenAICompatibleRouter(
+        base_url="https://api.example.com/v1",
+        api_key="k",
+        model="m",
+        timeout_seconds=1,
+        max_retries=1,
+    )
+    calls = {"n": 0}
+
+    def _fake_post(_payload):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("timeout")
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": '{"decision":"propose_task","confidence":0.66,"goal":"do x","risk_hints":[]}'
+                    }
+                }
+            ]
+        }
+
+    monkeypatch.setattr(router, "_post_json", _fake_post)
+    out = await router.route("please do x")
+    assert calls["n"] == 2
+    assert out is not None
+    assert out.decision == "propose_task"
