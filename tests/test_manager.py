@@ -608,6 +608,53 @@ async def test_explicit_skill_invocation_bypasses_router_and_runtime(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_explicit_skill_invocation_chunks_first_message_with_attribution_budget(tmp_path):
+    channel = MagicMock()
+    channel.platform = "discord"
+    channel.channel_id = "100"
+    channel.create_thread = AsyncMock(return_value="t1")
+    channel.send = AsyncMock()
+    channel.typing = MagicMock()
+    channel.typing.return_value.__aenter__ = AsyncMock(return_value=None)
+    channel.typing.return_value.__aexit__ = AsyncMock(return_value=False)
+
+    long_text = "A" * 5000
+    mock_agent = MagicMock()
+    mock_agent.name = "codex"
+    registry = MagicMock(spec=AgentRegistry)
+    registry.run = AsyncMock(
+        return_value=(
+            mock_agent,
+            AgentResponse(text=long_text, usage={"input_tokens": 1234, "output_tokens": 567}),
+        )
+    )
+
+    runtime = MagicMock()
+    runtime.maybe_handle_thread_context = AsyncMock(return_value=False)
+    runtime.maybe_handle_incoming = AsyncMock(return_value=False)
+    runtime.create_task = AsyncMock()
+    runtime.create_skill_task = AsyncMock()
+
+    skills_root = tmp_path / "skills"
+    skill_dir = skills_root / "top-5-daily-news"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("name: top-5-daily-news\n", encoding="utf-8")
+    syncer = MagicMock()
+    syncer._skills_path = skills_root  # noqa: SLF001
+
+    session = _make_session(channel=channel, registry=registry)
+    gm = GatewayManager([], runtime_service=runtime, skill_syncer=syncer)
+
+    msg = _make_msg(thread_id="thread-1", content="/top-5-daily-news")
+    await gm.handle_message(session, registry, msg)
+
+    sent_messages = [call.args[1] for call in channel.send.await_args_list]
+    assert len(sent_messages) >= 2
+    assert sent_messages[0].startswith("-# via **codex**")
+    assert max(len(message) for message in sent_messages) <= 2000
+
+
+@pytest.mark.asyncio
 async def test_router_repair_skill_creates_skill_task_with_thread_context(tmp_path):
     channel = MagicMock()
     channel.platform = "discord"

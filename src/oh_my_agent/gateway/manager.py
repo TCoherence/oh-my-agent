@@ -538,17 +538,14 @@ class GatewayManager:
         # Record assistant response in history
         await session.append_assistant(thread_id, response.text, agent_used.name)
 
-        # Send with attribution header + chunked content
-        attribution = f"-# via **{agent_used.name}**"
-        if response.usage:
-            attribution += f" · {self._format_usage(response.usage)}"
-        chunks = chunk_message(response.text)
-        if chunks:
-            await channel.send(thread_id, f"{attribution}\n{chunks[0]}")
-            for chunk in chunks[1:]:
-                await channel.send(thread_id, chunk)
-        else:
-            await channel.send(thread_id, f"{attribution}\n*(empty response)*")
+        # Send with attribution header + chunked content.
+        chunks = await self._send_agent_response(
+            channel,
+            thread_id,
+            agent_name=agent_used.name,
+            text=response.text,
+            usage=response.usage,
+        )
 
         elapsed_total = time.perf_counter() - t_start
         logger.info(
@@ -781,6 +778,33 @@ class GatewayManager:
         if cost is not None:
             parts.append(f"${cost:.4f}")
         return " · ".join(parts)
+
+    async def _send_agent_response(
+        self,
+        channel,
+        thread_id: str,
+        *,
+        agent_name: str,
+        text: str,
+        usage: dict | None = None,
+    ) -> list[str]:
+        attribution = f"-# via **{agent_name}**"
+        if usage:
+            attribution += f" · {self._format_usage(usage)}"
+
+        first_chunk_budget = max(1, 2000 - len(attribution) - 1)
+        first_chunks = chunk_message(text, max_size=first_chunk_budget)
+        if not first_chunks:
+            await channel.send(thread_id, f"{attribution}\n*(empty response)*")
+            return []
+
+        await channel.send(thread_id, f"{attribution}\n{first_chunks[0]}")
+
+        remainder = text[len(first_chunks[0]):].lstrip()
+        remaining_chunks = chunk_message(remainder) if remainder else []
+        for chunk in remaining_chunks:
+            await channel.send(thread_id, chunk)
+        return [first_chunks[0], *remaining_chunks]
 
     def _detect_explicit_skill_invocation(self, content: str) -> str | None:
         match = _EXPLICIT_SKILL_CALL_RE.match(content.strip())
