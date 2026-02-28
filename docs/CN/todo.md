@@ -42,14 +42,25 @@
 ## v0.6 - Skill-First Autonomy
 
 - [x] 把 skill 创建升级成一等 runtime task 类型
-- [x] 支持“把这个 workflow 变成 skill”类请求的路由
+- [x] 支持”把这个 workflow 变成 skill”类请求的路由
 - [x] 增加 merge 前的 skill 验证闭环
 - [ ] 增加跨 agent skill 抽象
 - [ ] 锁定 Codex 接入折中方案（`全局 skills + AGENTS.md/MCP`，不假设 project-level native skills）
 - [x] 增加 skill memory / provenance 元数据
 - [ ] 将 `mission` 模型和 operator surface 定义为支撑 skill autonomy 的基础设施
 - [ ] 将 thread-native runtime control 定义为配套能力，而不是 v0.6 headline
-- [ ] 把“调用已有 skill”和“修改 skill”彻底从语义上拆开
+- [ ] 把”调用已有 skill”和”修改 skill”彻底从语义上拆开
+
+### Adaptive Memory（自适应记忆）
+
+从对话中自动提取、积累用户偏好和项目知识，构建跨 session 的持久化用户画像。
+
+- [ ] `MemoryExtractor`：对话结束/压缩时自动提取记忆（复用现有 agent）
+- [ ] 文件系统存储：每条记忆 = 一句话摘要 + 结构化元数据（category, confidence, source_thread 等）
+- [ ] 记忆注入：新对话开始时，从记忆库中选取相关条目注入 agent prompt（token budget 控制）
+- [ ] `/memories` 命令：用户可查看 agent 学到的记忆，公开透明
+- [ ] 记忆冲突合并：重复出现 → confidence 增强；矛盾 → 自动更新
+- [ ] 跨 agent 共享：记忆属于用户，所有 agent 共用同一记忆库
 
 ## v0.7 - Ops-First 与 Hybrid Autonomy
 
@@ -90,3 +101,6 @@
 - [ ] Rate limiting / request queue
 - [ ] Docker 隔离
 - [ ] 语义记忆检索
+- [ ] Adaptive Memory 加密存储 + 认证后明文访问
+- [ ] Adaptive Memory 编辑权限控制（防止用户误改）
+- [ ] Codex / Gemini CLI session resume

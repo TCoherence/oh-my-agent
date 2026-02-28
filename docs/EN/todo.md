@@ -51,6 +51,17 @@
 - [ ] Keep thread-native runtime control as supporting work, not the headline
 - [ ] Separate skill invocation from skill mutation across all agents
 
+### Adaptive Memory
+
+Automatically extract and accumulate user preferences and project knowledge from conversations, building a persistent user profile across sessions.
+
+- [ ] `MemoryExtractor`: auto-extract memories after conversation end / history compression (reuse existing agents)
+- [ ] File-system storage: each memory = one-line summary + structured metadata (category, confidence, source_thread, etc.)
+- [ ] Memory injection: select relevant memories and inject into agent prompt at conversation start (token-budget aware)
+- [ ] `/memories` command: let users view what the agent has learned, fully transparent
+- [ ] Memory conflict resolution: repeated observations → boost confidence; contradictions → auto-update
+- [ ] Cross-agent sharing: memories belong to the user, shared across all agents
+
 ## v0.7 - Ops-First and Hybrid Autonomy
 
 - [ ] Scheduler-driven operational tasks
@@ -90,3 +101,6 @@ Recommended next architecture step:
 - [ ] Rate limiting / request queue
 - [ ] Docker-based agent isolation
 - [ ] Semantic memory retrieval
+- [ ] Adaptive Memory encrypted storage + authenticated plaintext access
+- [ ] Adaptive Memory edit permission control (prevent accidental user edits)
+- [ ] Codex / Gemini CLI session resume
