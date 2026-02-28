@@ -24,11 +24,13 @@ Implemented:
   - sampled progress snapshots in SQLite
   - full heartbeat in process logs
   - single updatable Discord status message
+  - separate underlying agent logs in `runtime/logs/agents/`
 
 Still missing:
 - true stop/pause/resume with subprocess interruption
 - message-driven runtime control
 - artifact delivery adapter (`attachment first`, link fallback)
+- in-memory live ring buffer and status-card live excerpt for running tasks
 - stronger Codex skill integration strategy beyond current global-skills / `AGENTS.md` tradeoff
 - ops/event autonomy remains future work
 

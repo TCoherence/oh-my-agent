@@ -4,7 +4,7 @@ Multi-platform bot that routes messages to CLI-based AI agents (Claude, Gemini, 
 
 Inspired by [OpenClaw](https://openclaw.dev).
 
-## Status Snapshot (2026-02-27)
+## Status Snapshot (2026-02-28)
 
 - `/search` is implemented with SQLite FTS5 across all threads.
 - `SkillSync` reverse sync is implemented and runs on startup.
@@ -13,6 +13,7 @@ Inspired by [OpenClaw](https://openclaw.dev).
 - Discord approvals use buttons first, slash fallback, reactions as status-only signals.
 - Optional LLM routing is implemented: incoming messages can be classified as `reply_once`, `invoke_existing_skill`, `propose_artifact_task`, `propose_repo_task`, or `create_skill`.
 - Runtime observability is implemented: `/task_logs`, sampled progress events in SQLite, and a single updatable Discord status message.
+- Runtime logging is split into service-level and per-agent logs under `~/.oh-my-agent/runtime/logs/`.
 - Multi-type runtime is implemented: only `repo_change` and `skill_change` tasks use merge gate; `artifact` tasks complete without merge.
 
 ## Architecture
@@ -169,6 +170,9 @@ oh-my-agent
 - `MERGED` tasks clean their worktree immediately after merge; other terminal states are retained for 72 hours before janitor cleanup.
 - Short `/ask` conversations use transient per-thread workspaces under `~/.oh-my-agent/agent-workspace/sessions/`; these are not runtime worktrees and are cleaned by TTL janitor.
 - `/task_logs` exposes recent runtime events plus output tails.
+- Runtime writes two log layers:
+  - service log: `~/.oh-my-agent/runtime/logs/oh-my-agent.log`
+  - underlying agent logs: `~/.oh-my-agent/runtime/logs/agents/<task>-step<step>-<agent>.log`
 - Discord progress prefers updating one status message instead of spamming many messages.
 
 ## Artifact Delivery
@@ -209,6 +213,7 @@ oh-my-agent
 - Runtime stop/resume is still command-driven; message-driven runtime control is not implemented yet.
 - `stop` changes task state but does not yet guarantee immediate interruption of a running agent/test subprocess.
 - Artifact delivery is not finished yet: generated artifacts are tracked, but attachment-first and link-fallback delivery still needs a dedicated adapter layer.
+- Runtime observability still lacks an in-memory live excerpt layer; `/task_logs` can read live agent log tails, but Discord status cards do not yet show the latest agent activity summary.
 - Codex skill integration is still weaker than Claude/Gemini because project-level native Codex skill discovery is not yet a trusted path.
 
 ## Documentation

@@ -4,7 +4,7 @@
 
 灵感来自 [OpenClaw](https://openclaw.dev)。
 
-## 当前状态（2026-02-27）
+## 当前状态（2026-02-28）
 
 - `/search` 已通过 SQLite FTS5 实现跨线程检索。
 - `SkillSync` reverse sync 已实现，并在启动时执行。
@@ -13,6 +13,7 @@
 - Discord 审批交互采用按钮优先、slash 兜底，reaction 只做状态信号。
 - 可选的 LLM 路由已实现：消息可被分类为 `reply_once`、`invoke_existing_skill`、`propose_artifact_task`、`propose_repo_task` 或 `create_skill`。
 - Runtime 可观测性已实现：支持 `/task_logs`、SQLite 中采样式 progress 事件，以及 Discord 中单条可更新的状态消息。
+- Runtime 日志已拆成两层：service log 和 per-agent 底层日志，统一写到 `~/.oh-my-agent/runtime/logs/`。
 - 多类型 runtime 已落地：只有 `repo_change` 和 `skill_change` 任务会进入 merge gate，`artifact` 任务不会要求 merge。
 
 ## 架构
@@ -169,6 +170,9 @@ oh-my-agent
 - `MERGED` 任务在合并成功后会立即清理 worktree；其他终态任务默认保留 72 小时，再由 janitor 清理。
 - 短对话 `/ask` 使用 `~/.oh-my-agent/agent-workspace/sessions/` 下按 thread 隔离的临时 workspace，并按 TTL 清理；它不是 runtime worktree。
 - `/task_logs` 用来查看最近 runtime 事件和输出 tail。
+- Runtime 现在会写两层日志：
+  - service log：`~/.oh-my-agent/runtime/logs/oh-my-agent.log`
+  - underlying agent log：`~/.oh-my-agent/runtime/logs/agents/<task>-step<step>-<agent>.log`
 - Discord 中 runtime 进度会尽量复用并更新同一条状态消息，避免刷屏。
 
 ## Artifact Delivery
@@ -209,4 +213,5 @@ oh-my-agent
 - Runtime 的 stop/resume 目前仍主要依赖命令入口，消息驱动控制还未实现。
 - 现在的 `stop` 会修改任务状态，但还不能保证立即中断正在运行的 agent/test 子进程。
 - artifact delivery 还没完全做完：运行时已经能记录产物，但“附件优先、链接兜底”的交付适配层还需要补齐。
+- Runtime 可观测性还缺少内存级 live excerpt 层；现在 `/task_logs` 已能读取 live agent log tail，但 Discord 状态卡还不会直接展示“最近在做什么”的摘要。
 - Codex 的 skill 接入目前仍弱于 Claude/Gemini，因为还没有确认 project-level native Codex skill discovery 的可靠路径。

@@ -1,6 +1,6 @@
 # Todo / Roadmap
 
-## Snapshot (2026-02-27)
+## Snapshot (2026-02-28)
 
 - `/search` is implemented.
 - SkillSync reverse sync is implemented.
@@ -8,6 +8,7 @@
 - v0.5 is runtime-first.
 - Optional LLM router is implemented.
 - Runtime observability baseline is implemented.
+- Runtime live agent logging is implemented.
 - Multi-type runtime is implemented (`artifact`, `repo_change`, `skill_change`).
 
 ## v0.5 Runtime Hardening
@@ -36,6 +37,7 @@
 - [ ] Structured task completion summary
 - [ ] Runtime metrics and latency stats
 - [ ] Clear paused/interrupted semantics in the state model
+- [ ] Live observability upgrade: per-task ring buffer + status-card live excerpt
 
 ## v0.6 - Skill-First Autonomy
 
@@ -83,6 +85,7 @@ Recommended next architecture step:
 - [ ] Slack adapter
 - [ ] Artifact delivery abstraction (`attachment first`, link fallback)
 - [ ] Object-storage adapter for remote artifact delivery (R2/S3 style)
+- [ ] Delivery policy abstraction (`inline summary`, attachment, link`)
 - [ ] Markdown-aware chunking
 - [ ] Rate limiting / request queue
 - [ ] Docker-based agent isolation

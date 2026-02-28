@@ -1,6 +1,6 @@
 # Todo / 路线图
 
-## 当前快照（2026-02-27）
+## 当前快照（2026-02-28）
 
 - `/search` 已实现。
 - SkillSync reverse sync 已实现。
@@ -8,6 +8,7 @@
 - v0.5 当前主线是 runtime-first。
 - 可选 LLM router 已实现。
 - Runtime 可观测性基线已实现。
+- Runtime live agent logging 已实现。
 - 多类型 runtime 已实现（`artifact`、`repo_change`、`skill_change`）。
 
 ## v0.5 Runtime 加固
@@ -36,6 +37,7 @@
 - [ ] 结构化任务完成摘要
 - [ ] Runtime metrics 和耗时统计
 - [ ] 更清晰的 paused/interrupted 状态语义
+- [ ] live observability 升级：per-task ring buffer + 状态卡 live excerpt
 
 ## v0.6 - Skill-First Autonomy
 
@@ -83,6 +85,7 @@
 - [ ] Slack 适配器
 - [ ] Artifact delivery 抽象（附件优先、链接兜底）
 - [ ] 面向远端部署的对象存储交付适配器（R2/S3 风格）
+- [ ] 交付策略抽象（inline summary / attachment / link）
 - [ ] Markdown 感知的分块发送
 - [ ] Rate limiting / request queue
 - [ ] Docker 隔离

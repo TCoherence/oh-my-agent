@@ -24,11 +24,13 @@ Oh My Agent 是一个多平台 bot，执行层直接使用 CLI Agent，而不是
   - SQLite 中采样式 progress snapshot
   - 进程日志中的完整 heartbeat
   - Discord 中单条可更新的状态消息
+  - `runtime/logs/agents/` 下独立的底层 agent 日志
 
 仍缺少：
 - 能中断活跃子进程的真正 stop/pause/resume
 - 消息驱动的 runtime 控制
 - artifact delivery 适配层（附件优先、链接兜底）
+- 针对运行中任务的内存级 live ring buffer 和状态卡 live excerpt
 - 超出当前 `全局 skills + AGENTS.md` 折中的 Codex skill 接入方案
 - ops/event autonomy 仍属于后续阶段
 
