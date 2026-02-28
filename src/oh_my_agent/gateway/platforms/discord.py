@@ -775,7 +775,7 @@ class DiscordChannel(BaseChannel):
                     nonce=action_nonce,
                     source="button",
                 )
-                await interaction.response.defer(ephemeral=True)
+                await interaction.response.defer()
                 result = await self._runtime_service.handle_decision_event(event)
 
                 task_after = await self._runtime_service.get_task(action_task_id)
@@ -791,7 +791,7 @@ class DiscordChannel(BaseChannel):
                     + f"\nResult: {result}"
                 )[:1900]
                 try:
-                    await interaction.message.edit(content=updated_content, view=view)
+                    await interaction.edit_original_response(content=updated_content, view=view)
                 except Exception:
                     logger.debug("Failed to update decision message for task %s", action_task_id, exc_info=True)
 
