@@ -131,6 +131,9 @@ class RuntimeService:
         if not self._enabled:
             return
         requeued = await self._store.requeue_inflight_runtime_tasks()
+        cleaned_on_start = 0
+        if self._cleanup_enabled:
+            cleaned_on_start = await self._cleanup_expired_tasks()
         for idx in range(self._worker_concurrency):
             self._workers.append(
                 asyncio.create_task(self._worker_loop(idx), name=f"runtime-worker-{idx}")
@@ -138,10 +141,11 @@ class RuntimeService:
         if self._cleanup_enabled:
             self._janitor_task = asyncio.create_task(self._janitor_loop(), name="runtime-janitor")
         logger.info(
-            "Runtime started with %d worker(s)%s%s",
+            "Runtime started with %d worker(s)%s%s%s",
             len(self._workers),
             " + janitor" if self._janitor_task else "",
             f"; requeued {requeued} inflight task(s)" if requeued else "",
+            f"; cleaned {cleaned_on_start} stale workspace(s) on start" if cleaned_on_start else "",
         )
 
     async def stop(self) -> None:
@@ -627,10 +631,10 @@ class RuntimeService:
     async def _janitor_loop(self) -> None:
         while not self._stop_event.is_set():
             try:
-                await asyncio.sleep(max(1, self._cleanup_interval_minutes) * 60)
                 cleaned = await self._cleanup_expired_tasks()
                 if cleaned:
                     logger.info("Runtime janitor cleaned %d expired task workspace(s)", cleaned)
+                await asyncio.sleep(max(1, self._cleanup_interval_minutes) * 60)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:

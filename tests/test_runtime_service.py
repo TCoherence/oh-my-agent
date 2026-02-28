@@ -589,3 +589,67 @@ async def test_runtime_test_timeout_marks_timeout(runtime_env):
     assert "timed out" in (timed_out.summary or "").lower() or "timed out" in (timed_out.error or "").lower()
     text = await runtime.get_task_logs(task.id)
     assert "before-timeout" in text
+
+
+@pytest.mark.asyncio
+async def test_runtime_start_cleans_stale_merged_workspace(tmp_path):
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+
+    db_path = tmp_path / "runtime.db"
+    store = SQLiteMemoryStore(db_path)
+    await store.init()
+
+    worktree_root = tmp_path / "worktrees"
+    stale_workspace = worktree_root / "stale-merged"
+    stale_workspace.mkdir(parents=True, exist_ok=True)
+    (stale_workspace / "leftover.txt").write_text("old", encoding="utf-8")
+
+    await store.create_runtime_task(
+        task_id="stale-merged",
+        platform="discord",
+        channel_id="100",
+        thread_id="thread-stale",
+        created_by="owner-1",
+        goal="old merged task",
+        preferred_agent="done-agent",
+        status=TASK_STATUS_MERGED,
+        max_steps=8,
+        max_minutes=20,
+        test_command="true",
+    )
+    await store.update_runtime_task(
+        "stale-merged",
+        workspace_path=str(stale_workspace),
+        ended_at="2000-01-01 00:00:00",
+    )
+
+    runtime = RuntimeService(
+        store,
+        config={
+            "enabled": True,
+            "worker_concurrency": 1,
+            "worktree_root": str(worktree_root),
+            "default_agent": "done-agent",
+            "default_test_command": "true",
+            "cleanup": {
+                "enabled": True,
+                "interval_minutes": 60,
+                "retention_hours": 72,
+                "prune_git_worktrees": True,
+                "merged_immediate": True,
+            },
+        },
+        owner_user_ids={"owner-1"},
+        repo_root=repo,
+    )
+
+    await runtime.start()
+    cleaned = await store.get_runtime_task("stale-merged")
+    assert cleaned is not None
+    assert cleaned.workspace_path is None
+    assert cleaned.workspace_cleaned_at is not None
+    assert not stale_workspace.exists()
+
+    await runtime.stop()
+    await store.close()
