@@ -125,6 +125,8 @@ class RuntimeService:
             merge_cfg.get("commit_message_template", "runtime(task:{task_id}): {goal_short}")
         )
 
+        self._skill_auto_approve = bool(cfg.get("skill_auto_approve", True))
+
         self._store = store
         self._owner_user_ids = owner_user_ids or set()
         self._repo_root = (repo_root or Path.cwd()).resolve()
@@ -480,7 +482,7 @@ class RuntimeService:
             max_steps=6,
             max_minutes=15,
             source=source,
-            force_draft=True,
+            force_draft=not self._skill_auto_approve,
             task_type=TASK_TYPE_SKILL_CHANGE,
             completion_mode=TASK_COMPLETION_MERGE,
             skill_name=resolved_name,
@@ -1262,6 +1264,25 @@ class RuntimeService:
                 )
 
                 if self._uses_merge_flow(task) and self._merge_gate_enabled:
+                    # Auto-merge skill tasks when skill_auto_approve is enabled
+                    if self._skill_auto_approve and task.task_type == TASK_TYPE_SKILL_CHANGE:
+                        try:
+                            refreshed = await self._store.get_runtime_task(task.id) or task
+                            result = await self._execute_merge(
+                                refreshed, actor_id="system", source="skill_auto_merge",
+                            )
+                            logger.info(
+                                "Runtime task=%s skill auto-merge result: %s", task.id, result,
+                            )
+                            return
+                        except Exception:
+                            logger.warning(
+                                "Runtime task=%s skill auto-merge failed, falling back to manual",
+                                task.id,
+                                exc_info=True,
+                            )
+                            # Fall through to normal merge decision surface
+
                     merge_nonce = await self._store.create_runtime_decision_nonce(
                         task.id,
                         ttl_minutes=self._decision_ttl_minutes,

@@ -12,7 +12,7 @@ from oh_my_agent.agents.registry import AgentRegistry
 from oh_my_agent.gateway.session import ChannelSession
 from oh_my_agent.memory.store import SQLiteMemoryStore
 from oh_my_agent.runtime.service import RuntimeService
-from oh_my_agent.runtime.types import TASK_STATUS_DRAFT, TASK_STATUS_MERGED, TASK_STATUS_WAITING_MERGE, TASK_TYPE_SKILL
+from oh_my_agent.runtime.types import TASK_STATUS_DRAFT, TASK_STATUS_MERGED, TASK_STATUS_PENDING, TASK_STATUS_WAITING_MERGE, TASK_TYPE_SKILL
 
 
 @dataclass
@@ -217,7 +217,8 @@ async def test_create_skill_task_forces_draft_and_uses_runtime_default_agent(ski
     )
     loaded = await store.get_runtime_task(task.id)
     assert loaded is not None
-    assert loaded.status == TASK_STATUS_DRAFT
+    # skill_auto_approve defaults to True → skips draft, goes straight to PENDING
+    assert loaded.status == TASK_STATUS_PENDING
     assert loaded.task_type == TASK_TYPE_SKILL
     assert loaded.skill_name == "weather"
     assert loaded.preferred_agent == "codex"
@@ -250,13 +251,39 @@ async def test_create_skill_task_respects_explicit_preferred_agent(skill_runtime
 
 
 @pytest.mark.asyncio
-async def test_skill_task_merge_records_provenance(skill_runtime_env):
-    runtime: RuntimeService = skill_runtime_env["runtime"]
+async def test_skill_task_merge_records_provenance(skill_runtime_env, tmp_path):
     channel: _FakeChannel = skill_runtime_env["channel"]
     store: SQLiteMemoryStore = skill_runtime_env["store"]
     syncer: _FakeSkillSyncer = skill_runtime_env["syncer"]
     repo: Path = skill_runtime_env["repo"]
     workspace_skills_dirs: list[Path] = skill_runtime_env["workspace_skills_dirs"]
+
+    # Use skill_auto_approve=False to test manual draft→approve→merge flow
+    runtime = RuntimeService(
+        store,
+        config={
+            "enabled": True,
+            "worker_concurrency": 1,
+            "worktree_root": str(tmp_path / "worktrees-merge"),
+            "default_agent": "codex",
+            "default_test_command": "true",
+            "cleanup": {"enabled": False},
+            "skill_auto_approve": False,
+            "merge_gate": {
+                "enabled": True,
+                "auto_commit": True,
+                "require_clean_repo": True,
+                "preflight_check": True,
+                "target_branch_mode": "current",
+                "commit_message_template": "runtime(task:{task_id}): {goal_short}",
+            },
+        },
+        owner_user_ids={"owner-1"},
+        repo_root=repo,
+        skill_syncer=syncer,
+        skills_path=repo / "skills",
+        workspace_skills_dirs=workspace_skills_dirs,
+    )
 
     registry = AgentRegistry([_ClaudeSkillAgent()])
     session = ChannelSession(platform="discord", channel_id="100", channel=channel, registry=registry)
@@ -317,3 +344,5 @@ async def test_skill_task_merge_records_provenance(skill_runtime_env):
     assert provenance["validated"] == 1
     assert provenance["agent_name"] == "claude"
     assert provenance["merged_commit_hash"]
+
+    await runtime.stop()

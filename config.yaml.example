@@ -59,6 +59,7 @@ runtime:
   default_test_command: "pytest -q"
   default_max_steps: 8
   default_max_minutes: 20
+  skill_auto_approve: true          # skip draft + auto-merge for skill tasks
   risk_profile: strict
   path_policy_mode: allow_all_with_denylist
   denied_paths: [".env", "config.yaml", ".workspace/**", ".git/**"]
