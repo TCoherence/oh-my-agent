@@ -13,12 +13,14 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class RouteDecision:
-    decision: str  # "reply_once" | "propose_task" | "create_skill"
+    decision: str  # "reply_once" | "invoke_existing_skill" | "propose_artifact_task" | "propose_repo_task" | "create_skill"
     confidence: float
     goal: str
     risk_hints: list[str]
     raw_text: str
     skill_name: str | None = None
+    task_type: str | None = None
+    completion_mode: str | None = None
 
 
 class OpenAICompatibleRouter:
@@ -55,12 +57,17 @@ class OpenAICompatibleRouter:
                     "role": "system",
                     "content": (
                         "Classify whether the user message should be handled as "
-                        "a one-off chat reply, a multi-step autonomous coding task, "
+                        "a one-off chat reply, a direct invocation of an existing skill, "
+                        "a multi-step artifact task, a multi-step repository-change task, "
                         "or a skill-creation task.\n"
-                        "Output strict JSON only with keys: decision, confidence, goal, risk_hints, skill_name.\n"
-                        "decision must be 'reply_once', 'propose_task', or 'create_skill'.\n"
-                        "If propose_task or create_skill, write a concise executable goal.\n"
+                        "Output strict JSON only with keys: decision, confidence, goal, risk_hints, skill_name, task_type, completion_mode.\n"
+                        "decision must be 'reply_once', 'invoke_existing_skill', 'propose_artifact_task', 'propose_repo_task', or 'create_skill'.\n"
+                        "If invoke_existing_skill, keep goal empty when possible and provide skill_name if obvious.\n"
+                        "If propose_artifact_task, propose_repo_task, or create_skill, write a concise executable goal.\n"
                         "If create_skill, also provide skill_name as a hyphen-case slug.\n"
+                        "If propose_artifact_task, task_type should be 'artifact' and completion_mode should be 'reply' or 'artifact'.\n"
+                        "If propose_repo_task, task_type should be 'repo_change' and completion_mode should be 'merge'.\n"
+                        "If create_skill, task_type should be 'skill_change' and completion_mode should be 'merge'.\n"
                         "If reply_once, goal can be empty string and skill_name should be empty string.\n"
                         "confidence must be a float between 0 and 1."
                     ),
@@ -112,12 +119,16 @@ class OpenAICompatibleRouter:
             return None
 
         decision = str(parsed.get("decision", "reply_once")).strip().lower()
-        if decision not in {"reply_once", "propose_task", "create_skill"}:
+        if decision not in {"reply_once", "invoke_existing_skill", "propose_artifact_task", "propose_repo_task", "create_skill", "propose_task"}:
             decision = "reply_once"
+        if decision == "propose_task":
+            decision = "propose_repo_task"
 
         confidence = self._to_float(parsed.get("confidence", 0.0))
         goal = str(parsed.get("goal", "")).strip()
         skill_name = str(parsed.get("skill_name", "")).strip() or None
+        task_type = str(parsed.get("task_type", "")).strip() or None
+        completion_mode = str(parsed.get("completion_mode", "")).strip() or None
         hints = parsed.get("risk_hints", [])
         risk_hints = [str(h).strip() for h in hints if str(h).strip()] if isinstance(hints, list) else []
 
@@ -128,6 +139,8 @@ class OpenAICompatibleRouter:
             risk_hints=risk_hints,
             raw_text=text[:2000],
             skill_name=skill_name,
+            task_type=task_type,
+            completion_mode=completion_mode,
         )
 
     def _post_json(self, payload: dict[str, Any]) -> dict[str, Any]:

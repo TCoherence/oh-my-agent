@@ -301,8 +301,11 @@ CREATE TABLE IF NOT EXISTS runtime_tasks (
     resume_instruction  TEXT,
     merge_commit_hash   TEXT,
     merge_error         TEXT,
+    completion_mode     TEXT NOT NULL DEFAULT 'merge',
+    output_summary      TEXT,
+    artifact_manifest   TEXT,
     workspace_cleaned_at TIMESTAMP,
-    task_type           TEXT NOT NULL DEFAULT 'code',
+    task_type           TEXT NOT NULL DEFAULT 'repo_change',
     skill_name          TEXT,
     created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     started_at          TIMESTAMP,
@@ -430,9 +433,16 @@ class SQLiteMemoryStore(MemoryStore):
         await self._ensure_column("runtime_tasks", "status_message_id", "TEXT")
         await self._ensure_column("runtime_tasks", "merge_commit_hash", "TEXT")
         await self._ensure_column("runtime_tasks", "merge_error", "TEXT")
+        await self._ensure_column("runtime_tasks", "completion_mode", "TEXT NOT NULL DEFAULT 'merge'")
+        await self._ensure_column("runtime_tasks", "output_summary", "TEXT")
+        await self._ensure_column("runtime_tasks", "artifact_manifest", "TEXT")
         await self._ensure_column("runtime_tasks", "workspace_cleaned_at", "TIMESTAMP")
-        await self._ensure_column("runtime_tasks", "task_type", "TEXT NOT NULL DEFAULT 'code'")
+        await self._ensure_column("runtime_tasks", "task_type", "TEXT NOT NULL DEFAULT 'repo_change'")
         await self._ensure_column("runtime_tasks", "skill_name", "TEXT")
+        db = await self._conn()
+        await db.execute("UPDATE runtime_tasks SET task_type='repo_change' WHERE task_type='code'")
+        await db.execute("UPDATE runtime_tasks SET task_type='skill_change' WHERE task_type='skill'")
+        await db.commit()
 
     async def _ensure_column(self, table: str, column: str, ddl_type: str) -> None:
         db = await self._conn()
@@ -628,8 +638,8 @@ class SQLiteMemoryStore(MemoryStore):
             await db.execute(
                 "INSERT INTO runtime_tasks "
                 "(id, platform, channel_id, thread_id, created_by, goal, original_request, preferred_agent, "
-                " status, max_steps, max_minutes, test_command, task_type, skill_name) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " status, max_steps, max_minutes, test_command, completion_mode, output_summary, artifact_manifest, task_type, skill_name) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     kwargs["task_id"],
                     kwargs["platform"],
@@ -643,7 +653,12 @@ class SQLiteMemoryStore(MemoryStore):
                     int(kwargs["max_steps"]),
                     int(kwargs["max_minutes"]),
                     kwargs["test_command"],
-                    kwargs.get("task_type", "code"),
+                    kwargs.get("completion_mode", "merge"),
+                    kwargs.get("output_summary"),
+                    json.dumps(kwargs.get("artifact_manifest"), ensure_ascii=False)
+                    if kwargs.get("artifact_manifest") is not None
+                    else None,
+                    kwargs.get("task_type", "repo_change"),
                     kwargs.get("skill_name"),
                 ),
             )
@@ -660,7 +675,7 @@ class SQLiteMemoryStore(MemoryStore):
             (task_id,),
         )
         row = await cursor.fetchone()
-        return RuntimeTask.from_row(dict(row)) if row else None
+        return RuntimeTask.from_row(self._normalize_runtime_task_row(dict(row))) if row else None
 
     async def list_runtime_tasks(
         self,
@@ -686,7 +701,7 @@ class SQLiteMemoryStore(MemoryStore):
                 (platform, channel_id, limit),
             )
         rows = await cursor.fetchall()
-        return [RuntimeTask.from_row(dict(r)) for r in rows]
+        return [RuntimeTask.from_row(self._normalize_runtime_task_row(dict(r))) for r in rows]
 
     async def upsert_ephemeral_workspace(self, workspace_key: str, workspace_path: str) -> None:
         db = await self._conn()
@@ -750,6 +765,8 @@ class SQLiteMemoryStore(MemoryStore):
                 if value == "__NOW__":
                     sets.append(f"{key}=CURRENT_TIMESTAMP")
                 else:
+                    if key == "artifact_manifest" and value is not None:
+                        value = json.dumps(value, ensure_ascii=False)
                     sets.append(f"{key}=?")
                     values.append(value)
             sets.append("updated_at=CURRENT_TIMESTAMP")
@@ -1010,6 +1027,16 @@ class SQLiteMemoryStore(MemoryStore):
                 data["validation_warnings"] = [str(raw_warnings)]
         else:
             data["validation_warnings"] = []
+        return data
+
+    @staticmethod
+    def _normalize_runtime_task_row(data: dict[str, Any]) -> dict[str, Any]:
+        raw_manifest = data.get("artifact_manifest")
+        if raw_manifest:
+            try:
+                data["artifact_manifest"] = json.loads(raw_manifest)
+            except Exception:
+                pass
         return data
 
     # -- search ------------------------------------------------------------

@@ -15,6 +15,7 @@ from oh_my_agent.memory.store import SQLiteMemoryStore
 from oh_my_agent.runtime import (
     RuntimeService,
     TASK_STATUS_BLOCKED,
+    TASK_STATUS_COMPLETED,
     TASK_STATUS_DRAFT,
     TASK_STATUS_FAILED,
     TASK_STATUS_MERGED,
@@ -191,6 +192,27 @@ class _SlowDoneAgent(BaseAgent):
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text("slow", encoding="utf-8")
         return AgentResponse(text=f"{prompt}\nTASK_STATE: DONE")
+
+
+class _ArtifactAgent(BaseAgent):
+    @property
+    def name(self) -> str:
+        return "artifact-agent"
+
+    async def run(
+        self,
+        prompt: str,
+        history: list[dict] | None = None,
+        *,
+        thread_id: str | None = None,
+        workspace_override: Path | None = None,
+    ) -> AgentResponse:
+        del prompt, history, thread_id
+        assert workspace_override is not None
+        out = workspace_override / "reports" / "daily-news.md"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text("# Daily News\n\n- item 1\n", encoding="utf-8")
+        return AgentResponse(text="artifact ready\nTASK_STATE: DONE")
 
 
 class _SandboxBlockedAgent(BaseAgent):
@@ -517,6 +539,41 @@ async def test_runtime_manual_cleanup_removes_workspace(runtime_env):
     assert cleaned is not None
     assert cleaned.workspace_path is None
     assert cleaned.workspace_cleaned_at is not None
+
+
+@pytest.mark.asyncio
+async def test_artifact_task_completes_without_merge(runtime_env):
+    store: SQLiteMemoryStore = runtime_env["store"]
+    runtime: RuntimeService = runtime_env["runtime"]
+    channel: _FakeChannel = runtime_env["channel"]
+    registry = AgentRegistry([_ArtifactAgent()])
+    session = ChannelSession(
+        platform="discord",
+        channel_id="100",
+        channel=channel,
+        registry=registry,
+    )
+    runtime.register_session(session, registry)
+    await runtime.start()
+
+    task = await runtime.create_artifact_task(
+        session=session,
+        registry=registry,
+        thread_id="thread-artifact",
+        goal="Generate a markdown daily news brief",
+        created_by="owner-1",
+        source="router",
+    )
+    completed = await _wait_for_status(store, task.id, {TASK_STATUS_COMPLETED})
+    assert completed.status == TASK_STATUS_COMPLETED
+    assert completed.completion_mode == "reply"
+    assert completed.task_type == "artifact"
+    assert completed.output_summary
+    assert completed.artifact_manifest == ["reports/daily-news.md"]
+    assert all(draft["task_id"] != task.id for draft in channel.drafts)
+    assert "waiting merge" not in (completed.summary or "").lower()
+    logs = await runtime.get_task_logs(task.id)
+    assert "Artifacts:" in logs
 
 
 @pytest.mark.asyncio

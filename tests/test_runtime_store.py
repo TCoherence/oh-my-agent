@@ -2,10 +2,14 @@ import pytest
 
 from oh_my_agent.memory.store import SQLiteMemoryStore
 from oh_my_agent.runtime.types import (
+    TASK_COMPLETION_MERGE,
+    TASK_COMPLETION_REPLY,
     TASK_STATUS_DRAFT,
     TASK_STATUS_MERGED,
     TASK_STATUS_PENDING,
     TASK_STATUS_RUNNING,
+    TASK_TYPE_ARTIFACT,
+    TASK_TYPE_REPO_CHANGE,
 )
 
 
@@ -38,6 +42,8 @@ async def test_runtime_task_crud_and_listing(store):
     loaded = await store.get_runtime_task("task-1")
     assert loaded is not None
     assert loaded.goal == "fix tests"
+    assert loaded.task_type == TASK_TYPE_REPO_CHANGE
+    assert loaded.completion_mode == TASK_COMPLETION_MERGE
 
     tasks = await store.list_runtime_tasks(platform="discord", channel_id="100", limit=10)
     assert len(tasks) == 1
@@ -154,3 +160,31 @@ async def test_runtime_cleanup_candidate_filter(store):
     )
     assert len(candidates) == 1
     assert candidates[0].id == "task-4"
+
+
+@pytest.mark.asyncio
+async def test_runtime_task_stores_artifact_fields(store):
+    created = await store.create_runtime_task(
+        task_id="task-artifact",
+        platform="discord",
+        channel_id="100",
+        thread_id="200",
+        created_by="u1",
+        goal="generate a daily report",
+        preferred_agent="codex",
+        status=TASK_STATUS_PENDING,
+        max_steps=4,
+        max_minutes=10,
+        test_command="true",
+        task_type=TASK_TYPE_ARTIFACT,
+        completion_mode=TASK_COMPLETION_REPLY,
+        output_summary="Artifacts (1): report.md",
+        artifact_manifest=["report.md"],
+    )
+    assert created.task_type == TASK_TYPE_ARTIFACT
+    loaded = await store.get_runtime_task("task-artifact")
+    assert loaded is not None
+    assert loaded.task_type == TASK_TYPE_ARTIFACT
+    assert loaded.completion_mode == TASK_COMPLETION_REPLY
+    assert loaded.output_summary == "Artifacts (1): report.md"
+    assert loaded.artifact_manifest == ["report.md"]

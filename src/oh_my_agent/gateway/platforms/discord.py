@@ -366,7 +366,7 @@ class DiscordChannel(BaseChannel):
                 return
 
             await interaction.response.defer(ephemeral=True)
-            task = await self._runtime_service.create_task(
+            task = await self._runtime_service.create_repo_change_task(
                 session=self._session,
                 registry=self._registry,
                 thread_id=thread_id,
@@ -405,6 +405,8 @@ class DiscordChannel(BaseChannel):
             lines = [
                 f"**Task** `{task.id}`",
                 f"- Status: `{task.status}`",
+                f"- Type: `{task.task_type}`",
+                f"- Completion: `{task.completion_mode}`",
                 f"- Goal: {task.goal[:200]}",
                 f"- Step: {task.step_no}/{task.max_steps}",
                 f"- Budget: {task.max_minutes} min",
@@ -414,6 +416,10 @@ class DiscordChannel(BaseChannel):
                 lines.append(f"- Blocked: {task.blocked_reason[:300]}")
             if task.error:
                 lines.append(f"- Error: {task.error[:300]}")
+            if task.output_summary:
+                lines.append(f"- Output: {task.output_summary[:300]}")
+            if task.artifact_manifest:
+                lines.append(f"- Artifacts: {', '.join(task.artifact_manifest[:8])[:300]}")
             if task.merge_commit_hash:
                 lines.append(f"- Commit: `{task.merge_commit_hash}`")
             if task.merge_error:
@@ -452,7 +458,10 @@ class DiscordChannel(BaseChannel):
                 return
             lines = [f"**Runtime tasks** ({len(tasks)})"]
             for t in tasks:
-                lines.append(f"- `{t.id}` [{t.status}] step {t.step_no}/{t.max_steps} · {t.goal[:80]}")
+                lines.append(
+                    f"- `{t.id}` [{t.status}] `{t.task_type}`/{t.completion_mode} "
+                    f"step {t.step_no}/{t.max_steps} · {t.goal[:80]}"
+                )
             await interaction.response.send_message("\n".join(lines)[:1900], ephemeral=True)
 
         async def _slash_decide(

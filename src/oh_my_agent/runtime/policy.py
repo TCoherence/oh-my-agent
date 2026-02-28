@@ -41,6 +41,28 @@ _SKILL_HINTS = (
     "生成skill",
 )
 
+_ARTIFACT_HINTS = (
+    "report",
+    "summary",
+    "summarize",
+    "research",
+    "headlines",
+    "news",
+    "analyze",
+    "analysis",
+    "collect",
+    "gather",
+    "brief",
+    "markdown report",
+    "日报",
+    "报告",
+    "总结",
+    "汇总",
+    "调研",
+    "分析",
+    "新闻",
+)
+
 _HIGH_RISK_HINTS = (
     "pip install",
     "npm install",
@@ -70,6 +92,11 @@ def is_long_task_intent(text: str) -> bool:
 def is_skill_intent(text: str) -> bool:
     lowered = text.lower()
     return any(hint in lowered for hint in _SKILL_HINTS)
+
+
+def is_artifact_intent(text: str) -> bool:
+    lowered = text.lower()
+    return any(hint in lowered for hint in _ARTIFACT_HINTS)
 
 
 def extract_skill_name(text: str, existing_skills: set[str] | None = None) -> tuple[str, bool]:

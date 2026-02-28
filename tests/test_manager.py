@@ -449,17 +449,19 @@ async def test_router_propose_task_creates_runtime_draft_and_skips_reply():
     runtime = MagicMock()
     runtime.maybe_handle_thread_context = AsyncMock(return_value=False)
     runtime.maybe_handle_incoming = AsyncMock(return_value=False)
-    runtime.create_task = AsyncMock()
+    runtime.create_repo_change_task = AsyncMock()
 
     router = MagicMock()
     router.confidence_threshold = 0.55
     router.route = AsyncMock(
         return_value=RouteDecision(
-            decision="propose_task",
+            decision="propose_repo_task",
             confidence=0.91,
             goal="create a new skill and validate it",
             risk_hints=[],
             raw_text="{}",
+            task_type="repo_change",
+            completion_mode="merge",
         )
     )
 
@@ -468,9 +470,112 @@ async def test_router_propose_task_creates_runtime_draft_and_skips_reply():
     msg = _make_msg(thread_id="t1", content="帮我创建一个skill并验证")
     await gm.handle_message(session, registry, msg)
 
-    runtime.create_task.assert_called_once()
-    kwargs = runtime.create_task.call_args.kwargs
+    runtime.create_repo_change_task.assert_called_once()
+    kwargs = runtime.create_repo_change_task.call_args.kwargs
     assert kwargs["source"] == "router"
     assert kwargs["force_draft"] is True
     assert kwargs["raw_request"] == "帮我创建一个skill并验证"
     registry.run.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_router_propose_artifact_task_creates_artifact_runtime_draft():
+    channel = MagicMock()
+    channel.platform = "discord"
+    channel.channel_id = "100"
+    channel.create_thread = AsyncMock(return_value="t1")
+    channel.send = AsyncMock()
+    channel.typing = MagicMock()
+    channel.typing.return_value.__aenter__ = AsyncMock(return_value=None)
+    channel.typing.return_value.__aexit__ = AsyncMock(return_value=False)
+
+    mock_agent = MagicMock()
+    mock_agent.name = "codex"
+    registry = MagicMock(spec=AgentRegistry)
+    registry.run = AsyncMock(return_value=(mock_agent, AgentResponse(text="answer")))
+
+    runtime = MagicMock()
+    runtime.maybe_handle_thread_context = AsyncMock(return_value=False)
+    runtime.maybe_handle_incoming = AsyncMock(return_value=False)
+    runtime.create_artifact_task = AsyncMock()
+
+    router = MagicMock()
+    router.confidence_threshold = 0.55
+    router.route = AsyncMock(
+        return_value=RouteDecision(
+            decision="propose_artifact_task",
+            confidence=0.91,
+            goal="Generate a markdown daily news brief",
+            risk_hints=[],
+            raw_text="{}",
+            task_type="artifact",
+            completion_mode="reply",
+        )
+    )
+
+    session = _make_session(channel=channel, registry=registry)
+    gm = GatewayManager([], runtime_service=runtime, intent_router=router)
+    msg = _make_msg(thread_id="t1", content="帮我生成一份今日新闻速读 markdown")
+    await gm.handle_message(session, registry, msg)
+
+    runtime.create_artifact_task.assert_called_once()
+    kwargs = runtime.create_artifact_task.call_args.kwargs
+    assert kwargs["source"] == "router"
+    assert kwargs["force_draft"] is True
+    assert kwargs["raw_request"] == "帮我生成一份今日新闻速读 markdown"
+    registry.run.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_explicit_skill_invocation_bypasses_router_and_runtime(tmp_path):
+    channel = MagicMock()
+    channel.platform = "discord"
+    channel.channel_id = "100"
+    channel.create_thread = AsyncMock(return_value="t1")
+    channel.send = AsyncMock()
+    channel.typing = MagicMock()
+    channel.typing.return_value.__aenter__ = AsyncMock(return_value=None)
+    channel.typing.return_value.__aexit__ = AsyncMock(return_value=False)
+
+    mock_agent = MagicMock()
+    mock_agent.name = "claude"
+    registry = MagicMock(spec=AgentRegistry)
+    registry.run = AsyncMock(return_value=(mock_agent, AgentResponse(text="news reply")))
+
+    runtime = MagicMock()
+    runtime.maybe_handle_thread_context = AsyncMock(return_value=False)
+    runtime.maybe_handle_incoming = AsyncMock(return_value=False)
+    runtime.create_task = AsyncMock()
+    runtime.create_skill_task = AsyncMock()
+
+    router = MagicMock()
+    router.confidence_threshold = 0.55
+    router.route = AsyncMock()
+
+    skills_root = tmp_path / "skills"
+    skill_dir = skills_root / "top-5-daily-news"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("name: top-5-daily-news\n", encoding="utf-8")
+    syncer = MagicMock()
+    syncer._skills_path = skills_root  # noqa: SLF001
+
+    session = _make_session(channel=channel, registry=registry)
+    gm = GatewayManager(
+        [],
+        runtime_service=runtime,
+        intent_router=router,
+        skill_syncer=syncer,
+    )
+
+    msg = _make_msg(thread_id="thread-1", content="/top-5-daily-news")
+    msg.preferred_agent = "claude"
+    await gm.handle_message(session, registry, msg)
+
+    router.route.assert_not_called()
+    runtime.create_task.assert_not_called()
+    runtime.create_skill_task.assert_not_called()
+    runtime.maybe_handle_incoming.assert_not_called()
+    registry.run.assert_awaited_once()
+    assert registry.run.call_args.args[0] == "/top-5-daily-news"
+    assert registry.run.call_args.kwargs["force_agent"] == "claude"
+    assert channel.send.await_count >= 1

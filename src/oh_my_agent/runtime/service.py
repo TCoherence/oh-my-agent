@@ -6,6 +6,7 @@ import inspect
 import json
 import logging
 import re
+import shutil
 import time
 import uuid
 from pathlib import Path
@@ -16,6 +17,7 @@ from oh_my_agent.agents.registry import AgentRegistry
 from oh_my_agent.gateway.base import IncomingMessage
 from oh_my_agent.gateway.session import ChannelSession
 from oh_my_agent.runtime.policy import (
+    is_artifact_intent,
     build_skill_prompt,
     build_runtime_prompt,
     extract_skill_name,
@@ -24,10 +26,17 @@ from oh_my_agent.runtime.policy import (
     parse_task_state,
 )
 from oh_my_agent.runtime.types import (
+    TASK_COMPLETION_ARTIFACT,
+    TASK_COMPLETION_MERGE,
+    TASK_COMPLETION_REPLY,
+    TASK_TYPE_ARTIFACT,
     TASK_TYPE_CODE,
+    TASK_TYPE_REPO_CHANGE,
     TASK_TYPE_SKILL,
+    TASK_TYPE_SKILL_CHANGE,
     TASK_STATUS_APPLIED,
     TASK_STATUS_BLOCKED,
+    TASK_STATUS_COMPLETED,
     TASK_STATUS_DISCARDED,
     TASK_STATUS_DRAFT,
     TASK_STATUS_FAILED,
@@ -52,6 +61,7 @@ _STATUS_MESSAGE_PREFIX = "**Task Status**"
 
 _TERMINAL_CLEANUP_STATUSES = {
     TASK_STATUS_APPLIED,  # legacy
+    TASK_STATUS_COMPLETED,
     TASK_STATUS_MERGED,
     TASK_STATUS_DISCARDED,
     TASK_STATUS_MERGE_FAILED,
@@ -122,6 +132,7 @@ class RuntimeService:
         self._skills_path = skills_path
         self._workspace_skills_dirs = workspace_skills_dirs
         worktree_root = Path(cfg.get("worktree_root", "~/.oh-my-agent/runtime/tasks")).expanduser().resolve()
+        self._runtime_workspace_root = worktree_root
         self._worktree = WorktreeManager(self._repo_root, worktree_root)
 
         self._sessions: dict[str, ChannelSession] = {}
@@ -189,12 +200,25 @@ class RuntimeService:
         if await self.maybe_handle_thread_context(session, msg, thread_id=thread_id):
             return True
 
-        # 2. Long task intent → create task
+        actor = msg.author_id or msg.author
+        if is_artifact_intent(msg.content):
+            await self.create_artifact_task(
+                session=session,
+                registry=registry,
+                thread_id=thread_id,
+                goal=msg.content,
+                raw_request=msg.content,
+                created_by=actor,
+                preferred_agent=msg.preferred_agent,
+                source="message",
+            )
+            return True
+
+        # 2. Long task intent → create repo-change task
         if not is_long_task_intent(msg.content):
             return False
 
-        actor = msg.author_id or msg.author
-        await self.create_task(
+        await self.create_repo_change_task(
             session=session,
             registry=registry,
             thread_id=thread_id,
@@ -268,7 +292,10 @@ class RuntimeService:
         max_minutes: int | None = None,
         source: str,
         force_draft: bool = False,
-        task_type: str = TASK_TYPE_CODE,
+        task_type: str = TASK_TYPE_REPO_CHANGE,
+        completion_mode: str = TASK_COMPLETION_MERGE,
+        output_summary: str | None = None,
+        artifact_manifest: list[str] | None = None,
         skill_name: str | None = None,
     ) -> RuntimeTask:
         self.register_session(session, registry)
@@ -301,6 +328,9 @@ class RuntimeService:
             max_steps=steps,
             max_minutes=minutes,
             test_command=command,
+            completion_mode=completion_mode,
+            output_summary=output_summary,
+            artifact_manifest=artifact_manifest,
             task_type=task_type,
             skill_name=skill_name,
         )
@@ -349,6 +379,72 @@ class RuntimeService:
 
         return task
 
+    async def create_repo_change_task(
+        self,
+        *,
+        session: ChannelSession,
+        registry: AgentRegistry,
+        thread_id: str,
+        goal: str,
+        raw_request: str | None = None,
+        created_by: str,
+        preferred_agent: str | None = None,
+        test_command: str | None = None,
+        max_steps: int | None = None,
+        max_minutes: int | None = None,
+        source: str,
+        force_draft: bool = False,
+    ) -> RuntimeTask:
+        return await self.create_task(
+            session=session,
+            registry=registry,
+            thread_id=thread_id,
+            goal=goal,
+            raw_request=raw_request,
+            created_by=created_by,
+            preferred_agent=preferred_agent,
+            test_command=test_command,
+            max_steps=max_steps,
+            max_minutes=max_minutes,
+            source=source,
+            force_draft=force_draft,
+            task_type=TASK_TYPE_REPO_CHANGE,
+            completion_mode=TASK_COMPLETION_MERGE,
+        )
+
+    async def create_artifact_task(
+        self,
+        *,
+        session: ChannelSession,
+        registry: AgentRegistry,
+        thread_id: str,
+        goal: str,
+        raw_request: str | None = None,
+        created_by: str,
+        preferred_agent: str | None = None,
+        test_command: str | None = None,
+        max_steps: int | None = None,
+        max_minutes: int | None = None,
+        source: str,
+        force_draft: bool = False,
+    ) -> RuntimeTask:
+        return await self.create_task(
+            session=session,
+            registry=registry,
+            thread_id=thread_id,
+            goal=goal,
+            raw_request=raw_request,
+            created_by=created_by,
+            preferred_agent=preferred_agent,
+            test_command=test_command or "true",
+            max_steps=max_steps,
+            max_minutes=max_minutes,
+            source=source,
+            force_draft=force_draft,
+            task_type=TASK_TYPE_ARTIFACT,
+            completion_mode=TASK_COMPLETION_REPLY,
+        )
+
     async def create_skill_task(
         self,
         *,
@@ -382,7 +478,8 @@ class RuntimeService:
             max_minutes=15,
             source=source,
             force_draft=True,
-            task_type=TASK_TYPE_SKILL,
+            task_type=TASK_TYPE_SKILL_CHANGE,
+            completion_mode=TASK_COMPLETION_MERGE,
             skill_name=resolved_name,
         )
 
@@ -396,7 +493,7 @@ class RuntimeService:
         author: str,
         preferred_agent: str | None,
     ) -> RuntimeTask:
-        return await self.create_task(
+        return await self.create_repo_change_task(
             session=session,
             registry=registry,
             thread_id=thread_id,
@@ -493,6 +590,8 @@ class RuntimeService:
         task = await self._store.get_runtime_task(task_id)
         if task is None:
             return f"Task `{task_id}` not found."
+        if not self._uses_merge_flow(task):
+            return f"Task `{task.id}` does not use merge completion."
         return await self._execute_merge(task, actor_id=actor_id, source="slash")
 
     async def wait_task(self, task_id: str, *, actor_id: str) -> str:
@@ -501,6 +600,8 @@ class RuntimeService:
         task = await self._store.get_runtime_task(task_id)
         if task is None:
             return f"Task `{task_id}` not found."
+        if not self._uses_merge_flow(task):
+            return f"Task `{task.id}` does not use merge completion."
         if task.status not in {TASK_STATUS_WAITING_MERGE, TASK_STATUS_APPLIED, TASK_STATUS_MERGE_FAILED}:
             return f"Task `{task.id}` is not waiting merge (status: {task.status})."
         updates: dict[str, Any] = {}
@@ -525,6 +626,8 @@ class RuntimeService:
         task = await self._store.get_runtime_task(task_id)
         if task is None:
             return f"Task `{task_id}` not found."
+        if not self._uses_merge_flow(task):
+            return f"Task `{task.id}` does not use merge completion."
         if task.status not in {TASK_STATUS_WAITING_MERGE, TASK_STATUS_APPLIED, TASK_STATUS_MERGE_FAILED}:
             return f"Task `{task.id}` is not waiting merge (status: {task.status})."
         await self._store.update_runtime_task(
@@ -566,8 +669,12 @@ class RuntimeService:
         ]
         if task.summary:
             lines.append(f"- Summary: {task.summary[:240]}")
+        if task.output_summary:
+            lines.append(f"- Output: {task.output_summary[:240]}")
         if task.error:
             lines.append(f"- Error: {task.error[:240]}")
+        if task.artifact_manifest:
+            lines.append(f"- Artifacts: {', '.join(task.artifact_manifest[:8])[:240]}")
 
         events = await self._store.list_runtime_events(task.id, limit=self._log_event_limit)
         if events:
@@ -626,6 +733,8 @@ class RuntimeService:
             if task.status not in valid:
                 return f"Task `{task.id}` is not waiting approval (status: {task.status})."
         elif event.action in {"merge", "discard", "request_changes"}:
+            if not self._uses_merge_flow(task):
+                return f"Task `{task.id}` does not use merge completion."
             valid = {TASK_STATUS_WAITING_MERGE, TASK_STATUS_APPLIED, TASK_STATUS_MERGE_FAILED}
             if task.status not in valid:
                 return f"Task `{task.id}` is not waiting merge (status: {task.status})."
@@ -817,9 +926,9 @@ class RuntimeService:
             return
 
         try:
-            workspace = await self._worktree.ensure_worktree(task.id)
+            workspace = await self._prepare_task_workspace(task)
         except WorktreeError as exc:
-            await self._fail(task, f"Failed to prepare worktree: {exc}")
+            await self._fail(task, f"Failed to prepare workspace: {exc}")
             return
 
         await self._store.update_runtime_task(task.id, workspace_path=str(workspace))
@@ -885,7 +994,7 @@ class RuntimeService:
                 task,
                 f"Task `{task.id}` step {step}/{task.max_steps}: running agent `{task.preferred_agent or self._default_agent}`.",
             )
-            if task.task_type == TASK_TYPE_SKILL and task.skill_name:
+            if task.task_type == TASK_TYPE_SKILL_CHANGE and task.skill_name:
                 prompt = build_skill_prompt(
                     skill_name=task.skill_name,
                     goal=task.goal,
@@ -934,11 +1043,12 @@ class RuntimeService:
                 len(response.text),
                 state,
             )
-            changed_files = await self._worktree.changed_files(workspace)
-            guard_error = self._validate_changed_paths(changed_files)
-            if guard_error:
-                await self._fail(task, guard_error)
-                return
+            changed_files = await self._collect_changed_files(task, workspace)
+            if self._uses_merge_flow(task):
+                guard_error = self._validate_changed_paths(changed_files)
+                if guard_error:
+                    await self._fail(task, guard_error)
+                    return
 
             await self._store.update_runtime_task(task.id, status=TASK_STATUS_VALIDATING)
             logger.info(
@@ -1100,18 +1210,26 @@ class RuntimeService:
                     total_agent_s=total_agent_s,
                     total_test_s=total_test_s,
                     total_elapsed_s=total_elapsed_s,
-                    waiting_merge=self._merge_gate_enabled,
+                    waiting_merge=self._uses_merge_flow(task) and self._merge_gate_enabled,
                 )
-                if self._merge_gate_enabled:
+                output_summary = self._build_output_summary(
+                    task=task,
+                    changed_files=changed_files,
+                    test_summary=test_summary,
+                )
+                artifact_manifest = changed_files if task.completion_mode != TASK_COMPLETION_MERGE else None
+                if self._uses_merge_flow(task) and self._merge_gate_enabled:
                     new_state = TASK_STATUS_WAITING_MERGE
                 else:
-                    new_state = TASK_STATUS_APPLIED
+                    new_state = TASK_STATUS_COMPLETED
 
                 await self._store.update_runtime_task(
                     task.id,
                     status=new_state,
                     ended_at_now=True,
                     summary=summary,
+                    output_summary=output_summary,
+                    artifact_manifest=artifact_manifest,
                     blocked_reason=None,
                     merge_error=None,
                 )
@@ -1127,7 +1245,7 @@ class RuntimeService:
                     },
                 )
 
-                if self._merge_gate_enabled:
+                if self._uses_merge_flow(task) and self._merge_gate_enabled:
                     merge_nonce = await self._store.create_runtime_decision_nonce(
                         task.id,
                         ttl_minutes=self._decision_ttl_minutes,
@@ -1153,9 +1271,14 @@ class RuntimeService:
                     logger.info("Runtime task=%s WAITING_MERGE step=%d", task.id, step)
                     return
 
-                logger.info("Runtime task=%s APPLIED step=%d", task.id, step)
-                await self._notify(task, f"Task `{task.id}` completed successfully.")
-                await self._signal_status_by_id(task, TASK_STATUS_APPLIED)
+                logger.info("Runtime task=%s COMPLETED step=%d", task.id, step)
+                completion_text = self._completed_text(
+                    task=await self._store.get_runtime_task(task.id) or task,
+                    changed_files=changed_files,
+                    test_summary=test_summary,
+                )
+                await self._notify(task, completion_text)
+                await self._signal_status_by_id(task, TASK_STATUS_COMPLETED)
                 return
 
             prior_failure = test_summary if not test_ok else None
@@ -1306,7 +1429,7 @@ class RuntimeService:
                     "auto_commit": self._merge_auto_commit,
                 },
             )
-            if task.task_type == TASK_TYPE_SKILL:
+            if task.task_type == TASK_TYPE_SKILL_CHANGE:
                 await self._on_skill_task_merged(
                     task,
                     await self._resolve_last_agent_name(task),
@@ -1324,7 +1447,7 @@ class RuntimeService:
                         except Exception:
                             logger.debug("git worktree prune failed after immediate merge cleanup", exc_info=True)
             merged_note = f"Task `{task.id}` merged successfully.{extra}"
-            if task.task_type == TASK_TYPE_SKILL and task.skill_name:
+            if task.task_type == TASK_TYPE_SKILL_CHANGE and task.skill_name:
                 merged_note += (
                     f" Skill `{task.skill_name}` merged and synced to active Claude/Gemini workspaces. "
                     "If an existing session still does not see it, run `/reload-skills`."
@@ -1421,9 +1544,12 @@ class RuntimeService:
         workspace = Path(task.workspace_path)
         if workspace.exists():
             try:
-                await self._worktree.remove_worktree(workspace)
+                if self._uses_merge_flow(task):
+                    await self._worktree.remove_worktree(workspace)
+                else:
+                    shutil.rmtree(workspace, ignore_errors=True)
             except Exception as exc:
-                logger.warning("Failed to remove worktree for task=%s: %s", task.id, exc)
+                logger.warning("Failed to remove workspace for task=%s: %s", task.id, exc)
                 return False
         await self._store.update_runtime_task(
             task.id,
@@ -1482,6 +1608,62 @@ class RuntimeService:
                 validation_warnings=warnings,
                 merged_commit_hash=merge_commit_hash or None,
             )
+
+    async def _prepare_task_workspace(self, task: RuntimeTask) -> Path:
+        if self._uses_merge_flow(task):
+            return await self._worktree.ensure_worktree(task.id)
+
+        workspace = self._runtime_workspace_root / "_artifacts" / task.id
+        workspace.mkdir(parents=True, exist_ok=True)
+        return workspace
+
+    async def _collect_changed_files(self, task: RuntimeTask, workspace: Path) -> list[str]:
+        if self._uses_merge_flow(task):
+            return await self._worktree.changed_files(workspace)
+        return self._list_workspace_files(workspace)
+
+    @staticmethod
+    def _list_workspace_files(workspace: Path) -> list[str]:
+        if not workspace.exists():
+            return []
+        return sorted(
+            str(path.relative_to(workspace)).replace("\\", "/")
+            for path in workspace.rglob("*")
+            if path.is_file()
+        )
+
+    @staticmethod
+    def _uses_merge_flow(task: RuntimeTask) -> bool:
+        return task.completion_mode == TASK_COMPLETION_MERGE
+
+    def _build_output_summary(self, task: RuntimeTask, changed_files: list[str], test_summary: str) -> str | None:
+        if task.completion_mode == TASK_COMPLETION_MERGE:
+            return None
+        parts: list[str] = []
+        if changed_files:
+            parts.append(f"Artifacts ({len(changed_files)}): " + ", ".join(changed_files[:10]))
+            if len(changed_files) > 10:
+                parts[-1] += f" and {len(changed_files) - 10} more"
+        formatted = self._format_test_output(test_summary)
+        if formatted:
+            parts.append(f"Validation: {formatted}")
+        return " | ".join(parts)[:1000] if parts else None
+
+    def _completed_text(self, *, task: RuntimeTask, changed_files: list[str], test_summary: str) -> str:
+        lines = [f"Task `{task.id}` completed."]
+        if task.output_summary:
+            lines.append(task.output_summary)
+        elif changed_files:
+            lines.append("Artifacts ready:")
+            lines.extend(f"- `{path}`" for path in changed_files[:8])
+            if len(changed_files) > 8:
+                lines.append(f"- ... and {len(changed_files) - 8} more")
+        formatted = self._format_test_output(test_summary)
+        if formatted:
+            lines.append("")
+            lines.append("Validation result:")
+            lines.append(f"```text\n{formatted[:500]}\n```")
+        return "\n".join(lines)[:1900]
 
     async def _resolve_last_agent_name(self, task: RuntimeTask) -> str:
         events = await self._store.list_runtime_events(task.id, limit=20)
@@ -1687,6 +1869,7 @@ class RuntimeService:
         reason_text = ", ".join(reasons) if reasons else "requires explicit approval"
         return (
             f"### Runtime Task Draft `{task.id}`\n"
+            f"Task type: `{task.task_type}` · completion: `{task.completion_mode}`\n"
             f"Goal: {task.goal}\n"
             f"Agent: `{task.preferred_agent or self._default_agent}`\n"
             f"Budget: {task.max_steps} steps / {task.max_minutes} min\n"
@@ -1698,6 +1881,7 @@ class RuntimeService:
     async def _merge_gate_text(self, task: RuntimeTask) -> str:
         lines = [
             f"### Runtime Task `{task.id}` Ready to Merge",
+            f"Task type: `{task.task_type}`",
             f"Goal: {task.goal[:220]}",
             f"Agent: `{task.preferred_agent or self._default_agent}`",
             f"Completed step: {task.step_no}/{task.max_steps}",
@@ -1775,7 +1959,7 @@ class RuntimeService:
             return "🧪"
         if status in {TASK_STATUS_DRAFT, TASK_STATUS_PENDING, TASK_STATUS_WAITING_MERGE}:
             return "⏳"
-        if status in {TASK_STATUS_MERGED, TASK_STATUS_APPLIED}:
+        if status in {TASK_STATUS_MERGED, TASK_STATUS_APPLIED, TASK_STATUS_COMPLETED}:
             return "✅"
         if status == TASK_STATUS_DISCARDED:
             return "🗑️"

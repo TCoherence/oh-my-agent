@@ -3,14 +3,24 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-TASK_TYPE_CODE = "code"
-TASK_TYPE_SKILL = "skill"
+TASK_TYPE_ARTIFACT = "artifact"
+TASK_TYPE_REPO_CHANGE = "repo_change"
+TASK_TYPE_SKILL_CHANGE = "skill_change"
+
+# Legacy aliases kept for internal/backward compatibility while rows migrate.
+TASK_TYPE_CODE = TASK_TYPE_REPO_CHANGE
+TASK_TYPE_SKILL = TASK_TYPE_SKILL_CHANGE
+
+TASK_COMPLETION_REPLY = "reply"
+TASK_COMPLETION_ARTIFACT = "artifact"
+TASK_COMPLETION_MERGE = "merge"
 
 TASK_STATUS_DRAFT = "DRAFT"
 TASK_STATUS_PENDING = "PENDING"
 TASK_STATUS_RUNNING = "RUNNING"
 TASK_STATUS_VALIDATING = "VALIDATING"
 TASK_STATUS_APPLIED = "APPLIED"
+TASK_STATUS_COMPLETED = "COMPLETED"
 TASK_STATUS_WAITING_MERGE = "WAITING_MERGE"
 TASK_STATUS_MERGED = "MERGED"
 TASK_STATUS_MERGE_FAILED = "MERGE_FAILED"
@@ -28,6 +38,7 @@ TaskStatus = Literal[
     "RUNNING",
     "VALIDATING",
     "APPLIED",
+    "COMPLETED",
     "WAITING_MERGE",
     "MERGED",
     "MERGE_FAILED",
@@ -39,7 +50,8 @@ TaskStatus = Literal[
     "REJECTED",
     "PAUSED",
 ]
-TaskType = Literal["code", "skill"]
+TaskType = Literal["artifact", "repo_change", "skill_change"]
+TaskCompletionMode = Literal["reply", "artifact", "merge"]
 
 DecisionAction = Literal[
     "approve",
@@ -76,16 +88,24 @@ class RuntimeTask:
     resume_instruction: str | None
     merge_commit_hash: str | None
     merge_error: str | None
+    completion_mode: str
+    output_summary: str | None
+    artifact_manifest: list[str] | None
     workspace_cleaned_at: str | None
     created_at: str | None
     started_at: str | None
     updated_at: str | None
     ended_at: str | None
-    task_type: str = TASK_TYPE_CODE
+    task_type: str = TASK_TYPE_REPO_CHANGE
     skill_name: str | None = None
 
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> "RuntimeTask":
+        raw_task_type = str(row.get("task_type", TASK_TYPE_REPO_CHANGE))
+        if raw_task_type == "code":
+            raw_task_type = TASK_TYPE_REPO_CHANGE
+        elif raw_task_type == "skill":
+            raw_task_type = TASK_TYPE_SKILL_CHANGE
         return cls(
             id=str(row["id"]),
             platform=str(row["platform"]),
@@ -109,12 +129,15 @@ class RuntimeTask:
             resume_instruction=row.get("resume_instruction"),
             merge_commit_hash=row.get("merge_commit_hash"),
             merge_error=row.get("merge_error"),
+            completion_mode=str(row.get("completion_mode", TASK_COMPLETION_MERGE)),
+            output_summary=row.get("output_summary"),
+            artifact_manifest=row.get("artifact_manifest"),
             workspace_cleaned_at=row.get("workspace_cleaned_at"),
             created_at=row.get("created_at"),
             started_at=row.get("started_at"),
             updated_at=row.get("updated_at"),
             ended_at=row.get("ended_at"),
-            task_type=str(row.get("task_type", TASK_TYPE_CODE)),
+            task_type=raw_task_type,
             skill_name=row.get("skill_name"),
         )
 

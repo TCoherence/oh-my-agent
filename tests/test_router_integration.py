@@ -34,11 +34,13 @@ async def test_router_real_http_with_config_and_env(tmp_path, monkeypatch):
         seen["payload"] = json.loads(req.data.decode("utf-8"))
         content = json.dumps(
             {
-                "decision": "propose_task",
+                "decision": "propose_repo_task",
                 "confidence": 0.92,
                 "goal": "create docs smoke file and run tests",
                 "risk_hints": ["multi_step", "run_tests"],
                 "skill_name": "",
+                "task_type": "repo_change",
+                "completion_mode": "merge",
             },
             ensure_ascii=False,
         )
@@ -79,9 +81,11 @@ async def test_router_real_http_with_config_and_env(tmp_path, monkeypatch):
 
     decision = await router.route("请在 docs 下新增文件并跑测试")
     assert decision is not None
-    assert decision.decision == "propose_task"
+    assert decision.decision == "propose_repo_task"
     assert decision.confidence == pytest.approx(0.92)
     assert "run tests" in decision.goal
+    assert decision.task_type == "repo_change"
+    assert decision.completion_mode == "merge"
 
     assert seen["url"] == "https://router.example.test/v1/chat/completions"
     assert seen["auth"] == "Bearer integration-test-key"

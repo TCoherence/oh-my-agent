@@ -19,8 +19,9 @@ async def test_router_parses_valid_json_decision(monkeypatch):
                 {
                     "message": {
                         "content": (
-                            '{"decision":"propose_task","confidence":0.88,'
-                            '"goal":"fix tests and docs","risk_hints":["multi-step"]}'
+                            '{"decision":"propose_repo_task","confidence":0.88,'
+                            '"goal":"fix tests and docs","risk_hints":["multi-step"],'
+                            '"task_type":"repo_change","completion_mode":"merge"}'
                         )
                     }
                 }
@@ -30,11 +31,13 @@ async def test_router_parses_valid_json_decision(monkeypatch):
     monkeypatch.setattr(router, "_post_json", _fake_post)
     out = await router.route("please fix and run tests")
     assert out is not None
-    assert out.decision == "propose_task"
+    assert out.decision == "propose_repo_task"
     assert out.confidence == 0.88
     assert out.goal == "fix tests and docs"
     assert out.risk_hints == ["multi-step"]
     assert out.skill_name is None
+    assert out.task_type == "repo_change"
+    assert out.completion_mode == "merge"
 
 
 @pytest.mark.asyncio
@@ -86,7 +89,10 @@ async def test_router_retries_once_then_succeeds(monkeypatch):
             "choices": [
                 {
                     "message": {
-                        "content": '{"decision":"propose_task","confidence":0.66,"goal":"do x","risk_hints":[]}'
+                        "content": (
+                            '{"decision":"propose_repo_task","confidence":0.66,"goal":"do x",'
+                            '"risk_hints":[],"task_type":"repo_change","completion_mode":"merge"}'
+                        )
                     }
                 }
             ]
@@ -96,7 +102,7 @@ async def test_router_retries_once_then_succeeds(monkeypatch):
     out = await router.route("please do x")
     assert calls["n"] == 2
     assert out is not None
-    assert out.decision == "propose_task"
+    assert out.decision == "propose_repo_task"
     assert out.skill_name is None
 
 
@@ -129,3 +135,35 @@ async def test_router_parses_create_skill_decision(monkeypatch):
     assert out is not None
     assert out.decision == "create_skill"
     assert out.skill_name == "weather"
+
+
+@pytest.mark.asyncio
+async def test_router_parses_artifact_task_decision(monkeypatch):
+    router = OpenAICompatibleRouter(
+        base_url="https://api.example.com/v1",
+        api_key="k",
+        model="m",
+    )
+
+    def _fake_post(_payload):
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": (
+                            '{"decision":"propose_artifact_task","confidence":0.83,'
+                            '"goal":"Generate a daily news markdown report",'
+                            '"risk_hints":["multi_step"],'
+                            '"task_type":"artifact","completion_mode":"reply"}'
+                        )
+                    }
+                }
+            ]
+        }
+
+    monkeypatch.setattr(router, "_post_json", _fake_post)
+    out = await router.route("生成一份今日新闻速读并整理成 markdown")
+    assert out is not None
+    assert out.decision == "propose_artifact_task"
+    assert out.task_type == "artifact"
+    assert out.completion_mode == "reply"

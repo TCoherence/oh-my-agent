@@ -5,6 +5,7 @@ import hashlib
 import inspect
 import logging
 import os
+import re
 import shutil
 import time
 import uuid
@@ -20,6 +21,7 @@ from oh_my_agent.utils.chunker import chunk_message
 logger = logging.getLogger(__name__)
 
 THREAD_NAME_MAX = 90
+_EXPLICIT_SKILL_CALL_RE = re.compile(r"^/([a-zA-Z0-9][a-zA-Z0-9-_]{0,62})(?:\s|$)")
 
 
 class GatewayManager:
@@ -264,9 +266,24 @@ class GatewayManager:
                 logger.info("[%s] THREAD_CONTEXT handled thread=%s", req_id, thread_id)
                 return
 
+        explicit_skill = self._detect_explicit_skill_invocation(msg.content)
+        if explicit_skill:
+            logger.info(
+                "[%s] SKILL_INVOKE explicit skill=%s preferred_agent=%r thread=%s",
+                req_id,
+                explicit_skill,
+                msg.preferred_agent,
+                thread_id,
+            )
+
         # Runtime interception for long-running autonomous tasks.
         router_decision = None
-        if (not msg.system) and self._intent_router and self._runtime_service:
+        if (
+            (not msg.system)
+            and not explicit_skill
+            and self._intent_router
+            and self._runtime_service
+        ):
             router_decision = await self._intent_router.route(msg.content)
             threshold = self._intent_router.confidence_threshold
             if router_decision is None:
@@ -313,11 +330,11 @@ class GatewayManager:
                 return
             if (
                 router_decision
-                and router_decision.decision == "propose_task"
+                and router_decision.decision == "propose_artifact_task"
                 and router_decision.confidence >= threshold
             ):
                 goal = router_decision.goal or msg.content
-                await self._runtime_service.create_task(
+                await self._runtime_service.create_artifact_task(
                     session=session,
                     registry=registry,
                     thread_id=thread_id,
@@ -331,17 +348,59 @@ class GatewayManager:
                 await channel.send(
                     thread_id,
                     (
-                        "Router suggested this as a long task and created a draft. "
+                        "Router suggested this as an artifact task and created a draft. "
                         "Approve to start autonomous execution, or reject/suggest to keep it in chat flow."
                     ),
                 )
                 logger.info(
-                    "[%s] ROUTER propose_task confidence=%.2f goal=%r",
+                    "[%s] ROUTER propose_artifact_task confidence=%.2f goal=%r",
                     req_id,
                     router_decision.confidence,
                     goal[:120],
                 )
                 return
+            if (
+                router_decision
+                and router_decision.decision == "propose_repo_task"
+                and router_decision.confidence >= threshold
+            ):
+                goal = router_decision.goal or msg.content
+                await self._runtime_service.create_repo_change_task(
+                    session=session,
+                    registry=registry,
+                    thread_id=thread_id,
+                    goal=goal,
+                    raw_request=msg.content,
+                    created_by=msg.author_id or msg.author,
+                    preferred_agent=msg.preferred_agent,
+                    source="router",
+                    force_draft=True,
+                )
+                await channel.send(
+                    thread_id,
+                    (
+                        "Router suggested this as a repository-change task and created a draft. "
+                        "Approve to start autonomous execution, or reject/suggest to keep it in chat flow."
+                    ),
+                )
+                logger.info(
+                    "[%s] ROUTER propose_repo_task confidence=%.2f goal=%r",
+                    req_id,
+                    router_decision.confidence,
+                    goal[:120],
+                )
+                return
+            if (
+                router_decision
+                and router_decision.decision == "invoke_existing_skill"
+                and router_decision.confidence >= threshold
+            ):
+                logger.info(
+                    "[%s] ROUTER invoke_existing_skill confidence=%.2f skill_name=%r",
+                    req_id,
+                    router_decision.confidence,
+                    router_decision.skill_name,
+                )
 
             should_try_heuristic = (
                 router_decision is None
@@ -350,7 +409,7 @@ class GatewayManager:
         else:
             should_try_heuristic = bool(self._runtime_service)
 
-        if self._runtime_service and should_try_heuristic:
+        if self._runtime_service and should_try_heuristic and not explicit_skill:
             if is_skill_intent(msg.content):
                 await self._runtime_service.create_skill_task(
                     session=session,
@@ -675,6 +734,29 @@ class GatewayManager:
         if cost is not None:
             parts.append(f"${cost:.4f}")
         return " · ".join(parts)
+
+    def _detect_explicit_skill_invocation(self, content: str) -> str | None:
+        match = _EXPLICIT_SKILL_CALL_RE.match(content.strip())
+        if not match:
+            return None
+
+        skill_name = match.group(1)
+        known = self._known_skill_names()
+        if skill_name not in known:
+            return None
+        return skill_name
+
+    def _known_skill_names(self) -> set[str]:
+        if not self._skill_syncer:
+            return set()
+        skills_path = getattr(self._skill_syncer, "_skills_path", None)
+        if not isinstance(skills_path, Path) or not skills_path.is_dir():
+            return set()
+        return {
+            child.name
+            for child in skills_path.iterdir()
+            if child.is_dir() and (child / "SKILL.md").exists()
+        }
 
     def resolve_session(self, platform: str, channel_id: str) -> ChannelSession | None:
         return self._sessions.get(self._session_key(platform, channel_id))
