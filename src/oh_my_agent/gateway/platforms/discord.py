@@ -886,8 +886,9 @@ class DiscordChannel(BaseChannel):
         guild_id = await self._resolve_target_guild_id(target_id)
         if guild_id is not None:
             guild = discord.Object(id=guild_id)
-            tree.clear_commands(guild=guild)
             tree.copy_global_to(guild=guild)
+            tree.clear_commands()
+            await tree.sync()
             await tree.sync(guild=guild)
             return f"guild:{guild_id}"
 

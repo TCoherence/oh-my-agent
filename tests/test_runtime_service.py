@@ -214,6 +214,15 @@ async def _wait_for_status(store: SQLiteMemoryStore, task_id: str, expected: set
     raise AssertionError(f"Task {task_id} did not reach {expected}, got {task.status if task else 'missing'}")
 
 
+async def _wait_for_draft_count(channel: _FakeChannel, count: int, timeout: float = 8.0) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        if len(channel.drafts) >= count:
+            return
+        await asyncio.sleep(0.1)
+    raise AssertionError(f"Expected at least {count} draft message(s), got {len(channel.drafts)}")
+
+
 @pytest.fixture
 async def runtime_env(tmp_path):
     repo = tmp_path / "repo"
@@ -319,6 +328,7 @@ async def test_runtime_message_intent_draft_to_merge(runtime_env):
 
     waiting = await _wait_for_status(store, tasks[0].id, {TASK_STATUS_WAITING_MERGE})
     assert waiting.status == TASK_STATUS_WAITING_MERGE
+    await _wait_for_draft_count(channel, 2)
     merge_draft = channel.drafts[-1]
     assert merge_draft["task_id"] == tasks[0].id
     assert "Ready to Merge" in merge_draft["draft_text"]
