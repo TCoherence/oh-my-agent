@@ -54,6 +54,7 @@ class RuntimeTask:
     thread_id: str
     created_by: str
     goal: str
+    original_request: str | None
     preferred_agent: str | None
     status: TaskStatus
     step_no: int
@@ -84,6 +85,7 @@ class RuntimeTask:
             thread_id=str(row["thread_id"]),
             created_by=str(row.get("created_by", "unknown")),
             goal=str(row["goal"]),
+            original_request=row.get("original_request"),
             preferred_agent=row.get("preferred_agent"),
             status=row["status"],
             step_no=int(row.get("step_no", 0)),

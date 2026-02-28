@@ -39,13 +39,17 @@ def test_parse_task_state_and_block_reason():
 def test_build_runtime_prompt_includes_loop_context():
     prompt = build_runtime_prompt(
         goal="Fix flaky test",
+        original_request="Please fix flaky test in parser.py and keep output stable",
         step_no=2,
         max_steps=8,
         prior_failure="assert x == y",
         resume_instruction="focus on parser module",
     )
-    assert "Goal: Fix flaky test" in prompt
+    assert "Normalized goal: Fix flaky test" in prompt
+    assert "Original user request:" in prompt
+    assert "Please fix flaky test in parser.py" in prompt
     assert "Current step: 2/8" in prompt
     assert "assert x == y" in prompt
     assert "focus on parser module" in prompt
     assert "User approval/merge happens outside your loop" in prompt
+    assert "authoritative test command" in prompt

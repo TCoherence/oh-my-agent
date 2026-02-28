@@ -471,4 +471,5 @@ async def test_router_propose_task_creates_runtime_draft_and_skips_reply():
     kwargs = runtime.create_task.call_args.kwargs
     assert kwargs["source"] == "router"
     assert kwargs["force_draft"] is True
+    assert kwargs["raw_request"] == "帮我创建一个skill并验证"
     registry.run.assert_not_called()

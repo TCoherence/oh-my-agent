@@ -278,6 +278,7 @@ class GatewayManager:
                     registry=registry,
                     thread_id=thread_id,
                     goal=goal,
+                    raw_request=msg.content,
                     created_by=msg.author_id or msg.author,
                     preferred_agent=msg.preferred_agent,
                     source="router",

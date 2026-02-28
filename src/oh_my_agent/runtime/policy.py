@@ -91,6 +91,7 @@ def parse_task_state(text: str) -> tuple[str, str | None]:
 def build_runtime_prompt(
     *,
     goal: str,
+    original_request: str | None,
     step_no: int,
     max_steps: int,
     prior_failure: str | None,
@@ -98,12 +99,22 @@ def build_runtime_prompt(
 ) -> str:
     lines = [
         "You are executing an autonomous coding task loop.",
-        f"Goal: {goal}",
+        f"Normalized goal: {goal}",
         f"Current step: {step_no}/{max_steps}",
         "",
+    ]
+    if original_request:
+        lines.extend([
+            "Original user request:",
+            original_request,
+            "",
+        ])
+    lines.extend([
         "Rules:",
         "- Make concrete repository changes toward the goal.",
-        "- Run or update tests as needed.",
+        "- Use the original user request as the source of truth for exact file content or constraints.",
+        "- You may do quick local checks, but the runtime will run the authoritative test command after your turn.",
+        "- Do not emit TASK_STATE: BLOCKED only because a local sandbox test or socket-bind attempt fails inside your agent environment.",
         "- User approval/merge happens outside your loop. If the workspace changes are ready and tests pass, emit TASK_STATE: DONE instead of waiting for more user input.",
         "- If blocked by missing dependency/permission/context, emit TASK_STATE: BLOCKED.",
         "- When the goal is complete and tests pass, emit TASK_STATE: DONE.",
@@ -111,7 +122,7 @@ def build_runtime_prompt(
         "- Always include exactly one marker line at the end:",
         "  TASK_STATE: CONTINUE|DONE|BLOCKED",
         "- If blocked, also include: BLOCK_REASON: <reason>",
-    ]
+    ])
     if prior_failure:
         lines.extend(["", "Previous test failure summary:", prior_failure])
     if resume_instruction:

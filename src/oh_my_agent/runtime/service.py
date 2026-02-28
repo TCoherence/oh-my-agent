@@ -5,6 +5,7 @@ import fnmatch
 import inspect
 import json
 import logging
+import re
 import time
 import uuid
 from pathlib import Path
@@ -180,6 +181,7 @@ class RuntimeService:
             registry=registry,
             thread_id=thread_id,
             goal=msg.content,
+            raw_request=msg.content,
             created_by=msg.author_id or msg.author,
             preferred_agent=msg.preferred_agent,
             source="message",
@@ -193,6 +195,7 @@ class RuntimeService:
         registry: AgentRegistry,
         thread_id: str,
         goal: str,
+        raw_request: str | None = None,
         created_by: str,
         preferred_agent: str | None = None,
         test_command: str | None = None,
@@ -225,6 +228,7 @@ class RuntimeService:
             thread_id=thread_id,
             created_by=created_by,
             goal=goal,
+            original_request=raw_request or goal,
             preferred_agent=chosen_agent,
             status=status,
             max_steps=steps,
@@ -291,6 +295,7 @@ class RuntimeService:
             registry=registry,
             thread_id=thread_id,
             goal=prompt,
+            raw_request=prompt,
             created_by=author,
             preferred_agent=preferred_agent,
             source="scheduler",
@@ -428,14 +433,14 @@ class RuntimeService:
         ckpt = await self._store.get_last_runtime_checkpoint(task.id)
         if ckpt:
             agent_tail = self._tail_text(str(ckpt.get("agent_result", "")))
-            test_tail = self._tail_text(str(ckpt.get("test_result", "")))
+            test_tail = self._format_test_output(str(ckpt.get("test_result", "")))
             if agent_tail:
                 lines.append("")
                 lines.append("**Last agent output tail**")
                 lines.append(f"```text\n{agent_tail}\n```")
             if test_tail:
                 lines.append("")
-                lines.append("**Last test output tail**")
+                lines.append("**Last test result**")
                 lines.append(f"```text\n{test_tail}\n```")
         return "\n".join(lines)[:3800]
 
@@ -719,6 +724,7 @@ class RuntimeService:
             )
             prompt = build_runtime_prompt(
                 goal=task.goal,
+                original_request=current.original_request,
                 step_no=step,
                 max_steps=task.max_steps,
                 prior_failure=prior_failure,
@@ -807,6 +813,7 @@ class RuntimeService:
             test_summary = (out + ("\n" + err if err else "")).strip()
             if not test_summary:
                 test_summary = f"exit={rc}"
+            test_display = self._format_test_output(test_summary)
             logger.info(
                 "Runtime task=%s step=%d TEST_DONE rc=%d",
                 task.id,
@@ -816,7 +823,7 @@ class RuntimeService:
             if test_timed_out:
                 timeout_msg = (
                     f"Test command exceeded timeout ({int(self._test_timeout_seconds)}s). "
-                    f"Recent output:\n{self._tail_text(test_summary)}"
+                    f"Recent output:\n{test_display}"
                 )
                 await self._store.add_runtime_event(
                     task.id,
@@ -830,7 +837,7 @@ class RuntimeService:
                     summary="Test command timed out.",
                     error=timeout_msg[:2000],
                 )
-                await self._notify(task, f"Task `{task.id}` timed out during tests.\n```text\n{self._tail_text(test_summary)}\n```")
+                await self._notify(task, f"Task `{task.id}` timed out during tests.\n```text\n{test_display}\n```")
                 await self._signal_status_by_id(task, TASK_STATUS_TIMEOUT)
                 return
 
@@ -851,9 +858,34 @@ class RuntimeService:
                     "agent": agent_name,
                     "test_exit_code": rc,
                     "changed_files": changed_files,
-                    "test_output_tail": self._tail_text(test_summary),
+                    "test_output_tail": test_display,
                 },
             )
+
+            if (
+                test_ok
+                and state == "BLOCKED"
+                and self._should_ignore_agent_block(response.text, block_reason)
+            ):
+                override_state = "DONE" if changed_files else "CONTINUE"
+                await self._store.add_runtime_event(
+                    task.id,
+                    "task.block_override",
+                    {
+                        "step": step,
+                        "from_state": "BLOCKED",
+                        "to_state": override_state,
+                        "reason": "runtime_test_authoritative",
+                    },
+                )
+                logger.info(
+                    "Runtime task=%s step=%d overriding agent BLOCKED -> %s because runtime tests passed",
+                    task.id,
+                    step,
+                    override_state,
+                )
+                state = override_state
+                block_reason = None
 
             if state == "BLOCKED":
                 await self._store.update_runtime_task(
@@ -868,7 +900,10 @@ class RuntimeService:
                 )
                 await self._notify(
                     task,
-                    f"Task `{task.id}` blocked: {block_reason or 'unknown reason'}",
+                    (
+                        f"Task `{task.id}` blocked: {block_reason or 'unknown reason'}\n"
+                        f"Provide missing context and resume with `/task_resume {task.id} <instruction>`."
+                    ),
                 )
                 await self._signal_status_by_id(task, TASK_STATUS_BLOCKED)
                 return
@@ -1261,6 +1296,77 @@ class RuntimeService:
             return text
         return text[-self._log_tail_chars :]
 
+    def _format_test_output(self, text: str) -> str:
+        if not text:
+            return ""
+        summary = self._summarize_pytest_output(text)
+        if summary:
+            return summary[: self._log_tail_chars]
+        return self._tail_text(text)
+
+    def _summarize_pytest_output(self, text: str) -> str:
+        lines = [line.rstrip() for line in text.splitlines() if line.strip()]
+        if not lines:
+            return ""
+
+        summary_line = ""
+        summary_re = re.compile(r"\b\d+\s+passed\b|\b\d+\s+failed\b|\b\d+\s+error\b|\b\d+\s+errors\b|\b\d+\s+skipped\b")
+        for line in reversed(lines):
+            cleaned = line.strip().strip("=").strip()
+            if summary_re.search(cleaned) and " in " in cleaned:
+                summary_line = cleaned
+                break
+
+        failure_lines: list[str] = []
+        seen: set[str] = set()
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith(("FAILED ", "ERROR ")):
+                if stripped not in seen:
+                    seen.add(stripped)
+                    failure_lines.append(stripped)
+            elif re.match(r"^[A-Za-z_][A-Za-z0-9_.]*(Error|Exception|Failure):", stripped):
+                if stripped not in seen:
+                    seen.add(stripped)
+                    failure_lines.append(stripped)
+
+        if summary_line and not failure_lines:
+            return summary_line
+
+        parts: list[str] = []
+        if summary_line:
+            parts.append(f"Summary: {summary_line}")
+        parts.extend(failure_lines[:4])
+        if parts:
+            return "\n".join(parts)
+        return ""
+
+    @staticmethod
+    def _should_ignore_agent_block(agent_text: str, block_reason: str | None) -> bool:
+        reason = (block_reason or "").strip()
+        hay = reason.lower() if reason else (agent_text or "").lower()
+        if not hay:
+            return False
+
+        positive_hints = (
+            "sandbox",
+            "socket-bind",
+            "127.0.0.1",
+            "permissionerror",
+            "operation not permitted",
+            "environment-specific",
+        )
+        negative_hints = (
+            "missing content",
+            "missing context",
+            "missing dependency",
+            "missing file",
+            "missing api key",
+            "missing credential",
+            "need user input",
+        )
+        return any(hint in hay for hint in positive_hints) and not any(hint in hay for hint in negative_hints)
+
     @staticmethod
     def _format_status_message(text: str) -> str:
         return f"{_STATUS_MESSAGE_PREFIX}\n{text}"
@@ -1316,10 +1422,10 @@ class RuntimeService:
 
         ckpt = await self._store.get_last_runtime_checkpoint(task.id)
         if ckpt:
-            test_tail = self._tail_text(str(ckpt.get("test_result", "")))
+            test_tail = self._format_test_output(str(ckpt.get("test_result", "")))
             if test_tail:
                 lines.append("")
-                lines.append("Latest test output:")
+                lines.append("Latest test result:")
                 lines.append(f"```text\n{test_tail[:500]}\n```")
 
         lines.extend(

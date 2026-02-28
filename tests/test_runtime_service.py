@@ -191,6 +191,34 @@ class _SlowDoneAgent(BaseAgent):
         return AgentResponse(text=f"{prompt}\nTASK_STATE: DONE")
 
 
+class _SandboxBlockedAgent(BaseAgent):
+    @property
+    def name(self) -> str:
+        return "sandbox-blocked"
+
+    async def run(
+        self,
+        prompt: str,
+        history: list[dict] | None = None,
+        *,
+        thread_id: str | None = None,
+        workspace_override: Path | None = None,
+    ) -> AgentResponse:
+        del history, thread_id
+        assert workspace_override is not None
+        out = workspace_override / "docs" / "note.txt"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text("ok", encoding="utf-8")
+        return AgentResponse(
+            text=(
+                f"{prompt}\n"
+                "Local sandbox pytest hit PermissionError: [Errno 1] Operation not permitted on 127.0.0.1\n"
+                "BLOCK_REASON: sandbox socket-bind restriction in local test environment\n"
+                "TASK_STATE: BLOCKED"
+            )
+        )
+
+
 def _init_git_repo(root: Path) -> None:
     root.mkdir(parents=True, exist_ok=True)
     (root / "README.md").write_text("# runtime test\n", encoding="utf-8")
@@ -334,7 +362,7 @@ async def test_runtime_message_intent_draft_to_merge(runtime_env):
     assert "Ready to Merge" in merge_draft["draft_text"]
     assert "Changed files:" in merge_draft["draft_text"]
     assert "src/runtime.txt" in merge_draft["draft_text"]
-    assert "Latest test output:" in merge_draft["draft_text"]
+    assert "Latest test result:" in merge_draft["draft_text"]
     assert "exit=0" in merge_draft["draft_text"]
 
     merge_event = await runtime.build_slash_decision_event(
@@ -589,6 +617,85 @@ async def test_runtime_test_timeout_marks_timeout(runtime_env):
     assert "timed out" in (timed_out.summary or "").lower() or "timed out" in (timed_out.error or "").lower()
     text = await runtime.get_task_logs(task.id)
     assert "before-timeout" in text
+
+
+@pytest.mark.asyncio
+async def test_runtime_router_raw_request_preserved_and_visible_in_prompt(runtime_env):
+    store: SQLiteMemoryStore = runtime_env["store"]
+    runtime: RuntimeService = runtime_env["runtime"]
+    channel: _FakeChannel = runtime_env["channel"]
+    registry = AgentRegistry([_DoneAgent()])
+    session = ChannelSession(
+        platform="discord",
+        channel_id="100",
+        channel=channel,
+        registry=registry,
+    )
+    runtime.register_session(session, registry)
+    await runtime.start()
+
+    task = await runtime.create_task(
+        session=session,
+        registry=registry,
+        thread_id="thread-raw",
+        goal="Create docs/doc_test_hanzhi.md with specified content and run pytest -q",
+        raw_request="请在当前仓库 docs 下新增一个 tiny 文档 docs/doc_test_hanzhi.md，内容只写三行：\\n1) router smoke\\n2) runtime draft confirm\\n3) done\\n然后运行 pytest -q，完成后停下等待我确认合并",
+        created_by="owner-1",
+        source="router",
+    )
+    waiting = await _wait_for_status(store, task.id, {TASK_STATUS_WAITING_MERGE})
+    assert waiting.status == TASK_STATUS_WAITING_MERGE
+
+    loaded = await store.get_runtime_task(task.id)
+    assert loaded is not None
+    assert "runtime draft confirm" in (loaded.original_request or "")
+    ckpt = await store.get_last_runtime_checkpoint(task.id)
+    assert ckpt is not None
+    assert "Original user request:" in ckpt["prompt_digest"]
+    assert "runtime draft confirm" in ckpt["prompt_digest"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_overrides_agent_block_when_runtime_tests_pass(runtime_env):
+    store: SQLiteMemoryStore = runtime_env["store"]
+    runtime: RuntimeService = runtime_env["runtime"]
+    channel: _FakeChannel = runtime_env["channel"]
+    registry = AgentRegistry([_SandboxBlockedAgent()])
+    session = ChannelSession(
+        platform="discord",
+        channel_id="100",
+        channel=channel,
+        registry=registry,
+    )
+    runtime.register_session(session, registry)
+    await runtime.start()
+
+    task = await runtime.create_task(
+        session=session,
+        registry=registry,
+        thread_id="thread-sandbox",
+        goal="write a docs note and run tests",
+        raw_request="write docs/note.txt with a short line and then run pytest -q",
+        created_by="owner-1",
+        test_command="true",
+        source="slash",
+    )
+    waiting = await _wait_for_status(store, task.id, {TASK_STATUS_WAITING_MERGE})
+    assert waiting.status == TASK_STATUS_WAITING_MERGE
+
+    logs = await runtime.get_task_logs(task.id)
+    assert "task.block_override" in logs
+
+
+@pytest.mark.asyncio
+async def test_runtime_formats_pytest_output_summary(runtime_env):
+    runtime: RuntimeService = runtime_env["runtime"]
+    output = (
+        "..................................s..................................... [ 56%]\n"
+        "........................................................                 [100%]\n"
+        "126 passed, 1 skipped in 7.11s\n"
+    )
+    assert runtime._format_test_output(output) == "126 passed, 1 skipped in 7.11s"  # noqa: SLF001
 
 
 @pytest.mark.asyncio

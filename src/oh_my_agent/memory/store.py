@@ -279,6 +279,7 @@ CREATE TABLE IF NOT EXISTS runtime_tasks (
     thread_id           TEXT NOT NULL,
     created_by          TEXT NOT NULL,
     goal                TEXT NOT NULL,
+    original_request    TEXT,
     preferred_agent     TEXT,
     status              TEXT NOT NULL,
     step_no             INTEGER NOT NULL DEFAULT 0,
@@ -397,6 +398,7 @@ class SQLiteMemoryStore(MemoryStore):
             self._db = None
 
     async def _migrate_runtime_schema(self) -> None:
+        await self._ensure_column("runtime_tasks", "original_request", "TEXT")
         await self._ensure_column("runtime_tasks", "status_message_id", "TEXT")
         await self._ensure_column("runtime_tasks", "merge_commit_hash", "TEXT")
         await self._ensure_column("runtime_tasks", "merge_error", "TEXT")
@@ -595,9 +597,9 @@ class SQLiteMemoryStore(MemoryStore):
             db = await self._conn()
             await db.execute(
                 "INSERT INTO runtime_tasks "
-                "(id, platform, channel_id, thread_id, created_by, goal, preferred_agent, "
+                "(id, platform, channel_id, thread_id, created_by, goal, original_request, preferred_agent, "
                 " status, max_steps, max_minutes, test_command) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     kwargs["task_id"],
                     kwargs["platform"],
@@ -605,6 +607,7 @@ class SQLiteMemoryStore(MemoryStore):
                     kwargs["thread_id"],
                     kwargs["created_by"],
                     kwargs["goal"],
+                    kwargs.get("original_request"),
                     kwargs.get("preferred_agent"),
                     kwargs["status"],
                     int(kwargs["max_steps"]),
