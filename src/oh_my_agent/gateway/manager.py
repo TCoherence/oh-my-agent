@@ -14,6 +14,7 @@ from oh_my_agent.automation import ScheduledJob, Scheduler
 from oh_my_agent.gateway.base import BaseChannel, IncomingMessage
 from oh_my_agent.gateway.session import ChannelSession
 from oh_my_agent.agents.registry import AgentRegistry
+from oh_my_agent.runtime.policy import is_skill_intent
 from oh_my_agent.utils.chunker import chunk_message
 
 logger = logging.getLogger(__name__)
@@ -257,6 +258,7 @@ class GatewayManager:
         router_decision = None
         if (not msg.system) and self._intent_router and self._runtime_service:
             router_decision = await self._intent_router.route(msg.content)
+            threshold = self._intent_router.confidence_threshold
             if router_decision is None:
                 logger.info("[%s] ROUTER unavailable; fallback to heuristic/normal flow", req_id)
             else:
@@ -265,12 +267,44 @@ class GatewayManager:
                     req_id,
                     router_decision.decision,
                     router_decision.confidence,
-                    self._intent_router.confidence_threshold,
+                    threshold,
                 )
             if (
                 router_decision
+                and router_decision.decision == "create_skill"
+                and router_decision.confidence >= threshold
+            ):
+                goal = router_decision.goal or msg.content
+                await self._runtime_service.create_skill_task(
+                    session=session,
+                    registry=registry,
+                    thread_id=thread_id,
+                    goal=goal,
+                    raw_request=msg.content,
+                    created_by=msg.author_id or msg.author,
+                    preferred_agent=msg.preferred_agent,
+                    skill_name=router_decision.skill_name or goal,
+                    source="router",
+                )
+                await channel.send(
+                    thread_id,
+                    (
+                        "Router classified this as a skill-creation task and created a draft. "
+                        "Approve to start autonomous execution, or reject/suggest to keep it in chat flow."
+                    ),
+                )
+                logger.info(
+                    "[%s] ROUTER create_skill confidence=%.2f goal=%r skill_name=%r",
+                    req_id,
+                    router_decision.confidence,
+                    goal[:120],
+                    router_decision.skill_name,
+                )
+                return
+            if (
+                router_decision
                 and router_decision.decision == "propose_task"
-                and router_decision.confidence >= self._intent_router.confidence_threshold
+                and router_decision.confidence >= threshold
             ):
                 goal = router_decision.goal or msg.content
                 await self._runtime_service.create_task(
@@ -299,7 +333,31 @@ class GatewayManager:
                 )
                 return
 
-        if self._runtime_service and not router_decision:
+            should_try_heuristic = (
+                router_decision is None
+                or router_decision.confidence < threshold
+            )
+        else:
+            should_try_heuristic = bool(self._runtime_service)
+
+        if self._runtime_service and should_try_heuristic:
+            if is_skill_intent(msg.content):
+                await self._runtime_service.create_skill_task(
+                    session=session,
+                    registry=registry,
+                    thread_id=thread_id,
+                    goal=msg.content,
+                    raw_request=msg.content,
+                    created_by=msg.author_id or msg.author,
+                    preferred_agent=msg.preferred_agent,
+                    skill_name=msg.content,
+                    source="heuristic",
+                )
+                await channel.send(
+                    thread_id,
+                    "Heuristic skill-intent detection created a draft. Approve to start autonomous execution.",
+                )
+                return
             handled = await self._runtime_service.maybe_handle_incoming(
                 session,
                 registry,
@@ -469,6 +527,20 @@ class GatewayManager:
             lines = [f"🔧 **New skill(s) synced** ({len(new_skills)}):"]
             lines.extend(validation_lines)
             await session.channel.send(thread_id, "\n".join(lines)[:2000])
+
+            if self._memory_store_ref and hasattr(self._memory_store_ref, "upsert_skill_provenance"):
+                for skill_name in new_skills:
+                    await self._memory_store_ref.upsert_skill_provenance(
+                        skill_name,
+                        source_task_id=None,
+                        created_by="agent-side-effect",
+                        agent_name="agent-side-effect",
+                        platform=session.platform,
+                        channel_id=session.channel_id,
+                        thread_id=thread_id,
+                        validation_mode="reverse_sync",
+                        validated=0,
+                    )
 
         except Exception as exc:
             logger.warning("[%s] SKILL_SYNC failed: %s", req_id, exc)

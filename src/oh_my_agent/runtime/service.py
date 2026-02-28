@@ -16,12 +16,16 @@ from oh_my_agent.agents.registry import AgentRegistry
 from oh_my_agent.gateway.base import IncomingMessage
 from oh_my_agent.gateway.session import ChannelSession
 from oh_my_agent.runtime.policy import (
+    build_skill_prompt,
     build_runtime_prompt,
+    extract_skill_name,
     evaluate_strict_risk,
     is_long_task_intent,
     parse_task_state,
 )
 from oh_my_agent.runtime.types import (
+    TASK_TYPE_CODE,
+    TASK_TYPE_SKILL,
     TASK_STATUS_APPLIED,
     TASK_STATUS_BLOCKED,
     TASK_STATUS_DISCARDED,
@@ -68,6 +72,8 @@ class RuntimeService:
         config: dict[str, Any] | None = None,
         owner_user_ids: set[str] | None = None,
         repo_root: Path | None = None,
+        skill_syncer=None,
+        skills_path: Path | None = None,
     ) -> None:
         cfg = config or {}
         self._enabled = bool(cfg.get("enabled", True))
@@ -111,6 +117,8 @@ class RuntimeService:
         self._store = store
         self._owner_user_ids = owner_user_ids or set()
         self._repo_root = (repo_root or Path.cwd()).resolve()
+        self._skill_syncer = skill_syncer
+        self._skills_path = skills_path
         worktree_root = Path(cfg.get("worktree_root", "~/.oh-my-agent/runtime/tasks")).expanduser().resolve()
         self._worktree = WorktreeManager(self._repo_root, worktree_root)
 
@@ -234,6 +242,8 @@ class RuntimeService:
         max_minutes: int | None = None,
         source: str,
         force_draft: bool = False,
+        task_type: str = TASK_TYPE_CODE,
+        skill_name: str | None = None,
     ) -> RuntimeTask:
         self.register_session(session, registry)
 
@@ -265,6 +275,8 @@ class RuntimeService:
             max_steps=steps,
             max_minutes=minutes,
             test_command=command,
+            task_type=task_type,
+            skill_name=skill_name,
         )
         await self._store.add_runtime_event(
             task.id,
@@ -310,6 +322,48 @@ class RuntimeService:
             await self._signal_status_by_id(task, TASK_STATUS_PENDING)
 
         return task
+
+    async def create_skill_task(
+        self,
+        *,
+        session: ChannelSession,
+        registry: AgentRegistry,
+        thread_id: str,
+        goal: str,
+        raw_request: str | None = None,
+        created_by: str,
+        preferred_agent: str | None = None,
+        skill_name: str,
+        source: str,
+    ) -> RuntimeTask:
+        existing = (
+            {d.name for d in self._skills_path.iterdir() if d.is_dir()}
+            if self._skills_path and self._skills_path.is_dir()
+            else None
+        )
+        resolved_name, is_update = extract_skill_name(skill_name or goal, existing)
+        effective_goal = f"Update existing skill '{resolved_name}': {goal}" if is_update else goal
+        effective_preferred = (
+            preferred_agent
+            or ("claude" if registry.get_agent("claude") is not None else None)
+            or self._default_agent
+        )
+        return await self.create_task(
+            session=session,
+            registry=registry,
+            thread_id=thread_id,
+            goal=effective_goal,
+            raw_request=raw_request,
+            created_by=created_by,
+            preferred_agent=effective_preferred,
+            test_command=f"python skills/skill-creator/scripts/quick_validate.py skills/{resolved_name}",
+            max_steps=6,
+            max_minutes=15,
+            source=source,
+            force_draft=True,
+            task_type=TASK_TYPE_SKILL,
+            skill_name=resolved_name,
+        )
 
     async def enqueue_scheduler_task(
         self,
@@ -743,6 +797,7 @@ class RuntimeService:
         prior_failure: str | None = None
         total_agent_s = 0.0
         total_test_s = 0.0
+        last_agent_name: str = task.preferred_agent or self._default_agent or ""
         latest = await self._store.get_last_runtime_checkpoint(task.id)
         if latest:
             prior_failure = latest.get("test_result")
@@ -785,14 +840,25 @@ class RuntimeService:
                 task,
                 f"Task `{task.id}` step {step}/{task.max_steps}: running agent `{task.preferred_agent or self._default_agent}`.",
             )
-            prompt = build_runtime_prompt(
-                goal=task.goal,
-                original_request=current.original_request,
-                step_no=step,
-                max_steps=task.max_steps,
-                prior_failure=prior_failure,
-                resume_instruction=current.resume_instruction,
-            )
+            if task.task_type == TASK_TYPE_SKILL and task.skill_name:
+                prompt = build_skill_prompt(
+                    skill_name=task.skill_name,
+                    goal=task.goal,
+                    original_request=current.original_request,
+                    step_no=step,
+                    max_steps=task.max_steps,
+                    prior_failure=prior_failure,
+                    resume_instruction=current.resume_instruction,
+                )
+            else:
+                prompt = build_runtime_prompt(
+                    goal=task.goal,
+                    original_request=current.original_request,
+                    step_no=step,
+                    max_steps=task.max_steps,
+                    prior_failure=prior_failure,
+                    resume_instruction=current.resume_instruction,
+                )
 
             t_agent = time.perf_counter()
             agent_name, response = await self._run_agent(
@@ -802,6 +868,7 @@ class RuntimeService:
                 workspace=workspace,
                 step=step,
             )
+            last_agent_name = agent_name
             elapsed_agent = time.perf_counter() - t_agent
             total_agent_s += elapsed_agent
             if response.error:
@@ -1194,6 +1261,12 @@ class RuntimeService:
                     "auto_commit": self._merge_auto_commit,
                 },
             )
+            if task.task_type == TASK_TYPE_SKILL:
+                await self._on_skill_task_merged(
+                    task,
+                    await self._resolve_last_agent_name(task),
+                    commit_hash or "",
+                )
             extra = f" commit `{commit_hash}`" if commit_hash else ""
             logger.info("Runtime task=%s MERGED commit=%s", task.id, commit_hash or "none")
             if self._cleanup_merged_immediately:
@@ -1205,9 +1278,12 @@ class RuntimeService:
                             await self._worktree.prune_worktrees()
                         except Exception:
                             logger.debug("git worktree prune failed after immediate merge cleanup", exc_info=True)
-            await self._notify(task, f"Task `{task.id}` merged successfully.{extra}")
+            merged_note = f"Task `{task.id}` merged successfully.{extra}"
+            if task.task_type == TASK_TYPE_SKILL and task.skill_name:
+                merged_note += f" Skill `{task.skill_name}` merged. Run `/reload-skills` to activate."
+            await self._notify(task, merged_note)
             await self._signal_status_by_id(task, TASK_STATUS_MERGED)
-            return f"Task `{task.id}` merged successfully.{extra}"
+            return merged_note
         except WorktreeError as exc:
             return await self._mark_merge_failed(task, str(exc))
         except Exception as exc:
@@ -1294,6 +1370,52 @@ class RuntimeService:
         logger.error("Runtime task=%s FAILED error=%s", task.id, error[:600])
         await self._notify(task, f"Task `{task.id}` failed: {error[:400]}")
         await self._signal_status_by_id(task, TASK_STATUS_FAILED)
+
+    async def _on_skill_task_merged(
+        self,
+        task: RuntimeTask,
+        agent_name: str,
+        merge_commit_hash: str,
+    ) -> None:
+        if self._skill_syncer is not None:
+            try:
+                self._skill_syncer.sync()
+            except Exception as exc:
+                logger.warning("Post-merge skill sync failed for task %s: %s", task.id, exc)
+
+        warnings: list[str] = []
+        if self._skills_path and task.skill_name:
+            try:
+                from oh_my_agent.skills.validator import SkillValidator
+
+                result = SkillValidator().validate(self._skills_path / task.skill_name)
+                warnings = result.warnings
+            except Exception:
+                logger.debug("SkillValidator failed after merge for task %s", task.id, exc_info=True)
+
+        if task.skill_name:
+            await self._store.upsert_skill_provenance(
+                task.skill_name,
+                source_task_id=task.id,
+                created_by=task.created_by,
+                agent_name=agent_name,
+                platform=task.platform,
+                channel_id=task.channel_id,
+                thread_id=task.thread_id,
+                validation_mode="quick_validate",
+                validated=1,
+                validation_warnings=warnings,
+                merged_commit_hash=merge_commit_hash or None,
+            )
+
+    async def _resolve_last_agent_name(self, task: RuntimeTask) -> str:
+        events = await self._store.list_runtime_events(task.id, limit=20)
+        for event in reversed(events):
+            payload = event.get("payload", {})
+            agent = payload.get("agent")
+            if isinstance(agent, str) and agent:
+                return agent
+        return task.preferred_agent or self._default_agent or ""
 
     def _validate_changed_paths(self, paths: list[str]) -> str | None:
         for raw in paths:

@@ -3,6 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
+TASK_TYPE_CODE = "code"
+TASK_TYPE_SKILL = "skill"
+
 TASK_STATUS_DRAFT = "DRAFT"
 TASK_STATUS_PENDING = "PENDING"
 TASK_STATUS_RUNNING = "RUNNING"
@@ -36,6 +39,7 @@ TaskStatus = Literal[
     "REJECTED",
     "PAUSED",
 ]
+TaskType = Literal["code", "skill"]
 
 DecisionAction = Literal[
     "approve",
@@ -77,6 +81,8 @@ class RuntimeTask:
     started_at: str | None
     updated_at: str | None
     ended_at: str | None
+    task_type: str = TASK_TYPE_CODE
+    skill_name: str | None = None
 
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> "RuntimeTask":
@@ -108,6 +114,8 @@ class RuntimeTask:
             started_at=row.get("started_at"),
             updated_at=row.get("updated_at"),
             ended_at=row.get("ended_at"),
+            task_type=str(row.get("task_type", TASK_TYPE_CODE)),
+            skill_name=row.get("skill_name"),
         )
 
 

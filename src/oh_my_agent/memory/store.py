@@ -215,6 +215,12 @@ class MemoryStore(ABC):
     async def mark_ephemeral_workspace_cleaned(self, workspace_key: str) -> None:
         return None
 
+    async def upsert_skill_provenance(self, skill_name: str, **kwargs) -> None:
+        return None
+
+    async def get_skill_provenance(self, skill_name: str) -> dict[str, Any] | None:
+        return None
+
 
 # --------------------------------------------------------------------------- #
 #  SQLite implementation                                                        #
@@ -296,6 +302,8 @@ CREATE TABLE IF NOT EXISTS runtime_tasks (
     merge_commit_hash   TEXT,
     merge_error         TEXT,
     workspace_cleaned_at TIMESTAMP,
+    task_type           TEXT NOT NULL DEFAULT 'code',
+    skill_name          TEXT,
     created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     started_at          TIMESTAMP,
     updated_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -363,6 +371,26 @@ CREATE TABLE IF NOT EXISTS ephemeral_workspaces (
 
 CREATE INDEX IF NOT EXISTS idx_ephemeral_workspaces_active
     ON ephemeral_workspaces(cleaned_at, last_used_at);
+
+CREATE TABLE IF NOT EXISTS skill_provenance (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    skill_name          TEXT NOT NULL UNIQUE,
+    source_task_id      TEXT,
+    created_by          TEXT,
+    agent_name          TEXT,
+    platform            TEXT,
+    channel_id          TEXT,
+    thread_id           TEXT,
+    validation_mode     TEXT,
+    validated           INTEGER NOT NULL DEFAULT 0,
+    validation_warnings TEXT,
+    merged_commit_hash  TEXT,
+    created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_skill_provenance_task
+    ON skill_provenance(source_task_id);
 """
 
 
@@ -403,6 +431,8 @@ class SQLiteMemoryStore(MemoryStore):
         await self._ensure_column("runtime_tasks", "merge_commit_hash", "TEXT")
         await self._ensure_column("runtime_tasks", "merge_error", "TEXT")
         await self._ensure_column("runtime_tasks", "workspace_cleaned_at", "TIMESTAMP")
+        await self._ensure_column("runtime_tasks", "task_type", "TEXT NOT NULL DEFAULT 'code'")
+        await self._ensure_column("runtime_tasks", "skill_name", "TEXT")
 
     async def _ensure_column(self, table: str, column: str, ddl_type: str) -> None:
         db = await self._conn()
@@ -598,8 +628,8 @@ class SQLiteMemoryStore(MemoryStore):
             await db.execute(
                 "INSERT INTO runtime_tasks "
                 "(id, platform, channel_id, thread_id, created_by, goal, original_request, preferred_agent, "
-                " status, max_steps, max_minutes, test_command) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " status, max_steps, max_minutes, test_command, task_type, skill_name) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     kwargs["task_id"],
                     kwargs["platform"],
@@ -613,6 +643,8 @@ class SQLiteMemoryStore(MemoryStore):
                     int(kwargs["max_steps"]),
                     int(kwargs["max_minutes"]),
                     kwargs["test_command"],
+                    kwargs.get("task_type", "code"),
+                    kwargs.get("skill_name"),
                 ),
             )
             await db.commit()
@@ -917,6 +949,68 @@ class SQLiteMemoryStore(MemoryStore):
         )
         rows = await cursor.fetchall()
         return [RuntimeTask.from_row(dict(r)) for r in rows]
+
+    async def upsert_skill_provenance(self, skill_name: str, **kwargs) -> None:
+        async with self._runtime_write_lock:
+            db = await self._conn()
+            warnings = kwargs.get("validation_warnings")
+            warnings_json = (
+                json.dumps(warnings, ensure_ascii=False)
+                if warnings is not None
+                else None
+            )
+            await db.execute(
+                "INSERT INTO skill_provenance ("
+                " skill_name, source_task_id, created_by, agent_name, platform, channel_id, thread_id,"
+                " validation_mode, validated, validation_warnings, merged_commit_hash, updated_at"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP) "
+                "ON CONFLICT(skill_name) DO UPDATE SET "
+                "source_task_id=CASE WHEN excluded.source_task_id IS NOT NULL THEN excluded.source_task_id ELSE source_task_id END, "
+                "created_by=CASE WHEN excluded.source_task_id IS NOT NULL THEN excluded.created_by ELSE created_by END, "
+                "agent_name=CASE WHEN excluded.source_task_id IS NOT NULL THEN excluded.agent_name ELSE agent_name END, "
+                "validated=CASE WHEN excluded.source_task_id IS NOT NULL THEN excluded.validated ELSE validated END, "
+                "merged_commit_hash=CASE WHEN excluded.merged_commit_hash IS NOT NULL THEN excluded.merged_commit_hash ELSE merged_commit_hash END, "
+                "validation_mode=CASE WHEN excluded.source_task_id IS NOT NULL THEN excluded.validation_mode ELSE validation_mode END, "
+                "validation_warnings=COALESCE(excluded.validation_warnings, validation_warnings), "
+                "platform=COALESCE(excluded.platform, platform), "
+                "channel_id=COALESCE(excluded.channel_id, channel_id), "
+                "thread_id=COALESCE(excluded.thread_id, thread_id), "
+                "updated_at=CURRENT_TIMESTAMP",
+                (
+                    skill_name,
+                    kwargs.get("source_task_id"),
+                    kwargs.get("created_by"),
+                    kwargs.get("agent_name"),
+                    kwargs.get("platform"),
+                    kwargs.get("channel_id"),
+                    kwargs.get("thread_id"),
+                    kwargs.get("validation_mode"),
+                    int(bool(kwargs.get("validated", False))),
+                    warnings_json,
+                    kwargs.get("merged_commit_hash"),
+                ),
+            )
+            await db.commit()
+
+    async def get_skill_provenance(self, skill_name: str) -> dict[str, Any] | None:
+        db = await self._conn()
+        cursor = await db.execute(
+            "SELECT * FROM skill_provenance WHERE skill_name=?",
+            (skill_name,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        data = dict(row)
+        raw_warnings = data.get("validation_warnings")
+        if raw_warnings:
+            try:
+                data["validation_warnings"] = json.loads(raw_warnings)
+            except Exception:
+                data["validation_warnings"] = [str(raw_warnings)]
+        else:
+            data["validation_warnings"] = []
+        return data
 
     # -- search ------------------------------------------------------------
 

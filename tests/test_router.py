@@ -34,6 +34,7 @@ async def test_router_parses_valid_json_decision(monkeypatch):
     assert out.confidence == 0.88
     assert out.goal == "fix tests and docs"
     assert out.risk_hints == ["multi-step"]
+    assert out.skill_name is None
 
 
 @pytest.mark.asyncio
@@ -63,6 +64,7 @@ async def test_router_extracts_json_from_wrapped_text(monkeypatch):
     assert out is not None
     assert out.decision == "reply_once"
     assert out.confidence == 0.74
+    assert out.skill_name is None
 
 
 @pytest.mark.asyncio
@@ -95,3 +97,35 @@ async def test_router_retries_once_then_succeeds(monkeypatch):
     assert calls["n"] == 2
     assert out is not None
     assert out.decision == "propose_task"
+    assert out.skill_name is None
+
+
+@pytest.mark.asyncio
+async def test_router_parses_create_skill_decision(monkeypatch):
+    router = OpenAICompatibleRouter(
+        base_url="https://api.example.com/v1",
+        api_key="k",
+        model="m",
+    )
+
+    def _fake_post(_payload):
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": (
+                            '{"decision":"create_skill","confidence":0.91,'
+                            '"goal":"Create a reusable weather skill",'
+                            '"skill_name":"weather",'
+                            '"risk_hints":["reusable"]}'
+                        )
+                    }
+                }
+            ]
+        }
+
+    monkeypatch.setattr(router, "_post_json", _fake_post)
+    out = await router.route("create a skill for checking weather")
+    assert out is not None
+    assert out.decision == "create_skill"
+    assert out.skill_name == "weather"

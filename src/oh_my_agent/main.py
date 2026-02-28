@@ -388,6 +388,8 @@ async def _async_main(config: dict, logger: logging.Logger) -> None:
             config=runtime_cfg,
             owner_user_ids=owner_user_ids,
             repo_root=project_root,
+            skill_syncer=skill_syncer,
+            skills_path=(Path(skills_cfg.get("path", "skills/")).resolve() if skills_cfg.get("enabled", False) else None),
         )
         logger.info(
             "Runtime enabled (workers=%s, default_agent=%s)",
