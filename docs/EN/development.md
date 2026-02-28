@@ -14,8 +14,11 @@ Oh My Agent is a multi-platform bot that uses CLI-based AI agents as the executi
 ## Current Runtime Baseline
 
 Implemented:
-- Optional LLM intent routing (`reply_once` vs `propose_task`)
+- Optional LLM intent routing (`reply_once`, `invoke_existing_skill`, `propose_artifact_task`, `propose_repo_task`, `create_skill`)
 - Short conversation transient workspaces with TTL cleanup persisted in SQLite
+- Multi-type runtime orchestration:
+  - `artifact` tasks complete without merge
+  - `repo_change` and `skill_change` tasks continue through merge gate
 - Runtime observability baseline:
   - `/task_logs`
   - sampled progress snapshots in SQLite
@@ -25,8 +28,8 @@ Implemented:
 Still missing:
 - true stop/pause/resume with subprocess interruption
 - message-driven runtime control
-- skill generation as a first-class runtime task type
-- skill routing and validation loop
+- artifact delivery adapter (`attachment first`, link fallback)
+- stronger Codex skill integration strategy beyond current global-skills / `AGENTS.md` tradeoff
 - ops/event autonomy remains future work
 
 ## Next Product Direction

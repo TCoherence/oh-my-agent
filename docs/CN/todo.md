@@ -8,6 +8,7 @@
 - v0.5 当前主线是 runtime-first。
 - 可选 LLM router 已实现。
 - Runtime 可观测性基线已实现。
+- 多类型 runtime 已实现（`artifact`、`repo_change`、`skill_change`）。
 
 ## v0.5 Runtime 加固
 
@@ -38,14 +39,15 @@
 
 ## v0.6 - Skill-First Autonomy
 
-- [ ] 把 skill 创建升级成一等 runtime task 类型
-- [ ] 支持“把这个 workflow 变成 skill”类请求的路由
-- [ ] 增加 merge 前的 skill 验证闭环
+- [x] 把 skill 创建升级成一等 runtime task 类型
+- [x] 支持“把这个 workflow 变成 skill”类请求的路由
+- [x] 增加 merge 前的 skill 验证闭环
 - [ ] 增加跨 agent skill 抽象
-- [ ] 明确 Codex 原生 skill 接入策略
-- [ ] 增加 skill memory / provenance 元数据
+- [ ] 锁定 Codex 接入折中方案（`全局 skills + AGENTS.md/MCP`，不假设 project-level native skills）
+- [x] 增加 skill memory / provenance 元数据
 - [ ] 将 `mission` 模型和 operator surface 定义为支撑 skill autonomy 的基础设施
 - [ ] 将 thread-native runtime control 定义为配套能力，而不是 v0.6 headline
+- [ ] 把“调用已有 skill”和“修改 skill”彻底从语义上拆开
 
 ## v0.7 - Ops-First 与 Hybrid Autonomy
 
@@ -65,7 +67,7 @@
 - 当前最强的差距不是“会不会写代码”，而是自主性的分层建设还不完整。
 - 当前系统已经完成 runtime-first 基线，下一层最需要的是 skill-first autonomy。
 - ops-first autonomy 和 hybrid autonomy 应该放在更后阶段，而不是和 v0.6 主线竞争。
-- Skill 平台化：skill sync 和 tooling 已有，但 skill 生成与复用还不是一等任务类型。
+- Skill 平台化已经部分进入一等任务类型，但调用语义和 Codex 兼容性还未完全收敛。
 - Operator surface 和 artifact 模型仍需继续补齐，才能支撑长期自主运行。
 
 推荐的下一步架构方向：
@@ -79,7 +81,8 @@
 
 - [ ] Feishu/Lark 适配器
 - [ ] Slack 适配器
-- [ ] 文件附件流水线
+- [ ] Artifact delivery 抽象（附件优先、链接兜底）
+- [ ] 面向远端部署的对象存储交付适配器（R2/S3 风格）
 - [ ] Markdown 感知的分块发送
 - [ ] Rate limiting / request queue
 - [ ] Docker 隔离

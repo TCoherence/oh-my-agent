@@ -11,8 +11,9 @@ Inspired by [OpenClaw](https://openclaw.dev).
 - v0.5 is runtime-first: durable autonomous task loops (`DRAFT -> RUNNING -> WAITING_MERGE -> MERGED/...`).
 - v0.6 direction is skill-first autonomy; v0.7 expands into ops-first and hybrid autonomy.
 - Discord approvals use buttons first, slash fallback, reactions as status-only signals.
-- Optional LLM routing is implemented: incoming messages can be classified as `reply_once` or `propose_task`, with human confirmation before task execution.
+- Optional LLM routing is implemented: incoming messages can be classified as `reply_once`, `invoke_existing_skill`, `propose_artifact_task`, `propose_repo_task`, or `create_skill`.
 - Runtime observability is implemented: `/task_logs`, sampled progress events in SQLite, and a single updatable Discord status message.
+- Multi-type runtime is implemented: only `repo_change` and `skill_change` tasks use merge gate; `artifact` tasks complete without merge.
 
 ## Architecture
 
@@ -130,6 +131,7 @@ oh-my-agent
 - Post a message in the configured channel to create a thread and get a reply.
 - Reply inside the thread to continue with full context.
 - Prefix with `@gemini`, `@claude`, or `@codex` to force an agent for that turn.
+- Explicit installed skill invocation such as `@claude /weather Shanghai` or `@claude /top-5-daily-news` stays in direct chat flow and does not create a runtime task.
 - If an agent fails, the next one in the fallback chain takes over.
 - If `access.owner_user_ids` is configured, only those users can trigger the bot.
 
@@ -157,14 +159,42 @@ oh-my-agent
 ## Autonomous Runtime
 
 - Long-task intent can create runtime tasks automatically.
-- Runtime tasks execute in isolated git worktrees under `~/.oh-my-agent/runtime/tasks/<task_id>`.
-- Loop contract: code changes -> tests -> retry until `TASK_STATE: DONE` and tests pass.
-- High-risk tasks go to `DRAFT`; low-risk tasks can auto-run under `strict` policy.
-- Completed execution enters `WAITING_MERGE`; final apply requires merge/discard/request-changes.
+- Runtime now distinguishes task types:
+  - `artifact`: long-running execution that returns a reply or generated artifact and does not use merge gate
+  - `repo_change`: code/docs/test/config changes that run in worktrees and require merge
+  - `skill_change`: canonical `skills/<name>` changes that validate and then require merge
+- `repo_change` and `skill_change` execute in isolated git worktrees under `~/.oh-my-agent/runtime/tasks/<task_id>`.
+- `artifact` tasks use runtime orchestration without entering `WAITING_MERGE`; `TASK_STATE: DONE` plus successful validation leads to `COMPLETED`.
+- High-risk tasks go to `DRAFT`; low-risk `artifact` tasks can run without approval by default.
 - `MERGED` tasks clean their worktree immediately after merge; other terminal states are retained for 72 hours before janitor cleanup.
-- Short `/ask` conversations use transient per-thread workspaces with TTL cleanup.
+- Short `/ask` conversations use transient per-thread workspaces under `~/.oh-my-agent/agent-workspace/sessions/`; these are not runtime worktrees and are cleaned by TTL janitor.
 - `/task_logs` exposes recent runtime events plus output tails.
 - Discord progress prefers updating one status message instead of spamming many messages.
+
+## Artifact Delivery
+
+- The current delivery direction is:
+  - try direct attachment upload first
+  - fall back to a link when the artifact is too large for the target platform
+  - keep delivery behind an abstraction so local-first runs can use direct filesystem access now and remote deployments can plug in object storage later
+- This delivery layer is a platform/runtime capability, not just prompt behavior.
+- Recommended storage direction for remote deployment is S3-compatible object storage, with Cloudflare R2 as the preferred default because it keeps the integration simple and works well for presigned-link delivery.
+
+## Codex Integration Notes
+
+- Codex support is currently grounded in CLI execution, `AGENTS.md`, and platform-level routing/runtime behavior.
+- Project-level native Codex skill discovery is not treated as a reliable primitive yet.
+- The practical near-term assumption is:
+  - Claude/Gemini use workspace skill directories refreshed by `SkillSync`
+  - Codex should rely on global Codex skills plus `AGENTS.md` / platform abstractions
+- `.codex/skills` remains deferred until there is confirmed project-level native discovery behavior.
+
+## Workspace Layout
+
+- `~/.oh-my-agent/agent-workspace/` is the base external workspace used by CLI agents.
+- `~/.oh-my-agent/agent-workspace/sessions/` stores per-thread transient workspaces for normal chat turns.
+- `~/.oh-my-agent/runtime/tasks/` stores isolated runtime task worktrees and artifact task output directories.
+- `AGENT.md`, `CLAUDE.md`, and `GEMINI.md` are still copied into the external base workspace on purpose because current Claude/Gemini compatibility paths still depend on them. They should not be removed until the context injection path is redesigned.
 
 ## Autonomy Direction
 
@@ -177,8 +207,8 @@ oh-my-agent
 
 - Runtime stop/resume is still command-driven; message-driven runtime control is not implemented yet.
 - `stop` changes task state but does not yet guarantee immediate interruption of a running agent/test subprocess.
-- Skill creation exists as tooling/workflow foundation, but not yet as a first-class runtime task type with intent routing.
-- Current autonomy is still runtime-task-centric; skill autonomy is the next product milestone.
+- Artifact delivery is not finished yet: generated artifacts are tracked, but attachment-first and link-fallback delivery still needs a dedicated adapter layer.
+- Codex skill integration is still weaker than Claude/Gemini because project-level native Codex skill discovery is not yet a trusted path.
 
 ## Documentation
 

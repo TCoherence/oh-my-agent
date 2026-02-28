@@ -14,8 +14,11 @@ Oh My Agent 是一个多平台 bot，执行层直接使用 CLI Agent，而不是
 ## 当前 Runtime 基线
 
 已实现：
-- 可选 LLM 意图路由（`reply_once` vs `propose_task`）
+- 可选 LLM 意图路由（`reply_once`、`invoke_existing_skill`、`propose_artifact_task`、`propose_repo_task`、`create_skill`）
 - 短对话临时 workspace + TTL 清理，状态持久化到 SQLite
+- 多类型 runtime orchestration：
+  - `artifact` 任务可直接完成，不进入 merge
+  - `repo_change` 与 `skill_change` 继续走 merge gate
 - Runtime 可观测性基线：
   - `/task_logs`
   - SQLite 中采样式 progress snapshot
@@ -25,8 +28,8 @@ Oh My Agent 是一个多平台 bot，执行层直接使用 CLI Agent，而不是
 仍缺少：
 - 能中断活跃子进程的真正 stop/pause/resume
 - 消息驱动的 runtime 控制
-- 作为一类一等 runtime task 的 skill 生成
-- skill routing / validation loop
+- artifact delivery 适配层（附件优先、链接兜底）
+- 超出当前 `全局 skills + AGENTS.md` 折中的 Codex skill 接入方案
 - ops/event autonomy 仍属于后续阶段
 
 ## 下一阶段产品方向

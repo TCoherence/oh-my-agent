@@ -8,6 +8,7 @@
 - v0.5 is runtime-first.
 - Optional LLM router is implemented.
 - Runtime observability baseline is implemented.
+- Multi-type runtime is implemented (`artifact`, `repo_change`, `skill_change`).
 
 ## v0.5 Runtime Hardening
 
@@ -38,14 +39,15 @@
 
 ## v0.6 - Skill-First Autonomy
 
-- [ ] Promote skill creation to a first-class runtime task type
-- [ ] Add skill routing for “turn this workflow into a skill” requests
-- [ ] Add skill validation loop before merge
+- [x] Promote skill creation to a first-class runtime task type
+- [x] Add skill routing for “turn this workflow into a skill” requests
+- [x] Add skill validation loop before merge
 - [ ] Add cross-agent skill abstraction
-- [ ] Define Codex-native skill integration strategy
-- [ ] Add skill memory / provenance metadata
+- [ ] Lock the Codex integration tradeoff (`global skills + AGENTS.md/MCP`, not assumed project-native skills)
+- [x] Add skill memory / provenance metadata
 - [ ] Keep `mission` model and operator surface as enabling architecture for skill autonomy
 - [ ] Keep thread-native runtime control as supporting work, not the headline
+- [ ] Separate skill invocation from skill mutation across all agents
 
 ## v0.7 - Ops-First and Hybrid Autonomy
 
@@ -65,7 +67,7 @@ Main gaps relative to OpenClaw:
 - The strongest gap is not coding runtime alone, but autonomy layering above it.
 - The current system is runtime-first; the next needed layer is skill-first autonomy.
 - Ops-first and hybrid autonomy should follow later, not compete with v0.6 priorities.
-- Skills as platform capability: skill sync/tooling exists, but skill generation and reuse are not yet a first-class task type.
+- Skills as platform capability are now partially first-class, but invocation semantics and Codex compatibility still need consolidation.
 - Operator surface and artifact model still need to mature for sustained autonomous work.
 
 Recommended next architecture step:
@@ -79,7 +81,8 @@ Recommended next architecture step:
 
 - [ ] Feishu/Lark adapter
 - [ ] Slack adapter
-- [ ] File attachment pipeline
+- [ ] Artifact delivery abstraction (`attachment first`, link fallback)
+- [ ] Object-storage adapter for remote artifact delivery (R2/S3 style)
 - [ ] Markdown-aware chunking
 - [ ] Rate limiting / request queue
 - [ ] Docker-based agent isolation
