@@ -9,6 +9,7 @@ Inspired by [OpenClaw](https://openclaw.dev).
 - `/search` is implemented with SQLite FTS5 across all threads.
 - `SkillSync` reverse sync is implemented and runs on startup.
 - v0.5 is runtime-first: durable autonomous task loops (`DRAFT -> RUNNING -> WAITING_MERGE -> MERGED/...`).
+- v0.6 direction is skill-first autonomy; v0.7 expands into ops-first and hybrid autonomy.
 - Discord approvals use buttons first, slash fallback, reactions as status-only signals.
 - Optional LLM routing is implemented: incoming messages can be classified as `reply_once` or `propose_task`, with human confirmation before task execution.
 - Runtime observability is implemented: `/task_logs`, sampled progress events in SQLite, and a single updatable Discord status message.
@@ -165,11 +166,19 @@ oh-my-agent
 - `/task_logs` exposes recent runtime events plus output tails.
 - Discord progress prefers updating one status message instead of spamming many messages.
 
+## Autonomy Direction
+
+- v0.5 establishes the runtime-first baseline: durable task execution, merge gating, and recovery.
+- v0.6 focuses on skill-first autonomy: skill creation, skill routing, skill validation, and reusable capability growth.
+- v0.7 expands into ops-first and hybrid autonomy: scheduler-driven and trigger-driven operational workflows combined with skill growth.
+- Source-code self-modification may exist as a high-risk, strongly gated capability, but it is not the default autonomy path.
+
 ## Current Limits
 
 - Runtime stop/resume is still command-driven; message-driven runtime control is not implemented yet.
 - `stop` changes task state but does not yet guarantee immediate interruption of a running agent/test subprocess.
 - Skill creation exists as tooling/workflow foundation, but not yet as a first-class runtime task type with intent routing.
+- Current autonomy is still runtime-task-centric; skill autonomy is the next product milestone.
 
 ## Documentation
 

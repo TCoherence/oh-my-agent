@@ -28,29 +28,33 @@
 
 ## Remaining v0.5 Work
 
-- [x] True runtime interruption for running agent/test subprocesses
-- [x] Message-driven runtime control (`stop`, `pause`, `resume` from normal thread messages)
-- [x] Resume UX refinement
-- [x] Suggestion UX refinement
-- [x] Structured task completion summary
-- [x] Runtime metrics and latency stats
-- [x] Clear paused/interrupted semantics in the state model
+- [ ] True runtime interruption for running agent/test subprocesses
+- [ ] Message-driven runtime control (`stop`, `pause`, `resume` from normal thread messages)
+- [ ] Resume UX refinement
+- [ ] Suggestion UX refinement
+- [ ] Structured task completion summary
+- [ ] Runtime metrics and latency stats
+- [ ] Clear paused/interrupted semantics in the state model
 
-## v0.6 Direction
+## v0.6 - Skill-First Autonomy
 
-- [ ] Introduce a first-class `mission` model above threads and runtime tasks
-- [ ] Add thread-native runtime control (`pause`, `resume`, `stop`, `summarize`) from normal messages
-- [ ] Support true interruption of running agent/test subprocesses and resumable checkpoints
 - [ ] Promote skill creation to a first-class runtime task type
 - [ ] Add skill routing for “turn this workflow into a skill” requests
-- [ ] Add an operator surface for active/blocked missions, approvals, and artifacts
-- [ ] Add first-class task artifacts (diff, test summary, generated files, commit, screenshots)
-- [ ] Smart agent routing by task profile
-- [ ] Multi-agent collaboration
-- [ ] Intent-based agent selection
-- [ ] Skill-oriented task type
-- [ ] Skill routing for “turn this workflow into a skill” requests
-- [ ] Skill validation loop before merge
+- [ ] Add skill validation loop before merge
+- [ ] Add cross-agent skill abstraction
+- [ ] Define Codex-native skill integration strategy
+- [ ] Add skill memory / provenance metadata
+- [ ] Keep `mission` model and operator surface as enabling architecture for skill autonomy
+- [ ] Keep thread-native runtime control as supporting work, not the headline
+
+## v0.7 - Ops-First and Hybrid Autonomy
+
+- [ ] Scheduler-driven operational tasks
+- [ ] Event-driven triggers beyond cron
+- [ ] Repeated-pattern detection from history
+- [ ] Skill recommendation / auto-draft from recurring workflows
+- [ ] Hybrid missions combining skill creation and scheduled execution
+- [ ] Unified operator surface for active ops and skill-growth workflows
 
 ## OpenClaw Gap Summary
 
@@ -58,18 +62,18 @@ Current positioning is still closer to a Discord-native coding runtime than to a
 
 Main gaps relative to OpenClaw:
 
-- Mission model: OpenClaw presents a stronger assistant/session/control-plane abstraction, while this repo still composes `thread + router + runtime task`.
-- Runtime control: autonomous execution exists, but operator controls are still command-heavy and do not yet provide true interruption and natural recovery from normal thread messages.
+- The strongest gap is not coding runtime alone, but autonomy layering above it.
+- The current system is runtime-first; the next needed layer is skill-first autonomy.
+- Ops-first and hybrid autonomy should follow later, not compete with v0.6 priorities.
 - Skills as platform capability: skill sync/tooling exists, but skill generation and reuse are not yet a first-class task type.
-- Operator surface: task logs and status messages exist, but there is no unified operator view for active missions, blocked reasons, pending approvals, and artifacts.
-- Artifact model: merge review is still mostly text-summary driven; task outputs should become first-class artifacts.
+- Operator surface and artifact model still need to mature for sustained autonomous work.
 
 Recommended next architecture step:
 
-- Treat `mission` as the durable unit of work.
-- Let threads be one interaction surface for a mission.
-- Let runtime tasks become execution attempts under that mission.
-- Make human control and skill creation part of the same mission lifecycle.
+- Use runtime-first infrastructure as the base layer.
+- Make skill-first autonomy the primary v0.6 product focus.
+- Treat `mission`, operator surface, and thread-native control as enabling architecture rather than the headline.
+- Defer ops-first and hybrid autonomy to the next phase once skill autonomy is stable.
 
 ## Backlog
 
@@ -80,5 +84,3 @@ Recommended next architecture step:
 - [ ] Rate limiting / request queue
 - [ ] Docker-based agent isolation
 - [ ] Semantic memory retrieval
-- [ ] Cross-agent skill abstraction
-- [ ] Codex-native skill integration strategy

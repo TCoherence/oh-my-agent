@@ -6,10 +6,10 @@ Oh My Agent 是一个多平台 bot，执行层直接使用 CLI Agent，而不是
 
 ## 真相来源
 
-1. `README_EN.md` / `README_CN.md`
-2. `docs/todo_EN.md` / `docs/todo_CN.md`
-3. `docs/v0.5_runtime_plan_EN.md` / `docs/v0.5_runtime_plan_CN.md`
-4. `docs/future_planning_discussion.md` 作为历史讨论归档
+1. `README.md` / `docs/CN/README.md`
+2. `docs/EN/todo.md` / `docs/CN/todo.md`
+3. `docs/EN/v0.5_runtime_plan.md` / `docs/CN/v0.5_runtime_plan.md`
+4. `docs/archive/future_planning_discussion.md` 作为历史讨论归档
 
 ## 当前 Runtime 基线
 
@@ -26,6 +26,15 @@ Oh My Agent 是一个多平台 bot，执行层直接使用 CLI Agent，而不是
 - 能中断活跃子进程的真正 stop/pause/resume
 - 消息驱动的 runtime 控制
 - 作为一类一等 runtime task 的 skill 生成
+- skill routing / validation loop
+- ops/event autonomy 仍属于后续阶段
+
+## 下一阶段产品方向
+
+- v0.5 已完成 runtime-first 基线。
+- v0.6 转向 skill-first autonomy。
+- v0.7 再扩展到 ops-first autonomy 和 hybrid autonomy。
+- 源代码自我更迭不是默认自主性路径，而是高风险、强审批的特殊能力。
 
 ## 历史阶段
 

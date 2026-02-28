@@ -9,6 +9,7 @@
 - `/search` 已通过 SQLite FTS5 实现跨线程检索。
 - `SkillSync` reverse sync 已实现，并在启动时执行。
 - v0.5 当前主线是 runtime-first：重点是可恢复的自主任务循环（`DRAFT -> RUNNING -> WAITING_MERGE -> MERGED/...`）。
+- v0.6 主线调整为 skill-first autonomy；v0.7 再扩展到 ops-first autonomy 和 hybrid autonomy。
 - Discord 审批交互采用按钮优先、slash 兜底，reaction 只做状态信号。
 - 可选的 LLM 路由已实现：消息可先被分类为 `reply_once` 或 `propose_task`，命中任务后先确认再执行。
 - Runtime 可观测性已实现：支持 `/task_logs`、SQLite 中采样式 progress 事件，以及 Discord 中单条可更新的状态消息。
@@ -165,8 +166,16 @@ oh-my-agent
 - `/task_logs` 用来查看最近 runtime 事件和输出 tail。
 - Discord 中 runtime 进度会尽量复用并更新同一条状态消息，避免刷屏。
 
+## 自主性方向
+
+- v0.5 建立 runtime-first 基线：重点是长任务执行、恢复、审批和合并闭环。
+- v0.6 聚焦 skill-first autonomy：重点是 skill 创建、skill 路由、skill 验证，以及可复用能力的持续增长。
+- v0.7 再扩展到 ops-first autonomy 和 hybrid autonomy：把 scheduler / trigger 驱动的主动执行和 skill growth 结合起来。
+- 源代码自我更迭可以作为高风险、强审批的特殊能力存在，但不是默认自主性主线。
+
 ## 当前限制
 
 - Runtime 的 stop/resume 目前仍主要依赖命令入口，消息驱动控制还未实现。
 - 现在的 `stop` 会修改任务状态，但还不能保证立即中断正在运行的 agent/test 子进程。
 - skill 生成已有工具链和 workflow 基础，但还没有作为一类一等的 runtime task 与意图路由打通。
+- 当前自主性仍然以 runtime task 为中心；skill autonomy 是下一阶段的产品主线。

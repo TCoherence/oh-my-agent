@@ -6,10 +6,10 @@ Oh My Agent is a multi-platform bot that uses CLI-based AI agents as the executi
 
 ## Source of Truth
 
-1. `README_EN.md` / `README_CN.md`
-2. `docs/todo_EN.md` / `docs/todo_CN.md`
-3. `docs/v0.5_runtime_plan_EN.md` / `docs/v0.5_runtime_plan_CN.md`
-4. `docs/future_planning_discussion.md` for historical rationale
+1. `README.md` / `docs/CN/README.md`
+2. `docs/EN/todo.md` / `docs/CN/todo.md`
+3. `docs/EN/v0.5_runtime_plan.md` / `docs/CN/v0.5_runtime_plan.md`
+4. `docs/archive/future_planning_discussion.md` for historical rationale
 
 ## Current Runtime Baseline
 
@@ -26,6 +26,15 @@ Still missing:
 - true stop/pause/resume with subprocess interruption
 - message-driven runtime control
 - skill generation as a first-class runtime task type
+- skill routing and validation loop
+- ops/event autonomy remains future work
+
+## Next Product Direction
+
+- v0.5 delivered runtime-first foundations.
+- v0.6 shifts to skill-first autonomy.
+- v0.7 expands into ops-first and hybrid autonomy.
+- Source-code self-modification is not the default autonomy path; it remains a high-risk, strongly gated capability.
 
 ## Historical Milestones
 

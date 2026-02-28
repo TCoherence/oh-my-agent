@@ -36,21 +36,25 @@
 - [ ] Runtime metrics 和耗时统计
 - [ ] 更清晰的 paused/interrupted 状态语义
 
-## v0.6 方向
+## v0.6 - Skill-First Autonomy
 
-- [ ] 引入一层高于 thread 和 runtime task 的一等 `mission` 模型
-- [ ] 支持普通消息触发的 thread-native runtime 控制（`pause` / `resume` / `stop` / `summarize`）
-- [ ] 支持对运行中 agent/test 子进程的真正中断，以及基于 checkpoint 的恢复
 - [ ] 把 skill 创建升级成一等 runtime task 类型
-- [ ] 支持“把这个 workflow 变成 skill”这类请求的 skill 路由
-- [ ] 增加 operator surface，用于查看 active/blocked missions、approvals、artifacts
-- [ ] 增加一等任务产物模型（diff、test summary、生成文件、commit、截图等）
-- [ ] 按任务特征做智能 agent 路由
-- [ ] 多 agent 协作
-- [ ] 基于意图的 agent 选择
-- [ ] skill-oriented task 类型
-- [ ] 针对“把这个流程变成 skill”的意图路由
-- [ ] merge 前的 skill 验证闭环
+- [ ] 支持“把这个 workflow 变成 skill”类请求的路由
+- [ ] 增加 merge 前的 skill 验证闭环
+- [ ] 增加跨 agent skill 抽象
+- [ ] 明确 Codex 原生 skill 接入策略
+- [ ] 增加 skill memory / provenance 元数据
+- [ ] 将 `mission` 模型和 operator surface 定义为支撑 skill autonomy 的基础设施
+- [ ] 将 thread-native runtime control 定义为配套能力，而不是 v0.6 headline
+
+## v0.7 - Ops-First 与 Hybrid Autonomy
+
+- [ ] 基于 scheduler / cron 的主动任务
+- [ ] 不止 cron 的 event-driven triggers
+- [ ] 基于历史对话/任务的重复模式发现
+- [ ] recurring workflow -> skill draft 的自动建议
+- [ ] skill growth + ops automation 的 hybrid missions
+- [ ] 支撑主动性运行的统一 operator surface
 
 ## 与 OpenClaw 的差距总结
 
@@ -58,18 +62,18 @@
 
 相对 OpenClaw 的主要差距：
 
-- Mission 模型：OpenClaw 更像 assistant/session/control-plane；当前 repo 仍主要是 `thread + router + runtime task` 的组合。
-- Runtime 控制：已经有自主执行循环，但 operator 控制仍偏命令式，也还缺真正的中断和自然恢复。
+- 当前最强的差距不是“会不会写代码”，而是自主性的分层建设还不完整。
+- 当前系统已经完成 runtime-first 基线，下一层最需要的是 skill-first autonomy。
+- ops-first autonomy 和 hybrid autonomy 应该放在更后阶段，而不是和 v0.6 主线竞争。
 - Skill 平台化：skill sync 和 tooling 已有，但 skill 生成与复用还不是一等任务类型。
-- Operator surface：已有 task logs 和状态消息，但还没有统一视角来查看 active missions、blocked reasons、pending approvals 和 artifacts。
-- Artifact 模型：merge review 仍主要依赖文本摘要，任务输出还没有完全升格成一等产物。
+- Operator surface 和 artifact 模型仍需继续补齐，才能支撑长期自主运行。
 
 推荐的下一步架构方向：
 
-- 把 `mission` 作为长期存在的工作单元。
-- 把 thread 视为 mission 的一种交互界面。
-- 把 runtime task 视为 mission 下面的一次执行尝试。
-- 把 human control 和 skill creation 一起纳入 mission 生命周期。
+- 以 runtime-first 基线作为底层。
+- 把 skill-first autonomy 定义为 v0.6 的主产品方向。
+- 把 `mission`、operator surface、thread-native control 视为支撑层，而不是 headline。
+- 在 skill autonomy 稳定之后，再扩展到 ops-first 与 hybrid autonomy。
 
 ## Backlog
 
@@ -80,5 +84,3 @@
 - [ ] Rate limiting / request queue
 - [ ] Docker 隔离
 - [ ] 语义记忆检索
-- [ ] 跨 agent skill 抽象
-- [ ] Codex 原生 skill 接入策略
