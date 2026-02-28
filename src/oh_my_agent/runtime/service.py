@@ -343,11 +343,6 @@ class RuntimeService:
         )
         resolved_name, is_update = extract_skill_name(skill_name or goal, existing)
         effective_goal = f"Update existing skill '{resolved_name}': {goal}" if is_update else goal
-        effective_preferred = (
-            preferred_agent
-            or ("claude" if registry.get_agent("claude") is not None else None)
-            or self._default_agent
-        )
         return await self.create_task(
             session=session,
             registry=registry,
@@ -355,7 +350,7 @@ class RuntimeService:
             goal=effective_goal,
             raw_request=raw_request,
             created_by=created_by,
-            preferred_agent=effective_preferred,
+            preferred_agent=preferred_agent or self._default_agent,
             test_command=f"python skills/skill-creator/scripts/quick_validate.py skills/{resolved_name}",
             max_steps=6,
             max_minutes=15,

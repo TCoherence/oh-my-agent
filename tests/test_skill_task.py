@@ -159,7 +159,7 @@ async def skill_runtime_env(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_create_skill_task_forces_draft_and_prefers_claude(skill_runtime_env):
+async def test_create_skill_task_forces_draft_and_uses_runtime_default_agent(skill_runtime_env):
     runtime: RuntimeService = skill_runtime_env["runtime"]
     channel: _FakeChannel = skill_runtime_env["channel"]
     store: SQLiteMemoryStore = skill_runtime_env["store"]
@@ -182,8 +182,33 @@ async def test_create_skill_task_forces_draft_and_prefers_claude(skill_runtime_e
     assert loaded.status == TASK_STATUS_DRAFT
     assert loaded.task_type == TASK_TYPE_SKILL
     assert loaded.skill_name == "weather"
-    assert loaded.preferred_agent == "claude"
+    assert loaded.preferred_agent == "codex"
     assert "quick_validate.py skills/weather" in loaded.test_command
+
+
+@pytest.mark.asyncio
+async def test_create_skill_task_respects_explicit_preferred_agent(skill_runtime_env):
+    runtime: RuntimeService = skill_runtime_env["runtime"]
+    channel: _FakeChannel = skill_runtime_env["channel"]
+    store: SQLiteMemoryStore = skill_runtime_env["store"]
+
+    registry = AgentRegistry([_ClaudeSkillAgent()])
+    session = ChannelSession(platform="discord", channel_id="100", channel=channel, registry=registry)
+
+    task = await runtime.create_skill_task(
+        session=session,
+        registry=registry,
+        thread_id="thread-skill-explicit",
+        goal="create a skill for weather checking",
+        raw_request="create a skill for weather checking",
+        created_by="owner-1",
+        preferred_agent="claude",
+        skill_name="weather",
+        source="router",
+    )
+    loaded = await store.get_runtime_task(task.id)
+    assert loaded is not None
+    assert loaded.preferred_agent == "claude"
 
 
 @pytest.mark.asyncio
