@@ -28,13 +28,13 @@
 
 ## Remaining v0.5 Work
 
-- [ ] True runtime interruption for running agent/test subprocesses
-- [ ] Message-driven runtime control (`stop`, `pause`, `resume` from normal thread messages)
-- [ ] Resume UX refinement
-- [ ] Suggestion UX refinement
-- [ ] Structured task completion summary
-- [ ] Runtime metrics and latency stats
-- [ ] Clear paused/interrupted semantics in the state model
+- [x] True runtime interruption for running agent/test subprocesses
+- [x] Message-driven runtime control (`stop`, `pause`, `resume` from normal thread messages)
+- [x] Resume UX refinement
+- [x] Suggestion UX refinement
+- [x] Structured task completion summary
+- [x] Runtime metrics and latency stats
+- [x] Clear paused/interrupted semantics in the state model
 
 ## v0.6 Direction
 

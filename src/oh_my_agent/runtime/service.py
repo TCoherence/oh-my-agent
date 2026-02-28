@@ -29,6 +29,7 @@ from oh_my_agent.runtime.types import (
     TASK_STATUS_FAILED,
     TASK_STATUS_MERGED,
     TASK_STATUS_MERGE_FAILED,
+    TASK_STATUS_PAUSED,
     TASK_STATUS_PENDING,
     TASK_STATUS_REJECTED,
     TASK_STATUS_RUNNING,
@@ -115,6 +116,7 @@ class RuntimeService:
 
         self._sessions: dict[str, ChannelSession] = {}
         self._registries: dict[str, AgentRegistry] = {}
+        self._running_tasks: dict[str, asyncio.Task] = {}
         self._workers: list[asyncio.Task] = []
         self._janitor_task: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
@@ -173,6 +175,35 @@ class RuntimeService:
             return False
         if msg.system:
             return False
+
+        actor = msg.author_id or msg.author
+
+        # 1. Try control command first (stop/pause/resume)
+        control = self._parse_control_intent(msg.content)
+        if control is not None:
+            action, instruction = control
+            active = await self._active_task_for_thread(session.platform, session.channel_id, thread_id)
+            if active is not None:
+                if action == "stop":
+                    result = await self.stop_task(active.id, actor_id=actor)
+                elif action == "pause":
+                    result = await self.pause_task(active.id, actor_id=actor)
+                elif action == "resume":
+                    result = await self.resume_task(active.id, instruction, actor_id=actor)
+                else:
+                    result = "Unknown control action."
+                await session.channel.send(thread_id, result)
+                return True
+
+        # 2. Auto-resume: if thread has a BLOCKED/PAUSED task, resume it regardless of intent.
+        #    This takes priority over new task creation — the user is replying to the blocked task.
+        active = await self._active_task_for_thread(session.platform, session.channel_id, thread_id)
+        if active is not None and active.status in {TASK_STATUS_BLOCKED, TASK_STATUS_PAUSED}:
+            result = await self.resume_task(active.id, msg.content, actor_id=actor)
+            await session.channel.send(thread_id, result)
+            return True
+
+        # 3. Long task intent → create task
         if not is_long_task_intent(msg.content):
             return False
 
@@ -182,7 +213,7 @@ class RuntimeService:
             thread_id=thread_id,
             goal=msg.content,
             raw_request=msg.content,
-            created_by=msg.author_id or msg.author,
+            created_by=actor,
             preferred_agent=msg.preferred_agent,
             source="message",
         )
@@ -332,9 +363,30 @@ class RuntimeService:
             ended_at_now=True,
         )
         await self._store.add_runtime_event(task_id, "task.stopped", {"actor_id": actor_id})
+        # The heartbeat loop in _invoke_agent will detect STOPPED status and cancel the agent.
         await self._notify(task, f"Task `{task.id}` stopped.")
         await self._signal_status_by_id(task, TASK_STATUS_STOPPED)
         return f"Task `{task.id}` stopped."
+
+    async def pause_task(self, task_id: str, *, actor_id: str) -> str:
+        if not self._is_authorized(actor_id):
+            return "Only configured owners can pause tasks."
+        task = await self._store.get_runtime_task(task_id)
+        if task is None:
+            return f"Task `{task_id}` not found."
+        if task.status not in {TASK_STATUS_RUNNING, TASK_STATUS_VALIDATING, TASK_STATUS_PENDING}:
+            return f"Task `{task.id}` cannot be paused (current status: {task.status})."
+        await self._store.update_runtime_task(
+            task_id,
+            status=TASK_STATUS_PAUSED,
+            summary="Paused by user.",
+            ended_at=None,
+        )
+        await self._store.add_runtime_event(task_id, "task.paused", {"actor_id": actor_id})
+        # The heartbeat loop in _invoke_agent will detect PAUSED status and cancel the agent.
+        await self._notify(task, f"Task `{task.id}` paused. Reply with instructions to resume.")
+        await self._signal_status_by_id(task, TASK_STATUS_PAUSED)
+        return f"Task `{task.id}` paused."
 
     async def resume_task(self, task_id: str, instruction: str, *, actor_id: str) -> str:
         if not self._is_authorized(actor_id):
@@ -342,8 +394,8 @@ class RuntimeService:
         task = await self._store.get_runtime_task(task_id)
         if task is None:
             return f"Task `{task_id}` not found."
-        if task.status != TASK_STATUS_BLOCKED:
-            return f"Task `{task.id}` is not blocked (current status: {task.status})."
+        if task.status not in {TASK_STATUS_BLOCKED, TASK_STATUS_PAUSED}:
+            return f"Task `{task.id}` is not blocked or paused (current status: {task.status})."
         await self._store.update_runtime_task(
             task.id,
             status=TASK_STATUS_PENDING,
@@ -537,13 +589,22 @@ class RuntimeService:
                 "task.suggested",
                 {"actor_id": event.actor_id, "source": event.source, "suggestion": suggestion},
             )
-            await self._notify(
-                task,
-                (
-                    f"Suggestion recorded for task `{task.id}`. It remains in `{task.status}`. "
-                    f"Use a fresh decision token `{new_nonce}` via buttons or slash."
-                ),
-            )
+            session = self._session_for(task)
+            if session is not None:
+                suggestion_preview = suggestion or task.resume_instruction or "(none)"
+                suggest_text = (
+                    f"### Runtime Task `{task.id}` — Suggestion Recorded\n"
+                    f"> {suggestion_preview}\n\n"
+                    "Approve to run with this guidance, or reject to discard."
+                )
+                await self._send_decision_surface(
+                    session,
+                    event.thread_id,
+                    suggest_text,
+                    task.id,
+                    new_nonce,
+                    ["approve", "reject"],
+                )
             return f"Task `{task.id}` suggestion recorded."
 
         if event.action == "merge":
@@ -680,6 +741,8 @@ class RuntimeService:
         start = time.monotonic()
         step = task.step_no
         prior_failure: str | None = None
+        total_agent_s = 0.0
+        total_test_s = 0.0
         latest = await self._store.get_last_runtime_checkpoint(task.id)
         if latest:
             prior_failure = latest.get("test_result")
@@ -688,7 +751,7 @@ class RuntimeService:
             current = await self._store.get_runtime_task(task.id)
             if current is None:
                 return
-            if current.status == TASK_STATUS_STOPPED:
+            if current.status in {TASK_STATUS_STOPPED, TASK_STATUS_PAUSED}:
                 return
             if (time.monotonic() - start) > (task.max_minutes * 60):
                 await self._store.update_runtime_task(
@@ -740,7 +803,12 @@ class RuntimeService:
                 step=step,
             )
             elapsed_agent = time.perf_counter() - t_agent
+            total_agent_s += elapsed_agent
             if response.error:
+                # If the task was stopped or paused externally, don't overwrite its status.
+                current_after = await self._store.get_runtime_task(task.id)
+                if current_after and current_after.status in {TASK_STATUS_STOPPED, TASK_STATUS_PAUSED}:
+                    return
                 await self._fail(task, f"{agent_name}: {response.error}")
                 return
 
@@ -802,6 +870,7 @@ class RuntimeService:
                         f"Task `{task.id}` step {step}: tests still running ({int(elapsed)}s elapsed).",
                     )
 
+            t_test = time.perf_counter()
             rc, out, err, test_timed_out = await self._worktree.run_shell(
                 workspace,
                 task.test_command,
@@ -809,6 +878,7 @@ class RuntimeService:
                 heartbeat_seconds=self._test_heartbeat_seconds,
                 on_heartbeat=_on_test_heartbeat,
             )
+            total_test_s += time.perf_counter() - t_test
             test_ok = rc == 0
             test_summary = (out + ("\n" + err if err else "")).strip()
             if not test_summary:
@@ -909,12 +979,21 @@ class RuntimeService:
                 return
 
             if test_ok and state == "DONE":
+                total_elapsed_s = time.monotonic() - start
+                summary = self._build_completion_summary(
+                    task=task,
+                    step=step,
+                    changed_files=changed_files,
+                    test_summary=test_summary,
+                    total_agent_s=total_agent_s,
+                    total_test_s=total_test_s,
+                    total_elapsed_s=total_elapsed_s,
+                    waiting_merge=self._merge_gate_enabled,
+                )
                 if self._merge_gate_enabled:
                     new_state = TASK_STATUS_WAITING_MERGE
-                    summary = f"Execution completed in {step} step(s), waiting merge confirmation."
                 else:
                     new_state = TASK_STATUS_APPLIED
-                    summary = f"Completed in {step} step(s)."
 
                 await self._store.update_runtime_task(
                     task.id,
@@ -927,7 +1006,13 @@ class RuntimeService:
                 await self._store.add_runtime_event(
                     task.id,
                     "task.completed",
-                    {"status": new_state, "step": step},
+                    {
+                        "status": new_state,
+                        "step": step,
+                        "total_agent_s": round(total_agent_s, 2),
+                        "total_test_s": round(total_test_s, 2),
+                        "total_elapsed_s": round(total_elapsed_s, 2),
+                    },
                 )
 
                 if self._merge_gate_enabled:
@@ -1014,37 +1099,47 @@ class RuntimeService:
         if "workspace_override" in sig.parameters:
             kwargs["workspace_override"] = workspace
         run_task = asyncio.create_task(agent.run(prompt, [], **kwargs))
+        self._running_tasks[task.id] = run_task
         started = asyncio.get_running_loop().time()
         last_notice = 0.0
         last_persist = 0.0
-        while True:
-            try:
-                return await asyncio.wait_for(
-                    asyncio.shield(run_task),
-                    timeout=self._agent_heartbeat_seconds,
-                )
-            except asyncio.TimeoutError:
-                elapsed = asyncio.get_running_loop().time() - started
-                logger.info(
-                    "Runtime task=%s step=%d AGENT_RUNNING agent=%s elapsed=%.2fs",
-                    task.id,
-                    step,
-                    agent.name,
-                    elapsed,
-                )
-                if elapsed - last_persist >= self._progress_persist_seconds:
-                    last_persist = elapsed
-                    await self._store.add_runtime_event(
+        try:
+            while True:
+                try:
+                    return await asyncio.wait_for(
+                        asyncio.shield(run_task),
+                        timeout=self._agent_heartbeat_seconds,
+                    )
+                except asyncio.TimeoutError:
+                    elapsed = asyncio.get_running_loop().time() - started
+                    # Check if user stopped or paused mid-run
+                    current = await self._store.get_runtime_task(task.id)
+                    if current and current.status in {TASK_STATUS_STOPPED, TASK_STATUS_PAUSED}:
+                        run_task.cancel()
+                        reason = "paused" if current.status == TASK_STATUS_PAUSED else "stopped"
+                        return AgentResponse(text="", error=f"Task {reason} by user.")
+                    logger.info(
+                        "Runtime task=%s step=%d AGENT_RUNNING agent=%s elapsed=%.2fs",
                         task.id,
-                        "task.agent_progress",
-                        {"step": step, "agent": agent.name, "elapsed_seconds": round(elapsed, 2)},
+                        step,
+                        agent.name,
+                        elapsed,
                     )
-                if elapsed - last_notice >= self._progress_notice_seconds:
-                    last_notice = elapsed
-                    await self._notify(
-                        task,
-                        f"Task `{task.id}` step {step}: agent `{agent.name}` still running ({int(elapsed)}s elapsed).",
-                    )
+                    if elapsed - last_persist >= self._progress_persist_seconds:
+                        last_persist = elapsed
+                        await self._store.add_runtime_event(
+                            task.id,
+                            "task.agent_progress",
+                            {"step": step, "agent": agent.name, "elapsed_seconds": round(elapsed, 2)},
+                        )
+                    if elapsed - last_notice >= self._progress_notice_seconds:
+                        last_notice = elapsed
+                        await self._notify(
+                            task,
+                            f"Task `{task.id}` step {step}: agent `{agent.name}` still running ({int(elapsed)}s elapsed).",
+                        )
+        finally:
+            self._running_tasks.pop(task.id, None)
 
     async def _execute_merge(self, task: RuntimeTask, *, actor_id: str, source: str) -> str:
         if task.status not in {TASK_STATUS_WAITING_MERGE, TASK_STATUS_APPLIED}:
@@ -1481,6 +1576,8 @@ class RuntimeService:
             return "✅"
         if status == TASK_STATUS_DISCARDED:
             return "🗑️"
+        if status == TASK_STATUS_PAUSED:
+            return "⏸️"
         if status in {
             TASK_STATUS_BLOCKED,
             TASK_STATUS_FAILED,
@@ -1491,3 +1588,81 @@ class RuntimeService:
         }:
             return "⚠️"
         return None
+
+    @staticmethod
+    def _parse_control_intent(text: str) -> tuple[str, str] | None:
+        """Return (action, instruction) if text is a runtime control command, else None."""
+        stripped = text.strip()
+        lower = stripped.lower()
+        if lower in {"stop", "stop the task", "cancel"}:
+            return ("stop", "")
+        if lower in {"pause", "pause the task"}:
+            return ("pause", "")
+        for prefix in ("resume ", "continue "):
+            if lower.startswith(prefix):
+                return ("resume", stripped[len(prefix):].strip())
+        return None
+
+    async def _active_task_for_thread(
+        self, platform: str, channel_id: str, thread_id: str
+    ) -> "RuntimeTask | None":
+        """Return the most recent active task in the given thread, or None."""
+        active_statuses = {
+            TASK_STATUS_RUNNING,
+            TASK_STATUS_VALIDATING,
+            TASK_STATUS_BLOCKED,
+            TASK_STATUS_PAUSED,
+            TASK_STATUS_PENDING,
+        }
+        tasks = await self._store.list_runtime_tasks(
+            platform=platform,
+            channel_id=channel_id,
+            limit=20,
+        )
+        for task in tasks:
+            if task.thread_id == thread_id and task.status in active_statuses:
+                return task
+        return None
+
+    @staticmethod
+    def _build_completion_summary(
+        task: RuntimeTask,
+        step: int,
+        changed_files: list[str],
+        test_summary: str,
+        total_agent_s: float,
+        total_test_s: float,
+        total_elapsed_s: float,
+        waiting_merge: bool,
+    ) -> str:
+        parts: list[str] = []
+        goal_short = " ".join(task.goal.strip().split())[:120]
+        parts.append(f"Goal: {goal_short}")
+        parts.append(f"Completed in {step} step(s)")
+
+        # Changed files
+        if changed_files:
+            shown = changed_files[:10]
+            parts.append(f"Changed files ({len(changed_files)}): " + ", ".join(f"`{f}`" for f in shown))
+            if len(changed_files) > 10:
+                parts[-1] += f" and {len(changed_files) - 10} more"
+
+        # Test result excerpt
+        if test_summary:
+            summary_re = re.compile(
+                r"\b\d+\s+passed\b|\b\d+\s+failed\b|\b\d+\s+error\b|\b\d+\s+errors\b|\b\d+\s+skipped\b"
+            )
+            for line in reversed(test_summary.splitlines()):
+                cleaned = line.strip().strip("=").strip()
+                if summary_re.search(cleaned) and " in " in cleaned:
+                    parts.append(f"Tests: {cleaned}")
+                    break
+
+        # Latency metrics
+        parts.append(
+            f"Timing: agent {total_agent_s:.1f}s | tests {total_test_s:.1f}s | total {total_elapsed_s:.1f}s"
+        )
+
+        if waiting_merge:
+            parts.append("Waiting merge confirmation.")
+        return " | ".join(parts)

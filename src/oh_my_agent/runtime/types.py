@@ -17,6 +17,7 @@ TASK_STATUS_FAILED = "FAILED"
 TASK_STATUS_TIMEOUT = "TIMEOUT"
 TASK_STATUS_STOPPED = "STOPPED"
 TASK_STATUS_REJECTED = "REJECTED"
+TASK_STATUS_PAUSED = "PAUSED"
 
 TaskStatus = Literal[
     "DRAFT",
@@ -33,6 +34,7 @@ TaskStatus = Literal[
     "TIMEOUT",
     "STOPPED",
     "REJECTED",
+    "PAUSED",
 ]
 
 DecisionAction = Literal[

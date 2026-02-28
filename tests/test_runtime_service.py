@@ -18,6 +18,8 @@ from oh_my_agent.runtime import (
     TASK_STATUS_DRAFT,
     TASK_STATUS_FAILED,
     TASK_STATUS_MERGED,
+    TASK_STATUS_PAUSED,
+    TASK_STATUS_STOPPED,
     TASK_STATUS_TIMEOUT,
     TASK_STATUS_WAITING_MERGE,
 )
@@ -760,3 +762,326 @@ async def test_runtime_start_cleans_stale_merged_workspace(tmp_path):
 
     await runtime.stop()
     await store.close()
+
+
+# ---------------------------------------------------------------------------
+# Helpers for new behaviour tests
+# ---------------------------------------------------------------------------
+
+
+class _StoppableSlowAgent(BaseAgent):
+    """Agent that sleeps for a long time, allowing stop/pause to interrupt it."""
+
+    def __init__(self, sleep_seconds: float = 5.0) -> None:
+        self._sleep = sleep_seconds
+
+    @property
+    def name(self) -> str:
+        return "stoppable-slow"
+
+    async def run(
+        self,
+        prompt: str,
+        history: list[dict] | None = None,
+        *,
+        thread_id: str | None = None,
+        workspace_override: Path | None = None,
+    ) -> AgentResponse:
+        del prompt, history, thread_id
+        assert workspace_override is not None
+        await asyncio.sleep(self._sleep)
+        out = workspace_override / "src" / "slow.txt"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text("done", encoding="utf-8")
+        return AgentResponse(text="TASK_STATE: DONE")
+
+
+# ---------------------------------------------------------------------------
+# New tests: PAUSED state, true interruption, message-driven control, summary
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_runtime_parse_control_intent():
+    """_parse_control_intent correctly maps text to (action, instruction)."""
+    from oh_my_agent.runtime.service import RuntimeService as RS
+
+    assert RS._parse_control_intent("stop") == ("stop", "")
+    assert RS._parse_control_intent("Stop") == ("stop", "")
+    assert RS._parse_control_intent("stop the task") == ("stop", "")
+    assert RS._parse_control_intent("cancel") == ("stop", "")
+    assert RS._parse_control_intent("pause") == ("pause", "")
+    assert RS._parse_control_intent("Pause the task") == ("pause", "")
+    assert RS._parse_control_intent("resume add tests for auth") == ("resume", "add tests for auth")
+    assert RS._parse_control_intent("Continue with fixture from env") == ("resume", "with fixture from env")
+    assert RS._parse_control_intent("please fix the parser bug") is None
+    assert RS._parse_control_intent("") is None
+
+
+@pytest.mark.asyncio
+async def test_runtime_stop_while_running_interrupts_agent(runtime_env):
+    """Calling stop_task while agent is running cancels the agent within one heartbeat."""
+    store: SQLiteMemoryStore = runtime_env["store"]
+    runtime: RuntimeService = runtime_env["runtime"]
+    channel: _FakeChannel = runtime_env["channel"]
+
+    registry = AgentRegistry([_StoppableSlowAgent(sleep_seconds=5.0)])
+    session = ChannelSession(
+        platform="discord",
+        channel_id="100",
+        channel=channel,
+        registry=registry,
+    )
+    runtime.register_session(session, registry)
+    await runtime.start()
+
+    task = await runtime.create_task(
+        session=session,
+        registry=registry,
+        thread_id="thread-stop",
+        goal="fix tests and install dependencies then run all tests",
+        created_by="owner-1",
+        source="slash",
+    )
+
+    # Wait for task to start running, then stop it
+    await asyncio.sleep(0.3)
+    stop_result = await runtime.stop_task(task.id, actor_id="owner-1")
+    assert "stopped" in stop_result.lower()
+
+    stopped = await _wait_for_status(store, task.id, {TASK_STATUS_STOPPED}, timeout=3.0)
+    assert stopped.status == TASK_STATUS_STOPPED
+
+
+@pytest.mark.asyncio
+async def test_runtime_message_stop_while_running(runtime_env):
+    """Sending 'stop' as a message while task is running stops it via maybe_handle_incoming."""
+    store: SQLiteMemoryStore = runtime_env["store"]
+    runtime: RuntimeService = runtime_env["runtime"]
+    channel: _FakeChannel = runtime_env["channel"]
+
+    registry = AgentRegistry([_StoppableSlowAgent(sleep_seconds=5.0)])
+    session = ChannelSession(
+        platform="discord",
+        channel_id="100",
+        channel=channel,
+        registry=registry,
+    )
+    runtime.register_session(session, registry)
+    await runtime.start()
+
+    task = await runtime.create_task(
+        session=session,
+        registry=registry,
+        thread_id="thread-msg-stop",
+        goal="fix tests and install dependencies then run all tests",
+        created_by="owner-1",
+        source="slash",
+    )
+
+    # Wait for it to reach running state
+    await asyncio.sleep(0.3)
+
+    # Send "stop" as a message in the same thread
+    stop_msg = IncomingMessage(
+        platform="discord",
+        channel_id="100",
+        thread_id="thread-msg-stop",
+        author="owner",
+        author_id="owner-1",
+        content="stop",
+    )
+    handled = await runtime.maybe_handle_incoming(session, registry, stop_msg, thread_id="thread-msg-stop")
+    assert handled is True
+
+    stopped = await _wait_for_status(store, task.id, {TASK_STATUS_STOPPED}, timeout=4.0)
+    assert stopped.status == TASK_STATUS_STOPPED
+
+
+@pytest.mark.asyncio
+async def test_runtime_pause_and_resume(runtime_env):
+    """pause_task sets PAUSED; resume_task re-queues it and it completes."""
+    store: SQLiteMemoryStore = runtime_env["store"]
+    runtime: RuntimeService = runtime_env["runtime"]
+    channel: _FakeChannel = runtime_env["channel"]
+
+    # Use a short-sleep stoppable agent so we can intercept it
+    registry = AgentRegistry([_StoppableSlowAgent(sleep_seconds=3.0)])
+    session = ChannelSession(
+        platform="discord",
+        channel_id="100",
+        channel=channel,
+        registry=registry,
+    )
+    runtime.register_session(session, registry)
+    await runtime.start()
+
+    task = await runtime.create_task(
+        session=session,
+        registry=registry,
+        thread_id="thread-pause",
+        goal="fix tests and install dependencies then run all tests",
+        created_by="owner-1",
+        source="slash",
+    )
+
+    # Wait briefly then pause
+    await asyncio.sleep(0.3)
+    pause_result = await runtime.pause_task(task.id, actor_id="owner-1")
+    assert "paused" in pause_result.lower()
+
+    paused = await _wait_for_status(store, task.id, {TASK_STATUS_PAUSED}, timeout=3.0)
+    assert paused.status == TASK_STATUS_PAUSED
+
+    # Now swap in a fast agent and resume
+    fast_registry = AgentRegistry([_DoneAgent()])
+    runtime.register_session(session, fast_registry)
+
+    resume_result = await runtime.resume_task(task.id, "use the mock fixture", actor_id="owner-1")
+    assert "resumed" in resume_result.lower()
+
+    # Task should reach WAITING_MERGE now with the fast agent
+    done = await _wait_for_status(store, task.id, {TASK_STATUS_WAITING_MERGE}, timeout=8.0)
+    assert done.status == TASK_STATUS_WAITING_MERGE
+
+
+@pytest.mark.asyncio
+async def test_runtime_blocked_thread_message_auto_resumes(runtime_env):
+    """A plain reply to a blocked thread automatically resumes the task."""
+    store: SQLiteMemoryStore = runtime_env["store"]
+    runtime: RuntimeService = runtime_env["runtime"]
+    channel: _FakeChannel = runtime_env["channel"]
+
+    agent = _BlockedOnceAgent()
+    registry = AgentRegistry([agent])
+    session = ChannelSession(
+        platform="discord",
+        channel_id="100",
+        channel=channel,
+        registry=registry,
+    )
+    runtime.register_session(session, registry)
+    await runtime.start()
+
+    task = await runtime.create_task(
+        session=session,
+        registry=registry,
+        thread_id="thread-auto-resume",
+        goal="fix parser and run tests",
+        created_by="owner-1",
+        source="slash",
+    )
+    blocked = await _wait_for_status(store, task.id, {TASK_STATUS_BLOCKED})
+    assert blocked.status == TASK_STATUS_BLOCKED
+
+    # Send a plain message (not a control word, not a long task intent)
+    reply = IncomingMessage(
+        platform="discord",
+        channel_id="100",
+        thread_id="thread-auto-resume",
+        author="owner",
+        author_id="owner-1",
+        content="the fixture is now available in conftest.py",
+    )
+    handled = await runtime.maybe_handle_incoming(session, registry, reply, thread_id="thread-auto-resume")
+    assert handled is True
+
+    waiting = await _wait_for_status(store, task.id, {TASK_STATUS_WAITING_MERGE}, timeout=8.0)
+    assert waiting.status == TASK_STATUS_WAITING_MERGE
+
+
+@pytest.mark.asyncio
+async def test_runtime_completion_summary_has_files_and_timing(runtime_env):
+    """Completion summary stored in task.summary includes file list and timing metrics."""
+    store: SQLiteMemoryStore = runtime_env["store"]
+    runtime: RuntimeService = runtime_env["runtime"]
+    channel: _FakeChannel = runtime_env["channel"]
+
+    registry = AgentRegistry([_DoneAgent()])
+    session = ChannelSession(
+        platform="discord",
+        channel_id="100",
+        channel=channel,
+        registry=registry,
+    )
+    runtime.register_session(session, registry)
+    await runtime.start()
+
+    task = await runtime.create_task(
+        session=session,
+        registry=registry,
+        thread_id="thread-summary",
+        goal="fix tests and install dependencies then run all tests",
+        created_by="owner-1",
+        source="slash",
+    )
+    waiting = await _wait_for_status(store, task.id, {TASK_STATUS_WAITING_MERGE})
+    assert waiting.status == TASK_STATUS_WAITING_MERGE
+
+    loaded = await store.get_runtime_task(task.id)
+    assert loaded is not None
+    summary = loaded.summary or ""
+    # Should mention changed files and timing
+    assert "src/runtime.txt" in summary or "Changed files" in summary
+    assert "Timing:" in summary
+
+    # Check task.completed event has latency fields
+    events = await store.list_runtime_events(task.id, limit=50)
+    completed = [e for e in events if e.get("event_type") == "task.completed"]
+    assert completed, "Expected task.completed event"
+    payload = completed[-1].get("payload", {})
+    assert "total_agent_s" in payload
+    assert "total_test_s" in payload
+    assert "total_elapsed_s" in payload
+
+
+@pytest.mark.asyncio
+async def test_runtime_suggest_action_resends_decision_surface(runtime_env):
+    """The 'suggest' decision action re-sends a decision surface with the suggestion shown."""
+    store: SQLiteMemoryStore = runtime_env["store"]
+    runtime: RuntimeService = runtime_env["runtime"]
+    channel: _FakeChannel = runtime_env["channel"]
+
+    registry = AgentRegistry([_DoneAgent()])
+    session = ChannelSession(
+        platform="discord",
+        channel_id="100",
+        channel=channel,
+        registry=registry,
+    )
+    runtime.register_session(session, registry)
+    await runtime.start()
+
+    msg = IncomingMessage(
+        platform="discord",
+        channel_id="100",
+        thread_id="thread-suggest",
+        author="owner",
+        author_id="owner-1",
+        content="please fix and pip install missing deps then run tests",
+    )
+    await runtime.maybe_handle_incoming(session, registry, msg, thread_id="thread-suggest")
+
+    tasks = await store.list_runtime_tasks(platform="discord", channel_id="100")
+    draft_task = next(t for t in tasks if t.thread_id == "thread-suggest")
+    assert draft_task.status == TASK_STATUS_DRAFT
+
+    suggest_event = await runtime.build_slash_decision_event(
+        platform="discord",
+        channel_id="100",
+        thread_id="thread-suggest",
+        task_id=draft_task.id,
+        action="suggest",
+        actor_id="owner-1",
+        suggestion="add --no-build-isolation flag",
+    )
+    assert suggest_event is not None
+    drafts_before = len(channel.drafts)
+    result = await runtime.handle_decision_event(suggest_event)
+    assert "suggestion recorded" in result.lower()
+
+    # A new decision surface should have been sent with the suggestion text
+    assert len(channel.drafts) > drafts_before
+    latest_draft = channel.drafts[-1]
+    assert "add --no-build-isolation flag" in latest_draft["draft_text"]
+    assert "Suggestion Recorded" in latest_draft["draft_text"]
