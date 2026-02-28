@@ -432,6 +432,30 @@ async def test_short_workspace_cleanup_uses_db_ttl(tmp_path):
     await store.close()
 
 
+def test_prepare_workspace_compat_files_replaces_stale_entries(tmp_path):
+    base = tmp_path / "base-workspace"
+    base.mkdir(parents=True, exist_ok=True)
+    (base / "AGENTS.md").write_text("# fresh agents\n", encoding="utf-8")
+    (base / ".codex").mkdir(exist_ok=True)
+    (base / ".codex" / "skills").mkdir(parents=True, exist_ok=True)
+    (base / ".claude").mkdir(exist_ok=True)
+    (base / ".gemini").mkdir(exist_ok=True)
+
+    session_ws = tmp_path / "sessions" / "thread-1"
+    session_ws.mkdir(parents=True, exist_ok=True)
+    (session_ws / "AGENTS.md").write_text("# stale agents\n", encoding="utf-8")
+    (session_ws / ".codex").mkdir(exist_ok=True)
+    (session_ws / ".codex" / "old.txt").write_text("old", encoding="utf-8")
+
+    gm = GatewayManager([], short_workspace={"base_workspace": str(base)})
+    gm._prepare_workspace_compat_files(session_ws)
+
+    assert (session_ws / "AGENTS.md").is_symlink()
+    assert (session_ws / "AGENTS.md").resolve() == (base / "AGENTS.md")
+    assert (session_ws / ".codex").is_symlink()
+    assert (session_ws / ".codex").resolve() == (base / ".codex")
+
+
 @pytest.mark.asyncio
 async def test_router_propose_task_creates_runtime_draft_and_skips_reply():
     channel = MagicMock()
@@ -581,3 +605,64 @@ async def test_explicit_skill_invocation_bypasses_router_and_runtime(tmp_path):
     assert registry.run.call_args.args[0] == "/top-5-daily-news"
     assert registry.run.call_args.kwargs["force_agent"] == "claude"
     assert channel.send.await_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_router_repair_skill_creates_skill_task_with_thread_context(tmp_path):
+    channel = MagicMock()
+    channel.platform = "discord"
+    channel.channel_id = "100"
+    channel.create_thread = AsyncMock(return_value="t1")
+    channel.send = AsyncMock()
+    channel.typing = MagicMock()
+    channel.typing.return_value.__aenter__ = AsyncMock(return_value=None)
+    channel.typing.return_value.__aexit__ = AsyncMock(return_value=False)
+
+    registry = MagicMock(spec=AgentRegistry)
+    registry.run = AsyncMock()
+
+    runtime = MagicMock()
+    runtime.maybe_handle_thread_context = AsyncMock(return_value=False)
+    runtime.maybe_handle_incoming = AsyncMock(return_value=False)
+    runtime.create_skill_task = AsyncMock()
+
+    router = MagicMock()
+    router.confidence_threshold = 0.55
+    router.route = AsyncMock(
+        return_value=RouteDecision(
+            decision="repair_skill",
+            confidence=0.92,
+            goal="Update existing skill 'top-5-daily-news' based on recent user feedback.",
+            risk_hints=[],
+            raw_text="",
+            skill_name="top-5-daily-news",
+            task_type="skill_change",
+            completion_mode="merge",
+        )
+    )
+
+    skills_root = tmp_path / "skills"
+    skill_dir = skills_root / "top-5-daily-news"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("name: top-5-daily-news\n", encoding="utf-8")
+    syncer = MagicMock()
+    syncer._skills_path = skills_root  # noqa: SLF001
+
+    session = _make_session(channel=channel, registry=registry)
+    await session.append_user("thread-1", "/top-5-daily-news", "alice")
+    await session.append_assistant("thread-1", "some result", "claude")
+
+    gm = GatewayManager([], runtime_service=runtime, intent_router=router, skill_syncer=syncer)
+    msg = _make_msg(thread_id="thread-1", content="这个 skill 不太对，帮我修一下")
+    await gm.handle_message(session, registry, msg)
+
+    runtime.create_skill_task.assert_awaited_once()
+    kwargs = runtime.create_skill_task.call_args.kwargs
+    assert kwargs["skill_name"] == "top-5-daily-news"
+    assert kwargs["source"] == "repair_skill"
+    assert "Repair existing skill: top-5-daily-news" in kwargs["raw_request"]
+    router.route.assert_awaited_once()
+    routed_context = router.route.call_args.kwargs["context"]
+    assert "/top-5-daily-news" in routed_context
+    assert "some result" in routed_context
+    registry.run.assert_not_called()

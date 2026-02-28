@@ -167,3 +167,40 @@ async def test_router_parses_artifact_task_decision(monkeypatch):
     assert out.decision == "propose_artifact_task"
     assert out.task_type == "artifact"
     assert out.completion_mode == "reply"
+
+
+@pytest.mark.asyncio
+async def test_router_parses_repair_skill_decision(monkeypatch):
+    router = OpenAICompatibleRouter(
+        base_url="https://api.example.com/v1",
+        api_key="k",
+        model="m",
+    )
+
+    def _fake_post(_payload):
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": (
+                            '{"decision":"repair_skill","confidence":0.89,'
+                            "\"goal\":\"Update existing skill 'top-5-daily-news' based on recent feedback\","
+                            '"skill_name":"top-5-daily-news",'
+                            '"risk_hints":["quality_feedback"],'
+                            '"task_type":"skill_change","completion_mode":"merge"}'
+                        )
+                    }
+                }
+            ]
+        }
+
+    monkeypatch.setattr(router, "_post_json", _fake_post)
+    out = await router.route(
+        "这个 skill 不太对，帮我修一下",
+        context="Recent thread context:\n- user: /top-5-daily-news",
+    )
+    assert out is not None
+    assert out.decision == "repair_skill"
+    assert out.skill_name == "top-5-daily-news"
+    assert out.task_type == "skill_change"
+    assert out.completion_mode == "merge"

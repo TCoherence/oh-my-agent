@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class RouteDecision:
-    decision: str  # "reply_once" | "invoke_existing_skill" | "propose_artifact_task" | "propose_repo_task" | "create_skill"
+    decision: str  # "reply_once" | "invoke_existing_skill" | "propose_artifact_task" | "propose_repo_task" | "create_skill" | "repair_skill"
     confidence: float
     goal: str
     risk_hints: list[str]
@@ -47,7 +47,7 @@ class OpenAICompatibleRouter:
     def confidence_threshold(self) -> float:
         return self._confidence_threshold
 
-    async def route(self, message: str) -> RouteDecision | None:
+    async def route(self, message: str, *, context: str | None = None) -> RouteDecision | None:
         payload = {
             "model": self._model,
             "temperature": 0,
@@ -59,20 +59,21 @@ class OpenAICompatibleRouter:
                         "Classify whether the user message should be handled as "
                         "a one-off chat reply, a direct invocation of an existing skill, "
                         "a multi-step artifact task, a multi-step repository-change task, "
-                        "or a skill-creation task.\n"
+                        "a skill-creation task, or a repair request for an existing skill.\n"
                         "Output strict JSON only with keys: decision, confidence, goal, risk_hints, skill_name, task_type, completion_mode.\n"
-                        "decision must be 'reply_once', 'invoke_existing_skill', 'propose_artifact_task', 'propose_repo_task', or 'create_skill'.\n"
+                        "decision must be 'reply_once', 'invoke_existing_skill', 'propose_artifact_task', 'propose_repo_task', 'create_skill', or 'repair_skill'.\n"
                         "If invoke_existing_skill, keep goal empty when possible and provide skill_name if obvious.\n"
-                        "If propose_artifact_task, propose_repo_task, or create_skill, write a concise executable goal.\n"
-                        "If create_skill, also provide skill_name as a hyphen-case slug.\n"
+                        "If propose_artifact_task, propose_repo_task, create_skill, or repair_skill, write a concise executable goal.\n"
+                        "If create_skill or repair_skill, also provide skill_name as a hyphen-case slug.\n"
+                        "Use repair_skill when the user is giving feedback on an existing skill or asking to fix/update one based on recent skill output.\n"
                         "If propose_artifact_task, task_type should be 'artifact' and completion_mode should be 'reply' or 'artifact'.\n"
                         "If propose_repo_task, task_type should be 'repo_change' and completion_mode should be 'merge'.\n"
-                        "If create_skill, task_type should be 'skill_change' and completion_mode should be 'merge'.\n"
+                        "If create_skill or repair_skill, task_type should be 'skill_change' and completion_mode should be 'merge'.\n"
                         "If reply_once, goal can be empty string and skill_name should be empty string.\n"
                         "confidence must be a float between 0 and 1."
                     ),
                 },
-                {"role": "user", "content": message[:1500]},
+                {"role": "user", "content": (f"{context}\n\nCurrent user message:\n{message[:1500]}" if context else message[:1500])},
             ],
         }
         attempts = self._max_retries + 1
@@ -119,7 +120,7 @@ class OpenAICompatibleRouter:
             return None
 
         decision = str(parsed.get("decision", "reply_once")).strip().lower()
-        if decision not in {"reply_once", "invoke_existing_skill", "propose_artifact_task", "propose_repo_task", "create_skill", "propose_task"}:
+        if decision not in {"reply_once", "invoke_existing_skill", "propose_artifact_task", "propose_repo_task", "create_skill", "repair_skill", "propose_task"}:
             decision = "reply_once"
         if decision == "propose_task":
             decision = "propose_repo_task"

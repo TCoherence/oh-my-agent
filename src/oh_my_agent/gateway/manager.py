@@ -23,7 +23,6 @@ logger = logging.getLogger(__name__)
 THREAD_NAME_MAX = 90
 _EXPLICIT_SKILL_CALL_RE = re.compile(r"^/([a-zA-Z0-9][a-zA-Z0-9-_]{0,62})(?:\s|$)")
 
-
 class GatewayManager:
     """Manages multiple platform channels and routes messages to agent sessions."""
 
@@ -266,6 +265,8 @@ class GatewayManager:
                 logger.info("[%s] THREAD_CONTEXT handled thread=%s", req_id, thread_id)
                 return
 
+        history = await session.get_history(thread_id)
+
         explicit_skill = self._detect_explicit_skill_invocation(msg.content)
         if explicit_skill:
             logger.info(
@@ -284,7 +285,8 @@ class GatewayManager:
             and self._intent_router
             and self._runtime_service
         ):
-            router_decision = await self._intent_router.route(msg.content)
+            router_context = self._build_router_context(history)
+            router_decision = await self._intent_router.route(msg.content, context=router_context)
             threshold = self._intent_router.confidence_threshold
             if router_decision is None:
                 logger.info("[%s] ROUTER unavailable; fallback to heuristic/normal flow", req_id)
@@ -296,6 +298,40 @@ class GatewayManager:
                     router_decision.confidence,
                     threshold,
                 )
+            if (
+                router_decision
+                and router_decision.decision == "repair_skill"
+                and router_decision.confidence >= threshold
+            ):
+                repair_skill = router_decision.skill_name or self._recent_invoked_skill(history) or "skill"
+                repair_request = self._build_skill_repair_request(repair_skill, history, msg.content)
+                goal = router_decision.goal or f"Update existing skill '{repair_skill}' based on recent user feedback."
+                await self._runtime_service.create_skill_task(
+                    session=session,
+                    registry=registry,
+                    thread_id=thread_id,
+                    goal=goal,
+                    raw_request=repair_request,
+                    created_by=msg.author_id or msg.author,
+                    preferred_agent=msg.preferred_agent,
+                    skill_name=repair_skill,
+                    source="repair_skill",
+                )
+                await channel.send(
+                    thread_id,
+                    (
+                        f"Router classified this as feedback on existing skill `{repair_skill}` and created a repair draft. "
+                        "Approve to let the agent update the skill, or reject/suggest to keep it in chat flow."
+                    ),
+                )
+                logger.info(
+                    "[%s] ROUTER repair_skill confidence=%.2f goal=%r skill_name=%r",
+                    req_id,
+                    router_decision.confidence,
+                    goal[:120],
+                    repair_skill,
+                )
+                return
             if (
                 router_decision
                 and router_decision.decision == "create_skill"
@@ -438,7 +474,6 @@ class GatewayManager:
 
         # Append user turn to history
         await session.append_user(thread_id, msg.content, msg.author)
-        history = await session.get_history(thread_id)
         prior_history = history[:-1] if len(history) > 1 else []
 
         logger.info(
@@ -684,8 +719,20 @@ class GatewayManager:
         for name in ("AGENTS.md", ".claude", ".gemini", ".codex"):
             src = self._base_workspace / name
             dst = workspace / name
-            if not src.exists() or dst.exists():
+            if not src.exists():
                 continue
+            if dst.exists() or dst.is_symlink():
+                if dst.is_symlink():
+                    try:
+                        if dst.resolve() == src.resolve():
+                            continue
+                    except OSError:
+                        pass
+                    dst.unlink(missing_ok=True)
+                elif dst.is_dir():
+                    shutil.rmtree(dst, ignore_errors=True)
+                else:
+                    dst.unlink(missing_ok=True)
             try:
                 os.symlink(src, dst, target_is_directory=src.is_dir())
             except OSError:
@@ -757,6 +804,57 @@ class GatewayManager:
             for child in skills_path.iterdir()
             if child.is_dir() and (child / "SKILL.md").exists()
         }
+
+    @staticmethod
+    def _build_router_context(history: list[dict]) -> str:
+        if not history:
+            return ""
+        recent = history[-6:]
+        lines = ["Recent thread context:"]
+        for turn in recent:
+            role = turn.get("role", "unknown")
+            content = str(turn.get("content", "")).strip().replace("\n", " ")
+            if not content:
+                continue
+            lines.append(f"- {role}: {content[:240]}")
+        return "\n".join(lines)
+
+    def _recent_invoked_skill(self, history: list[dict]) -> str | None:
+        known = self._known_skill_names()
+        for turn in reversed(history):
+            if turn.get("role") != "user":
+                continue
+            content = str(turn.get("content", ""))
+            match = _EXPLICIT_SKILL_CALL_RE.match(content.strip())
+            if not match:
+                continue
+            skill_name = match.group(1)
+            if skill_name in known:
+                return skill_name
+        return None
+
+    @staticmethod
+    def _build_skill_repair_request(skill_name: str, history: list[dict], latest_feedback: str) -> str:
+        recent = history[-6:]
+        lines = [
+            f"Repair existing skill: {skill_name}",
+            "",
+            "Recent thread context:",
+        ]
+        for turn in recent:
+            role = turn.get("role", "unknown")
+            content = str(turn.get("content", "")).strip().replace("\n", " ")
+            if len(content) > 280:
+                content = content[:280] + "..."
+            lines.append(f"- {role}: {content}")
+        lines.extend(
+            [
+                "",
+                "Latest user feedback:",
+                latest_feedback.strip(),
+            ]
+        )
+        return "\n".join(lines).strip()
 
     def resolve_session(self, platform: str, channel_id: str) -> ChannelSession | None:
         return self._sessions.get(self._session_key(platform, channel_id))
