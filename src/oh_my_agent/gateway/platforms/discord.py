@@ -775,12 +775,28 @@ class DiscordChannel(BaseChannel):
                     nonce=action_nonce,
                     source="button",
                 )
-                await interaction.response.defer()
-                result = await self._runtime_service.handle_decision_event(event)
-
                 task_after = await self._runtime_service.get_task(action_task_id)
                 for child in view.children:
                     child.disabled = True
+                status = task_after.status if task_after else "PENDING"
+                processing_content = (
+                    f"{original_text}\n\n---\n"
+                    f"Status: `{status}`\n"
+                    f"Result: Processing `{action_name}`..."
+                )[:1900]
+                try:
+                    await interaction.response.edit_message(content=processing_content, view=view)
+                except Exception:
+                    logger.debug(
+                        "Failed to acknowledge decision message update for task %s",
+                        action_task_id,
+                        exc_info=True,
+                    )
+                    return
+
+                result = await self._runtime_service.handle_decision_event(event)
+
+                task_after = await self._runtime_service.get_task(action_task_id)
                 status = task_after.status if task_after else "UNKNOWN"
                 summary_bits = [f"Status: `{status}`"]
                 if task_after and task_after.merge_commit_hash:
@@ -791,9 +807,9 @@ class DiscordChannel(BaseChannel):
                     + f"\nResult: {result}"
                 )[:1900]
                 try:
-                    await interaction.edit_original_response(content=updated_content, view=view)
+                    await interaction.message.edit(content=updated_content, view=view)
                 except Exception:
-                    logger.debug("Failed to update decision message for task %s", action_task_id, exc_info=True)
+                    logger.debug("Failed to finalize decision message for task %s", action_task_id, exc_info=True)
 
                 await interaction.followup.send(result, ephemeral=True)
 
