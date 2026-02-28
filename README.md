@@ -62,8 +62,16 @@ cd oh-my-agent
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
+cp .env.example .env
 cp config.yaml.example config.yaml
 ```
+
+Then:
+
+- put secrets in `.env`
+- keep `config.yaml` limited to `${ENV_VAR}` references
+- update `DISCORD_BOT_TOKEN` and `DISCORD_CHANNEL_ID`
+- optionally set `DEEPSEEK_API_KEY` if router is enabled
 
 ### Config Highlights
 
@@ -114,7 +122,7 @@ runtime:
     merged_immediate: true
 ```
 
-Secrets can live in `.env`; `${VAR}` placeholders are substituted automatically.
+Secrets should live in `.env`; `${VAR}` placeholders are substituted automatically.
 
 Runtime artifacts default to `~/.oh-my-agent/runtime/` (memory DB, logs, task worktrees). Legacy `.workspace/` is migrated automatically on startup.
 
@@ -226,3 +234,7 @@ oh-my-agent
 - English runtime plan: [docs/EN/v0.5_runtime_plan.md](docs/EN/v0.5_runtime_plan.md)
 - Chinese runtime plan: [docs/CN/v0.5_runtime_plan.md](docs/CN/v0.5_runtime_plan.md)
 - Archived discussion: [docs/archive/future_planning_discussion.md](docs/archive/future_planning_discussion.md)
+
+## License
+
+MIT. See [LICENSE](LICENSE).
