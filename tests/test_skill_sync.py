@@ -54,3 +54,20 @@ def test_sync_no_skills_dir(tmp_path):
     syncer = SkillSync(skills_path=tmp_path / "nonexistent", project_root=tmp_path)
     count = syncer.sync()
     assert count == 0
+
+
+def test_refresh_workspace_dirs_copies_skill_dirs(skill_dir, tmp_path):
+    syncer = SkillSync(skills_path=skill_dir, project_root=tmp_path)
+    workspace_targets = [
+        tmp_path / "agent-workspace" / ".claude" / "skills",
+        tmp_path / "agent-workspace" / ".gemini" / "skills",
+    ]
+
+    count = syncer.refresh_workspace_dirs(workspace_targets)
+
+    assert count == 1
+    for target in workspace_targets:
+        copied = target / "test-skill"
+        assert copied.is_dir()
+        assert not copied.is_symlink()
+        assert (copied / "SKILL.md").exists()

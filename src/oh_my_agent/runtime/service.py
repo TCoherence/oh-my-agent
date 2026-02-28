@@ -74,6 +74,7 @@ class RuntimeService:
         repo_root: Path | None = None,
         skill_syncer=None,
         skills_path: Path | None = None,
+        workspace_skills_dirs: list[Path] | None = None,
     ) -> None:
         cfg = config or {}
         self._enabled = bool(cfg.get("enabled", True))
@@ -119,6 +120,7 @@ class RuntimeService:
         self._repo_root = (repo_root or Path.cwd()).resolve()
         self._skill_syncer = skill_syncer
         self._skills_path = skills_path
+        self._workspace_skills_dirs = workspace_skills_dirs
         worktree_root = Path(cfg.get("worktree_root", "~/.oh-my-agent/runtime/tasks")).expanduser().resolve()
         self._worktree = WorktreeManager(self._repo_root, worktree_root)
 
@@ -1323,7 +1325,10 @@ class RuntimeService:
                             logger.debug("git worktree prune failed after immediate merge cleanup", exc_info=True)
             merged_note = f"Task `{task.id}` merged successfully.{extra}"
             if task.task_type == TASK_TYPE_SKILL and task.skill_name:
-                merged_note += f" Skill `{task.skill_name}` merged. Run `/reload-skills` to activate."
+                merged_note += (
+                    f" Skill `{task.skill_name}` merged and synced to active Claude/Gemini workspaces. "
+                    "If an existing session still does not see it, run `/reload-skills`."
+                )
             await self._notify(task, merged_note)
             await self._signal_status_by_id(task, TASK_STATUS_MERGED)
             return merged_note
@@ -1449,6 +1454,7 @@ class RuntimeService:
         if self._skill_syncer is not None:
             try:
                 self._skill_syncer.sync()
+                self._skill_syncer.refresh_workspace_dirs(self._workspace_skills_dirs)
             except Exception as exc:
                 logger.warning("Post-merge skill sync failed for task %s: %s", task.id, exc)
 

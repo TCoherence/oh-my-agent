@@ -516,22 +516,7 @@ class GatewayManager:
                     line += f" — {len(result.warnings)} warning(s)"
                 validation_lines.append(line)
 
-            # Copy validated skills into workspace CLI dirs
-            if self._workspace_skills_dirs:
-                import shutil
-                for skill_name in new_skills:
-                    skill_dir = skills_path / skill_name
-                    if not skill_dir.is_dir():
-                        continue
-                    for ws_dir in self._workspace_skills_dirs:
-                        dest = ws_dir / skill_name
-                        if dest.exists():
-                            shutil.rmtree(dest)
-                        shutil.copytree(skill_dir, dest)
-                        logger.debug(
-                            "[%s] SKILL_SYNC copied '%s' to workspace %s",
-                            req_id, skill_name, ws_dir,
-                        )
+            self._skill_syncer.refresh_workspace_dirs(self._workspace_skills_dirs)
 
             # Notify via the current thread
             lines = [f"🔧 **New skill(s) synced** ({len(new_skills)}):"]

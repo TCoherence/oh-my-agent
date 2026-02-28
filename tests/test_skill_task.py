@@ -84,10 +84,21 @@ class _ClaudeSkillAgent(BaseAgent):
 class _FakeSkillSyncer:
     def __init__(self) -> None:
         self.calls = 0
+        self.workspace_refresh_calls: list[list[Path]] = []
 
     def sync(self) -> int:
         self.calls += 1
         return 1
+
+    def refresh_workspace_dirs(self, workspace_target_dirs=None) -> int:
+        dirs = list(workspace_target_dirs or [])
+        self.workspace_refresh_calls.append(dirs)
+        for target_dir in dirs:
+            target_dir.mkdir(parents=True, exist_ok=True)
+            skill_dir = target_dir / "weather"
+            skill_dir.mkdir(parents=True, exist_ok=True)
+            (skill_dir / "SKILL.md").write_text("---\nname: weather\n---\n", encoding="utf-8")
+        return len(dirs)
 
 
 def _init_repo(root: Path) -> None:
@@ -129,6 +140,10 @@ async def skill_runtime_env(tmp_path):
     await store.init()
 
     syncer = _FakeSkillSyncer()
+    workspace_skills_dirs = [
+        tmp_path / "agent-workspace" / ".claude" / "skills",
+        tmp_path / "agent-workspace" / ".gemini" / "skills",
+    ]
     runtime = RuntimeService(
         store,
         config={
@@ -151,9 +166,17 @@ async def skill_runtime_env(tmp_path):
         repo_root=repo,
         skill_syncer=syncer,
         skills_path=repo / "skills",
+        workspace_skills_dirs=workspace_skills_dirs,
     )
     channel = _FakeChannel()
-    yield {"repo": repo, "store": store, "runtime": runtime, "syncer": syncer, "channel": channel}
+    yield {
+        "repo": repo,
+        "store": store,
+        "runtime": runtime,
+        "syncer": syncer,
+        "channel": channel,
+        "workspace_skills_dirs": workspace_skills_dirs,
+    }
     await runtime.stop()
     await store.close()
 
@@ -218,6 +241,7 @@ async def test_skill_task_merge_records_provenance(skill_runtime_env):
     store: SQLiteMemoryStore = skill_runtime_env["store"]
     syncer: _FakeSkillSyncer = skill_runtime_env["syncer"]
     repo: Path = skill_runtime_env["repo"]
+    workspace_skills_dirs: list[Path] = skill_runtime_env["workspace_skills_dirs"]
 
     registry = AgentRegistry([_ClaudeSkillAgent()])
     session = ChannelSession(platform="discord", channel_id="100", channel=channel, registry=registry)
@@ -267,6 +291,9 @@ async def test_skill_task_merge_records_provenance(skill_runtime_env):
     assert merged.status == TASK_STATUS_MERGED
     assert (repo / "skills" / "weather" / "SKILL.md").exists()
     assert syncer.calls == 1
+    assert syncer.workspace_refresh_calls
+    for target in workspace_skills_dirs:
+        assert (target / "weather" / "SKILL.md").exists()
 
     provenance = await store.get_skill_provenance("weather")
     assert provenance is not None

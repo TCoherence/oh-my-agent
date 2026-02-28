@@ -360,6 +360,7 @@ async def _async_main(config: dict, logger: logging.Logger) -> None:
             ]
 
         forward, reverse = skill_syncer.full_sync(extra_source_dirs=workspace_skills_dirs)
+        skill_syncer.refresh_workspace_dirs(workspace_skills_dirs)
         logger.info("Skills: %d synced, %d reverse-imported", forward, reverse)
 
     # Build scheduler (optional)
@@ -390,6 +391,7 @@ async def _async_main(config: dict, logger: logging.Logger) -> None:
             repo_root=project_root,
             skill_syncer=skill_syncer,
             skills_path=(Path(skills_cfg.get("path", "skills/")).resolve() if skills_cfg.get("enabled", False) else None),
+            workspace_skills_dirs=workspace_skills_dirs,
         )
         logger.info(
             "Runtime enabled (workers=%s, default_agent=%s)",

@@ -278,6 +278,7 @@ class DiscordChannel(BaseChannel):
                 forward, reverse = self._skill_syncer.full_sync(
                     extra_source_dirs=self._workspace_skills_dirs
                 )
+                self._skill_syncer.refresh_workspace_dirs(self._workspace_skills_dirs)
 
                 from oh_my_agent.skills.validator import SkillValidator
                 validator = SkillValidator()
@@ -299,6 +300,7 @@ class DiscordChannel(BaseChannel):
 
                 summary = [
                     f"**Skill reload complete** — {forward} synced, {reverse} reverse-imported",
+                    "Active Claude/Gemini workspace skills refreshed.",
                 ]
                 if validation_lines:
                     summary.append("**Skills:**")

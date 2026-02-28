@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -123,8 +124,6 @@ class SkillSync:
         Returns:
             The number of skills imported.
         """
-        import shutil
-
         self._skills_path.mkdir(parents=True, exist_ok=True)
         existing_names = {
             d.name
@@ -174,6 +173,32 @@ class SkillSync:
         reverse_count = self.reverse_sync(extra_source_dirs=extra_source_dirs)
         forward_count = self.sync()
         return forward_count, reverse_count
+
+    def refresh_workspace_dirs(self, workspace_target_dirs: list[Path] | None = None) -> int:
+        """Copy canonical skills into active workspace CLI directories."""
+        if not workspace_target_dirs:
+            return 0
+
+        self._skills_path.mkdir(parents=True, exist_ok=True)
+        skills = self._collect_skills(self._skills_path)
+
+        for target_dir in workspace_target_dirs:
+            target_dir.mkdir(parents=True, exist_ok=True)
+            for skill_dir in skills:
+                dest = target_dir / skill_dir.name
+                if dest.is_symlink() or dest.is_file():
+                    dest.unlink()
+                elif dest.is_dir():
+                    shutil.rmtree(dest)
+                shutil.copytree(skill_dir, dest)
+
+        if skills:
+            logger.info(
+                "Refreshed %d skill(s) into workspace directories: %s",
+                len(skills),
+                [str(p) for p in workspace_target_dirs],
+            )
+        return len(skills)
 
     # ------------------------------------------------------------------ #
     #  Internal helpers                                                    #
