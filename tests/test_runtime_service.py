@@ -556,6 +556,76 @@ async def test_runtime_legacy_applied_is_mergeable(runtime_env):
 
 
 @pytest.mark.asyncio
+async def test_runtime_merge_blocked_can_wait_and_retry_from_thread(runtime_env):
+    store: SQLiteMemoryStore = runtime_env["store"]
+    runtime: RuntimeService = runtime_env["runtime"]
+    channel: _FakeChannel = runtime_env["channel"]
+    repo: Path = runtime_env["repo"]
+    registry = AgentRegistry([_DoneAgent()])
+    session = ChannelSession(
+        platform="discord",
+        channel_id="100",
+        channel=channel,
+        registry=registry,
+    )
+    runtime.register_session(session, registry)
+    await runtime.start()
+
+    task = await runtime.create_task(
+        session=session,
+        registry=registry,
+        thread_id="thread-merge-retry",
+        goal="fix docs and run tests",
+        created_by="owner-1",
+        source="slash",
+    )
+    waiting = await _wait_for_status(store, task.id, {TASK_STATUS_WAITING_MERGE})
+    assert waiting.status == TASK_STATUS_WAITING_MERGE
+
+    (repo / "README.md").write_text("# dirty\n", encoding="utf-8")
+    merge_result = await runtime.merge_task(task.id, actor_id="owner-1")
+    assert "merge blocked" in merge_result.lower()
+
+    blocked_merge = await store.get_runtime_task(task.id)
+    assert blocked_merge is not None
+    assert blocked_merge.status == TASK_STATUS_WAITING_MERGE
+    assert blocked_merge.merge_error
+    assert any(draft["task_id"] == task.id for draft in channel.drafts[1:])
+
+    wait_msg = IncomingMessage(
+        platform="discord",
+        channel_id="100",
+        thread_id="thread-merge-retry",
+        author="owner",
+        author_id="owner-1",
+        content="wait",
+    )
+    handled_wait = await runtime.maybe_handle_thread_context(session, wait_msg, thread_id="thread-merge-retry")
+    assert handled_wait is True
+    waiting_again = await store.get_runtime_task(task.id)
+    assert waiting_again is not None
+    assert waiting_again.status == TASK_STATUS_WAITING_MERGE
+
+    subprocess.run(["git", "add", "README.md"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "clean repo for retry"], cwd=repo, check=True, capture_output=True)
+
+    retry_msg = IncomingMessage(
+        platform="discord",
+        channel_id="100",
+        thread_id="thread-merge-retry",
+        author="owner",
+        author_id="owner-1",
+        content="retry merge",
+    )
+    handled_retry = await runtime.maybe_handle_thread_context(session, retry_msg, thread_id="thread-merge-retry")
+    assert handled_retry is True
+
+    merged = await _wait_for_status(store, task.id, {TASK_STATUS_MERGED})
+    assert merged.status == TASK_STATUS_MERGED
+    assert merged.merge_commit_hash
+
+
+@pytest.mark.asyncio
 async def test_runtime_logs_capture_heartbeats_and_tails(runtime_env):
     store: SQLiteMemoryStore = runtime_env["store"]
     runtime: RuntimeService = runtime_env["runtime"]

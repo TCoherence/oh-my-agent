@@ -254,6 +254,16 @@ class GatewayManager:
             thread_id = await channel.create_thread(msg, name)
             logger.info("[%s] THREAD created thread_id=%s name=%r", req_id, thread_id, name)
 
+        if self._runtime_service:
+            handled = await self._runtime_service.maybe_handle_thread_context(
+                session,
+                msg,
+                thread_id=thread_id,
+            )
+            if handled:
+                logger.info("[%s] THREAD_CONTEXT handled thread=%s", req_id, thread_id)
+                return
+
         # Runtime interception for long-running autonomous tasks.
         router_decision = None
         if (not msg.system) and self._intent_router and self._runtime_service:

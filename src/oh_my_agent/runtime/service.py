@@ -184,37 +184,14 @@ class RuntimeService:
         if msg.system:
             return False
 
-        actor = msg.author_id or msg.author
-
-        # 1. Try control command first (stop/pause/resume)
-        control = self._parse_control_intent(msg.content)
-        if control is not None:
-            action, instruction = control
-            active = await self._active_task_for_thread(session.platform, session.channel_id, thread_id)
-            if active is not None:
-                if action == "stop":
-                    result = await self.stop_task(active.id, actor_id=actor)
-                elif action == "pause":
-                    result = await self.pause_task(active.id, actor_id=actor)
-                elif action == "resume":
-                    result = await self.resume_task(active.id, instruction, actor_id=actor)
-                else:
-                    result = "Unknown control action."
-                await session.channel.send(thread_id, result)
-                return True
-
-        # 2. Auto-resume: if thread has a BLOCKED/PAUSED task, resume it regardless of intent.
-        #    This takes priority over new task creation — the user is replying to the blocked task.
-        active = await self._active_task_for_thread(session.platform, session.channel_id, thread_id)
-        if active is not None and active.status in {TASK_STATUS_BLOCKED, TASK_STATUS_PAUSED}:
-            result = await self.resume_task(active.id, msg.content, actor_id=actor)
-            await session.channel.send(thread_id, result)
+        if await self.maybe_handle_thread_context(session, msg, thread_id=thread_id):
             return True
 
-        # 3. Long task intent → create task
+        # 2. Long task intent → create task
         if not is_long_task_intent(msg.content):
             return False
 
+        actor = msg.author_id or msg.author
         await self.create_task(
             session=session,
             registry=registry,
@@ -226,6 +203,53 @@ class RuntimeService:
             source="message",
         )
         return True
+
+    async def maybe_handle_thread_context(
+        self,
+        session: ChannelSession,
+        msg: IncomingMessage,
+        *,
+        thread_id: str,
+    ) -> bool:
+        if not self._enabled:
+            return False
+        if msg.system:
+            return False
+
+        actor = msg.author_id or msg.author
+        active = await self._active_task_for_thread(session.platform, session.channel_id, thread_id)
+        if active is None:
+            return False
+
+        # 1. Try control command first (stop/pause/resume)
+        control = self._parse_control_intent(msg.content, active)
+        if control is not None:
+            action, instruction = control
+            if action == "stop":
+                result = await self.stop_task(active.id, actor_id=actor)
+            elif action == "pause":
+                result = await self.pause_task(active.id, actor_id=actor)
+            elif action == "resume":
+                result = await self.resume_task(active.id, instruction, actor_id=actor)
+            elif action == "retry_merge":
+                result = await self.merge_task(active.id, actor_id=actor)
+            elif action == "wait":
+                result = await self.wait_task(active.id, actor_id=actor)
+            elif action == "discard":
+                result = await self.discard_task(active.id, actor_id=actor)
+            else:
+                result = "Unknown control action."
+            await session.channel.send(thread_id, result)
+            return True
+
+        # 2. Auto-resume: if thread has a BLOCKED/PAUSED task, resume it regardless of intent.
+        #    This takes priority over new task creation — the user is replying to the blocked task.
+        if active.status in {TASK_STATUS_BLOCKED, TASK_STATUS_PAUSED}:
+            result = await self.resume_task(active.id, msg.content, actor_id=actor)
+            await session.channel.send(thread_id, result)
+            return True
+
+        return False
 
     async def create_task(
         self,
@@ -469,13 +493,37 @@ class RuntimeService:
             return f"Task `{task_id}` not found."
         return await self._execute_merge(task, actor_id=actor_id, source="slash")
 
+    async def wait_task(self, task_id: str, *, actor_id: str) -> str:
+        if not self._is_authorized(actor_id):
+            return "Only configured owners can keep merge tasks waiting."
+        task = await self._store.get_runtime_task(task_id)
+        if task is None:
+            return f"Task `{task_id}` not found."
+        if task.status not in {TASK_STATUS_WAITING_MERGE, TASK_STATUS_APPLIED, TASK_STATUS_MERGE_FAILED}:
+            return f"Task `{task.id}` is not waiting merge (status: {task.status})."
+        updates: dict[str, Any] = {}
+        if task.status == TASK_STATUS_MERGE_FAILED:
+            updates["status"] = TASK_STATUS_WAITING_MERGE
+        if updates:
+            await self._store.update_runtime_task(task.id, **updates)
+        await self._store.add_runtime_event(task.id, "task.merge_wait", {"actor_id": actor_id})
+        await self._notify(
+            task,
+            (
+                f"Task `{task.id}` remains pending merge. "
+                "Wait until the main repository is ready, then reply `retry merge`."
+            ),
+        )
+        await self._signal_status_by_id(task, TASK_STATUS_WAITING_MERGE)
+        return f"Task `{task.id}` kept in WAITING_MERGE."
+
     async def discard_task(self, task_id: str, *, actor_id: str) -> str:
         if not self._is_authorized(actor_id):
             return "Only configured owners can discard tasks."
         task = await self._store.get_runtime_task(task_id)
         if task is None:
             return f"Task `{task_id}` not found."
-        if task.status not in {TASK_STATUS_WAITING_MERGE, TASK_STATUS_APPLIED}:
+        if task.status not in {TASK_STATUS_WAITING_MERGE, TASK_STATUS_APPLIED, TASK_STATUS_MERGE_FAILED}:
             return f"Task `{task.id}` is not waiting merge (status: {task.status})."
         await self._store.update_runtime_task(
             task.id,
@@ -576,7 +624,7 @@ class RuntimeService:
             if task.status not in valid:
                 return f"Task `{task.id}` is not waiting approval (status: {task.status})."
         elif event.action in {"merge", "discard", "request_changes"}:
-            valid = {TASK_STATUS_WAITING_MERGE, TASK_STATUS_APPLIED}
+            valid = {TASK_STATUS_WAITING_MERGE, TASK_STATUS_APPLIED, TASK_STATUS_MERGE_FAILED}
             if task.status not in valid:
                 return f"Task `{task.id}` is not waiting merge (status: {task.status})."
         else:
@@ -1204,7 +1252,7 @@ class RuntimeService:
             self._running_tasks.pop(task.id, None)
 
     async def _execute_merge(self, task: RuntimeTask, *, actor_id: str, source: str) -> str:
-        if task.status not in {TASK_STATUS_WAITING_MERGE, TASK_STATUS_APPLIED}:
+        if task.status not in {TASK_STATUS_WAITING_MERGE, TASK_STATUS_APPLIED, TASK_STATUS_MERGE_FAILED}:
             return f"Task `{task.id}` is not waiting merge (status: {task.status})."
         if not self._merge_gate_enabled:
             return "Merge gate is disabled."
@@ -1213,18 +1261,18 @@ class RuntimeService:
 
         workspace = Path(task.workspace_path) if task.workspace_path else None
         if workspace is None or not workspace.exists():
-            return await self._mark_merge_failed(task, "Workspace path is missing; cannot build patch.")
+            return await self._mark_merge_blocked(task, "Workspace path is missing; cannot build patch.")
 
         try:
             if self._merge_require_clean_repo and not await self._worktree.repo_is_clean():
-                return await self._mark_merge_failed(
+                return await self._mark_merge_blocked(
                     task,
                     "Main repository is not clean. Commit/stash changes before merging runtime task.",
                 )
 
             patch = await self._worktree.create_patch(workspace)
             if not patch.strip():
-                return await self._mark_merge_failed(task, "No patch produced from task workspace.")
+                return await self._mark_merge_blocked(task, "No patch produced from task workspace.")
 
             if self._merge_preflight_check:
                 await self._worktree.apply_patch_check(patch)
@@ -1280,23 +1328,49 @@ class RuntimeService:
             await self._signal_status_by_id(task, TASK_STATUS_MERGED)
             return merged_note
         except WorktreeError as exc:
-            return await self._mark_merge_failed(task, str(exc))
+            return await self._mark_merge_blocked(task, str(exc))
         except Exception as exc:
-            return await self._mark_merge_failed(task, f"Unexpected merge error: {exc}")
+            return await self._mark_merge_blocked(task, f"Unexpected merge error: {exc}")
 
-    async def _mark_merge_failed(self, task: RuntimeTask, error: str) -> str:
+    async def _mark_merge_blocked(self, task: RuntimeTask, error: str) -> str:
         await self._store.update_runtime_task(
             task.id,
-            status=TASK_STATUS_MERGE_FAILED,
+            status=TASK_STATUS_WAITING_MERGE,
             merge_error=error[:2000],
-            summary="Merge failed.",
-            ended_at_now=True,
         )
-        await self._store.add_runtime_event(task.id, "task.merge_failed", {"error": error[:1000]})
-        logger.error("Runtime task=%s MERGE_FAILED error=%s", task.id, error[:600])
-        await self._notify(task, f"Task `{task.id}` merge failed: {error[:400]}")
-        await self._signal_status_by_id(task, TASK_STATUS_MERGE_FAILED)
-        return f"Task `{task.id}` merge failed: {error[:200]}"
+        await self._store.add_runtime_event(task.id, "task.merge_blocked", {"error": error[:1000]})
+        logger.warning("Runtime task=%s MERGE_BLOCKED error=%s", task.id, error[:600])
+
+        refreshed = await self._store.get_runtime_task(task.id)
+        blocked_task = refreshed or task
+        session = self._session_for(blocked_task)
+        if session is not None:
+            nonce = await self._store.create_runtime_decision_nonce(
+                task.id,
+                ttl_minutes=self._decision_ttl_minutes,
+            )
+            text = await self._merge_gate_text(blocked_task)
+            msg_id = await self._send_decision_surface(
+                session,
+                blocked_task.thread_id,
+                text,
+                blocked_task.id,
+                nonce,
+                ["merge", "discard", "request_changes"],
+            )
+            if msg_id:
+                await self._store.update_runtime_task(task.id, decision_message_id=msg_id)
+
+        await self._notify(
+            blocked_task,
+            (
+                f"Task `{task.id}` merge blocked: {error[:400]}\n"
+                "Check whether another process or uncommitted change is touching the main repository. "
+                "Reply `retry merge` after cleanup, `wait` to keep it pending, or `discard` to end it."
+            ),
+        )
+        await self._signal_status_by_id(blocked_task, TASK_STATUS_WAITING_MERGE)
+        return f"Task `{task.id}` merge blocked: {error[:200]}"
 
     async def _cleanup_expired_tasks(self) -> int:
         candidates: list[RuntimeTask] = []
@@ -1624,6 +1698,11 @@ class RuntimeService:
             f"Test command: `{task.test_command}`",
         ]
 
+        if task.merge_error:
+            lines.append("")
+            lines.append("Last merge attempt:")
+            lines.append(f"```text\n{task.merge_error[:400]}\n```")
+
         changes = await self._collect_task_changes(task, limit=10)
         if changes:
             lines.append("")
@@ -1644,11 +1723,12 @@ class RuntimeService:
             [
                 "",
                 "Choose one action:",
-                "- Merge: apply patch to current branch and auto commit",
+                "- Merge: apply patch to current branch and auto commit" + (" (retry)" if task.merge_error else ""),
                 "- Discard: keep audit metadata, drop this task result",
                 "- Request Changes: send task back to BLOCKED for another iteration",
+                "- Wait: keep the task pending and retry later",
                 "",
-                "Use `/task_changes` or `/task_logs` for full details, if available.",
+                "Use `/task_changes` or `/task_logs` for full details, if available. You can also reply `retry merge`, `wait`, or `discard` in-thread.",
             ]
         )
         return "\n".join(lines)[:1900]
@@ -1707,7 +1787,7 @@ class RuntimeService:
         return None
 
     @staticmethod
-    def _parse_control_intent(text: str) -> tuple[str, str] | None:
+    def _parse_control_intent(text: str, task: RuntimeTask | None = None) -> tuple[str, str] | None:
         """Return (action, instruction) if text is a runtime control command, else None."""
         stripped = text.strip()
         lower = stripped.lower()
@@ -1718,6 +1798,42 @@ class RuntimeService:
         for prefix in ("resume ", "continue "):
             if lower.startswith(prefix):
                 return ("resume", stripped[len(prefix):].strip())
+
+        if task and task.status in {TASK_STATUS_WAITING_MERGE, TASK_STATUS_APPLIED, TASK_STATUS_MERGE_FAILED}:
+            retry_hints = (
+                "retry merge",
+                "merge again",
+                "remerge",
+                "retry the merge",
+                "重新merge",
+                "重新 merge",
+                "重新合并",
+                "重试merge",
+                "重试合并",
+                "再merge",
+                "再试一次merge",
+                "再试一次合并",
+                "能重新merge吗",
+                "能重新合并吗",
+                "清理好了，重新merge",
+                "清理好了，重新合并",
+            )
+            if any(hint in lower for hint in retry_hints) or any(hint in stripped for hint in ("重新合并", "重试合并", "再试一次合并", "能重新合并吗", "清理好了，重新合并")):
+                return ("retry_merge", "")
+
+            wait_hints = {"wait", "hold", "wait for now", "later"}
+            if lower in wait_hints or any(hint in stripped for hint in ("先等等", "先等", "等待", "先放着", "先放一放")):
+                return ("wait", "")
+
+            discard_hints = (
+                "discard",
+                "drop it",
+                "end this task",
+                "cancel this task",
+                "give up",
+            )
+            if lower in discard_hints or any(hint in stripped for hint in ("结束这个任务", "直接结束", "放弃这个任务", "放弃吧", "算了")):
+                return ("discard", "")
         return None
 
     async def _active_task_for_thread(
@@ -1730,6 +1846,9 @@ class RuntimeService:
             TASK_STATUS_BLOCKED,
             TASK_STATUS_PAUSED,
             TASK_STATUS_PENDING,
+            TASK_STATUS_WAITING_MERGE,
+            TASK_STATUS_APPLIED,
+            TASK_STATUS_MERGE_FAILED,
         }
         tasks = await self._store.list_runtime_tasks(
             platform=platform,

@@ -447,6 +447,7 @@ async def test_router_propose_task_creates_runtime_draft_and_skips_reply():
     registry.run = AsyncMock(return_value=(mock_agent, AgentResponse(text="answer")))
 
     runtime = MagicMock()
+    runtime.maybe_handle_thread_context = AsyncMock(return_value=False)
     runtime.maybe_handle_incoming = AsyncMock(return_value=False)
     runtime.create_task = AsyncMock()
 

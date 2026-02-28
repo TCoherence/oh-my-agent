@@ -50,6 +50,7 @@ def _make_session_and_registry():
 async def test_manager_routes_create_skill_from_router():
     session, registry, channel = _make_session_and_registry()
     runtime_service = MagicMock()
+    runtime_service.maybe_handle_thread_context = AsyncMock(return_value=False)
     runtime_service.create_skill_task = AsyncMock()
     runtime_service.create_task = AsyncMock()
     runtime_service.maybe_handle_incoming = AsyncMock(return_value=False)
@@ -80,6 +81,7 @@ async def test_manager_routes_create_skill_from_router():
 async def test_manager_high_confidence_reply_once_skips_skill_heuristic():
     session, registry, channel = _make_session_and_registry()
     runtime_service = MagicMock()
+    runtime_service.maybe_handle_thread_context = AsyncMock(return_value=False)
     runtime_service.create_skill_task = AsyncMock()
     runtime_service.create_task = AsyncMock()
     runtime_service.maybe_handle_incoming = AsyncMock(return_value=False)
@@ -108,6 +110,7 @@ async def test_manager_high_confidence_reply_once_skips_skill_heuristic():
 async def test_manager_low_confidence_reply_once_falls_back_to_skill_heuristic():
     session, registry, _ = _make_session_and_registry()
     runtime_service = MagicMock()
+    runtime_service.maybe_handle_thread_context = AsyncMock(return_value=False)
     runtime_service.create_skill_task = AsyncMock()
     runtime_service.create_task = AsyncMock()
     runtime_service.maybe_handle_incoming = AsyncMock(return_value=False)
@@ -128,3 +131,27 @@ async def test_manager_low_confidence_reply_once_falls_back_to_skill_heuristic()
 
     runtime_service.create_skill_task.assert_awaited_once()
     runtime_service.maybe_handle_incoming.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_manager_thread_context_takes_priority_over_router():
+    session, registry, channel = _make_session_and_registry()
+    runtime_service = MagicMock()
+    runtime_service.maybe_handle_thread_context = AsyncMock(return_value=True)
+    runtime_service.create_skill_task = AsyncMock()
+    runtime_service.create_task = AsyncMock()
+    runtime_service.maybe_handle_incoming = AsyncMock(return_value=False)
+    router = MagicMock()
+    router.confidence_threshold = 0.55
+    router.route = AsyncMock()
+    gm = GatewayManager([], runtime_service=runtime_service, intent_router=router, owner_user_ids={"owner-1"})
+
+    await gm.handle_message(session, registry, _make_msg("retry merge"))
+
+    runtime_service.maybe_handle_thread_context.assert_awaited_once()
+    router.route.assert_not_called()
+    runtime_service.create_skill_task.assert_not_called()
+    runtime_service.create_task.assert_not_called()
+    runtime_service.maybe_handle_incoming.assert_not_called()
+    registry.run.assert_not_called()
+    channel.send.assert_not_called()
