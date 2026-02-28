@@ -6,7 +6,12 @@ import logging
 from pathlib import Path
 
 from oh_my_agent.agents.base import AgentResponse
-from oh_my_agent.agents.cli.base import BaseCLIAgent, _build_prompt_with_history, _extract_cli_error
+from oh_my_agent.agents.cli.base import (
+    BaseCLIAgent,
+    _build_prompt_with_history,
+    _extract_cli_error,
+    _stream_cli_process,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +95,7 @@ class ClaudeAgent(BaseCLIAgent):
         *,
         thread_id: str | None = None,
         workspace_override: Path | None = None,
+        log_path: Path | None = None,
     ) -> AgentResponse:
         """Run the Claude CLI.
 
@@ -110,19 +116,14 @@ class ClaudeAgent(BaseCLIAgent):
             logger.info("Running %s (new session) ...", self.name)
 
         try:
-            proc = await asyncio.create_subprocess_exec(
+            returncode, stdout, stderr = await _stream_cli_process(
                 *cmd,
                 cwd=self._resolve_cwd(workspace_override),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
                 env=self._build_env(),
-            )
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=self._timeout
+                timeout=self._timeout,
+                log_path=log_path,
             )
         except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
             return AgentResponse(text="", error=f"{self.name} CLI timed out after {self._timeout}s")
         except FileNotFoundError:
             return AgentResponse(
@@ -130,15 +131,15 @@ class ClaudeAgent(BaseCLIAgent):
                 error=f"{self.name} CLI not found at '{self._cli_path}'. Is it installed?",
             )
 
-        if proc.returncode != 0:
+        if returncode != 0:
             err_msg = _extract_cli_error(stderr, stdout)
-            logger.error("%s CLI failed (rc=%d): %s", self.name, proc.returncode, err_msg)
+            logger.error("%s CLI failed (rc=%d): %s", self.name, returncode, err_msg)
             # If resume fails, clear the session so next attempt starts fresh
             if session_id and thread_id:
                 self.clear_session(thread_id)
             return AgentResponse(
                 text="",
-                error=f"{self.name} exited {proc.returncode}: {err_msg[:400]}",
+                error=f"{self.name} exited {returncode}: {err_msg[:400]}",
             )
 
         raw = stdout.decode(errors="replace").strip()

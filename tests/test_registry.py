@@ -47,6 +47,20 @@ class _WorkspaceAgent(BaseAgent):
         return AgentResponse(text="ok")
 
 
+class _LogAgent(BaseAgent):
+    def __init__(self, name: str):
+        self._name = name
+        self.calls: list[tuple] = []
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    async def run(self, prompt, history=None, *, log_path=None):
+        self.calls.append((prompt, history, log_path))
+        return AgentResponse(text="ok")
+
+
 def test_registry_requires_at_least_one_agent():
     with pytest.raises(ValueError):
         AgentRegistry([])
@@ -114,3 +128,13 @@ async def test_workspace_override_passed_when_agent_supports_it(tmp_path):
     assert len(agent.calls) == 1
     assert agent.calls[0][2] == "thread-1"
     assert agent.calls[0][3] == workspace
+
+
+@pytest.mark.asyncio
+async def test_log_path_passed_when_agent_supports_it(tmp_path):
+    agent = _LogAgent("loggy")
+    registry = AgentRegistry([agent])
+    log_path = tmp_path / "runtime" / "logs" / "agent.log"
+    await registry.run("q", log_path=log_path)
+    assert len(agent.calls) == 1
+    assert agent.calls[0][2] == log_path

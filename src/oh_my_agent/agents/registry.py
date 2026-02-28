@@ -31,6 +31,7 @@ class AgentRegistry:
         thread_id: str | None = None,
         force_agent: str | None = None,
         workspace_override=None,
+        log_path=None,
     ) -> tuple[BaseAgent, AgentResponse]:
         """Try each agent in order. Return the first successful (agent, response) pair.
 
@@ -54,6 +55,8 @@ class AgentRegistry:
                 kwargs["thread_id"] = thread_id
             if "workspace_override" in sig.parameters:
                 kwargs["workspace_override"] = workspace_override
+            if "log_path" in sig.parameters:
+                kwargs["log_path"] = log_path
             response = await agent.run(prompt, history, **kwargs)
             return agent, response
 
@@ -70,6 +73,8 @@ class AgentRegistry:
                 kwargs["thread_id"] = thread_id
             if "workspace_override" in sig.parameters:
                 kwargs["workspace_override"] = workspace_override
+            if "log_path" in sig.parameters:
+                kwargs["log_path"] = log_path
             response = await agent.run(prompt, history, **kwargs)
             if not response.error:
                 return agent, response

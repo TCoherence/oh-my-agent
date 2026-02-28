@@ -73,6 +73,69 @@ def _build_prompt_with_history(prompt: str, history: list[dict] | None) -> str:
     return "\n".join(lines)
 
 
+async def _stream_cli_process(
+    *cmd: str,
+    cwd: str | None,
+    env: dict[str, str],
+    timeout: int,
+    log_path: Path | None = None,
+) -> tuple[int, bytes, bytes]:
+    log_handle = None
+    if log_path is not None:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_handle = log_path.open("a", encoding="utf-8")
+        log_handle.write(f"$ {' '.join(cmd)}\n")
+        if cwd:
+            log_handle.write(f"[cwd] {cwd}\n")
+        log_handle.write("\n")
+        log_handle.flush()
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        cwd=cwd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=env,
+    )
+
+    stdout_buf = bytearray()
+    stderr_buf = bytearray()
+
+    async def _pump(stream, buffer: bytearray, label: str) -> None:
+        while True:
+            chunk = await stream.read(4096)
+            if not chunk:
+                break
+            buffer.extend(chunk)
+            if log_handle is not None:
+                text = chunk.decode(errors="replace")
+                log_handle.write(f"[{label}] {text}")
+                if not text.endswith("\n"):
+                    log_handle.write("\n")
+                log_handle.flush()
+
+    stdout_task = asyncio.create_task(_pump(proc.stdout, stdout_buf, "stdout"))
+    stderr_task = asyncio.create_task(_pump(proc.stderr, stderr_buf, "stderr"))
+    try:
+        returncode = await asyncio.wait_for(proc.wait(), timeout=timeout)
+        await asyncio.gather(stdout_task, stderr_task)
+        return returncode, bytes(stdout_buf), bytes(stderr_buf)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+        raise
+    except asyncio.CancelledError:
+        proc.kill()
+        await proc.wait()
+        await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+        raise
+    finally:
+        if log_handle is not None:
+            log_handle.write(f"\n[exit] {proc.returncode}\n")
+            log_handle.close()
+
+
 class BaseCLIAgent(BaseAgent):
     """Base class for agents that wrap a CLI tool as a subprocess.
 
@@ -142,25 +205,21 @@ class BaseCLIAgent(BaseAgent):
         history: list[dict] | None = None,
         *,
         workspace_override: Path | None = None,
+        log_path: Path | None = None,
     ) -> AgentResponse:
         full_prompt = _build_prompt_with_history(prompt, history)
         cmd = self._build_command(full_prompt)
         logger.info("Running %s: %s ...", self.name, " ".join(cmd[:4]))
 
         try:
-            proc = await asyncio.create_subprocess_exec(
+            returncode, stdout, stderr = await _stream_cli_process(
                 *cmd,
                 cwd=self._resolve_cwd(workspace_override),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
                 env=self._build_env(),
-            )
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=self._timeout
+                timeout=self._timeout,
+                log_path=log_path,
             )
         except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
             return AgentResponse(text="", error=f"{self.name} CLI timed out after {self._timeout}s")
         except FileNotFoundError:
             return AgentResponse(
@@ -168,12 +227,12 @@ class BaseCLIAgent(BaseAgent):
                 error=f"{self.name} CLI not found at '{self._cli_path}'. Is it installed?",
             )
 
-        if proc.returncode != 0:
+        if returncode != 0:
             err_msg = _extract_cli_error(stderr, stdout)
-            logger.error("%s CLI failed (rc=%d): %s", self.name, proc.returncode, err_msg)
+            logger.error("%s CLI failed (rc=%d): %s", self.name, returncode, err_msg)
             return AgentResponse(
                 text="",
-                error=f"{self.name} exited {proc.returncode}: {err_msg[:400]}",
+                error=f"{self.name} exited {returncode}: {err_msg[:400]}",
             )
 
         return self._parse_output(stdout.decode(errors="replace").strip())

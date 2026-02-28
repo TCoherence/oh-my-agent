@@ -718,6 +718,43 @@ async def test_runtime_logs_capture_heartbeats_and_tails(runtime_env):
 
 
 @pytest.mark.asyncio
+async def test_runtime_logs_include_live_agent_log_tail(runtime_env):
+    store: SQLiteMemoryStore = runtime_env["store"]
+    runtime: RuntimeService = runtime_env["runtime"]
+    channel: _FakeChannel = runtime_env["channel"]
+    registry = AgentRegistry([_DoneAgent()])
+    session = ChannelSession(
+        platform="discord",
+        channel_id="100",
+        channel=channel,
+        registry=registry,
+    )
+    runtime.register_session(session, registry)
+    await runtime.start()
+
+    task = await runtime.create_task(
+        session=session,
+        registry=registry,
+        thread_id="thread-live-log",
+        goal="write a file and finish",
+        created_by="owner-1",
+        source="slash",
+    )
+    waiting = await _wait_for_status(store, task.id, {TASK_STATUS_WAITING_MERGE})
+    assert waiting.status == TASK_STATUS_WAITING_MERGE
+
+    live_log = runtime._agent_logs_root / f"{task.id}-step1-done-agent.log"  # noqa: SLF001
+    live_log.parent.mkdir(parents=True, exist_ok=True)
+    live_log.write_text("[stdout] line one\n[stdout] line two\n", encoding="utf-8")
+    runtime._live_agent_logs[task.id] = live_log  # noqa: SLF001
+
+    logs = await runtime.get_task_logs(task.id)
+    assert "Live agent log:" in logs
+    assert "Live agent log tail" in logs
+    assert "line two" in logs
+
+
+@pytest.mark.asyncio
 async def test_runtime_test_timeout_marks_timeout(runtime_env):
     store: SQLiteMemoryStore = runtime_env["store"]
     runtime: RuntimeService = runtime_env["runtime"]

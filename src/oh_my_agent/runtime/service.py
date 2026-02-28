@@ -134,10 +134,13 @@ class RuntimeService:
         worktree_root = Path(cfg.get("worktree_root", "~/.oh-my-agent/runtime/tasks")).expanduser().resolve()
         self._runtime_workspace_root = worktree_root
         self._worktree = WorktreeManager(self._repo_root, worktree_root)
+        self._agent_logs_root = self._runtime_workspace_root.parent / "logs" / "agents"
+        self._agent_logs_root.mkdir(parents=True, exist_ok=True)
 
         self._sessions: dict[str, ChannelSession] = {}
         self._registries: dict[str, AgentRegistry] = {}
         self._running_tasks: dict[str, asyncio.Task] = {}
+        self._live_agent_logs: dict[str, Path] = {}
         self._workers: list[asyncio.Task] = []
         self._janitor_task: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
@@ -675,6 +678,9 @@ class RuntimeService:
             lines.append(f"- Error: {task.error[:240]}")
         if task.artifact_manifest:
             lines.append(f"- Artifacts: {', '.join(task.artifact_manifest[:8])[:240]}")
+        live_log_path = self._live_agent_logs.get(task.id)
+        if live_log_path and live_log_path.exists():
+            lines.append(f"- Live agent log: `{live_log_path}`")
 
         events = await self._store.list_runtime_events(task.id, limit=self._log_event_limit)
         if events:
@@ -689,6 +695,16 @@ class RuntimeService:
                 )
 
         ckpt = await self._store.get_last_runtime_checkpoint(task.id)
+        live_agent_tail = None
+        if live_log_path and live_log_path.exists():
+            try:
+                live_agent_tail = self._tail_text(live_log_path.read_text(encoding="utf-8", errors="replace"))
+            except Exception:
+                live_agent_tail = None
+        if live_agent_tail:
+            lines.append("")
+            lines.append("**Live agent log tail**")
+            lines.append(f"```text\n{live_agent_tail}\n```")
         if ckpt:
             agent_tail = self._tail_text(str(ckpt.get("agent_result", "")))
             test_tail = self._format_test_output(str(ckpt.get("test_result", "")))
@@ -1333,8 +1349,12 @@ class RuntimeService:
             kwargs["thread_id"] = runtime_thread_id
         if "workspace_override" in sig.parameters:
             kwargs["workspace_override"] = workspace
+        log_path = self._agent_log_path(task, step, agent.name)
+        if "log_path" in sig.parameters:
+            kwargs["log_path"] = log_path
         run_task = asyncio.create_task(agent.run(prompt, [], **kwargs))
         self._running_tasks[task.id] = run_task
+        self._live_agent_logs[task.id] = log_path
         started = asyncio.get_running_loop().time()
         last_notice = 0.0
         last_persist = 0.0
@@ -1375,6 +1395,10 @@ class RuntimeService:
                         )
         finally:
             self._running_tasks.pop(task.id, None)
+
+    def _agent_log_path(self, task: RuntimeTask, step: int, agent_name: str) -> Path:
+        safe_agent = re.sub(r"[^a-zA-Z0-9._-]+", "-", agent_name).strip("-") or "agent"
+        return self._agent_logs_root / f"{task.id}-step{step}-{safe_agent}.log"
 
     async def _execute_merge(self, task: RuntimeTask, *, actor_id: str, source: str) -> str:
         if task.status not in {TASK_STATUS_WAITING_MERGE, TASK_STATUS_APPLIED, TASK_STATUS_MERGE_FAILED}:
