@@ -498,8 +498,9 @@ class DiscordChannel(BaseChannel):
                     ephemeral=True,
                 )
                 return
+            await interaction.response.defer(ephemeral=True)
             result = await self._runtime_service.handle_decision_event(event)
-            await interaction.response.send_message(result, ephemeral=True)
+            await interaction.followup.send(result[:1900], ephemeral=True)
 
         @tree.command(name="task_approve", description="Approve a runtime task draft")
         @app_commands.describe(task_id="Task ID")
@@ -555,8 +556,9 @@ class DiscordChannel(BaseChannel):
                     ephemeral=True,
                 )
                 return
+            await interaction.response.defer(ephemeral=True)
             text = await self._runtime_service.get_task_changes(task_id)
-            await interaction.response.send_message(text[:1900], ephemeral=True)
+            await interaction.followup.send(text[:1900], ephemeral=True)
 
         @tree.command(name="task_logs", description="Show recent logs/events for a runtime task")
         @app_commands.describe(task_id="Task ID")
@@ -573,8 +575,9 @@ class DiscordChannel(BaseChannel):
                     ephemeral=True,
                 )
                 return
+            await interaction.response.defer(ephemeral=True)
             text = await self._runtime_service.get_task_logs(task_id)
-            await interaction.response.send_message(text[:1900], ephemeral=True)
+            await interaction.followup.send(text[:1900], ephemeral=True)
 
         @tree.command(name="task_cleanup", description="Cleanup runtime task workspace(s)")
         @app_commands.describe(task_id="Optional task ID for immediate cleanup")
@@ -594,11 +597,12 @@ class DiscordChannel(BaseChannel):
                     ephemeral=True,
                 )
                 return
+            await interaction.response.defer(ephemeral=True)
             result = await self._runtime_service.cleanup_tasks(
                 actor_id=str(interaction.user.id),
                 task_id=task_id,
             )
-            await interaction.response.send_message(result, ephemeral=True)
+            await interaction.followup.send(result[:1900], ephemeral=True)
 
         @tree.command(name="task_resume", description="Resume a blocked runtime task")
         @app_commands.describe(task_id="Task ID", instruction="Instruction to unblock and continue")
@@ -619,12 +623,13 @@ class DiscordChannel(BaseChannel):
                     ephemeral=True,
                 )
                 return
+            await interaction.response.defer(ephemeral=True)
             result = await self._runtime_service.resume_task(
                 task_id,
                 instruction,
                 actor_id=str(interaction.user.id),
             )
-            await interaction.response.send_message(result, ephemeral=True)
+            await interaction.followup.send(result[:1900], ephemeral=True)
 
         @tree.command(name="task_stop", description="Stop a runtime task")
         @app_commands.describe(task_id="Task ID")
@@ -641,8 +646,9 @@ class DiscordChannel(BaseChannel):
                     ephemeral=True,
                 )
                 return
+            await interaction.response.defer(ephemeral=True)
             result = await self._runtime_service.stop_task(task_id, actor_id=str(interaction.user.id))
-            await interaction.response.send_message(result, ephemeral=True)
+            await interaction.followup.send(result[:1900], ephemeral=True)
 
         # ---- Events --------------------------------------------------------
 
