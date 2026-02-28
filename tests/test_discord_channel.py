@@ -27,7 +27,7 @@ class _FakeTree:
     def copy_global_to(self, *, guild) -> None:
         self.calls.append(("copy_global_to", guild.id))
 
-    def clear_commands(self, *, guild=None) -> None:
+    def clear_commands(self, *, guild) -> None:
         self.calls.append(("clear_commands", getattr(guild, "id", None)))
 
     async def sync(self, *, guild=None):
