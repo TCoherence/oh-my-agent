@@ -340,7 +340,6 @@ async def test_handle_message_uses_short_workspace_override(tmp_path):
     base = tmp_path / "base-workspace"
     base.mkdir(parents=True, exist_ok=True)
     (base / "AGENTS.md").write_text("# workspace agents\n", encoding="utf-8")
-    (base / "AGENT.md").write_text("ctx", encoding="utf-8")
     (base / ".claude").mkdir(exist_ok=True)
     (base / ".gemini").mkdir(exist_ok=True)
     (base / ".codex").mkdir(exist_ok=True)
@@ -380,7 +379,6 @@ async def test_handle_message_uses_short_workspace_override(tmp_path):
     assert isinstance(ws, Path)
     assert ws.parent == (tmp_path / "sessions")
     assert (ws / "AGENTS.md").exists()
-    assert (ws / "AGENT.md").exists()
     assert (ws / ".codex").exists()
 
 
@@ -388,7 +386,7 @@ async def test_handle_message_uses_short_workspace_override(tmp_path):
 async def test_short_workspace_cleanup_uses_db_ttl(tmp_path):
     base = tmp_path / "base-workspace"
     base.mkdir(parents=True, exist_ok=True)
-    (base / "AGENT.md").write_text("ctx", encoding="utf-8")
+    (base / "AGENTS.md").write_text("# workspace agents\n", encoding="utf-8")
 
     channel = MagicMock()
     channel.platform = "discord"

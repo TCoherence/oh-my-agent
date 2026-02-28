@@ -13,9 +13,9 @@ from pathlib import Path
 def _setup_workspace(workspace_path: str, project_root: Path, skills_path: Path | None = None) -> Path:
     """Create and populate the agent workspace directory.
 
-    Copies compatibility markdown files so CLI agents have project context
-    without access to the full dev repo. Also copies skills into workspace
-    CLI directories and generates a workspace-local ``AGENTS.md`` for Codex.
+    Generates a workspace-local ``AGENTS.md`` plus workspace skill directories
+    so CLI agents have the context they need without mirroring repo-root
+    `AGENT.md` / `CLAUDE.md` / `GEMINI.md` files into the external workspace.
 
     Args:
         workspace_path: Path string from config (may contain ``~``).
@@ -28,17 +28,8 @@ def _setup_workspace(workspace_path: str, project_root: Path, skills_path: Path 
     ws = Path(workspace_path).expanduser().resolve()
     ws.mkdir(parents=True, exist_ok=True)
 
-    # Copy AGENT.md / CLAUDE.md / GEMINI.md so agents have project context.
-    for filename in ("AGENT.md", "CLAUDE.md", "GEMINI.md"):
-        src = project_root / filename
-        if not src.exists():
-            continue
-        # Resolve symlinks so we copy the actual content, not a dangling link.
-        resolved = src.resolve() if src.is_symlink() else src
-        if resolved.exists():
-            shutil.copy2(resolved, ws / filename)
-
     # Copy skills into workspace CLI directories (not symlinks — real copies).
+    wrote_agents = False
     if skills_path and skills_path.is_dir():
         for cli_skills_dir in (
             ws / ".claude" / "skills",
@@ -60,9 +51,21 @@ def _setup_workspace(workspace_path: str, project_root: Path, skills_path: Path 
             from oh_my_agent.skills.skill_sync import SkillSync
 
             SkillSync(skills_path, project_root=project_root).write_workspace_agents_md(ws)
+            wrote_agents = True
         except Exception:
             logging.getLogger(__name__).warning(
                 "Failed to write workspace AGENTS.md for %s",
+                ws,
+                exc_info=True,
+            )
+    if not wrote_agents:
+        try:
+            from oh_my_agent.skills.skill_sync import SkillSync
+
+            SkillSync(project_root / "skills", project_root=project_root).write_workspace_agents_md(ws)
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "Failed to write fallback workspace AGENTS.md for %s",
                 ws,
                 exc_info=True,
             )

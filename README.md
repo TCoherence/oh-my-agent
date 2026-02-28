@@ -195,7 +195,7 @@ oh-my-agent
 - `~/.oh-my-agent/agent-workspace/sessions/` stores per-thread transient workspaces for normal chat turns.
 - `~/.oh-my-agent/agent-workspace/.codex/skills/` is refreshed so the workspace can expose Codex-oriented skill references through `AGENTS.md`.
 - `~/.oh-my-agent/runtime/tasks/` stores isolated runtime task worktrees and artifact task output directories.
-- `AGENTS.md`, `AGENT.md`, `CLAUDE.md`, and `GEMINI.md` are still written into the external base workspace on purpose. `AGENTS.md` currently carries Codex-visible skill references; the agent-specific files are still needed by the existing Claude/Gemini compatibility path and should not be removed until context injection is redesigned.
+- The external workspace now uses a generated `AGENTS.md` as the single injected context document. Repo-root `AGENT.md`, `CLAUDE.md`, and `GEMINI.md` are no longer mirrored into the external workspace or session workspaces.
 
 ## Autonomy Direction
 

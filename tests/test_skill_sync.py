@@ -1,6 +1,7 @@
 import pytest
 from pathlib import Path
 from oh_my_agent.skills.skill_sync import SkillSync
+from oh_my_agent.main import _setup_workspace
 
 
 @pytest.fixture
@@ -78,3 +79,20 @@ def test_refresh_workspace_dirs_copies_skill_dirs(skill_dir, tmp_path):
     content = agents_md.read_text(encoding="utf-8")
     assert ".codex/skills/test-skill/SKILL.md" in content
     assert "A test skill" in content
+
+
+def test_setup_workspace_uses_agents_md_not_agent_compat_files(skill_dir, tmp_path):
+    project_root = tmp_path / "project"
+    project_root.mkdir(parents=True, exist_ok=True)
+    (project_root / "AGENTS.md").write_text("# Repo Rules\n", encoding="utf-8")
+    (project_root / "AGENT.md").write_text("legacy agent file\n", encoding="utf-8")
+    (project_root / "CLAUDE.md").write_text("legacy claude file\n", encoding="utf-8")
+    (project_root / "GEMINI.md").write_text("legacy gemini file\n", encoding="utf-8")
+
+    workspace = _setup_workspace(str(tmp_path / "workspace"), project_root, skill_dir)
+
+    assert (workspace / "AGENTS.md").exists()
+    assert not (workspace / "AGENT.md").exists()
+    assert not (workspace / "CLAUDE.md").exists()
+    assert not (workspace / "GEMINI.md").exists()
+    assert (workspace / ".codex" / "skills" / "test-skill" / "SKILL.md").exists()

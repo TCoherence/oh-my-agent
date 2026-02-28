@@ -195,7 +195,7 @@ oh-my-agent
 - `~/.oh-my-agent/agent-workspace/sessions/` 存的是普通聊天 thread 的临时工作区。
 - `~/.oh-my-agent/agent-workspace/.codex/skills/` 会被刷新，用来通过 `AGENTS.md` 向 Codex 暴露 workspace 内的 skill 引用。
 - `~/.oh-my-agent/runtime/tasks/` 存的是 runtime 长任务的 worktree 和 artifact task 产物。
-- `AGENTS.md`、`AGENT.md`、`CLAUDE.md`、`GEMINI.md` 目前仍会被写入外置 base workspace。`AGENTS.md` 现在承担 Codex 可见的 skill 引用，而其余 agent-specific 文件仍被现有 Claude/Gemini 兼容路径使用；在重做上下文注入前，不应直接删除。
+- 外置 workspace 现在只使用生成的 `AGENTS.md` 作为统一上下文注入入口。repo 根的 `AGENT.md`、`CLAUDE.md`、`GEMINI.md` 不再被镜像到外置 workspace 或 session workspace。
 
 ## 自主性方向
 

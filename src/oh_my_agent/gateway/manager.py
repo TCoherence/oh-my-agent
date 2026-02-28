@@ -681,7 +681,7 @@ class GatewayManager:
     def _prepare_workspace_compat_files(self, workspace: Path) -> None:
         if self._base_workspace is None:
             return
-        for name in ("AGENTS.md", "AGENT.md", "CLAUDE.md", "GEMINI.md", ".claude", ".gemini", ".codex"):
+        for name in ("AGENTS.md", ".claude", ".gemini", ".codex"):
             src = self._base_workspace / name
             dst = workspace / name
             if not src.exists() or dst.exists():
