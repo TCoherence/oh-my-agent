@@ -1,0 +1,4 @@
+interface:
+  display_name: "Adapt Community Skill"
+  short_description: "Adapt imported skills for this workspace"
+  default_prompt: "Adapt an existing community skill to fit this workspace."
