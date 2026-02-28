@@ -186,15 +186,16 @@ oh-my-agent
 - 目前不把“project-level native Codex skill discovery”当成可靠能力。
 - 近阶段的实际策略是：
   - Claude/Gemini 通过 workspace skill dirs + `SkillSync` 刷新使用 skill
-  - Codex 依赖全局 Codex skills、`AGENTS.md` 和平台层抽象
+  - Codex 依赖全局 Codex skills，以及自动生成的 workspace `AGENTS.md`（其中引用 `workspace/.codex/skills/`）
 - `.codex/skills` 继续延后，直到确认 project-level 原生发现机制可靠。
 
 ## Workspace 布局
 
 - `~/.oh-my-agent/agent-workspace/` 是 CLI agent 的基础外置 workspace。
 - `~/.oh-my-agent/agent-workspace/sessions/` 存的是普通聊天 thread 的临时工作区。
+- `~/.oh-my-agent/agent-workspace/.codex/skills/` 会被刷新，用来通过 `AGENTS.md` 向 Codex 暴露 workspace 内的 skill 引用。
 - `~/.oh-my-agent/runtime/tasks/` 存的是 runtime 长任务的 worktree 和 artifact task 产物。
-- `AGENT.md`、`CLAUDE.md`、`GEMINI.md` 目前仍会被复制到外置 base workspace，因为现有 Claude/Gemini 兼容路径还依赖这些文件；在重做上下文注入前，不应直接删除。
+- `AGENTS.md`、`AGENT.md`、`CLAUDE.md`、`GEMINI.md` 目前仍会被写入外置 base workspace。`AGENTS.md` 现在承担 Codex 可见的 skill 引用，而其余 agent-specific 文件仍被现有 Claude/Gemini 兼容路径使用；在重做上下文注入前，不应直接删除。
 
 ## 自主性方向
 

@@ -61,6 +61,7 @@ def test_refresh_workspace_dirs_copies_skill_dirs(skill_dir, tmp_path):
     workspace_targets = [
         tmp_path / "agent-workspace" / ".claude" / "skills",
         tmp_path / "agent-workspace" / ".gemini" / "skills",
+        tmp_path / "agent-workspace" / ".codex" / "skills",
     ]
 
     count = syncer.refresh_workspace_dirs(workspace_targets)
@@ -71,3 +72,9 @@ def test_refresh_workspace_dirs_copies_skill_dirs(skill_dir, tmp_path):
         assert copied.is_dir()
         assert not copied.is_symlink()
         assert (copied / "SKILL.md").exists()
+
+    agents_md = tmp_path / "agent-workspace" / "AGENTS.md"
+    assert agents_md.exists()
+    content = agents_md.read_text(encoding="utf-8")
+    assert ".codex/skills/test-skill/SKILL.md" in content
+    assert "A test skill" in content

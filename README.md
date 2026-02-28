@@ -186,15 +186,16 @@ oh-my-agent
 - Project-level native Codex skill discovery is not treated as a reliable primitive yet.
 - The practical near-term assumption is:
   - Claude/Gemini use workspace skill directories refreshed by `SkillSync`
-  - Codex should rely on global Codex skills plus `AGENTS.md` / platform abstractions
+  - Codex uses global Codex skills plus a generated workspace `AGENTS.md` that references workspace-local `.codex/skills/`
 - `.codex/skills` remains deferred until there is confirmed project-level native discovery behavior.
 
 ## Workspace Layout
 
 - `~/.oh-my-agent/agent-workspace/` is the base external workspace used by CLI agents.
 - `~/.oh-my-agent/agent-workspace/sessions/` stores per-thread transient workspaces for normal chat turns.
+- `~/.oh-my-agent/agent-workspace/.codex/skills/` is refreshed so the workspace can expose Codex-oriented skill references through `AGENTS.md`.
 - `~/.oh-my-agent/runtime/tasks/` stores isolated runtime task worktrees and artifact task output directories.
-- `AGENT.md`, `CLAUDE.md`, and `GEMINI.md` are still copied into the external base workspace on purpose because current Claude/Gemini compatibility paths still depend on them. They should not be removed until the context injection path is redesigned.
+- `AGENTS.md`, `AGENT.md`, `CLAUDE.md`, and `GEMINI.md` are still written into the external base workspace on purpose. `AGENTS.md` currently carries Codex-visible skill references; the agent-specific files are still needed by the existing Claude/Gemini compatibility path and should not be removed until context injection is redesigned.
 
 ## Autonomy Direction
 

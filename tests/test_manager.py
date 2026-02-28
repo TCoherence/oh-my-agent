@@ -339,9 +339,11 @@ async def test_scheduler_dispatch_dm_skips_when_channel_unsupported():
 async def test_handle_message_uses_short_workspace_override(tmp_path):
     base = tmp_path / "base-workspace"
     base.mkdir(parents=True, exist_ok=True)
+    (base / "AGENTS.md").write_text("# workspace agents\n", encoding="utf-8")
     (base / "AGENT.md").write_text("ctx", encoding="utf-8")
     (base / ".claude").mkdir(exist_ok=True)
     (base / ".gemini").mkdir(exist_ok=True)
+    (base / ".codex").mkdir(exist_ok=True)
 
     channel = MagicMock()
     channel.platform = "discord"
@@ -377,7 +379,9 @@ async def test_handle_message_uses_short_workspace_override(tmp_path):
     ws = kwargs.get("workspace_override")
     assert isinstance(ws, Path)
     assert ws.parent == (tmp_path / "sessions")
+    assert (ws / "AGENTS.md").exists()
     assert (ws / "AGENT.md").exists()
+    assert (ws / ".codex").exists()
 
 
 @pytest.mark.asyncio

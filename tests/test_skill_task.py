@@ -85,6 +85,7 @@ class _FakeSkillSyncer:
     def __init__(self) -> None:
         self.calls = 0
         self.workspace_refresh_calls: list[list[Path]] = []
+        self.agents_md_roots: list[Path] = []
 
     def sync(self) -> int:
         self.calls += 1
@@ -98,7 +99,20 @@ class _FakeSkillSyncer:
             skill_dir = target_dir / "weather"
             skill_dir.mkdir(parents=True, exist_ok=True)
             (skill_dir / "SKILL.md").write_text("---\nname: weather\n---\n", encoding="utf-8")
+        roots = {
+            target_dir.parent.parent
+            for target_dir in dirs
+            if target_dir.name == "skills"
+        }
+        for root in roots:
+            self.write_workspace_agents_md(root)
         return len(dirs)
+
+    def write_workspace_agents_md(self, workspace_root: Path) -> Path:
+        self.agents_md_roots.append(workspace_root)
+        target = workspace_root / "AGENTS.md"
+        target.write_text("# Workspace AGENTS.md\n", encoding="utf-8")
+        return target
 
 
 def _init_repo(root: Path) -> None:
@@ -143,6 +157,7 @@ async def skill_runtime_env(tmp_path):
     workspace_skills_dirs = [
         tmp_path / "agent-workspace" / ".claude" / "skills",
         tmp_path / "agent-workspace" / ".gemini" / "skills",
+        tmp_path / "agent-workspace" / ".codex" / "skills",
     ]
     runtime = RuntimeService(
         store,
@@ -294,6 +309,7 @@ async def test_skill_task_merge_records_provenance(skill_runtime_env):
     assert syncer.workspace_refresh_calls
     for target in workspace_skills_dirs:
         assert (target / "weather" / "SKILL.md").exists()
+    assert (workspace_skills_dirs[0].parent.parent / "AGENTS.md").exists()
 
     provenance = await store.get_skill_provenance("weather")
     assert provenance is not None

@@ -13,10 +13,9 @@ from pathlib import Path
 def _setup_workspace(workspace_path: str, project_root: Path, skills_path: Path | None = None) -> Path:
     """Create and populate the agent workspace directory.
 
-    Copies ``AGENT.md`` (resolved through symlinks) so CLI agents have project
-    context without access to the full dev repo.  Also copies skills into
-    ``.claude/skills/`` and ``.gemini/skills/`` under the workspace so that
-    CLI-native skill discovery works from the new cwd.
+    Copies compatibility markdown files so CLI agents have project context
+    without access to the full dev repo. Also copies skills into workspace
+    CLI directories and generates a workspace-local ``AGENTS.md`` for Codex.
 
     Args:
         workspace_path: Path string from config (may contain ``~``).
@@ -41,7 +40,11 @@ def _setup_workspace(workspace_path: str, project_root: Path, skills_path: Path 
 
     # Copy skills into workspace CLI directories (not symlinks — real copies).
     if skills_path and skills_path.is_dir():
-        for cli_skills_dir in (ws / ".claude" / "skills", ws / ".gemini" / "skills"):
+        for cli_skills_dir in (
+            ws / ".claude" / "skills",
+            ws / ".gemini" / "skills",
+            ws / ".codex" / "skills",
+        ):
             cli_skills_dir.mkdir(parents=True, exist_ok=True)
             for skill_dir in skills_path.iterdir():
                 if not skill_dir.is_dir():
@@ -53,6 +56,16 @@ def _setup_workspace(workspace_path: str, project_root: Path, skills_path: Path 
                 if dest.exists():
                     shutil.rmtree(dest)
                 shutil.copytree(resolved_skill, dest)
+        try:
+            from oh_my_agent.skills.skill_sync import SkillSync
+
+            SkillSync(skills_path, project_root=project_root).write_workspace_agents_md(ws)
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "Failed to write workspace AGENTS.md for %s",
+                ws,
+                exc_info=True,
+            )
 
     return ws
 
@@ -357,6 +370,7 @@ async def _async_main(config: dict, logger: logging.Logger) -> None:
             workspace_skills_dirs = [
                 workspace / ".claude" / "skills",
                 workspace / ".gemini" / "skills",
+                workspace / ".codex" / "skills",
             ]
 
         forward, reverse = skill_syncer.full_sync(extra_source_dirs=workspace_skills_dirs)

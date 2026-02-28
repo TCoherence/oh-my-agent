@@ -300,7 +300,7 @@ class DiscordChannel(BaseChannel):
 
                 summary = [
                     f"**Skill reload complete** — {forward} synced, {reverse} reverse-imported",
-                    "Active Claude/Gemini workspace skills refreshed.",
+                    "Active Claude/Gemini/Codex workspace skill directories refreshed.",
                 ]
                 if validation_lines:
                     summary.append("**Skills:**")
