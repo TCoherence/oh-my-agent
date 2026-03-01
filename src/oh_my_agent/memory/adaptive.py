@@ -31,6 +31,47 @@ class MemoryEntry:
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
     observation_count: int = 1
+    tier: str = "daily"  # "daily" | "curated"
+
+
+# ---------------------------------------------------------------------------
+# Module-level utility functions (shared by AdaptiveMemoryStore & DateBasedMemoryStore)
+# ---------------------------------------------------------------------------
+
+def word_set(text: str) -> set[str]:
+    """Split text into a lowercase word set."""
+    return set(text.lower().split())
+
+
+def jaccard_similarity(words_a: set[str], words_b: set[str]) -> float:
+    """Jaccard similarity on word sets."""
+    if not words_a or not words_b:
+        return 0.0
+    return len(words_a & words_b) / len(words_a | words_b)
+
+
+def eviction_score(m: MemoryEntry, decay_half_life_days: float = 10.0) -> float:
+    """Higher = more likely to keep. Uses confidence * recency weight."""
+    try:
+        ref = datetime.fromisoformat(m.last_referenced)
+        age_days = (datetime.now(timezone.utc) - ref).total_seconds() / 86400
+    except (ValueError, TypeError):
+        age_days = 30.0
+    recency_weight = 1.0 / (1.0 + age_days * 0.1)
+    return m.confidence * recency_weight
+
+
+def find_duplicate(
+    summary: str,
+    memories: list[MemoryEntry],
+    threshold: float = 0.6,
+) -> int | None:
+    """Find index of existing memory with high Jaccard overlap, or None."""
+    words_new = word_set(summary)
+    for i, existing in enumerate(memories):
+        if jaccard_similarity(words_new, word_set(existing.summary)) >= threshold:
+            return i
+    return None
 
 
 class AdaptiveMemoryStore:
@@ -94,7 +135,7 @@ class AdaptiveMemoryStore:
                     entry.category = "fact"
                 entry.confidence = max(0.0, min(1.0, entry.confidence))
 
-                match = self._find_duplicate(entry.summary)
+                match = find_duplicate(entry.summary, self._memories)
                 if match is not None:
                     # Merge: boost confidence, union threads, bump count
                     existing = self._memories[match]
@@ -113,7 +154,7 @@ class AdaptiveMemoryStore:
 
             # Cap at max_memories by evicting lowest score
             if len(self._memories) > self._max_memories:
-                self._memories.sort(key=lambda m: self._eviction_score(m), reverse=True)
+                self._memories.sort(key=lambda m: eviction_score(m), reverse=True)
                 self._memories = self._memories[: self._max_memories]
 
             await self.save()
@@ -124,10 +165,10 @@ class AdaptiveMemoryStore:
         if not self._memories:
             return []
 
-        context_words = self._word_set(context)
+        context_words = word_set(context)
         scored: list[tuple[float, MemoryEntry]] = []
         for m in self._memories:
-            sim = self._similarity_score(context_words, self._word_set(m.summary))
+            sim = jaccard_similarity(context_words, word_set(m.summary))
             # Preferences always get a minimum score boost
             if m.category == "preference":
                 sim = max(sim, 0.1)
@@ -160,34 +201,8 @@ class AdaptiveMemoryStore:
                 return True
             return False
 
-    def _find_duplicate(self, summary: str) -> int | None:
-        """Find index of existing memory with high Jaccard overlap, or None."""
-        words_new = self._word_set(summary)
-        for i, existing in enumerate(self._memories):
-            if self._similarity_score(words_new, self._word_set(existing.summary)) >= 0.6:
-                return i
-        return None
-
-    @staticmethod
-    def _similarity_score(words_a: set[str], words_b: set[str]) -> float:
-        """Jaccard similarity on word sets."""
-        if not words_a or not words_b:
-            return 0.0
-        intersection = words_a & words_b
-        union = words_a | words_b
-        return len(intersection) / len(union)
-
-    @staticmethod
-    def _word_set(text: str) -> set[str]:
-        return set(text.lower().split())
-
-    @staticmethod
-    def _eviction_score(m: MemoryEntry) -> float:
-        """Higher = more likely to keep."""
-        try:
-            ref = datetime.fromisoformat(m.last_referenced)
-            age_days = (datetime.now(timezone.utc) - ref).total_seconds() / 86400
-        except (ValueError, TypeError):
-            age_days = 30.0
-        recency_weight = 1.0 / (1.0 + age_days * 0.1)
-        return m.confidence * recency_weight
+    # Legacy aliases — delegate to module-level functions for backward compat
+    _find_duplicate = staticmethod(lambda summary, mems=None: find_duplicate(summary, mems or []))
+    _similarity_score = staticmethod(jaccard_similarity)
+    _word_set = staticmethod(word_set)
+    _eviction_score = staticmethod(eviction_score)

@@ -11,6 +11,7 @@
 - Runtime live agent logging 已实现。
 - 多类型 runtime 已实现（`artifact`、`repo_change`、`skill_change`）。
 - Adaptive Memory 已实现（自动提取、注入、`/memories`、`/forget`）。
+- 基于日期的记忆系统已实现（daily/curated 两层架构、自动晋升、MEMORY.md 合成、`/promote`）。
 
 ## v0.5 Runtime 加固（已完成）
 
@@ -60,16 +61,16 @@
 
 ## v0.7 - 基于日期的记忆系统 + Ops 基础
 
-### 基于日期的记忆（核心）
+### 基于日期的记忆（已完成）
 
 将 adaptive memory 从扁平 YAML 升级为按日期组织的两层架构，参考 [OpenClaw 记忆系统](https://docs.openclaw.ai/concepts/memory)。
 
-- [ ] **每日记忆日志**（`memory/YYYY-MM-DD.md`）：按日追加的观察记录。系统启动时加载今天 + 昨天的内容，保持近期上下文。
-- [ ] **长期策展记忆**（`MEMORY.md`）：将稳定、高置信度的记忆从每日日志提升到持久化长期存储。包含决策、偏好和确认的事实。
-- [ ] **时间衰减评分**：近期记忆得分更高；旧的每日条目按指数衰减（可配置半衰期）。`MEMORY.md` 条目为常青内容（不衰减）。
-- [ ] **晋升生命周期**：每日 → 长期，当 `observation_count ≥ N` 且 `confidence ≥ 阈值` 跨越多天时触发。支持自动晋升或 agent 辅助策展。
-- [ ] **压缩前记忆刷写**：上下文窗口压缩前，触发一次静默 turn 提醒 agent 持久化重要观察，确保长会话中不丢失记忆。
-- [ ] **迁移路径**：首次加载时自动将现有 `memories.yaml` 条目迁移到新的日期格式。
+- [x] **每日记忆日志**（`memory/daily/YYYY-MM-DD.yaml`）：按日追加的观察记录。系统启动时加载今天 + 昨天，保持近期上下文。
+- [x] **长期策展记忆**（`memory/curated.yaml` + `memory/MEMORY.md`）：将稳定记忆提升到持久化长期存储。MEMORY.md 是 agent 合成的自然语言视图。
+- [x] **时间衰减评分**：daily 条目按指数衰减（可配置半衰期）。curated 条目不衰减。
+- [x] **晋升生命周期**：daily → curated，当 `observation_count ≥ N` 且 `confidence ≥ 阈值` 且 age ≥ 1 天。启动时自动晋升 + `/promote` 手动晋升。
+- [x] **压缩前记忆刷写**：记忆提取在历史压缩之前执行（顺序调换），确保不丢失。
+- [x] **Discord 命令**：`/memories` 显示 `[C]`/`[D]` 层级标记，新增 `/promote` 命令。
 
 ### Ops 基础
 

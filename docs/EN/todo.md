@@ -11,6 +11,7 @@
 - Runtime live agent logging is implemented.
 - Multi-type runtime is implemented (`artifact`, `repo_change`, `skill_change`).
 - Adaptive memory is implemented (auto-extraction, injection, `/memories`, `/forget`).
+- Date-based memory is implemented (daily/curated two-tier, auto-promotion, MEMORY.md synthesis, `/promote`).
 
 ## v0.5 Runtime Hardening (complete)
 
@@ -60,16 +61,16 @@
 
 ## v0.7 - Date-Based Memory + Ops Foundation
 
-### Date-Based Memory (core)
+### Date-Based Memory (complete)
 
 Upgrade adaptive memory from flat YAML to a date-organized, two-tier architecture inspired by [OpenClaw's memory system](https://docs.openclaw.ai/concepts/memory).
 
-- [ ] **Daily memory logs** (`memory/YYYY-MM-DD.md`): append-only daily records capturing day-to-day observations, context, and session notes. System loads today + yesterday at session start for recency.
-- [ ] **Curated long-term memory** (`MEMORY.md`): promote stable, high-confidence memories from daily logs into durable long-term storage. Decisions, preferences, and confirmed facts.
-- [ ] **Temporal decay scoring**: recent memories score higher; older daily entries decay exponentially (configurable half-life). `MEMORY.md` entries are evergreen (no decay).
-- [ ] **Promotion lifecycle**: daily → long-term when `observation_count ≥ N` and `confidence ≥ threshold` across multiple days. Auto-promote or agent-assisted curation.
-- [ ] **Pre-compaction memory flush**: before context window compaction, trigger a silent turn reminding the agent to persist durable observations. Ensures no memory loss during long sessions.
-- [ ] **Migration path**: auto-migrate existing `memories.yaml` entries into the new date-based format on first load.
+- [x] **Daily memory logs** (`memory/daily/YYYY-MM-DD.yaml`): append-only daily records. System loads today + yesterday at session start for recency.
+- [x] **Curated long-term memory** (`memory/curated.yaml` + `memory/MEMORY.md`): promote stable, high-confidence memories into durable long-term storage. MEMORY.md is agent-synthesized natural language.
+- [x] **Temporal decay scoring**: daily entries decay exponentially (configurable half-life). Curated entries are evergreen (no decay).
+- [x] **Promotion lifecycle**: daily → curated when `observation_count ≥ N` and `confidence ≥ threshold` and age ≥ 1 day. Auto-promotion on load + manual `/promote` command.
+- [x] **Pre-compaction memory flush**: memory extraction runs before history compression (order swapped), ensuring no memory loss.
+- [x] **Discord commands**: `/memories` shows `[C]`/`[D]` tier tags, `/promote` for manual promotion.
 
 ### Ops Foundation
 

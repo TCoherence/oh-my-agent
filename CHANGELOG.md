@@ -6,6 +6,19 @@ The format is intentionally lightweight and release-oriented rather than exhaust
 
 ## Unreleased
 
+### Added
+
+- Date-based two-tier memory system (`DateBasedMemoryStore`):
+  - Daily logs (`memory/daily/YYYY-MM-DD.yaml`) with exponential time decay
+  - Curated long-term memories (`memory/curated.yaml`) — no decay
+  - Auto-promotion: daily entries meeting observation count + confidence + age thresholds are promoted to curated on load
+  - `MEMORY.md` synthesis: agent-generated natural-language view of curated memories
+  - Pre-compaction flush: memory extraction now runs before history compression
+- Discord `/promote` slash command for manual daily-to-curated promotion
+- Discord `/memories` now shows tier tags (`[C]` curated / `[D]` daily)
+- Module-level utility functions: `word_set`, `jaccard_similarity`, `eviction_score`, `find_duplicate`
+- `MemoryEntry.tier` field (`"daily"` | `"curated"`)
+
 ### Fixed
 
 - Hardened persisted CLI session resume for Claude, Codex, and Gemini:

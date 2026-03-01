@@ -15,7 +15,7 @@ oh-my-agent
 
 # Tests
 pip install -e ".[dev]"
-pytest                            # all tests (189 tests)
+pytest                            # all tests (240 tests)
 pytest tests/test_memory_store.py # single file
 pytest -k "test_fallback"         # single test by name
 ```
@@ -33,7 +33,7 @@ The system has seven major subsystems.
   - Conversation: `/ask`, `/reset`, `/history`, `/agent`, `/search`
   - Runtime tasks: `/task_start`, `/task_status`, `/task_list`, `/task_approve`, `/task_reject`, `/task_suggest`, `/task_resume`, `/task_stop`, `/task_merge`, `/task_discard`, `/task_changes`, `/task_logs`, `/task_cleanup`
   - Skills: `/reload-skills`
-  - Adaptive memory: `/memories`, `/forget`
+  - Adaptive memory: `/memories`, `/forget`, `/promote`
 - Agent targeting:
   - `/ask` supports optional `agent` argument for new threads.
   - Thread messages support `@claude` / `@gemini` / `@codex` prefix to force one agent for that turn.
@@ -56,8 +56,9 @@ The system has seven major subsystems.
 - `agent_sessions` table persists CLI session IDs with primary key `(platform, channel_id, thread_id, agent)`.
 - `GatewayManager` loads persisted session IDs on message handling and upserts/deletes them based on agent outcome.
 - `HistoryCompressor`: when a thread exceeds `max_turns`, compresses old turns into a summary (via agent) or truncates (fallback). Runs asynchronously after each response.
-- `AdaptiveMemoryStore` (`memory/adaptive.py`): YAML-backed persistent store for extracted user memories. Each `MemoryEntry` has `id`, `summary`, `category` (preference/project_knowledge/workflow/fact), `confidence`, `source_threads`, `observation_count`. Dedup via Jaccard word-overlap (threshold 0.6); duplicates merge (boost confidence, union threads). Eviction by `confidence × recency_weight` when at capacity.
-- `MemoryExtractor` (`memory/extractor.py`): uses an agent (via `registry.run()`) to parse JSON memories from conversation turns. Triggered after history compression when history has ≥ 4 turns. Extracted memories are injected as `[Remembered context]` block before agent prompts.
+- `DateBasedMemoryStore` (`memory/date_based.py`): two-tier date-organized memory store. Daily logs in `~/.oh-my-agent/memory/daily/YYYY-MM-DD.yaml` (with exponential time decay); curated long-term in `curated.yaml` (no decay). Auto-promotion on load when entries meet observation count + confidence + age thresholds. Synthesizes `MEMORY.md` (natural-language view) via agent. Loads today + yesterday daily on startup.
+- `AdaptiveMemoryStore` (`memory/adaptive.py`): legacy flat YAML store, kept for reference. `MemoryEntry` dataclass with `id`, `summary`, `category`, `confidence`, `source_threads`, `observation_count`, `tier`. Module-level utility functions: `word_set`, `jaccard_similarity`, `eviction_score`, `find_duplicate`.
+- `MemoryExtractor` (`memory/extractor.py`): uses an agent (via `registry.run()`) to parse JSON memories from conversation turns. Triggered **before** history compression (pre-compaction flush) when history has ≥ 4 turns. Extracted memories are injected as `[Remembered context]` block before agent prompts.
 
 **Skill system** (`src/oh_my_agent/skills/`)
 

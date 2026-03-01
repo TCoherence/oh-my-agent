@@ -5,10 +5,13 @@ memory:
   summary_max_chars: 500
   adaptive:
     enabled: true
-    path: ~/.oh-my-agent/memories.yaml
+    memory_dir: ~/.oh-my-agent/memory         # date-based memory directory
     max_memories: 100
     min_confidence: 0.3
     injection_budget_chars: 500
+    decay_half_life_days: 7                   # daily entry half-life for relevance decay
+    promotion_observation_threshold: 3        # min observation count to auto-promote
+    promotion_confidence_threshold: 0.8       # min confidence to auto-promote
 
 skills:
   enabled: true

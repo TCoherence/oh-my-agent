@@ -687,8 +687,9 @@ class DiscordChannel(BaseChannel):
             lines = [f"**Memories** — {len(all_memories)} total"]
             for m in all_memories[:20]:
                 conf_bar = "█" * int(m.confidence * 5) + "░" * (5 - int(m.confidence * 5))
+                tier_tag = "[C]" if getattr(m, "tier", "daily") == "curated" else "[D]"
                 lines.append(
-                    f"`{m.id}` [{conf_bar}] **[{m.category}]** {m.summary}"
+                    f"`{m.id}` {tier_tag} [{conf_bar}] **[{m.category}]** {m.summary}"
                 )
             if len(all_memories) > 20:
                 lines.append(f"_…and {len(all_memories) - 20} more_")
@@ -718,6 +719,36 @@ class DiscordChannel(BaseChannel):
             else:
                 await interaction.response.send_message(
                     f"Memory `{memory_id}` not found.", ephemeral=True,
+                )
+
+        @tree.command(name="promote", description="Promote a daily memory to curated (long-term)")
+        @app_commands.describe(memory_id="The memory ID to promote (shown in /memories)")
+        async def slash_promote(interaction: discord.Interaction, memory_id: str):
+            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
+                await interaction.response.send_message(
+                    "This command is restricted to the configured owner.",
+                    ephemeral=True,
+                )
+                return
+            if not self._adaptive_memory_store:
+                await interaction.response.send_message(
+                    "Adaptive memory is not enabled.", ephemeral=True,
+                )
+                return
+            if not hasattr(self._adaptive_memory_store, "promote_memory"):
+                await interaction.response.send_message(
+                    "Memory store does not support promotion.", ephemeral=True,
+                )
+                return
+
+            promoted = await self._adaptive_memory_store.promote_memory(memory_id)
+            if promoted:
+                await interaction.response.send_message(
+                    f"Memory `{memory_id}` promoted to curated.", ephemeral=True,
+                )
+            else:
+                await interaction.response.send_message(
+                    f"Memory `{memory_id}` not found in daily memories.", ephemeral=True,
                 )
 
         # ---- Events --------------------------------------------------------

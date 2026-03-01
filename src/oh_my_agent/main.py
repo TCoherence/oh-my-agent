@@ -364,18 +364,22 @@ async def _async_main(config: dict, logger: logging.Logger) -> None:
     memory_extractor = None
     adaptive_cfg = memory_cfg.get("adaptive", {})
     if adaptive_cfg.get("enabled", False):
-        from oh_my_agent.memory.adaptive import AdaptiveMemoryStore
+        from oh_my_agent.memory.date_based import DateBasedMemoryStore
         from oh_my_agent.memory.extractor import MemoryExtractor
 
-        adaptive_path = str(Path(adaptive_cfg.get("path", "~/.oh-my-agent/memories.yaml")).expanduser().resolve())
-        adaptive_store = AdaptiveMemoryStore(
-            path=adaptive_path,
+        memory_dir = str(Path(adaptive_cfg.get("memory_dir", "~/.oh-my-agent/memory")).expanduser().resolve())
+
+        adaptive_store = DateBasedMemoryStore(
+            memory_dir=memory_dir,
             max_memories=int(adaptive_cfg.get("max_memories", 100)),
             min_confidence=float(adaptive_cfg.get("min_confidence", 0.3)),
+            decay_half_life_days=float(adaptive_cfg.get("decay_half_life_days", 7.0)),
+            promotion_observation_threshold=int(adaptive_cfg.get("promotion_observation_threshold", 3)),
+            promotion_confidence_threshold=float(adaptive_cfg.get("promotion_confidence_threshold", 0.8)),
         )
         await adaptive_store.load()
         memory_extractor = MemoryExtractor(adaptive_store)
-        logger.info("Adaptive memory enabled: %s (%d memories loaded)", adaptive_path, len(adaptive_store.memories))
+        logger.info("Date-based memory enabled: %s (%d memories loaded)", memory_dir, len(adaptive_store.memories))
 
     # Sync skills
     skills_cfg = config.get("skills", {})

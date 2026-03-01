@@ -685,27 +685,26 @@ class GatewayManager:
         thread_id: str,
         req_id: str,
     ) -> None:
-        """Run compression first, then memory extraction if applicable."""
+        """Extract memories first (pre-compaction flush), then compress."""
+        # 1. Extract memories from the full (uncompressed) history
+        if self._memory_extractor:
+            try:
+                history = await session.get_history(thread_id)
+                if len(history) >= 4:
+                    entries = await self._memory_extractor.extract(
+                        history, registry, thread_id=thread_id,
+                    )
+                    if entries:
+                        logger.info(
+                            "[%s] MEMORY_EXTRACT (pre-compaction) thread=%s extracted=%d",
+                            req_id, thread_id, len(entries),
+                        )
+            except Exception as exc:
+                logger.warning("[%s] MEMORY_EXTRACT failed: %s", req_id, exc)
+
+        # 2. Compress (memories are already safely persisted)
         if self._compressor:
             await self._try_compress(session, registry, thread_id, req_id)
-
-        if not self._memory_extractor:
-            return
-
-        try:
-            history = await session.get_history(thread_id)
-            if len(history) < 4:
-                return
-            entries = await self._memory_extractor.extract(
-                history, registry, thread_id=thread_id,
-            )
-            if entries:
-                logger.info(
-                    "[%s] MEMORY_EXTRACT thread=%s extracted=%d",
-                    req_id, thread_id, len(entries),
-                )
-        except Exception as exc:
-            logger.warning("[%s] MEMORY_EXTRACT failed: %s", req_id, exc)
 
     async def _run_short_workspace_janitor(self) -> None:
         while True:

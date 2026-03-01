@@ -6,7 +6,7 @@ import json
 import logging
 import re
 
-from oh_my_agent.memory.adaptive import AdaptiveMemoryStore, MemoryEntry
+from oh_my_agent.memory.adaptive import MemoryEntry
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +39,7 @@ If there is nothing worth extracting, output: []
 class MemoryExtractor:
     """Uses an agent to extract memories from conversation turns."""
 
-    def __init__(self, store: AdaptiveMemoryStore) -> None:
+    def __init__(self, store) -> None:  # accepts any store with add_memories/list_all
         self._store = store
 
     async def extract(
