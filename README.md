@@ -139,6 +139,12 @@ source .venv/bin/activate
 oh-my-agent
 ```
 
+Check the installed version:
+
+```bash
+oh-my-agent --version
+```
+
 ## Usage
 
 ### Messages
@@ -251,6 +257,14 @@ oh-my-agent
 - Chinese development log: [docs/CN/development.md](docs/CN/development.md)
 - Router smoke test: [docs/router_smoke.md](docs/router_smoke.md)
 - Archived: [docs/archive/](docs/archive/)
+
+## Versioning
+
+- The package version is sourced from [`src/oh_my_agent/_version.py`](src/oh_my_agent/_version.py).
+- `oh-my-agent --version` prints the installed version without requiring `config.yaml`.
+- `CHANGELOG.md` is expected to move with the package version:
+  - released sections use `vX.Y.Z`
+  - if `Unreleased` is non-empty, the package version should stay on a `.devN` suffix
 
 ## License
 

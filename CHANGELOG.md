@@ -18,12 +18,15 @@ The format is intentionally lightweight and release-oriented rather than exhaust
 - Discord `/memories` now shows tier tags (`[C]` curated / `[D]` daily)
 - Module-level utility functions: `word_set`, `jaccard_similarity`, `eviction_score`, `find_duplicate`
 - `MemoryEntry.tier` field (`"daily"` | `"curated"`)
+- `oh-my-agent --version`
+- Single-source package versioning via `src/oh_my_agent/_version.py`
 
 ### Fixed
 
 - Hardened persisted CLI session resume for Claude, Codex, and Gemini:
   - invalid/stale resumed sessions are now cleared more selectively
   - stale persisted sessions are deleted even when fallback succeeds through another agent
+- Added tests to keep package version and changelog state aligned
 
 ## v0.6.1 - 2026-03-01
 

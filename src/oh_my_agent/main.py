@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import asyncio
 import logging
 import logging.handlers
@@ -8,6 +9,8 @@ import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
+
+from oh_my_agent import __version__
 
 
 def _setup_workspace(workspace_path: str, project_root: Path, skills_path: Path | None = None) -> Path:
@@ -531,6 +534,14 @@ async def _async_main(config: dict, logger: logging.Logger) -> None:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(prog="oh-my-agent")
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
+    )
+    parser.parse_args()
+
     # Locate config.yaml (next to cwd or project root)
     config_path = Path("config.yaml")
     if not config_path.exists():
