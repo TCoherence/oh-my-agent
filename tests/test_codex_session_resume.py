@@ -1,6 +1,8 @@
 """Tests for CodexCLIAgent session resume."""
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, patch
+
 import pytest
 
 from oh_my_agent.agents.cli.codex import CodexCLIAgent
@@ -103,4 +105,34 @@ def test_codex_parse_output_session_id_not_captured_by_parse_output():
     resp = agent._parse_output(raw)
     assert resp.text == "Hi!"
     # session_id not stored by _parse_output
+    assert agent.get_session_id("t1") is None
+
+
+@pytest.mark.asyncio
+async def test_codex_generic_resume_error_keeps_session_id():
+    agent = _agent()
+    agent.set_session_id("t1", "sess-abc")
+
+    with patch(
+        "oh_my_agent.agents.cli.codex._stream_cli_process",
+        new=AsyncMock(return_value=(1, b"", b"rate limited, retry later")),
+    ):
+        resp = await agent.run("hello", thread_id="t1")
+
+    assert resp.error is not None
+    assert agent.get_session_id("t1") == "sess-abc"
+
+
+@pytest.mark.asyncio
+async def test_codex_invalid_resume_error_clears_session_id():
+    agent = _agent()
+    agent.set_session_id("t1", "sess-abc")
+
+    with patch(
+        "oh_my_agent.agents.cli.codex._stream_cli_process",
+        new=AsyncMock(return_value=(1, b"", b"session not found")),
+    ):
+        resp = await agent.run("hello", thread_id="t1")
+
+    assert resp.error is not None
     assert agent.get_session_id("t1") is None

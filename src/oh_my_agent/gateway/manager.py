@@ -106,6 +106,11 @@ class GatewayManager:
             # Session was cleared (e.g. failed resume) — remove stale DB entry
             await store.delete_session(session.platform, session.channel_id, thread_id, agent.name)
 
+    async def _sync_registry_sessions(self, session, thread_id: str, registry: AgentRegistry) -> None:
+        """Synchronize persisted session state for every resume-capable agent."""
+        for agent in registry.agents:
+            await self._sync_session(session, thread_id, agent)
+
     async def start(self) -> None:
         """Start all platform channels concurrently."""
         tasks = []
@@ -534,6 +539,7 @@ class GatewayManager:
                 workspace_override=workspace_override,
             )
         elapsed_agent = time.perf_counter() - t_agent
+        await self._sync_registry_sessions(session, thread_id, registry)
 
         if response.error:
             logger.error(
@@ -543,8 +549,6 @@ class GatewayManager:
                 elapsed_agent,
                 response.error,
             )
-            # If the agent cleared its session (failed resume), remove stale DB entry
-            await self._sync_session(session, thread_id, agent_used)
             await channel.send(thread_id, f"**Error** ({agent_used.name}): {response.error[:1800]}")
             # Remove the failed user turn so history stays clean
             history = await session.get_history(thread_id)
@@ -559,9 +563,6 @@ class GatewayManager:
             elapsed_agent,
             len(response.text),
         )
-
-        # Persist updated CLI session ID to DB (for resume after restart)
-        await self._sync_session(session, thread_id, agent_used)
 
         # Record assistant response in history
         await session.append_assistant(thread_id, response.text, agent_used.name)

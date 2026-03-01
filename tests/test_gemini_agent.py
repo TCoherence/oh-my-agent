@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -98,3 +99,33 @@ def test_gemini_parse_output_falls_back_when_no_response_field():
     resp = agent._parse_output(json.dumps({"session_id": "x", "other": "value"}))
     # no "response" key → falls back to raw
     assert "session_id" in resp.text or resp.text != ""
+
+
+@pytest.mark.asyncio
+async def test_gemini_generic_resume_error_keeps_session_id():
+    agent = _agent()
+    agent.set_session_id("t1", "sess-abc")
+
+    with patch(
+        "oh_my_agent.agents.cli.gemini._stream_cli_process",
+        new=AsyncMock(return_value=(1, b"", b"rate limited, retry later")),
+    ):
+        resp = await agent.run("hello", thread_id="t1")
+
+    assert resp.error is not None
+    assert agent.get_session_id("t1") == "sess-abc"
+
+
+@pytest.mark.asyncio
+async def test_gemini_invalid_resume_error_clears_session_id():
+    agent = _agent()
+    agent.set_session_id("t1", "sess-abc")
+
+    with patch(
+        "oh_my_agent.agents.cli.gemini._stream_cli_process",
+        new=AsyncMock(return_value=(1, b"", b"invalid session identifier")),
+    ):
+        resp = await agent.run("hello", thread_id="t1")
+
+    assert resp.error is not None
+    assert agent.get_session_id("t1") is None

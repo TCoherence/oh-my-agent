@@ -10,6 +10,7 @@ from oh_my_agent.agents.cli.base import (
     BaseCLIAgent,
     _build_prompt_with_history,
     _extract_cli_error,
+    _should_clear_resumed_session,
     _stream_cli_process,
 )
 
@@ -113,8 +114,8 @@ class GeminiCLIAgent(BaseCLIAgent):
         if returncode != 0:
             err_msg = _extract_cli_error(stderr, stdout)
             logger.error("%s CLI failed (rc=%d): %s", self.name, returncode, err_msg)
-            # If resume fails, clear the session so next attempt starts fresh
-            if session_id and thread_id:
+            # Only discard a stored session when the CLI reports it as invalid/stale.
+            if session_id and thread_id and _should_clear_resumed_session(err_msg):
                 self.clear_session(thread_id)
             return AgentResponse(
                 text="",

@@ -4,7 +4,7 @@ from pathlib import Path
 from oh_my_agent.gateway.manager import GatewayManager
 from oh_my_agent.gateway.base import IncomingMessage
 from oh_my_agent.gateway.session import ChannelSession
-from oh_my_agent.agents.base import AgentResponse
+from oh_my_agent.agents.base import AgentResponse, BaseAgent
 from oh_my_agent.agents.registry import AgentRegistry
 from oh_my_agent.automation import ScheduledJob
 from oh_my_agent.memory.store import SQLiteMemoryStore
@@ -41,6 +41,43 @@ def _make_session(channel=None, registry=None) -> ChannelSession:
         channel=channel,
         registry=registry,
     )
+
+
+class _ResumeClearingAgent(BaseAgent):
+    def __init__(self, name: str = "codex") -> None:
+        self._name = name
+        self._session_ids: dict[str, str] = {}
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    def get_session_id(self, thread_id: str) -> str | None:
+        return self._session_ids.get(thread_id)
+
+    def set_session_id(self, thread_id: str, session_id: str) -> None:
+        self._session_ids[thread_id] = session_id
+
+    def clear_session(self, thread_id: str) -> None:
+        self._session_ids.pop(thread_id, None)
+
+    async def run(self, prompt, history=None, *, thread_id=None, workspace_override=None, log_path=None):
+        if thread_id and self.get_session_id(thread_id):
+            self.clear_session(thread_id)
+        return AgentResponse(text="", error="session not found")
+
+
+class _ThreadAwareOKAgent(BaseAgent):
+    def __init__(self, name: str = "claude", response: str = "ok") -> None:
+        self._name = name
+        self._response = response
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    async def run(self, prompt, history=None, *, thread_id=None, workspace_override=None, log_path=None):
+        return AgentResponse(text=self._response)
 
 
 def test_thread_name_truncates_at_90_chars():
@@ -143,6 +180,37 @@ async def test_handle_message_error_response_sent_and_history_cleaned():
     assert "boom" in sent
     # History should be empty (failed turn was popped)
     assert await session.get_history("t1") == []
+
+
+@pytest.mark.asyncio
+async def test_handle_message_deletes_stale_session_after_fallback_success(tmp_path):
+    channel = MagicMock()
+    channel.platform = "discord"
+    channel.channel_id = "100"
+    channel.create_thread = AsyncMock(return_value="t1")
+    channel.send = AsyncMock()
+    channel.typing = MagicMock()
+    channel.typing.return_value.__aenter__ = AsyncMock(return_value=None)
+    channel.typing.return_value.__aexit__ = AsyncMock(return_value=False)
+
+    flaky = _ResumeClearingAgent("codex")
+    healthy = _ThreadAwareOKAgent("claude", "answer")
+    registry = AgentRegistry([flaky, healthy])
+    session = _make_session(channel=channel, registry=registry)
+
+    store = SQLiteMemoryStore(tmp_path / "memory.db")
+    await store.init()
+
+    gm = GatewayManager([])
+    gm.set_memory_store(store)
+    await store.save_session("discord", "100", "t1", "codex", "sess-stale")
+
+    msg = _make_msg(thread_id="t1", content="follow up")
+    await gm.handle_message(session, registry, msg)
+
+    assert await store.load_session("discord", "100", "t1", "codex") is None
+    assert channel.send.call_count >= 1
+    await store.close()
 
 
 @pytest.mark.asyncio

@@ -21,6 +21,26 @@ _SAFE_ENV_KEYS = frozenset({
     "XDG_RUNTIME_DIR",
 })
 
+_SESSION_ERROR_MARKERS = (
+    "session",
+    "resume",
+    "conversation",
+    "checkpoint",
+    "thread",
+)
+
+_INVALID_SESSION_MARKERS = (
+    "not found",
+    "no such",
+    "unknown",
+    "invalid",
+    "expired",
+    "missing",
+    "does not exist",
+    "cannot resume",
+    "failed to resume",
+)
+
 
 def _extract_cli_error(stderr_raw: bytes, stdout_raw: bytes) -> str:
     """Best-effort extraction of useful CLI error text.
@@ -71,6 +91,15 @@ def _build_prompt_with_history(prompt: str, history: list[dict] | None) -> str:
     lines.append("Current message:")
     lines.append(prompt)
     return "\n".join(lines)
+
+
+def _should_clear_resumed_session(err_msg: str) -> bool:
+    """Return True when an error looks like an invalid/stale session failure."""
+    lowered = err_msg.lower()
+    return (
+        any(marker in lowered for marker in _SESSION_ERROR_MARKERS)
+        and any(marker in lowered for marker in _INVALID_SESSION_MARKERS)
+    )
 
 
 async def _stream_cli_process(
