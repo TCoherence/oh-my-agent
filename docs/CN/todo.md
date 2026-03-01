@@ -38,15 +38,15 @@
 
 ## v0.6 - Skill-First Autonomy + Adaptive Memory
 
-### Skill-First（剩余）
+### Skill-First（已完成）
 
 - [x] 把 skill 创建升级成一等 runtime task 类型
 - [x] 支持"把这个 workflow 变成 skill"类请求的路由
 - [x] 增加 merge 前的 skill 验证闭环
 - [x] 增加 skill memory / provenance 元数据
-- [ ] 增加跨 agent skill 抽象
-- [ ] 锁定 Codex 接入折中方案（`全局 skills + AGENTS.md/MCP`，不假设 project-level native skills）
-- [ ] 把"调用已有 skill"和"修改 skill"彻底从语义上拆开
+- [x] 跨 agent skill 分发：统一 SKILL.md 格式，SkillSync 分发到 `.claude/`、`.gemini/`、`.codex/` 目录；AGENTS.md 桥接 Codex 发现
+- [x] Codex 接入：`AGENTS.md` + workspace `.codex/skills/`；reverse sync 现在扫描全部三个 CLI 目录
+- [x] Skill 调用与修改分离：`/skill-name` → 普通对话路径；"创建 skill" → `TASK_TYPE_SKILL_CHANGE` runtime task，专用 prompt、验证和自动合并
 
 ### Adaptive Memory（已完成）
 

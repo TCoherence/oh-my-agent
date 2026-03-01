@@ -38,15 +38,15 @@
 
 ## v0.6 - Skill-First Autonomy + Adaptive Memory
 
-### Skill-First (remaining)
+### Skill-First (complete)
 
 - [x] Promote skill creation to a first-class runtime task type
 - [x] Add skill routing for "turn this workflow into a skill" requests
 - [x] Add skill validation loop before merge
 - [x] Add skill memory / provenance metadata
-- [ ] Add cross-agent skill abstraction
-- [ ] Lock the Codex integration tradeoff (`global skills + AGENTS.md/MCP`, not assumed project-native skills)
-- [ ] Separate skill invocation from skill mutation across all agents
+- [x] Cross-agent skill delivery: unified SKILL.md format, SkillSync distributes to `.claude/`, `.gemini/`, `.codex/` directories; AGENTS.md bridges Codex discovery
+- [x] Codex integration: `AGENTS.md` + workspace `.codex/skills/`; reverse sync now scans all three CLI dirs
+- [x] Skill invocation vs mutation: `/skill-name` → normal chat path; "create skill" → `TASK_TYPE_SKILL_CHANGE` runtime task with dedicated prompt, validation, and auto-merge
 
 ### Adaptive Memory (complete)
 

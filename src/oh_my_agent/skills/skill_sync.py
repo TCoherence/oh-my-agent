@@ -85,6 +85,7 @@ class SkillSync:
         sources = [
             self._project_root / ".gemini" / "skills",
             self._project_root / ".claude" / "skills",
+            self._project_root / ".codex" / "skills",
         ]
         if extra_source_dirs:
             sources.extend(extra_source_dirs)
@@ -134,6 +135,7 @@ class SkillSync:
         sources = [
             self._project_root / ".gemini" / "skills",
             self._project_root / ".claude" / "skills",
+            self._project_root / ".codex" / "skills",
         ]
         if extra_source_dirs:
             sources.extend(extra_source_dirs)
