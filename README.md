@@ -64,7 +64,7 @@ git clone <repo-url>
 cd oh-my-agent
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e .
+./.venv/bin/pip install -e .
 cp .env.example .env
 cp config.yaml.example config.yaml
 ```
@@ -135,14 +135,13 @@ Runtime artifacts default to `~/.oh-my-agent/runtime/` (memory DB, logs, task wo
 ### Run
 
 ```bash
-source .venv/bin/activate
-oh-my-agent
+./.venv/bin/oh-my-agent
 ```
 
 Check the installed version:
 
 ```bash
-oh-my-agent --version
+./.venv/bin/oh-my-agent --version
 ```
 
 ## Usage
@@ -162,6 +161,13 @@ oh-my-agent --version
 - On restart, the gateway restores stored session IDs from SQLite and attempts to continue the original CLI conversation instead of flattening full history every turn.
 - If a stored session is clearly stale or invalid, it is cleared automatically so the next turn can start fresh.
 - Persisted stale sessions are also deleted when fallback succeeds through another agent.
+
+### Workspace Refresh
+
+- `~/.oh-my-agent/agent-workspace/AGENTS.md` is a generated file, not a hand-maintained source file.
+- Its top section is copied from repo-root `AGENTS.md`; its workspace extension section is generated from synced workspace `.codex/skills/`.
+- The base workspace stores a small source-state manifest and refreshes automatically before short-workspace turns when repo `AGENTS.md` or canonical `skills/` change.
+- Session workspaces inherit the refreshed base workspace, so normal chat turns see updated rules and skills without a manual rebuild.
 
 ### Slash Commands
 
@@ -230,6 +236,7 @@ oh-my-agent --version
 - `~/.oh-my-agent/agent-workspace/.codex/skills/` is refreshed so the workspace can expose Codex-oriented skill references through `AGENTS.md`.
 - `~/.oh-my-agent/runtime/tasks/` stores isolated runtime task worktrees and artifact task output directories.
 - The external workspace now uses a generated `AGENTS.md` as the single injected context document. Repo-root `AGENT.md`, `CLAUDE.md`, and `GEMINI.md` are no longer mirrored into the external workspace or session workspaces.
+- The generated workspace `AGENTS.md` includes visible metadata so it is clear when you are looking at a derived file instead of the repo source file.
 
 ## Autonomy Direction
 

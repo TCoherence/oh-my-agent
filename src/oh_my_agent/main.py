@@ -5,7 +5,6 @@ import asyncio
 import logging
 import logging.handlers
 import os
-import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -31,47 +30,17 @@ def _setup_workspace(workspace_path: str, project_root: Path, skills_path: Path 
     ws = Path(workspace_path).expanduser().resolve()
     ws.mkdir(parents=True, exist_ok=True)
 
-    # Copy skills into workspace CLI directories (not symlinks — real copies).
-    wrote_agents = False
-    if skills_path and skills_path.is_dir():
-        for cli_skills_dir in (
-            ws / ".claude" / "skills",
-            ws / ".gemini" / "skills",
-            ws / ".codex" / "skills",
-        ):
-            cli_skills_dir.mkdir(parents=True, exist_ok=True)
-            for skill_dir in skills_path.iterdir():
-                if not skill_dir.is_dir():
-                    continue
-                resolved_skill = skill_dir.resolve() if skill_dir.is_symlink() else skill_dir
-                if not (resolved_skill / "SKILL.md").exists():
-                    continue
-                dest = cli_skills_dir / skill_dir.name
-                if dest.exists():
-                    shutil.rmtree(dest)
-                shutil.copytree(resolved_skill, dest)
-        try:
-            from oh_my_agent.skills.skill_sync import SkillSync
+    try:
+        from oh_my_agent.skills.skill_sync import SkillSync
 
-            SkillSync(skills_path, project_root=project_root).write_workspace_agents_md(ws)
-            wrote_agents = True
-        except Exception:
-            logging.getLogger(__name__).warning(
-                "Failed to write workspace AGENTS.md for %s",
-                ws,
-                exc_info=True,
-            )
-    if not wrote_agents:
-        try:
-            from oh_my_agent.skills.skill_sync import SkillSync
-
-            SkillSync(project_root / "skills", project_root=project_root).write_workspace_agents_md(ws)
-        except Exception:
-            logging.getLogger(__name__).warning(
-                "Failed to write fallback workspace AGENTS.md for %s",
-                ws,
-                exc_info=True,
-            )
+        syncer = SkillSync(skills_path or (project_root / "skills"), project_root=project_root)
+        syncer.refresh_workspace(ws)
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "Failed to refresh workspace contents for %s",
+            ws,
+            exc_info=True,
+        )
 
     return ws
 
@@ -517,6 +486,7 @@ async def _async_main(config: dict, logger: logging.Logger) -> None:
             **config.get("short_workspace", {}),
             "base_workspace": str(workspace) if workspace is not None else None,
         },
+        repo_root=project_root,
         intent_router=intent_router,
         adaptive_memory_store=adaptive_store,
         memory_extractor=memory_extractor,

@@ -4,6 +4,7 @@
 - Keep `README.md` as the primary English entry document at the repo root.
 - Keep Chinese docs under `docs/CN/` and English detailed docs under `docs/EN/`.
 - Do not add extra intermediate planning docs to the main docs tree; put historical or temporary material under `docs/archive/` if it must be kept.
+- Prefer project-local virtualenv executables such as `./.venv/bin/python` and `./.venv/bin/pytest` when they exist instead of system-wide Python tools.
 
 ## Communication Style
 

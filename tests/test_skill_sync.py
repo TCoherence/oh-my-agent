@@ -58,6 +58,7 @@ def test_sync_no_skills_dir(tmp_path):
 
 
 def test_refresh_workspace_dirs_copies_skill_dirs(skill_dir, tmp_path):
+    (tmp_path / "AGENTS.md").write_text("# Repo Rules\n\n- keep things tidy\n", encoding="utf-8")
     syncer = SkillSync(skills_path=skill_dir, project_root=tmp_path)
     workspace_targets = [
         tmp_path / "agent-workspace" / ".claude" / "skills",
@@ -77,6 +78,9 @@ def test_refresh_workspace_dirs_copies_skill_dirs(skill_dir, tmp_path):
     agents_md = tmp_path / "agent-workspace" / "AGENTS.md"
     assert agents_md.exists()
     content = agents_md.read_text(encoding="utf-8")
+    assert content.startswith("# Generated Workspace AGENTS")
+    assert "Source repo AGENTS:" in content
+    assert "# Repo Rules" in content
     assert ".codex/skills/test-skill/SKILL.md" in content
     assert "A test skill" in content
 
@@ -96,3 +100,42 @@ def test_setup_workspace_uses_agents_md_not_agent_compat_files(skill_dir, tmp_pa
     assert not (workspace / "CLAUDE.md").exists()
     assert not (workspace / "GEMINI.md").exists()
     assert (workspace / ".codex" / "skills" / "test-skill" / "SKILL.md").exists()
+    assert (workspace / ".oh-my-agent-state.json").exists()
+
+
+def test_workspace_needs_refresh_when_source_agents_changes(skill_dir, tmp_path):
+    project_root = tmp_path / "project"
+    project_root.mkdir(parents=True, exist_ok=True)
+    (project_root / "AGENTS.md").write_text("# Repo Rules\n\n- first version\n", encoding="utf-8")
+
+    syncer = SkillSync(skills_path=skill_dir, project_root=project_root)
+    workspace = tmp_path / "workspace"
+    syncer.refresh_workspace(workspace)
+
+    assert syncer.workspace_needs_refresh(workspace) is False
+
+    (project_root / "AGENTS.md").write_text("# Repo Rules\n\n- second version\n", encoding="utf-8")
+
+    assert syncer.workspace_needs_refresh(workspace) is True
+
+    syncer.refresh_workspace(workspace)
+    content = (workspace / "AGENTS.md").read_text(encoding="utf-8")
+    assert "- second version" in content
+    assert syncer.workspace_needs_refresh(workspace) is False
+
+
+def test_workspace_needs_refresh_when_skill_changes(skill_dir, tmp_path):
+    (tmp_path / "AGENTS.md").write_text("# Repo Rules\n", encoding="utf-8")
+    syncer = SkillSync(skills_path=skill_dir, project_root=tmp_path)
+    workspace = tmp_path / "workspace"
+    syncer.refresh_workspace(workspace)
+
+    assert syncer.workspace_needs_refresh(workspace) is False
+
+    (skill_dir / "test-skill" / "scripts" / "run.sh").write_text("#!/bin/bash\necho changed\n", encoding="utf-8")
+
+    assert syncer.workspace_needs_refresh(workspace) is True
+
+    syncer.refresh_workspace(workspace)
+    copied = workspace / ".codex" / "skills" / "test-skill" / "scripts" / "run.sh"
+    assert "changed" in copied.read_text(encoding="utf-8")

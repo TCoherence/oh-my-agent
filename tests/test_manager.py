@@ -9,6 +9,7 @@ from oh_my_agent.agents.registry import AgentRegistry
 from oh_my_agent.automation import ScheduledJob
 from oh_my_agent.memory.store import SQLiteMemoryStore
 from oh_my_agent.gateway.router import RouteDecision
+from oh_my_agent.skills.skill_sync import SkillSync
 
 
 def _make_msg(thread_id=None, content="hello", author_id=None, system=False) -> IncomingMessage:
@@ -522,6 +523,43 @@ def test_prepare_workspace_compat_files_replaces_stale_entries(tmp_path):
     assert (session_ws / "AGENTS.md").resolve() == (base / "AGENTS.md")
     assert (session_ws / ".codex").is_symlink()
     assert (session_ws / ".codex").resolve() == (base / ".codex")
+
+
+@pytest.mark.asyncio
+async def test_resolve_short_workspace_refreshes_stale_base_workspace(tmp_path):
+    project_root = tmp_path / "project"
+    skills_root = project_root / "skills" / "test-skill"
+    skills_root.mkdir(parents=True, exist_ok=True)
+    (skills_root / "SKILL.md").write_text(
+        "---\nname: test-skill\ndescription: A synced skill\n---\n",
+        encoding="utf-8",
+    )
+    (project_root / "AGENTS.md").write_text("# Repo Rules\n\n- version one\n", encoding="utf-8")
+
+    syncer = SkillSync(project_root / "skills", project_root=project_root)
+    base = tmp_path / "base-workspace"
+    syncer.refresh_workspace(base)
+
+    (project_root / "AGENTS.md").write_text("# Repo Rules\n\n- version two\n", encoding="utf-8")
+
+    gm = GatewayManager(
+        [],
+        skill_syncer=syncer,
+        short_workspace={
+            "enabled": True,
+            "root": str(tmp_path / "sessions"),
+            "base_workspace": str(base),
+        },
+        repo_root=project_root,
+    )
+    session = _make_session()
+
+    workspace = await gm._resolve_short_workspace(session, "thread-1")
+
+    assert workspace is not None
+    assert "- version two" in (base / "AGENTS.md").read_text(encoding="utf-8")
+    assert (workspace / "AGENTS.md").is_symlink()
+    assert (workspace / "AGENTS.md").resolve() == (base / "AGENTS.md")
 
 
 @pytest.mark.asyncio

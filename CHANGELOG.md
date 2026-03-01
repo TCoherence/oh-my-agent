@@ -20,6 +20,7 @@ The format is intentionally lightweight and release-oriented rather than exhaust
 - `MemoryEntry.tier` field (`"daily"` | `"curated"`)
 - `oh-my-agent --version`
 - Single-source package versioning via `src/oh_my_agent/_version.py`
+- Generated workspace `AGENTS.md` metadata with source path, source hash, and generation timestamp
 
 ### Fixed
 
@@ -27,6 +28,7 @@ The format is intentionally lightweight and release-oriented rather than exhaust
   - invalid/stale resumed sessions are now cleared more selectively
   - stale persisted sessions are deleted even when fallback succeeds through another agent
 - Added tests to keep package version and changelog state aligned
+- Base workspace now refreshes synced skills and generated `AGENTS.md` together when repo `AGENTS.md` or canonical `skills/` change
 
 ## v0.6.1 - 2026-03-01
 

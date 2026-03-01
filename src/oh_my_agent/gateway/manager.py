@@ -36,6 +36,7 @@ class GatewayManager:
         workspace_skills_dirs=None,
         runtime_service=None,
         short_workspace: dict | None = None,
+        repo_root: str | Path | None = None,
         intent_router=None,
         adaptive_memory_store=None,
         memory_extractor=None,
@@ -49,6 +50,7 @@ class GatewayManager:
         self._skill_syncer = skill_syncer
         self._workspace_skills_dirs = workspace_skills_dirs  # list[Path] | None
         self._runtime_service = runtime_service
+        self._repo_root = Path(repo_root).expanduser().resolve() if repo_root else Path.cwd()
         self._intent_router = intent_router
         self._adaptive_memory_store = adaptive_memory_store
         self._memory_extractor = memory_extractor
@@ -725,6 +727,7 @@ class GatewayManager:
     ) -> Path | None:
         if not self._short_workspace_enabled or self._short_workspace_root is None:
             return None
+        self._refresh_base_workspace_if_needed()
         ws_key = self._short_workspace_key(session.platform, session.channel_id, thread_id)
         workspace = self._short_workspace_root / self._workspace_dirname(thread_id, ws_key)
         workspace.mkdir(parents=True, exist_ok=True)
@@ -766,6 +769,27 @@ class GatewayManager:
             shutil.rmtree(child, ignore_errors=True)
             cleaned += 1
         return cleaned
+
+    def _refresh_base_workspace_if_needed(self) -> None:
+        if self._base_workspace is None:
+            return
+        syncer = self._workspace_syncer()
+        if syncer is None:
+            return
+        if not syncer.workspace_needs_refresh(self._base_workspace):
+            return
+        logger.info("Refreshing base workspace from repo sources: %s", self._base_workspace)
+        syncer.refresh_workspace(self._base_workspace)
+
+    def _workspace_syncer(self):
+        if self._skill_syncer is not None:
+            return self._skill_syncer
+        try:
+            from oh_my_agent.skills.skill_sync import SkillSync
+        except Exception:
+            logger.warning("Failed to import SkillSync for base workspace refresh", exc_info=True)
+            return None
+        return SkillSync(self._repo_root / "skills", project_root=self._repo_root)
 
     def _prepare_workspace_compat_files(self, workspace: Path) -> None:
         if self._base_workspace is None:
