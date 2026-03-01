@@ -120,6 +120,6 @@
 - [ ] Docker 隔离
 - [ ] Adaptive Memory 加密存储 + 认证后明文访问
 - [ ] Adaptive Memory 编辑权限控制
-- [ ] Codex / Gemini CLI session resume
+- [x] Codex / Gemini CLI session resume
 - [ ] Feishu/Lark 适配器
 - [ ] Slack 适配器

@@ -120,6 +120,6 @@ Upgrade adaptive memory from flat YAML to a date-organized, two-tier architectur
 - [ ] Docker-based agent isolation
 - [ ] Adaptive Memory encrypted storage + authenticated plaintext access
 - [ ] Adaptive Memory edit permission control
-- [ ] Codex / Gemini CLI session resume
+- [x] Codex / Gemini CLI session resume
 - [ ] Feishu/Lark adapter
 - [ ] Slack adapter
