@@ -7,8 +7,9 @@ Oh My Agent is a multi-platform bot that uses CLI-based AI agents as the executi
 ## Source of Truth
 
 1. `README.md` / `docs/CN/README.md`
-2. `docs/EN/todo.md` / `docs/CN/todo.md`
-3. `docs/archive/` for historical planning documents
+2. `CHANGELOG.md`
+3. `docs/EN/todo.md` / `docs/CN/todo.md`
+4. `docs/archive/` for historical planning documents
 
 ## Current Runtime Baseline
 
@@ -48,6 +49,13 @@ Still missing:
 - Source-code self-modification is not the default autonomy path; it remains a high-risk, strongly gated capability.
 
 ## Historical Milestones
+
+### v0.6.1
+
+- Codex CLI session resume
+- Gemini CLI session resume
+- Persisted CLI session restore after restart for all three CLI agents
+- Resume hardening: stale persisted sessions are cleared more safely and synced correctly across fallback
 
 ### v0.6.0
 

@@ -7,8 +7,9 @@ Oh My Agent 是一个多平台 bot，执行层直接使用 CLI Agent，而不是
 ## 真相来源
 
 1. `README.md` / `docs/CN/README.md`
-2. `docs/EN/todo.md` / `docs/CN/todo.md`
-3. `docs/archive/` 存放历史规划文档
+2. `CHANGELOG.md`
+3. `docs/EN/todo.md` / `docs/CN/todo.md`
+4. `docs/archive/` 存放历史规划文档
 
 ## 当前 Runtime 基线
 
@@ -48,6 +49,13 @@ Oh My Agent 是一个多平台 bot，执行层直接使用 CLI Agent，而不是
 - 源代码自我更迭不是默认自主性路径，而是高风险、强审批的特殊能力。
 
 ## 历史阶段
+
+### v0.6.1
+
+- Codex CLI session resume
+- Gemini CLI session resume
+- 三个 CLI agent 的 session ID 都支持重启后恢复
+- Resume 加固：stale persisted session 会更安全地清理，并在 fallback 时正确同步删除
 
 ### v0.6.0
 

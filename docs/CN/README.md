@@ -4,7 +4,7 @@
 
 灵感来自 [OpenClaw](https://openclaw.dev)。
 
-## 当前状态（2026-02-28）
+## 当前状态（2026-03-01）
 
 - `/search` 已通过 SQLite FTS5 实现跨线程检索。
 - `SkillSync` reverse sync 已实现，并在启动时执行。
@@ -17,6 +17,7 @@
 - Runtime 可观测性已实现：支持 `/task_logs`、SQLite 中采样式 progress 事件，以及 Discord 中单条可更新的状态消息。
 - Runtime hardening 已完成：真正的子进程中断、消息驱动控制（stop/pause/resume）、PAUSED 状态、完成摘要、metrics。
 - Adaptive Memory 已实现：对话中自动提取记忆、注入 agent prompt、`/memories` 和 `/forget` 命令。
+- Claude / Codex / Gemini 的 CLI session resume 已实现，线程级 session ID 会持久化并在重启后恢复。
 
 ## 架构
 
@@ -65,6 +66,7 @@ cd oh-my-agent
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
+cp .env.example .env
 cp config.yaml.example config.yaml
 ```
 
@@ -144,6 +146,13 @@ oh-my-agent
 - 如果当前 agent 失败，会自动切换到 fallback 链中的下一个 agent。
 - 如果配置了 `access.owner_user_ids`，只有白名单用户可以触发 bot。
 
+### CLI Session Resume
+
+- Claude、Codex、Gemini 都会按 thread 持久化 CLI session ID。
+- 进程重启后，gateway 会从 SQLite 恢复这些 session，并优先继续原始 CLI 会话，而不是每轮都重新拼接完整 history。
+- 如果某个 session 已经明显失效或不可恢复，会自动清理，下一轮回退为 fresh session。
+- 如果前置 agent 的 stale session 失效但 fallback agent 成功，旧的持久化 session 也会被一起删除。
+
 ### Slash 命令
 
 - `/ask <question> [agent]`
@@ -216,6 +225,8 @@ oh-my-agent
 
 ## 文档
 
+- 文档索引: [../README.md](../README.md)
+- 变更日志: [../../CHANGELOG.md](../../CHANGELOG.md)
 - English README: [README.md](../../README.md)
 - 英文路线图: [docs/EN/todo.md](../EN/todo.md)
 - 中文路线图: [docs/CN/todo.md](todo.md)

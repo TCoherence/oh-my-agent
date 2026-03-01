@@ -4,7 +4,7 @@ Multi-platform bot that routes messages to CLI-based AI agents (Claude, Gemini, 
 
 Inspired by [OpenClaw](https://openclaw.dev).
 
-## Status Snapshot (2026-02-28)
+## Status Snapshot (2026-03-01)
 
 - `/search` is implemented with SQLite FTS5 across all threads.
 - `SkillSync` reverse sync is implemented and runs on startup.
@@ -17,6 +17,7 @@ Inspired by [OpenClaw](https://openclaw.dev).
 - Multi-type runtime is implemented: only `repo_change` and `skill_change` tasks use merge gate; `artifact` tasks complete without merge.
 - Runtime hardening is complete: true subprocess interruption, message-driven control (stop/pause/resume), PAUSED state, completion summaries, metrics.
 - Adaptive memory is implemented: auto-extraction from conversations, injection into agent prompts, `/memories` and `/forget` commands.
+- CLI session resume is implemented for Claude, Codex, and Gemini, with persisted session IDs restored after restart.
 
 ## Architecture
 
@@ -149,6 +150,13 @@ oh-my-agent
 - If an agent fails, the next one in the fallback chain takes over.
 - If `access.owner_user_ids` is configured, only those users can trigger the bot.
 
+### CLI Session Resume
+
+- Claude, Codex, and Gemini all persist CLI session IDs per thread.
+- On restart, the gateway restores stored session IDs from SQLite and attempts to continue the original CLI conversation instead of flattening full history every turn.
+- If a stored session is clearly stale or invalid, it is cleared automatically so the next turn can start fresh.
+- Persisted stale sessions are also deleted when fallback succeeds through another agent.
+
 ### Slash Commands
 
 - `/ask <question> [agent]`
@@ -234,6 +242,8 @@ oh-my-agent
 
 ## Documentation
 
+- Documentation index: [docs/README.md](docs/README.md)
+- Changelog: [CHANGELOG.md](CHANGELOG.md)
 - Chinese README: [docs/CN/README.md](docs/CN/README.md)
 - English roadmap: [docs/EN/todo.md](docs/EN/todo.md)
 - Chinese roadmap: [docs/CN/todo.md](docs/CN/todo.md)
