@@ -9,12 +9,14 @@ Inspired by [OpenClaw](https://openclaw.dev).
 - `/search` is implemented with SQLite FTS5 across all threads.
 - `SkillSync` reverse sync is implemented and runs on startup.
 - v0.5 is runtime-first: durable autonomous task loops (`DRAFT -> RUNNING -> WAITING_MERGE -> MERGED/...`).
-- v0.6 direction is skill-first autonomy; v0.7 expands into ops-first and hybrid autonomy.
+- v0.6 direction is skill-first autonomy + adaptive memory; v0.7 upgrades memory to date-based architecture and expands into ops-first autonomy.
 - Discord approvals use buttons first, slash fallback, reactions as status-only signals.
 - Optional LLM routing is implemented: incoming messages can be classified as `reply_once`, `invoke_existing_skill`, `propose_artifact_task`, `propose_repo_task`, or `create_skill`.
 - Runtime observability is implemented: `/task_logs`, sampled progress events in SQLite, and a single updatable Discord status message.
 - Runtime logging is split into service-level and per-agent logs under `~/.oh-my-agent/runtime/logs/`.
 - Multi-type runtime is implemented: only `repo_change` and `skill_change` tasks use merge gate; `artifact` tasks complete without merge.
+- Runtime hardening is complete: true subprocess interruption, message-driven control (stop/pause/resume), PAUSED state, completion summaries, metrics.
+- Adaptive memory is implemented: auto-extraction from conversations, injection into agent prompts, `/memories` and `/forget` commands.
 
 ## Architecture
 
@@ -79,6 +81,9 @@ Then:
 memory:
   backend: sqlite
   path: ~/.oh-my-agent/runtime/memory.db
+  adaptive:
+    enabled: true
+    path: ~/.oh-my-agent/memories.yaml
 
 workspace: ~/.oh-my-agent/agent-workspace
 
@@ -164,6 +169,9 @@ oh-my-agent
 - `/task_changes <task_id>`
 - `/task_logs <task_id>`
 - `/task_cleanup [task_id]`
+- `/memories [category]`
+- `/forget <memory_id>`
+- `/reload-skills`
 
 ## Autonomous Runtime
 
@@ -212,17 +220,16 @@ oh-my-agent
 ## Autonomy Direction
 
 - v0.5 establishes the runtime-first baseline: durable task execution, merge gating, and recovery.
-- v0.6 focuses on skill-first autonomy: skill creation, skill routing, skill validation, and reusable capability growth.
-- v0.7 expands into ops-first and hybrid autonomy: scheduler-driven and trigger-driven operational workflows combined with skill growth.
+- v0.6 focuses on skill-first autonomy + adaptive memory: skill creation, skill routing, skill validation, reusable capability growth, and cross-session user knowledge.
+- v0.7 upgrades memory to date-based architecture with semantic retrieval and expands into ops-first and hybrid autonomy.
 - Source-code self-modification may exist as a high-risk, strongly gated capability, but it is not the default autonomy path.
 
 ## Current Limits
 
-- Runtime stop/resume is still command-driven; message-driven runtime control is not implemented yet.
-- `stop` changes task state but does not yet guarantee immediate interruption of a running agent/test subprocess.
 - Artifact delivery is not finished yet: generated artifacts are tracked, but attachment-first and link-fallback delivery still needs a dedicated adapter layer.
 - Runtime observability still lacks an in-memory live excerpt layer; `/task_logs` can read live agent log tails, but Discord status cards do not yet show the latest agent activity summary.
 - Codex skill integration is still weaker than Claude/Gemini because project-level native Codex skill discovery is not yet a trusted path.
+- Adaptive memory uses Jaccard word-overlap for similarity; date-based organization and semantic (vector) retrieval are planned for v0.7.
 
 ## Documentation
 

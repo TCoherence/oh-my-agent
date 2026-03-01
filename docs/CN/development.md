@@ -25,23 +25,46 @@ Oh My Agent 是一个多平台 bot，执行层直接使用 CLI Agent，而不是
   - 进程日志中的完整 heartbeat
   - Discord 中单条可更新的状态消息
   - `runtime/logs/agents/` 下独立的底层 agent 日志
+- 真正的子进程中断（heartbeat 循环检查 PAUSED/STOPPED，取消运行中 agent/test）
+- 消息驱动的 runtime 控制（通过 `_parse_control_intent` 从普通 thread 消息触发 stop/pause/resume）
+- PAUSED 状态：非终态，workspace 保留，可带指令 resume
+- 结构化任务完成摘要（目标、变更文件、测试统计、耗时）
+- Runtime 指标（`total_agent_s`、`total_test_s`、`total_elapsed_s`）
+- Adaptive Memory：对话中自动提取记忆、注入 agent prompt、`/memories` 和 `/forget` 命令
 
 仍缺少：
-- 能中断活跃子进程的真正 stop/pause/resume
-- 消息驱动的 runtime 控制
-- artifact delivery 适配层（附件优先、链接兜底）
 - 针对运行中任务的内存级 live ring buffer 和状态卡 live excerpt
+- artifact delivery 适配层（附件优先、链接兜底）
 - 超出当前 `全局 skills + AGENTS.md` 折中的 Codex skill 接入方案
+- 基于日期的记忆组织 + 语义检索（计划 v0.7）
 - ops/event autonomy 仍属于后续阶段
 
 ## 下一阶段产品方向
 
-- v0.5 已完成 runtime-first 基线。
-- v0.6 转向 skill-first autonomy。
-- v0.7 再扩展到 ops-first autonomy 和 hybrid autonomy。
+- v0.5 已完成 runtime-first 基线（全部完成）。
+- v0.6 转向 skill-first autonomy + adaptive memory（记忆已完成，skill 进行中）。
+- v0.7 升级记忆为日期驱动架构 + ops-first autonomy 和 hybrid autonomy。
 - 源代码自我更迭不是默认自主性路径，而是高风险、强审批的特殊能力。
 
 ## 历史阶段
+
+### v0.6.0
+
+- Adaptive Memory：YAML 存储 + Jaccard 去重 + confidence 评分 + 淘汰策略
+- `MemoryExtractor`：对话压缩后由 agent 驱动提取记忆
+- 记忆注入：`[Remembered context]` 前置到 agent prompt
+- Discord `/memories`（列表 + 类别筛选）和 `/forget`（按 ID 删除）
+- Skill task 自动审批 + 自动合并
+- 189 项测试全部通过
+
+### v0.5.3
+
+- PAUSED 状态：非终态，workspace 保留
+- 真正的子进程中断：`_invoke_agent` 中 heartbeat 循环检查 stop/pause 并取消 agent
+- 消息驱动控制：`_parse_control_intent(text)` 从 thread 消息识别 stop/pause/resume
+- Suggestion 体验优化：用新 nonce 重新发送包含建议文本的决策界面
+- 完成摘要存入 `task.summary`（目标、文件、测试统计、耗时）
+- Runtime 指标：事件 payload 中包含 `total_agent_s`、`total_test_s`、`total_elapsed_s`
 
 ### v0.5.2
 

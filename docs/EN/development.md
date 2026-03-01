@@ -25,23 +25,46 @@ Implemented:
   - full heartbeat in process logs
   - single updatable Discord status message
   - separate underlying agent logs in `runtime/logs/agents/`
+- True subprocess interruption (heartbeat loop checks PAUSED/STOPPED, cancels running agent/test)
+- Message-driven runtime control (`stop`, `pause`, `resume` from normal thread messages via `_parse_control_intent`)
+- PAUSED state with workspace preservation and resumable with instruction
+- Structured task completion summary (goal, files changed, test counts, timing)
+- Runtime metrics (`total_agent_s`, `total_test_s`, `total_elapsed_s`)
+- Adaptive memory: auto-extraction from conversations, injection into agent prompts, `/memories` and `/forget` commands
 
 Still missing:
-- true stop/pause/resume with subprocess interruption
-- message-driven runtime control
-- artifact delivery adapter (`attachment first`, link fallback)
 - in-memory live ring buffer and status-card live excerpt for running tasks
+- artifact delivery adapter (`attachment first`, link fallback)
 - stronger Codex skill integration strategy beyond current global-skills / `AGENTS.md` tradeoff
+- date-based memory organization with semantic retrieval (planned for v0.7)
 - ops/event autonomy remains future work
 
 ## Next Product Direction
 
-- v0.5 delivered runtime-first foundations.
-- v0.6 shifts to skill-first autonomy.
-- v0.7 expands into ops-first and hybrid autonomy.
+- v0.5 delivered runtime-first foundations (complete).
+- v0.6 shifts to skill-first autonomy + adaptive memory (memory done, skills in progress).
+- v0.7 upgrades memory to date-based architecture + ops-first and hybrid autonomy.
 - Source-code self-modification is not the default autonomy path; it remains a high-risk, strongly gated capability.
 
 ## Historical Milestones
+
+### v0.6.0
+
+- Adaptive memory: YAML-backed store with Jaccard dedup, confidence scoring, eviction
+- `MemoryExtractor`: agent-powered extraction from conversation turns after compression
+- Memory injection: `[Remembered context]` prepended to agent prompts
+- Discord `/memories` (list with category filter) and `/forget` (delete by ID)
+- Skill auto-approve and auto-merge for skill tasks
+- 189 tests passing
+
+### v0.5.3
+
+- PAUSED state: non-terminal, workspace preserved
+- True subprocess interruption: heartbeat loop in `_invoke_agent` checks stop/pause and cancels agent
+- Message-driven control: `_parse_control_intent(text)` detects stop/pause/resume from thread messages
+- Suggestion UX: re-sends decision surface with suggestion text using new nonce
+- Completion summary stored in `task.summary` (goal, files, test counts, timing)
+- Runtime metrics: `total_agent_s`, `total_test_s`, `total_elapsed_s` in task events
 
 ### v0.5.2
 
