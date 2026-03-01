@@ -8,13 +8,15 @@
 
 - `/search` 已通过 SQLite FTS5 实现跨线程检索。
 - `SkillSync` reverse sync 已实现，并在启动时执行。
-- v0.5 当前主线是 runtime-first：重点是可恢复的自主任务循环（`DRAFT -> RUNNING -> WAITING_MERGE -> MERGED/...`）。
-- v0.6 主线调整为 skill-first autonomy；v0.7 再扩展到 ops-first autonomy 和 hybrid autonomy。
+- v0.5 runtime-first 已完成（包括 runtime hardening pass）。
+- v0.6 主线是 skill-first autonomy + adaptive memory；全部已完成。
+- v0.7 升级记忆为日期驱动架构，增加 ops 基础和 skill 评估。
+- v0.8+ 增加语义记忆检索（向量搜索）和 hybrid autonomy。
 - Discord 审批交互采用按钮优先、slash 兜底，reaction 只做状态信号。
 - 可选的 LLM 路由已实现：消息可被分类为 `reply_once`、`invoke_existing_skill`、`propose_artifact_task`、`propose_repo_task` 或 `create_skill`。
 - Runtime 可观测性已实现：支持 `/task_logs`、SQLite 中采样式 progress 事件，以及 Discord 中单条可更新的状态消息。
-- Runtime 日志已拆成两层：service log 和 per-agent 底层日志，统一写到 `~/.oh-my-agent/runtime/logs/`。
-- 多类型 runtime 已落地：只有 `repo_change` 和 `skill_change` 任务会进入 merge gate，`artifact` 任务不会要求 merge。
+- Runtime hardening 已完成：真正的子进程中断、消息驱动控制（stop/pause/resume）、PAUSED 状态、完成摘要、metrics。
+- Adaptive Memory 已实现：对话中自动提取记忆、注入 agent prompt、`/memories` 和 `/forget` 命令。
 
 ## 架构
 
@@ -40,8 +42,9 @@ User (Discord / Slack / ...)
 核心层次：
 - Gateway：平台适配层和 slash 命令入口
 - Agents：CLI 子进程封装，带 workspace 隔离和 fallback 顺序
-- Memory：SQLite + FTS5 持久化对话历史
+- Memory：SQLite + FTS5 持久化对话历史 + YAML 自适应记忆
 - Skills：`skills/` 与 CLI 原生技能目录之间的同步
+- Runtime：自主任务编排，支持 merge gate 和中断恢复
 
 ## 安装与配置
 
@@ -65,12 +68,21 @@ pip install -e .
 cp config.yaml.example config.yaml
 ```
 
+配置说明：
+- 把敏感信息（token、API key）写入 `.env`
+- `config.yaml` 里只放 `${ENV_VAR}` 引用
+- 填写 `DISCORD_BOT_TOKEN` 和 `DISCORD_CHANNEL_ID`
+- 如果开启 router，还需要设置 `DEEPSEEK_API_KEY`
+
 ### 关键配置
 
 ```yaml
 memory:
   backend: sqlite
   path: ~/.oh-my-agent/runtime/memory.db
+  adaptive:
+    enabled: true
+    path: ~/.oh-my-agent/memories.yaml
 
 workspace: ~/.oh-my-agent/agent-workspace
 
@@ -102,10 +114,6 @@ runtime:
   agent_heartbeat_seconds: 20
   test_heartbeat_seconds: 15
   test_timeout_seconds: 600
-  progress_notice_seconds: 30
-  progress_persist_seconds: 60
-  log_event_limit: 12
-  log_tail_chars: 1200
   cleanup:
     enabled: true
     interval_minutes: 60
@@ -114,7 +122,7 @@ runtime:
     merged_immediate: true
 ```
 
-敏感信息可以放在 `.env` 文件中，`config.yaml` 里的 `${VAR}` 会自动替换。
+敏感信息放在 `.env` 文件中，`config.yaml` 里的 `${VAR}` 会自动替换。
 
 Runtime 产物默认放在 `~/.oh-my-agent/runtime/`（包括 memory DB、日志、task worktree）。旧版 `.workspace/` 会在启动时自动迁移。
 
@@ -132,7 +140,7 @@ oh-my-agent
 - 在目标频道直接发消息，bot 会创建 thread 并回复。
 - 在线程内继续回复，bot 会带着完整上下文继续回答。
 - 使用 `@gemini`、`@claude`、`@codex` 前缀可强制本轮指定 agent。
-- 显式调用已安装 skill（例如 `@claude /weather Shanghai`、`@claude /top-5-daily-news`）会直接走普通聊天流，不会创建 runtime task。
+- 显式调用已安装 skill（例如 `@claude /weather Shanghai`）会直接走普通聊天流，不会创建 runtime task。
 - 如果当前 agent 失败，会自动切换到 fallback 链中的下一个 agent。
 - 如果配置了 `access.owner_user_ids`，只有白名单用户可以触发 bot。
 
@@ -143,6 +151,9 @@ oh-my-agent
 - `/history`
 - `/agent`
 - `/search <query>`
+- `/memories [category]`
+- `/forget <memory_id>`
+- `/reload-skills`
 - `/task_start`
 - `/task_status <task_id>`
 - `/task_list [status]`
@@ -160,58 +171,53 @@ oh-my-agent
 ## 自主任务 Runtime
 
 - 长任务消息意图可以自动创建 runtime task。
-- Runtime 现在区分三类任务：
+- Runtime 区分三类任务：
   - `artifact`：长执行但只返回回复或产物，不进入 merge gate
   - `repo_change`：修改 repo 中代码/文档/测试/配置，最终需要 merge
   - `skill_change`：修改 canonical `skills/<name>`，验证后需要 merge
-- `repo_change` 和 `skill_change` 会在独立的 git worktree 中执行：`~/.oh-my-agent/runtime/tasks/<task_id>`。
-- `artifact` 任务也会走 runtime orchestration，但 `TASK_STATE: DONE` 且校验通过后直接进入 `COMPLETED`，不会出现 `WAITING_MERGE`。
-- `strict` 风险策略下，高风险任务进入 `DRAFT`；低风险 `artifact` 任务默认可直接执行。
-- `MERGED` 任务在合并成功后会立即清理 worktree；其他终态任务默认保留 72 小时，再由 janitor 清理。
-- 短对话 `/ask` 使用 `~/.oh-my-agent/agent-workspace/sessions/` 下按 thread 隔离的临时 workspace，并按 TTL 清理；它不是 runtime worktree。
+- `repo_change` 和 `skill_change` 在独立 git worktree 中执行：`~/.oh-my-agent/runtime/tasks/<task_id>`。
+- `MERGED` 任务在合并成功后立即清理 worktree；其他终态任务默认保留 72 小时后由 janitor 清理。
+- 消息驱动控制：在线程内发送 `stop`、`pause`、`resume` 可直接控制任务状态。
 - `/task_logs` 用来查看最近 runtime 事件和输出 tail。
-- Runtime 现在会写两层日志：
-  - service log：`~/.oh-my-agent/runtime/logs/oh-my-agent.log`
-  - underlying agent log：`~/.oh-my-agent/runtime/logs/agents/<task>-step<step>-<agent>.log`
-- Discord 中 runtime 进度会尽量复用并更新同一条状态消息，避免刷屏。
+- Runtime 写两层日志：service log 和 per-agent 底层日志，均在 `~/.oh-my-agent/runtime/logs/`。
 
 ## Artifact Delivery
 
-- 当前交付方向是：
-  - 先尝试直接上传附件
-  - 如果产物过大，则回退为链接
-  - 交付能力做成抽象层，便于本地运行时直接访问文件、远端部署时接入对象存储
-- 这层能力应由平台/runtime 控制，而不是只靠 agent prompt 自由发挥。
-- 远端托管方向优先推荐 S3 兼容对象存储；默认建议 Cloudflare R2，便于做 presigned link 交付。
+- 先尝试直接上传附件，过大时回退为链接。
+- 交付能力做成抽象层，本地运行直接访问文件，远端部署接入对象存储（推荐 Cloudflare R2）。
 
 ## Codex 接入说明
 
-- 当前 Codex 的稳定接入基础是 CLI 执行、`AGENTS.md` 和平台层的 routing/runtime 逻辑。
-- 目前不把“project-level native Codex skill discovery”当成可靠能力。
-- 近阶段的实际策略是：
-  - Claude/Gemini 通过 workspace skill dirs + `SkillSync` 刷新使用 skill
-  - Codex 依赖全局 Codex skills，以及自动生成的 workspace `AGENTS.md`（其中引用 `workspace/.codex/skills/`）
-- `.codex/skills` 继续延后，直到确认 project-level 原生发现机制可靠。
+- Codex 接入基础是 CLI 执行 + `AGENTS.md` + workspace `.codex/skills/`。
+- `SkillSync` 把所有 skill 同步到 workspace `.codex/skills/`，并生成 `AGENTS.md` 列出每个 skill 的路径和描述供 Codex 读取。
+- Claude/Gemini 通过原生 skill 目录发现；Codex 通过 AGENTS.md 桥接，等待官方支持 project-level skill 后平滑迁移。
 
 ## Workspace 布局
 
-- `~/.oh-my-agent/agent-workspace/` 是 CLI agent 的基础外置 workspace。
-- `~/.oh-my-agent/agent-workspace/sessions/` 存的是普通聊天 thread 的临时工作区。
-- `~/.oh-my-agent/agent-workspace/.codex/skills/` 会被刷新，用来通过 `AGENTS.md` 向 Codex 暴露 workspace 内的 skill 引用。
-- `~/.oh-my-agent/runtime/tasks/` 存的是 runtime 长任务的 worktree 和 artifact task 产物。
-- 外置 workspace 现在只使用生成的 `AGENTS.md` 作为统一上下文注入入口。repo 根的 `AGENT.md`、`CLAUDE.md`、`GEMINI.md` 不再被镜像到外置 workspace 或 session workspace。
+- `~/.oh-my-agent/agent-workspace/` — CLI agent 的基础外置 workspace
+- `~/.oh-my-agent/agent-workspace/sessions/` — 普通聊天 thread 的临时工作区（TTL 清理）
+- `~/.oh-my-agent/runtime/tasks/` — runtime 长任务的 worktree 和 artifact 产物
+- `~/.oh-my-agent/runtime/logs/` — service log + per-agent 底层日志
+- `~/.oh-my-agent/memories.yaml` — adaptive memory 持久化存储
 
 ## 自主性方向
 
-- v0.5 建立 runtime-first 基线：重点是长任务执行、恢复、审批和合并闭环。
-- v0.6 聚焦 skill-first autonomy：重点是 skill 创建、skill 路由、skill 验证，以及可复用能力的持续增长。
-- v0.7 再扩展到 ops-first autonomy 和 hybrid autonomy：把 scheduler / trigger 驱动的主动执行和 skill growth 结合起来。
+- v0.5 建立 runtime-first 基线：长任务执行、恢复、审批和合并闭环（已完成）。
+- v0.6 聚焦 skill-first autonomy + adaptive memory：skill 创建路由验证、跨 session 用户记忆（已完成）。
+- v0.7 升级记忆为日期驱动架构，增加 ops 基础和 skill 评估。
+- v0.8+ 增加语义记忆检索和 hybrid autonomy。
 - 源代码自我更迭可以作为高风险、强审批的特殊能力存在，但不是默认自主性主线。
 
 ## 当前限制
 
-- Runtime 的 stop/resume 目前仍主要依赖命令入口，消息驱动控制还未实现。
-- 现在的 `stop` 会修改任务状态，但还不能保证立即中断正在运行的 agent/test 子进程。
-- artifact delivery 还没完全做完：运行时已经能记录产物，但“附件优先、链接兜底”的交付适配层还需要补齐。
-- Runtime 可观测性还缺少内存级 live excerpt 层；现在 `/task_logs` 已能读取 live agent log tail，但 Discord 状态卡还不会直接展示“最近在做什么”的摘要。
-- Codex 的 skill 接入目前仍弱于 Claude/Gemini，因为还没有确认 project-level native Codex skill discovery 的可靠路径。
+- Artifact delivery 还没完全做完：附件优先、链接兜底的交付适配层还需要补齐。
+- Runtime 可观测性还缺少内存级 live excerpt；`/task_logs` 可读 live agent log tail，但 Discord 状态卡不会直接展示"最近在做什么"的摘要。
+- Adaptive memory 目前使用 Jaccard 词重叠做相似度；日期驱动组织计划在 v0.7 实现，语义检索（向量搜索）在 v0.8+。
+
+## 文档
+
+- English README: [README.md](../../README.md)
+- 英文路线图: [docs/EN/todo.md](../EN/todo.md)
+- 中文路线图: [docs/CN/todo.md](todo.md)
+- 英文开发记录: [docs/EN/development.md](../EN/development.md)
+- 中文开发记录: [docs/CN/development.md](development.md)

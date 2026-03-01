@@ -8,8 +8,7 @@ Oh My Agent is a multi-platform bot that uses CLI-based AI agents as the executi
 
 1. `README.md` / `docs/CN/README.md`
 2. `docs/EN/todo.md` / `docs/CN/todo.md`
-3. `docs/EN/v0.5_runtime_plan.md` / `docs/CN/v0.5_runtime_plan.md`
-4. `docs/archive/future_planning_discussion.md` for historical rationale
+3. `docs/archive/` for historical planning documents
 
 ## Current Runtime Baseline
 

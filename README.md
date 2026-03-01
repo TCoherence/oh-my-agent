@@ -239,9 +239,8 @@ oh-my-agent
 - Chinese roadmap: [docs/CN/todo.md](docs/CN/todo.md)
 - English development log: [docs/EN/development.md](docs/EN/development.md)
 - Chinese development log: [docs/CN/development.md](docs/CN/development.md)
-- English runtime plan: [docs/EN/v0.5_runtime_plan.md](docs/EN/v0.5_runtime_plan.md)
-- Chinese runtime plan: [docs/CN/v0.5_runtime_plan.md](docs/CN/v0.5_runtime_plan.md)
-- Archived discussion: [docs/archive/future_planning_discussion.md](docs/archive/future_planning_discussion.md)
+- Router smoke test: [docs/router_smoke.md](docs/router_smoke.md)
+- Archived: [docs/archive/](docs/archive/)
 
 ## License
 

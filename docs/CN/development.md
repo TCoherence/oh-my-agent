@@ -8,8 +8,7 @@ Oh My Agent 是一个多平台 bot，执行层直接使用 CLI Agent，而不是
 
 1. `README.md` / `docs/CN/README.md`
 2. `docs/EN/todo.md` / `docs/CN/todo.md`
-3. `docs/EN/v0.5_runtime_plan.md` / `docs/CN/v0.5_runtime_plan.md`
-4. `docs/archive/future_planning_discussion.md` 作为历史讨论归档
+3. `docs/archive/` 存放历史规划文档
 
 ## 当前 Runtime 基线
 
