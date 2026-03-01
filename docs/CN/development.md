@@ -36,14 +36,16 @@ Oh My Agent 是一个多平台 bot，执行层直接使用 CLI Agent，而不是
 - 针对运行中任务的内存级 live ring buffer 和状态卡 live excerpt
 - artifact delivery 适配层（附件优先、链接兜底）
 - 超出当前 `全局 skills + AGENTS.md` 折中的 Codex skill 接入方案
-- 基于日期的记忆组织 + 语义检索（计划 v0.7）
+- 基于日期的记忆组织（计划 v0.7）；语义检索（v0.8+）
+- Skill 评估（成功率追踪、用户反馈、健康看板；计划 v0.7）
 - ops/event autonomy 仍属于后续阶段
 
 ## 下一阶段产品方向
 
 - v0.5 已完成 runtime-first 基线（全部完成）。
 - v0.6 转向 skill-first autonomy + adaptive memory（记忆已完成，skill 进行中）。
-- v0.7 升级记忆为日期驱动架构 + ops-first autonomy 和 hybrid autonomy。
+- v0.7 升级记忆为日期驱动架构，增加 ops 基础和 skill 评估。
+- v0.8+ 增加语义记忆检索（向量搜索）和 hybrid autonomy。
 - 源代码自我更迭不是默认自主性路径，而是高风险、强审批的特殊能力。
 
 ## 历史阶段

@@ -36,14 +36,16 @@ Still missing:
 - in-memory live ring buffer and status-card live excerpt for running tasks
 - artifact delivery adapter (`attachment first`, link fallback)
 - stronger Codex skill integration strategy beyond current global-skills / `AGENTS.md` tradeoff
-- date-based memory organization with semantic retrieval (planned for v0.7)
+- date-based memory organization (planned for v0.7); semantic retrieval (v0.8+)
+- skill evaluation (success tracking, user feedback, health dashboard; planned for v0.7)
 - ops/event autonomy remains future work
 
 ## Next Product Direction
 
 - v0.5 delivered runtime-first foundations (complete).
 - v0.6 shifts to skill-first autonomy + adaptive memory (memory done, skills in progress).
-- v0.7 upgrades memory to date-based architecture + ops-first and hybrid autonomy.
+- v0.7 upgrades memory to date-based architecture, adds ops foundation and skill evaluation.
+- v0.8+ adds semantic memory retrieval (vector search) and hybrid autonomy.
 - Source-code self-modification is not the default autonomy path; it remains a high-risk, strongly gated capability.
 
 ## Historical Milestones

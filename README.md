@@ -221,7 +221,8 @@ oh-my-agent
 
 - v0.5 establishes the runtime-first baseline: durable task execution, merge gating, and recovery.
 - v0.6 focuses on skill-first autonomy + adaptive memory: skill creation, skill routing, skill validation, reusable capability growth, and cross-session user knowledge.
-- v0.7 upgrades memory to date-based architecture with semantic retrieval and expands into ops-first and hybrid autonomy.
+- v0.7 upgrades memory to date-based architecture, adds ops foundation and skill evaluation.
+- v0.8+ adds semantic memory retrieval (vector search) and hybrid autonomy.
 - Source-code self-modification may exist as a high-risk, strongly gated capability, but it is not the default autonomy path.
 
 ## Current Limits
@@ -229,7 +230,7 @@ oh-my-agent
 - Artifact delivery is not finished yet: generated artifacts are tracked, but attachment-first and link-fallback delivery still needs a dedicated adapter layer.
 - Runtime observability still lacks an in-memory live excerpt layer; `/task_logs` can read live agent log tails, but Discord status cards do not yet show the latest agent activity summary.
 - Codex skill integration is still weaker than Claude/Gemini because project-level native Codex skill discovery is not yet a trusted path.
-- Adaptive memory uses Jaccard word-overlap for similarity; date-based organization and semantic (vector) retrieval are planned for v0.7.
+- Adaptive memory uses Jaccard word-overlap for similarity; date-based organization is planned for v0.7, semantic (vector) retrieval for v0.8+.
 
 ## Documentation
 
