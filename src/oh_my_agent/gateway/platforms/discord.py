@@ -35,6 +35,7 @@ class DiscordChannel(BaseChannel):
         self._skill_syncer = None  # SkillSync
         self._workspace_skills_dirs = None  # list[Path] | None
         self._runtime_service = None  # RuntimeService
+        self._adaptive_memory_store = None  # AdaptiveMemoryStore
 
     @property
     def platform(self) -> str:
@@ -58,6 +59,10 @@ class DiscordChannel(BaseChannel):
     def set_runtime_service(self, runtime_service) -> None:
         """Inject runtime service for /task_* commands and decision buttons."""
         self._runtime_service = runtime_service
+
+    def set_adaptive_memory_store(self, store) -> None:
+        """Inject adaptive memory store for /memories and /forget commands."""
+        self._adaptive_memory_store = store
 
     def supports_buttons(self) -> bool:
         return True
@@ -649,6 +654,71 @@ class DiscordChannel(BaseChannel):
             await interaction.response.defer(ephemeral=True)
             result = await self._runtime_service.stop_task(task_id, actor_id=str(interaction.user.id))
             await interaction.followup.send(result[:1900], ephemeral=True)
+
+        # ---- Adaptive Memory commands --------------------------------------
+
+        @tree.command(name="memories", description="Show learned user memories")
+        @app_commands.describe(category="Filter by category (preference, project_knowledge, workflow, fact)")
+        async def slash_memories(interaction: discord.Interaction, category: str | None = None):
+            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
+                await interaction.response.send_message(
+                    "This command is restricted to the configured owner.",
+                    ephemeral=True,
+                )
+                return
+            if not self._adaptive_memory_store:
+                await interaction.response.send_message(
+                    "Adaptive memory is not enabled.", ephemeral=True,
+                )
+                return
+
+            await interaction.response.defer()
+            all_memories = await self._adaptive_memory_store.list_all()
+            if category:
+                all_memories = [m for m in all_memories if m.category == category]
+
+            if not all_memories:
+                msg = "No memories stored."
+                if category:
+                    msg = f"No memories in category **{category}**."
+                await interaction.followup.send(msg)
+                return
+
+            lines = [f"**Memories** — {len(all_memories)} total"]
+            for m in all_memories[:20]:
+                conf_bar = "█" * int(m.confidence * 5) + "░" * (5 - int(m.confidence * 5))
+                lines.append(
+                    f"`{m.id}` [{conf_bar}] **[{m.category}]** {m.summary}"
+                )
+            if len(all_memories) > 20:
+                lines.append(f"_…and {len(all_memories) - 20} more_")
+
+            await interaction.followup.send("\n".join(lines)[:2000])
+
+        @tree.command(name="forget", description="Delete a specific memory by ID")
+        @app_commands.describe(memory_id="The memory ID to delete (shown in /memories)")
+        async def slash_forget(interaction: discord.Interaction, memory_id: str):
+            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
+                await interaction.response.send_message(
+                    "This command is restricted to the configured owner.",
+                    ephemeral=True,
+                )
+                return
+            if not self._adaptive_memory_store:
+                await interaction.response.send_message(
+                    "Adaptive memory is not enabled.", ephemeral=True,
+                )
+                return
+
+            deleted = await self._adaptive_memory_store.delete_memory(memory_id)
+            if deleted:
+                await interaction.response.send_message(
+                    f"Memory `{memory_id}` deleted.", ephemeral=True,
+                )
+            else:
+                await interaction.response.send_message(
+                    f"Memory `{memory_id}` not found.", ephemeral=True,
+                )
 
         # ---- Events --------------------------------------------------------
 

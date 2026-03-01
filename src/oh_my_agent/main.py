@@ -359,6 +359,24 @@ async def _async_main(config: dict, logger: logging.Logger) -> None:
             summary_max_chars=int(memory_cfg.get("summary_max_chars", 500)),
         )
 
+    # Build adaptive memory (optional)
+    adaptive_store = None
+    memory_extractor = None
+    adaptive_cfg = memory_cfg.get("adaptive", {})
+    if adaptive_cfg.get("enabled", False):
+        from oh_my_agent.memory.adaptive import AdaptiveMemoryStore
+        from oh_my_agent.memory.extractor import MemoryExtractor
+
+        adaptive_path = str(Path(adaptive_cfg.get("path", "~/.oh-my-agent/memories.yaml")).expanduser().resolve())
+        adaptive_store = AdaptiveMemoryStore(
+            path=adaptive_path,
+            max_memories=int(adaptive_cfg.get("max_memories", 100)),
+            min_confidence=float(adaptive_cfg.get("min_confidence", 0.3)),
+        )
+        await adaptive_store.load()
+        memory_extractor = MemoryExtractor(adaptive_store)
+        logger.info("Adaptive memory enabled: %s (%d memories loaded)", adaptive_path, len(adaptive_store.memories))
+
     # Sync skills
     skills_cfg = config.get("skills", {})
     skill_syncer = None
@@ -493,6 +511,9 @@ async def _async_main(config: dict, logger: logging.Logger) -> None:
             "base_workspace": str(workspace) if workspace is not None else None,
         },
         intent_router=intent_router,
+        adaptive_memory_store=adaptive_store,
+        memory_extractor=memory_extractor,
+        adaptive_memory_budget=int(adaptive_cfg.get("injection_budget_chars", 500)),
     )
     if memory_store:
         gateway.set_memory_store(memory_store)

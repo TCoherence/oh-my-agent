@@ -3,6 +3,12 @@ memory:
   path: ~/.oh-my-agent/runtime/memory.db
   max_turns: 20
   summary_max_chars: 500
+  adaptive:
+    enabled: true
+    path: ~/.oh-my-agent/memories.yaml
+    max_memories: 100
+    min_confidence: 0.3
+    injection_budget_chars: 500
 
 skills:
   enabled: true

@@ -37,6 +37,9 @@ class GatewayManager:
         runtime_service=None,
         short_workspace: dict | None = None,
         intent_router=None,
+        adaptive_memory_store=None,
+        memory_extractor=None,
+        adaptive_memory_budget: int = 500,
     ) -> None:
         self._channels = channels
         self._compressor = compressor
@@ -47,6 +50,9 @@ class GatewayManager:
         self._workspace_skills_dirs = workspace_skills_dirs  # list[Path] | None
         self._runtime_service = runtime_service
         self._intent_router = intent_router
+        self._adaptive_memory_store = adaptive_memory_store
+        self._memory_extractor = memory_extractor
+        self._adaptive_memory_budget = adaptive_memory_budget
         short_cfg = short_workspace or {}
         self._short_workspace_enabled = bool(short_cfg.get("enabled", True))
         self._short_workspace_ttl_hours = int(short_cfg.get("ttl_hours", 24))
@@ -120,6 +126,10 @@ class GatewayManager:
             # Inject skill syncer for /reload-skills (Discord-specific)
             if hasattr(channel, "set_skill_syncer") and self._skill_syncer:
                 channel.set_skill_syncer(self._skill_syncer, self._workspace_skills_dirs)
+
+            # Inject adaptive memory store for /memories, /forget (Discord-specific)
+            if hasattr(channel, "set_adaptive_memory_store") and self._adaptive_memory_store:
+                channel.set_adaptive_memory_store(self._adaptive_memory_store)
 
             # Inject runtime service for /task_* (Discord-specific)
             if hasattr(channel, "set_runtime_service") and self._runtime_service:
@@ -494,12 +504,30 @@ class GatewayManager:
                         agent.set_session_id(thread_id, stored)
                         logger.debug("Restored session %s for %s thread %s", stored[:12], agent.name, thread_id)
 
+        # Inject adaptive memory context if available
+        agent_prompt = msg.content
+        if self._adaptive_memory_store:
+            try:
+                relevant = await self._adaptive_memory_store.get_relevant(
+                    msg.content, budget_chars=self._adaptive_memory_budget,
+                )
+                if relevant:
+                    mem_lines = [f"- {m.summary}" for m in relevant]
+                    agent_prompt = (
+                        "[Remembered context]\n"
+                        + "\n".join(mem_lines)
+                        + "\n\n"
+                        + msg.content
+                    )
+            except Exception as exc:
+                logger.warning("[%s] Adaptive memory injection failed: %s", req_id, exc)
+
         # Run agent (with fallback, or targeted if preferred_agent is set)
         workspace_override = await self._resolve_short_workspace(session, thread_id)
         t_agent = time.perf_counter()
         async with channel.typing(thread_id):
             agent_used, response = await registry.run(
-                msg.content,
+                agent_prompt,
                 prior_history,
                 thread_id=thread_id,
                 force_agent=msg.preferred_agent,
@@ -556,10 +584,10 @@ class GatewayManager:
             elapsed_total,
         )
 
-        # Async: check compression (don't block the response)
-        if self._compressor:
+        # Async: check compression + memory extraction (don't block the response)
+        if self._compressor or self._memory_extractor:
             asyncio.create_task(
-                self._try_compress(session, registry, thread_id, req_id)
+                self._try_compress_and_extract(session, registry, thread_id, req_id)
             )
 
         # Async: detect and hot-reload new skills created by agents
@@ -648,6 +676,35 @@ class GatewayManager:
                 logger.info("[%s] COMPRESS thread=%s completed", req_id, thread_id)
         except Exception as exc:
             logger.warning("[%s] COMPRESS failed: %s", req_id, exc)
+
+    async def _try_compress_and_extract(
+        self,
+        session: ChannelSession,
+        registry: AgentRegistry,
+        thread_id: str,
+        req_id: str,
+    ) -> None:
+        """Run compression first, then memory extraction if applicable."""
+        if self._compressor:
+            await self._try_compress(session, registry, thread_id, req_id)
+
+        if not self._memory_extractor:
+            return
+
+        try:
+            history = await session.get_history(thread_id)
+            if len(history) < 4:
+                return
+            entries = await self._memory_extractor.extract(
+                history, registry, thread_id=thread_id,
+            )
+            if entries:
+                logger.info(
+                    "[%s] MEMORY_EXTRACT thread=%s extracted=%d",
+                    req_id, thread_id, len(entries),
+                )
+        except Exception as exc:
+            logger.warning("[%s] MEMORY_EXTRACT failed: %s", req_id, exc)
 
     async def _run_short_workspace_janitor(self) -> None:
         while True:
