@@ -1,4 +1,4 @@
 interface:
   display_name: "Bilibili Video Summarizer"
-  short_description: "Summarize Bilibili videos from URL"
-  default_prompt: "Use $bilibili-video-summarizer to extract evidence from this Bilibili URL and write a concise summary."
+  short_description: "Summarize Bilibili videos from links or BV IDs"
+  default_prompt: "Use $bilibili-video-summarizer to summarize this Bilibili link or BV ID with explicit evidence labeling."

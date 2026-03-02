@@ -13,6 +13,12 @@ from urllib.parse import parse_qs, urlparse
 
 
 VIDEO_SEGMENT_RE = re.compile(r"(?i)^(bv[0-9a-z]{10}|av\d+)$")
+VIDEO_SEGMENT_WITH_SUFFIX_RE = re.compile(
+    r"(?i)^(?P<video_id>bv[0-9a-z]{10}|av\d+)(?P<suffix>(?:[/?#].*)?)$"
+)
+SCHEMELESS_URL_RE = re.compile(
+    r"(?i)^(?:www\.)?bilibili\.com/|^m\.bilibili\.com/|^(?:www\.)?b23\.tv/|^(?:www\.)?bili2233\.cn/"
+)
 TIME_RE = re.compile(
     r"^(?:(?P<hours>\d+)h)?(?:(?P<minutes>\d+)m)?(?:(?P<seconds>\d+)s)?$"
 )
@@ -67,6 +73,27 @@ def parse_timestamp(raw: Optional[str]) -> Optional[int]:
     return total if total > 0 else None
 
 
+def parse_fragment_timestamp(raw: Optional[str]) -> Optional[int]:
+    if raw is None or raw == "":
+        return None
+    candidate = raw.strip()
+    if candidate.startswith("t="):
+        return parse_timestamp(candidate[2:])
+    query = parse_qs(candidate)
+    if "t" in query:
+        return parse_timestamp(query["t"][0])
+    return parse_timestamp(candidate)
+
+
+def extract_page_and_timestamp(parsed) -> tuple[Optional[int], Optional[int]]:
+    query = parse_qs(parsed.query)
+    page = parse_positive_int(query.get("p", [None])[0])
+    timestamp = parse_timestamp(query.get("t", [None])[0])
+    if timestamp is None:
+        timestamp = parse_fragment_timestamp(parsed.fragment)
+    return page, timestamp
+
+
 def build_note_slug(video_id: str, page: Optional[int]) -> str:
     parts = [video_id]
     if page:
@@ -86,9 +113,20 @@ def build_canonical_url(video_id: str, page: Optional[int], timestamp: Optional[
     return f"https://www.bilibili.com/video/{video_id}/{query}"
 
 
+def coerce_url_candidate(raw: str) -> str:
+    candidate = raw.strip()
+    if candidate.startswith("//"):
+        return f"https:{candidate}"
+    if SCHEMELESS_URL_RE.match(candidate):
+        return f"https://{candidate}"
+    return candidate
+
+
 def normalize_from_url(raw: str) -> NormalizedVideo:
     parsed = urlparse(raw)
     host = parsed.netloc.lower()
+
+    page, timestamp = extract_page_and_timestamp(parsed)
 
     if host in {"b23.tv", "www.b23.tv", "bili2233.cn", "www.bili2233.cn"}:
         return NormalizedVideo(
@@ -96,8 +134,8 @@ def normalize_from_url(raw: str) -> NormalizedVideo:
             kind="short_url",
             video_id=None,
             video_id_type=None,
-            page=None,
-            timestamp_seconds=None,
+            page=page,
+            timestamp_seconds=timestamp,
             canonical_url=None,
             note_slug=None,
             needs_resolution=True,
@@ -117,10 +155,6 @@ def normalize_from_url(raw: str) -> NormalizedVideo:
     if not video_id:
         raise ValueError("URL does not contain a recognizable Bilibili video ID.")
 
-    query = parse_qs(parsed.query)
-    page = parse_positive_int(query.get("p", [None])[0])
-    timestamp = parse_timestamp(query.get("t", [None])[0])
-
     return NormalizedVideo(
         input=raw,
         kind="video_url",
@@ -134,8 +168,36 @@ def normalize_from_url(raw: str) -> NormalizedVideo:
     )
 
 
+def normalize_id_with_suffix(raw: str) -> Optional[NormalizedVideo]:
+    match = VIDEO_SEGMENT_WITH_SUFFIX_RE.match(raw.strip())
+    if not match:
+        return None
+    suffix = match.group("suffix") or ""
+    if suffix == "":
+        return None
+
+    video_id, video_id_type = normalize_video_id(match.group("video_id"))
+    if not video_id or not video_id_type:
+        return None
+
+    parsed = urlparse(f"https://www.bilibili.com/video/{video_id}{suffix}")
+    page, timestamp = extract_page_and_timestamp(parsed)
+
+    return NormalizedVideo(
+        input=raw,
+        kind="bare_id",
+        video_id=video_id,
+        video_id_type=video_id_type,
+        page=page,
+        timestamp_seconds=timestamp,
+        canonical_url=build_canonical_url(video_id, page, timestamp),
+        note_slug=build_note_slug(video_id, page),
+        needs_resolution=False,
+    )
+
+
 def normalize_target(raw: str) -> NormalizedVideo:
-    candidate = raw.strip()
+    candidate = coerce_url_candidate(raw)
     if not candidate:
         raise ValueError("Input is empty.")
 
@@ -152,6 +214,10 @@ def normalize_target(raw: str) -> NormalizedVideo:
             note_slug=build_note_slug(video_id, None),
             needs_resolution=False,
         )
+
+    normalized = normalize_id_with_suffix(candidate)
+    if normalized:
+        return normalized
 
     parsed = urlparse(candidate)
     if not parsed.scheme or not parsed.netloc:
