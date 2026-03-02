@@ -60,7 +60,7 @@
 - [x] 记忆冲突合并：Jaccard 去重（阈值 0.6）→ 合并并提升 confidence；按 confidence × 时效性 淘汰
 - [x] 跨 agent 共享：记忆属于用户，所有 agent 共用同一 YAML 文件
 
-## v0.7 - 基于日期的记忆系统 + Ops 基础
+## v0.7 - 基于日期的记忆系统 + Human-in-the-Loop Ops 基础
 
 ### 基于日期的记忆（已完成）
 
@@ -78,6 +78,13 @@
 - [ ] Scheduler 驱动的主动任务（对接 `automations` 到 runtime task 类型）
 - [ ] 超越 cron 的事件驱动触发器（webhook 接入、文件监控、外部通知）
 - [ ] **面向 operator 的 doctor 命令**：增加 Discord 优先的自诊断入口（`/doctor` 或等价能力），在进程异常或服务挂掉后，能够汇报最近失败状态、启动健康情况、日志位置和建议排查步骤，而不要求先手动登录服务器找日志
+
+### Human-in-the-Loop Runtime
+
+- [ ] **一等等待状态**：增加专门的 `WAITING_USER_INPUT` runtime 状态，不再把所有人工交互都塞进 `BLOCKED`
+- [ ] **Agent 主动提问界面**：允许运行中的 task 在 Discord 里向用户发起带上下文和可选项的明确问题
+- [ ] **结构化答案绑定**：把用户的下一条回复绑定到 pending question，并以结构化 answer payload 恢复 task，而不是只靠自由文本 resume instruction
+- [ ] **任务中途审批检查点**：对高风险或高歧义步骤支持显式人工确认，而不是只在 merge 阶段做人类审批
 
 ### Skill 评估
 

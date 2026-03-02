@@ -6,7 +6,7 @@ The format is intentionally lightweight and release-oriented rather than exhaust
 
 ## Unreleased
 
-## v0.6.3 - 2026-03-01
+## v0.7.0 - 2026-03-01
 
 ### Added
 

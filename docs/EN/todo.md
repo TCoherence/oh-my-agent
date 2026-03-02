@@ -60,7 +60,7 @@
 - [x] Memory conflict resolution: Jaccard dedup (threshold 0.6) → merge with confidence boost; eviction by confidence × recency
 - [x] Cross-agent sharing: memories belong to the user, shared across all agents (YAML file, not per-agent)
 
-## v0.7 - Date-Based Memory + Ops Foundation
+## v0.7 - Date-Based Memory + Human-in-the-Loop Ops Foundation
 
 ### Date-Based Memory (complete)
 
@@ -78,6 +78,13 @@ Upgrade adaptive memory from flat YAML to a date-organized, two-tier architectur
 - [ ] Scheduler-driven operational tasks (connect `automations` to runtime task types)
 - [ ] Event-driven triggers beyond cron (webhook ingestion, file-watch, external notifications)
 - [ ] **Operator-facing doctor command**: add a Discord-first self-diagnostics entrypoint (`/doctor` or equivalent) that can report recent crash/failure state, startup health, log pointers, and recommended next checks without requiring direct server log access
+
+### Human-in-the-Loop Runtime
+
+- [ ] **First-class waiting state**: add a dedicated `WAITING_USER_INPUT` runtime state instead of overloading `BLOCKED` for every human handoff
+- [ ] **Agent-initiated question surface**: let a running task ask the user a scoped question (with context and optional choices) directly in Discord
+- [ ] **Structured answer binding**: bind the next user reply to the pending question and resume the task with explicit answer payloads instead of ad hoc free-text resume instructions
+- [ ] **Mid-task approval checkpoints**: support explicit human checkpoints for risky or ambiguous steps without forcing the task into merge-only approval semantics
 
 ### Skill Evaluation
 

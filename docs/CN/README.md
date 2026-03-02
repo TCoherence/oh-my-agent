@@ -10,7 +10,7 @@
 - `SkillSync` reverse sync 已实现，并在启动时执行。
 - v0.5 runtime-first 已完成（包括 runtime hardening pass）。
 - v0.6 主线是 skill-first autonomy + adaptive memory；全部已完成。
-- v0.7 升级记忆为日期驱动架构，增加 ops 基础和 skill 评估。
+- v0.7 已经完成日期驱动记忆系统，当前继续推进 ops 基础、Human-in-the-Loop runtime 和 skill 评估。
 - v0.8+ 增加语义记忆检索（向量搜索）和 hybrid autonomy。
 - Discord 审批交互采用按钮优先、slash 兜底，reaction 只做状态信号。
 - 可选的 LLM 路由已实现：消息可被分类为 `reply_once`、`invoke_existing_skill`、`propose_artifact_task`、`propose_repo_task` 或 `create_skill`。
@@ -223,7 +223,7 @@ Runtime 产物默认放在 `~/.oh-my-agent/runtime/`（包括 memory DB、日志
 
 - v0.5 建立 runtime-first 基线：长任务执行、恢复、审批和合并闭环（已完成）。
 - v0.6 聚焦 skill-first autonomy + adaptive memory：skill 创建路由验证、跨 session 用户记忆（已完成）。
-- v0.7 升级记忆为日期驱动架构，增加 ops 基础和 skill 评估。
+- v0.7 已经交付日期驱动记忆系统，当前继续推进 ops 基础、Human-in-the-Loop runtime 和 skill 评估。
 - v0.8+ 增加语义记忆检索和 hybrid autonomy。
 - 源代码自我更迭可以作为高风险、强审批的特殊能力存在，但不是默认自主性主线。
 
@@ -232,8 +232,9 @@ Runtime 产物默认放在 `~/.oh-my-agent/runtime/`（包括 memory DB、日志
 - Artifact delivery 还没完全做完：附件优先、链接兜底的交付适配层还需要补齐。
 - Runtime 可观测性还缺少内存级 live excerpt；`/task_logs` 可读 live agent log tail，但 Discord 状态卡不会直接展示"最近在做什么"的摘要。
 - 服务挂掉或启动失败时，Discord 侧还没有面向 operator 的 doctor / 自诊断入口；当前排查仍然需要直接去服务器上看日志。
+- Runtime 还没有一等的 Human-in-the-Loop 状态机；目前只能通过 `BLOCKED + 线程回复 resume` 近似实现，缺少明确的 `WAITING_USER_INPUT` 协议。
 - Codex repo/workspace skill 发现现在已经走官方 `.agents/skills/`；生成的 `AGENTS.md` 不再承担 workspace skill 列举逻辑。
-- Adaptive memory 目前使用 Jaccard 词重叠做相似度；日期驱动组织计划在 v0.7 实现，语义检索（向量搜索）在 v0.8+。
+- 记忆检索目前仍使用 Jaccard 词重叠做相似度；语义检索（向量搜索）仍是 v0.8+ 项目。
 
 ## 文档
 

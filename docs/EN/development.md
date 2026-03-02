@@ -36,19 +36,29 @@ Still missing:
 - in-memory live ring buffer and status-card live excerpt for running tasks
 - artifact delivery adapter (`attachment first`, link fallback)
 - stronger Codex skill integration strategy beyond current global-skills / `AGENTS.md` tradeoff
-- date-based memory organization (planned for v0.7); semantic retrieval (v0.8+)
+- semantic retrieval (v0.8+)
 - skill evaluation (success tracking, user feedback, health dashboard; planned for v0.7)
+- first-class human-in-the-loop runtime beyond the current `BLOCKED + resume` approximation
 - ops/event autonomy remains future work
 
 ## Next Product Direction
 
 - v0.5 delivered runtime-first foundations (complete).
-- v0.6 shifts to skill-first autonomy + adaptive memory (memory done, skills in progress).
-- v0.7 upgrades memory to date-based architecture, adds ops foundation and skill evaluation.
+- v0.6 delivered skill-first autonomy + adaptive memory.
+- v0.7 delivered date-based memory and now continues with ops foundation, human-in-the-loop runtime, and skill evaluation.
 - v0.8+ adds semantic memory retrieval (vector search) and hybrid autonomy.
 - Source-code self-modification is not the default autonomy path; it remains a high-risk, strongly gated capability.
 
 ## Historical Milestones
+
+### v0.7.0
+
+- Date-based two-tier memory (`daily/` + `curated.yaml` + `MEMORY.md`) shipped
+- Manual `/promote` command and daily-to-curated promotion lifecycle
+- Image attachment support across Discord + Claude/Gemini/Codex
+- Workspace refresh now regenerates synced skills and generated `AGENTS.md` together
+- Codex repo/workspace skill delivery now uses official `.agents/skills/`
+- Request-scoped observability improved across gateway replies and background memory/compression runs
 
 ### v0.6.1
 

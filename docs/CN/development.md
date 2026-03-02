@@ -36,19 +36,29 @@ Oh My Agent 是一个多平台 bot，执行层直接使用 CLI Agent，而不是
 - 针对运行中任务的内存级 live ring buffer 和状态卡 live excerpt
 - artifact delivery 适配层（附件优先、链接兜底）
 - 超出当前 `全局 skills + AGENTS.md` 折中的 Codex skill 接入方案
-- 基于日期的记忆组织（计划 v0.7）；语义检索（v0.8+）
+- 语义检索（v0.8+）
 - Skill 评估（成功率追踪、用户反馈、健康看板；计划 v0.7）
+- 超出当前 `BLOCKED + resume` 近似模型的一等 Human-in-the-Loop runtime
 - ops/event autonomy 仍属于后续阶段
 
 ## 下一阶段产品方向
 
 - v0.5 已完成 runtime-first 基线（全部完成）。
-- v0.6 转向 skill-first autonomy + adaptive memory（记忆已完成，skill 进行中）。
-- v0.7 升级记忆为日期驱动架构，增加 ops 基础和 skill 评估。
+- v0.6 已交付 skill-first autonomy + adaptive memory。
+- v0.7 已交付日期驱动记忆系统，当前继续推进 ops 基础、Human-in-the-Loop runtime 和 skill 评估。
 - v0.8+ 增加语义记忆检索（向量搜索）和 hybrid autonomy。
 - 源代码自我更迭不是默认自主性路径，而是高风险、强审批的特殊能力。
 
 ## 历史阶段
+
+### v0.7.0
+
+- 日期驱动的两层记忆系统（`daily/` + `curated.yaml` + `MEMORY.md`）正式交付
+- 手动 `/promote` 命令和 daily 到 curated 的晋升生命周期
+- Discord 图片附件支持，以及 Claude/Gemini/Codex 的对应处理链路
+- workspace refresh 现在会一起重建同步后的 skills 和生成的 `AGENTS.md`
+- Codex 的 repo/workspace skill 分发切到官方 `.agents/skills/`
+- gateway 回复链路和后台 memory/compression 链路的 request-scoped 可观测性增强
 
 ### v0.6.1
 

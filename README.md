@@ -9,7 +9,8 @@ Inspired by [OpenClaw](https://openclaw.dev).
 - `/search` is implemented with SQLite FTS5 across all threads.
 - `SkillSync` reverse sync is implemented and runs on startup.
 - v0.5 is runtime-first: durable autonomous task loops (`DRAFT -> RUNNING -> WAITING_MERGE -> MERGED/...`).
-- v0.6 direction is skill-first autonomy + adaptive memory; v0.7 upgrades memory to date-based architecture and expands into ops-first autonomy.
+- v0.6 skill-first autonomy + adaptive memory is complete.
+- v0.7 has shipped date-based memory and is now focused on ops foundation, human-in-the-loop runtime, and skill evaluation.
 - Discord approvals use buttons first, slash fallback, reactions as status-only signals.
 - Optional LLM routing is implemented: incoming messages can be classified as `reply_once`, `invoke_existing_skill`, `propose_artifact_task`, `propose_repo_task`, or `create_skill`.
 - Runtime observability is implemented: `/task_logs`, sampled progress events in SQLite, and a single updatable Discord status message.
@@ -243,7 +244,7 @@ Check the installed version:
 
 - v0.5 establishes the runtime-first baseline: durable task execution, merge gating, and recovery.
 - v0.6 focuses on skill-first autonomy + adaptive memory: skill creation, skill routing, skill validation, reusable capability growth, and cross-session user knowledge.
-- v0.7 upgrades memory to date-based architecture, adds ops foundation and skill evaluation.
+- v0.7 delivers date-based memory and continues with ops foundation, human-in-the-loop runtime, and skill evaluation.
 - v0.8+ adds semantic memory retrieval (vector search) and hybrid autonomy.
 - Source-code self-modification may exist as a high-risk, strongly gated capability, but it is not the default autonomy path.
 
@@ -252,8 +253,9 @@ Check the installed version:
 - Artifact delivery is not finished yet: generated artifacts are tracked, but attachment-first and link-fallback delivery still needs a dedicated adapter layer.
 - Runtime observability still lacks an in-memory live excerpt layer; `/task_logs` can read live agent log tails, but Discord status cards do not yet show the latest agent activity summary.
 - There is still no operator-facing doctor/self-diagnostics entrypoint in Discord when the service crashes or fails to start; today, debugging still requires direct access to server logs.
+- Runtime still lacks a first-class human-in-the-loop state for agent-initiated questions; today, blocked tasks can be resumed from thread replies, but there is no explicit `WAITING_USER_INPUT` flow yet.
 - Codex repo/workspace skill discovery now uses official `.agents/skills/`; the generated `AGENTS.md` is no longer used to enumerate workspace skills.
-- Adaptive memory uses Jaccard word-overlap for similarity; date-based organization is planned for v0.7, semantic (vector) retrieval for v0.8+.
+- Memory retrieval still uses Jaccard word-overlap for similarity; semantic (vector) retrieval remains a v0.8+ item.
 
 ## Documentation
 
