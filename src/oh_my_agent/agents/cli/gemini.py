@@ -73,17 +73,18 @@ class GeminiCLIAgent(BaseCLIAgent):
         ]
 
     def _augment_prompt_with_images(
-        self, prompt: str, image_paths: list[Path], cwd: Path | None
+        self, prompt: str, image_paths: list[Path], cwd: str | Path | None
     ) -> str:
         """Copy images to the workspace and prepend file-reference instructions."""
         if not image_paths:
             return prompt
         lines: list[str] = []
+        cwd_path = Path(cwd) if cwd else None
         for img in image_paths:
             if not img.is_file():
                 continue
-            if cwd:
-                dest_dir = Path(cwd) / "_attachments"
+            if cwd_path:
+                dest_dir = cwd_path / "_attachments"
                 dest_dir.mkdir(parents=True, exist_ok=True)
                 dest = dest_dir / img.name
                 shutil.copy2(img, dest)

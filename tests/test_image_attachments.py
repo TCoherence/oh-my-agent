@@ -152,6 +152,20 @@ def test_claude_augment_prompt_with_images_with_workspace(tmp_path):
     assert (workspace / "_attachments" / "test.png").exists()
 
 
+def test_claude_augment_prompt_with_images_with_string_workspace(tmp_path):
+    from oh_my_agent.agents.cli.claude import ClaudeAgent
+
+    agent = ClaudeAgent()
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    img = tmp_path / "test.png"
+    img.write_bytes(b"PNG")
+
+    result = agent._augment_prompt_with_images("describe this", [img], cwd=str(workspace))
+    assert "_attachments/test.png" in result
+    assert (workspace / "_attachments" / "test.png").exists()
+
+
 def test_claude_augment_prompt_empty_list():
     from oh_my_agent.agents.cli.claude import ClaudeAgent
 
@@ -176,6 +190,20 @@ def test_gemini_augment_prompt_with_images(tmp_path):
     result = agent._augment_prompt_with_images("analyze", [img], cwd=workspace)
     assert "_attachments/chart.png" in result
     assert "analyze" in result
+    assert (workspace / "_attachments" / "chart.png").exists()
+
+
+def test_gemini_augment_prompt_with_string_workspace(tmp_path):
+    from oh_my_agent.agents.cli.gemini import GeminiCLIAgent
+
+    agent = GeminiCLIAgent()
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    img = tmp_path / "chart.png"
+    img.write_bytes(b"PNG")
+
+    result = agent._augment_prompt_with_images("analyze", [img], cwd=str(workspace))
+    assert "_attachments/chart.png" in result
     assert (workspace / "_attachments" / "chart.png").exists()
 
 
