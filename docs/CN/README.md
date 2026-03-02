@@ -155,7 +155,7 @@ Runtime 产物默认放在 `~/.oh-my-agent/runtime/`（包括 memory DB、日志
 ### Workspace 自动刷新
 
 - `~/.oh-my-agent/agent-workspace/AGENTS.md` 是生成文件，不是手工维护的源文件。
-- 它的上半部分来自 repo 根的 `AGENTS.md`，下半部分来自同步后的 workspace `.agents/skills/`。
+- 它本质上是 repo 根 `AGENTS.md` 的镜像，并在顶部附带可见的生成元信息。
 - base workspace 会保存一个很小的 source-state manifest；当 repo `AGENTS.md` 或 canonical `skills/` 变化时，会在短对话 workspace 创建前自动刷新。
 - session workspace 继承刷新后的 base workspace，所以普通聊天不需要手动重建也能看到最新规则和 skill。
 
@@ -204,8 +204,8 @@ Runtime 产物默认放在 `~/.oh-my-agent/runtime/`（包括 memory DB、日志
 ## Codex 接入说明
 
 - Codex 接入基础是 CLI 执行 + repo/workspace `.agents/skills/` + 生成的 `AGENTS.md`。
-- `SkillSync` 会把 canonical `skills/` 同步到 repo/workspace `.agents/skills/`，并生成 `AGENTS.md` 列出本地可见 skill 和 repo 规则。
-- Claude/Gemini 继续通过各自原生 skill 目录发现；Codex 使用官方 `.agents/skills/` 约定，`AGENTS.md` 作为补充说明层。
+- `SkillSync` 会把 canonical `skills/` 同步到 repo/workspace `.agents/skills/`。
+- Claude/Gemini 继续通过各自原生 skill 目录发现；Codex 使用官方 `.agents/skills/` 约定。生成的 `AGENTS.md` 只保留 repo 规则和元信息，不再列出 workspace skill 扩展。
 
 ## Workspace 布局
 
@@ -228,7 +228,7 @@ Runtime 产物默认放在 `~/.oh-my-agent/runtime/`（包括 memory DB、日志
 
 - Artifact delivery 还没完全做完：附件优先、链接兜底的交付适配层还需要补齐。
 - Runtime 可观测性还缺少内存级 live excerpt；`/task_logs` 可读 live agent log tail，但 Discord 状态卡不会直接展示"最近在做什么"的摘要。
-- Codex repo/workspace skill 发现现在已经走官方 `.agents/skills/`，但生成的 `AGENTS.md` 仍然保留，作为 repo 规则和可用 skill 的可见摘要。
+- Codex repo/workspace skill 发现现在已经走官方 `.agents/skills/`；生成的 `AGENTS.md` 不再承担 workspace skill 列举逻辑。
 - Adaptive memory 目前使用 Jaccard 词重叠做相似度；日期驱动组织计划在 v0.7 实现，语义检索（向量搜索）在 v0.8+。
 
 ## 文档

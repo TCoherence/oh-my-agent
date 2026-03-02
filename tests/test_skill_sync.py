@@ -84,8 +84,8 @@ def test_refresh_workspace_dirs_copies_skill_dirs(skill_dir, tmp_path):
     assert content.startswith("# Generated Workspace AGENTS")
     assert "Source repo AGENTS:" in content
     assert "# Repo Rules" in content
-    assert ".agents/skills/test-skill/SKILL.md" in content
-    assert "A test skill" in content
+    assert "# Workspace Extensions" not in content
+    assert ".agents/skills/test-skill/SKILL.md" not in content
 
 
 def test_setup_workspace_uses_agents_md_not_agent_compat_files(skill_dir, tmp_path):

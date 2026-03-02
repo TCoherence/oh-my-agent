@@ -121,6 +121,7 @@ Upgrade adaptive memory from flat YAML to a date-organized, two-tier architectur
 - [ ] Docker-based agent isolation
 - [ ] Adaptive Memory encrypted storage + authenticated plaintext access
 - [ ] Adaptive Memory edit permission control
+- [ ] Revisit whether generated workspace `AGENTS.md` is still needed at all once the `.agents/skills/` migration settles
 - [x] Codex / Gemini CLI session resume
 - [ ] Feishu/Lark adapter
 - [ ] Slack adapter

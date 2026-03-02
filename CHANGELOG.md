@@ -31,6 +31,7 @@ The format is intentionally lightweight and release-oriented rather than exhaust
 - Added tests to keep package version and changelog state aligned
 - Base workspace now refreshes synced skills and generated `AGENTS.md` together when repo `AGENTS.md` or canonical `skills/` change
 - Legacy workspace `.codex/` compatibility directories are removed during workspace refresh and session sync
+- Generated workspace `AGENTS.md` no longer enumerates workspace skill extensions now that Codex uses official `.agents/skills/`
 
 ## v0.6.1 - 2026-03-01
 

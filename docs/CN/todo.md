@@ -121,6 +121,7 @@
 - [ ] Docker 隔离
 - [ ] Adaptive Memory 加密存储 + 认证后明文访问
 - [ ] Adaptive Memory 编辑权限控制
+- [ ] 在 `.agents/skills/` 迁移稳定后，再评估是否还需要保留生成的 workspace `AGENTS.md`
 - [x] Codex / Gemini CLI session resume
 - [ ] Feishu/Lark 适配器
 - [ ] Slack 适配器
