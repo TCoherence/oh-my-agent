@@ -576,8 +576,9 @@ class GatewayManager:
 
         if response.error:
             logger.error(
-                "[%s] AGENT_ERROR agent=%s elapsed=%.2fs error=%r",
+                "[%s] AGENT_ERROR purpose=%s agent=%s elapsed=%.2fs error=%r",
                 req_id,
+                agent_purpose,
                 agent_used.name,
                 elapsed_agent,
                 response.error,
@@ -590,8 +591,9 @@ class GatewayManager:
             return
 
         logger.info(
-            "[%s] AGENT_OK agent=%s elapsed=%.2fs response_len=%d",
+            "[%s] AGENT_OK purpose=%s agent=%s elapsed=%.2fs response_len=%d",
             req_id,
+            agent_purpose,
             agent_used.name,
             elapsed_agent,
             len(response.text),

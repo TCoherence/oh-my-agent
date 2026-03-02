@@ -178,6 +178,7 @@ async def test_handle_message_logs_direct_reply_purpose(caplog):
         await gm.handle_message(session, registry, _make_msg(thread_id="existing-thread", content="follow up"))
 
     assert "AGENT starting purpose=direct_reply" in caplog.text
+    assert "AGENT_OK purpose=direct_reply agent=claude" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -228,6 +229,34 @@ async def test_handle_message_logs_explicit_skill_purpose(caplog, tmp_path):
         await gm.handle_message(session, registry, msg)
 
     assert "AGENT starting purpose=explicit_skill preferred_agent='claude'" in caplog.text
+    assert "AGENT_OK purpose=explicit_skill agent=claude" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_handle_message_logs_error_purpose(caplog):
+    channel = MagicMock()
+    channel.platform = "discord"
+    channel.channel_id = "100"
+    channel.create_thread = AsyncMock(return_value="t1")
+    channel.send = AsyncMock()
+    channel.typing = MagicMock()
+    channel.typing.return_value.__aenter__ = AsyncMock(return_value=None)
+    channel.typing.return_value.__aexit__ = AsyncMock(return_value=False)
+
+    mock_agent = MagicMock()
+    mock_agent.name = "claude"
+    registry = MagicMock(spec=AgentRegistry)
+    registry.agents = [mock_agent]
+    registry.run = AsyncMock(return_value=(mock_agent, AgentResponse(text="", error="boom")))
+
+    session = _make_session(channel=channel, registry=registry)
+    gm = GatewayManager([])
+
+    with caplog.at_level("INFO"):
+        await gm.handle_message(session, registry, _make_msg(thread_id="t1", content="oops"))
+
+    assert "AGENT starting purpose=direct_reply" in caplog.text
+    assert "AGENT_ERROR purpose=direct_reply agent=claude" in caplog.text
 
 
 @pytest.mark.asyncio
