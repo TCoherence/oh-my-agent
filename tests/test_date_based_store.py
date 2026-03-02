@@ -400,6 +400,7 @@ async def test_synthesize_calls_agent(tmp_path):
     registry.run = AsyncMock(return_value=(agent, response))
 
     await s.synthesize_memory_md(registry)
+    assert registry.run.call_args.kwargs["run_label"] == "memory_md_synthesis"
 
     md_path = mem_dir / "MEMORY.md"
     assert md_path.exists()

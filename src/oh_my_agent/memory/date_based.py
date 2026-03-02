@@ -337,7 +337,7 @@ class DateBasedMemoryStore:
         prompt = _SYNTHESIS_PROMPT.format(entries_text=entries_text)
 
         try:
-            _agent, response = await registry.run(prompt)
+            _agent, response = await registry.run(prompt, run_label="memory_md_synthesis")
             if response.error:
                 logger.warning("MEMORY.md synthesis agent error: %s", response.error)
                 return
@@ -438,4 +438,3 @@ class DateBasedMemoryStore:
             await self.save()
             logger.info("Promoted %d daily memories to curated", promoted)
         return promoted
-

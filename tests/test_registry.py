@@ -138,3 +138,14 @@ async def test_log_path_passed_when_agent_supports_it(tmp_path):
     await registry.run("q", log_path=log_path)
     assert len(agent.calls) == 1
     assert agent.calls[0][2] == log_path
+
+
+@pytest.mark.asyncio
+async def test_run_label_appears_in_registry_logs(caplog):
+    agent = _OKAgent("solo", "ok")
+    registry = AgentRegistry([agent])
+
+    with caplog.at_level("INFO"):
+        await registry.run("q", run_label="memory_extract thread=t1")
+
+    assert "Trying agent 'solo' [memory_extract thread=t1]" in caplog.text

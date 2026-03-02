@@ -75,9 +75,11 @@ class MemoryExtractor:
             conversation=conversation_text[:3000],
             existing_context=existing_context,
         )
+        run_label = f"memory_extract thread={thread_id or '-'}"
 
         try:
-            _agent, response = await registry.run(prompt)
+            logger.info("Memory extraction started thread=%s turns=%d", thread_id or "-", len(conversation_turns))
+            _agent, response = await registry.run(prompt, run_label=run_label)
         except Exception as exc:
             logger.warning("Memory extraction agent call failed: %s", exc)
             return []

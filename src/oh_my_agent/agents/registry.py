@@ -34,6 +34,7 @@ class AgentRegistry:
         workspace_override=None,
         log_path=None,
         image_paths: list[Path] | None = None,
+        run_label: str | None = None,
     ) -> tuple[BaseAgent, AgentResponse]:
         """Try each agent in order. Return the first successful (agent, response) pair.
 
@@ -42,6 +43,8 @@ class AgentRegistry:
         *thread_id* is forwarded to agents that accept it (e.g. for session resume).
         *force_agent* bypasses fallback and runs only the named agent.
         """
+        label_suffix = f" [{run_label}]" if run_label else ""
+
         if force_agent is not None:
             agent = self.get_agent(force_agent)
             if agent is None:
@@ -68,7 +71,7 @@ class AgentRegistry:
         last_response = AgentResponse(text="", error="No agents available")
 
         for agent in self._agents:
-            logger.info("Trying agent '%s'", agent.name)
+            logger.info("Trying agent '%s'%s", agent.name, label_suffix)
             # Pass thread_id to agents that support it (e.g. ClaudeAgent)
             import inspect
             sig = inspect.signature(agent.run)
@@ -85,10 +88,10 @@ class AgentRegistry:
             if not response.error:
                 return agent, response
             logger.warning(
-                "Agent '%s' failed: %s — trying next", agent.name, response.error
+                "Agent '%s'%s failed: %s — trying next", agent.name, label_suffix, response.error
             )
             last_agent = agent
             last_response = response
 
-        logger.error("All agents failed. Last error: %s", last_response.error)
+        logger.error("All agents failed%s. Last error: %s", label_suffix, last_response.error)
         return last_agent, last_response

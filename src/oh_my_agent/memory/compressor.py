@@ -84,7 +84,10 @@ class HistoryCompressor:
         # Try to get a summary from the agent
         summary_text: str | None = None
         try:
-            agent_used, response = await registry.run(prompt)
+            agent_used, response = await registry.run(
+                prompt,
+                run_label=f"history_compress thread={thread_id}",
+            )
             if not response.error and response.text.strip():
                 summary_text = response.text.strip()[:self._summary_max_chars]
                 logger.info(
