@@ -231,6 +231,7 @@ Runtime 产物默认放在 `~/.oh-my-agent/runtime/`（包括 memory DB、日志
 
 - Artifact delivery 还没完全做完：附件优先、链接兜底的交付适配层还需要补齐。
 - Runtime 可观测性还缺少内存级 live excerpt；`/task_logs` 可读 live agent log tail，但 Discord 状态卡不会直接展示"最近在做什么"的摘要。
+- 服务挂掉或启动失败时，Discord 侧还没有面向 operator 的 doctor / 自诊断入口；当前排查仍然需要直接去服务器上看日志。
 - Codex repo/workspace skill 发现现在已经走官方 `.agents/skills/`；生成的 `AGENTS.md` 不再承担 workspace skill 列举逻辑。
 - Adaptive memory 目前使用 Jaccard 词重叠做相似度；日期驱动组织计划在 v0.7 实现，语义检索（向量搜索）在 v0.8+。
 

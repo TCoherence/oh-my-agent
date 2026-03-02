@@ -77,6 +77,7 @@
 
 - [ ] Scheduler 驱动的主动任务（对接 `automations` 到 runtime task 类型）
 - [ ] 超越 cron 的事件驱动触发器（webhook 接入、文件监控、外部通知）
+- [ ] **面向 operator 的 doctor 命令**：增加 Discord 优先的自诊断入口（`/doctor` 或等价能力），在进程异常或服务挂掉后，能够汇报最近失败状态、启动健康情况、日志位置和建议排查步骤，而不要求先手动登录服务器找日志
 
 ### Skill 评估
 

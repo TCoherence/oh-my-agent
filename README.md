@@ -251,6 +251,7 @@ Check the installed version:
 
 - Artifact delivery is not finished yet: generated artifacts are tracked, but attachment-first and link-fallback delivery still needs a dedicated adapter layer.
 - Runtime observability still lacks an in-memory live excerpt layer; `/task_logs` can read live agent log tails, but Discord status cards do not yet show the latest agent activity summary.
+- There is still no operator-facing doctor/self-diagnostics entrypoint in Discord when the service crashes or fails to start; today, debugging still requires direct access to server logs.
 - Codex repo/workspace skill discovery now uses official `.agents/skills/`; the generated `AGENTS.md` is no longer used to enumerate workspace skills.
 - Adaptive memory uses Jaccard word-overlap for similarity; date-based organization is planned for v0.7, semantic (vector) retrieval for v0.8+.
 

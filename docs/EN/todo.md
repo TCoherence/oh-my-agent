@@ -77,6 +77,7 @@ Upgrade adaptive memory from flat YAML to a date-organized, two-tier architectur
 
 - [ ] Scheduler-driven operational tasks (connect `automations` to runtime task types)
 - [ ] Event-driven triggers beyond cron (webhook ingestion, file-watch, external notifications)
+- [ ] **Operator-facing doctor command**: add a Discord-first self-diagnostics entrypoint (`/doctor` or equivalent) that can report recent crash/failure state, startup health, log pointers, and recommended next checks without requiring direct server log access
 
 ### Skill Evaluation
 
