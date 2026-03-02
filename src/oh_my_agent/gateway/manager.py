@@ -794,7 +794,7 @@ class GatewayManager:
     def _prepare_workspace_compat_files(self, workspace: Path) -> None:
         if self._base_workspace is None:
             return
-        for name in ("AGENTS.md", ".claude", ".gemini", ".codex"):
+        for name in ("AGENTS.md", ".claude", ".gemini", ".agents"):
             src = self._base_workspace / name
             dst = workspace / name
             if not src.exists():
@@ -818,6 +818,12 @@ class GatewayManager:
                     shutil.copytree(src, dst)
                 else:
                     shutil.copy2(src, dst)
+        legacy_codex = workspace / ".codex"
+        if legacy_codex.exists() or legacy_codex.is_symlink():
+            if legacy_codex.is_dir() and not legacy_codex.is_symlink():
+                shutil.rmtree(legacy_codex, ignore_errors=True)
+            else:
+                legacy_codex.unlink(missing_ok=True)
 
     @staticmethod
     def _short_workspace_key(platform: str, channel_id: str, thread_id: str) -> str:

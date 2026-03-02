@@ -9,3 +9,5 @@ __pycache__/
 dist/
 .claude/
 .gemini/
+.agents/
+.codex/

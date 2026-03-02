@@ -21,6 +21,7 @@ The format is intentionally lightweight and release-oriented rather than exhaust
 - `oh-my-agent --version`
 - Single-source package versioning via `src/oh_my_agent/_version.py`
 - Generated workspace `AGENTS.md` metadata with source path, source hash, and generation timestamp
+- Codex repo/workspace skill delivery via official `.agents/skills/`
 
 ### Fixed
 
@@ -29,6 +30,7 @@ The format is intentionally lightweight and release-oriented rather than exhaust
   - stale persisted sessions are deleted even when fallback succeeds through another agent
 - Added tests to keep package version and changelog state aligned
 - Base workspace now refreshes synced skills and generated `AGENTS.md` together when repo `AGENTS.md` or canonical `skills/` change
+- Legacy workspace `.codex/` compatibility directories are removed during workspace refresh and session sync
 
 ## v0.6.1 - 2026-03-01
 

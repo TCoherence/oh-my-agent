@@ -157,7 +157,7 @@ async def skill_runtime_env(tmp_path):
     workspace_skills_dirs = [
         tmp_path / "agent-workspace" / ".claude" / "skills",
         tmp_path / "agent-workspace" / ".gemini" / "skills",
-        tmp_path / "agent-workspace" / ".codex" / "skills",
+        tmp_path / "agent-workspace" / ".agents" / "skills",
     ]
     runtime = RuntimeService(
         store,

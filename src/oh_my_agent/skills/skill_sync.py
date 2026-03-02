@@ -10,13 +10,16 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+_CODEX_SKILLS_DIR = Path(".agents") / "skills"
+_LEGACY_CODEX_SKILLS_DIR = Path(".codex") / "skills"
+
 
 class SkillSync:
     """Bidirectional skill sync between ``skills/`` and CLI-native directories.
 
     **Forward sync** (default): symlinks each skill from ``skills/`` into
-    ``.gemini/skills/`` and ``.claude/skills/`` so both CLI agents discover
-    them natively.
+    ``.gemini/skills/``, ``.claude/skills/``, and ``.agents/skills/`` so
+    each CLI agent discovers them through its native repo/workspace path.
 
     **Reverse sync**: detects new skills created by CLI agents in their
     native directories (non-symlink folders containing ``SKILL.md``) and
@@ -49,6 +52,7 @@ class SkillSync:
         targets = [
             self._project_root / ".gemini" / "skills",
             self._project_root / ".claude" / "skills",
+            self._project_root / _CODEX_SKILLS_DIR,
         ]
 
         for target_dir in targets:
@@ -59,7 +63,7 @@ class SkillSync:
 
         if skills:
             logger.info(
-                "Synced %d skill(s) to .gemini/skills/ and .claude/skills/: %s",
+                "Synced %d skill(s) to .gemini/skills/, .claude/skills/, and .agents/skills/: %s",
                 len(skills),
                 [s.name for s in skills],
             )
@@ -68,7 +72,8 @@ class SkillSync:
     def find_new_skills(self, extra_source_dirs: list[Path] | None = None) -> list[str]:
         """Detect new skills in CLI dirs that are not yet in ``skills/``.
 
-        Scans ``.claude/skills/``, ``.gemini/skills/``, and any *extra_source_dirs*
+        Scans ``.claude/skills/``, ``.gemini/skills/``, ``.agents/skills/``,
+        and any *extra_source_dirs*
         for non-symlink directories containing ``SKILL.md`` that don't already exist
         in the canonical ``skills/`` path.
 
@@ -89,7 +94,8 @@ class SkillSync:
         sources = [
             self._project_root / ".gemini" / "skills",
             self._project_root / ".claude" / "skills",
-            self._project_root / ".codex" / "skills",
+            self._project_root / _CODEX_SKILLS_DIR,
+            self._project_root / _LEGACY_CODEX_SKILLS_DIR,
         ]
         if extra_source_dirs:
             sources.extend(extra_source_dirs)
@@ -139,7 +145,8 @@ class SkillSync:
         sources = [
             self._project_root / ".gemini" / "skills",
             self._project_root / ".claude" / "skills",
-            self._project_root / ".codex" / "skills",
+            self._project_root / _CODEX_SKILLS_DIR,
+            self._project_root / _LEGACY_CODEX_SKILLS_DIR,
         ]
         if extra_source_dirs:
             sources.extend(extra_source_dirs)
@@ -192,7 +199,7 @@ class SkillSync:
             {
                 target_dir.parent.parent
                 for target_dir in workspace_target_dirs
-                if target_dir.name == "skills" and target_dir.parent.name in {".claude", ".gemini", ".codex"}
+                if target_dir.name == "skills" and target_dir.parent.name in {".claude", ".gemini", ".agents", ".codex"}
             },
             key=lambda path: str(path),
         )
@@ -213,9 +220,10 @@ class SkillSync:
         for relative in (
             Path(".claude/skills"),
             Path(".gemini/skills"),
-            Path(".codex/skills"),
+            _CODEX_SKILLS_DIR,
         ):
             self._replace_workspace_skills_dir(workspace_root / relative)
+        self._remove_path(workspace_root / ".codex")
         self.write_workspace_agents_md(workspace_root)
         self._write_workspace_state(workspace_root)
         return workspace_root
@@ -229,7 +237,7 @@ class SkillSync:
         for relative in (
             Path(".claude/skills"),
             Path(".gemini/skills"),
-            Path(".codex/skills"),
+            _CODEX_SKILLS_DIR,
         ):
             if not (workspace_root / relative).is_dir():
                 return True
@@ -244,7 +252,7 @@ class SkillSync:
     def write_workspace_agents_md(self, workspace_root: Path) -> Path:
         """Generate a workspace-local AGENTS.md that references Codex-visible skills."""
         workspace_root.mkdir(parents=True, exist_ok=True)
-        codex_skills_dir = workspace_root / ".codex" / "skills"
+        codex_skills_dir = workspace_root / _CODEX_SKILLS_DIR
         skills = self._collect_skills(codex_skills_dir)
         source_agents = self._project_root / "AGENTS.md"
         state = self._workspace_source_state()
@@ -293,7 +301,7 @@ class SkillSync:
             [
                 "",
                 "## Usage notes",
-                "- Prefer the workspace-local skill paths under `.codex/skills/` when using Codex in this workspace.",
+                "- Prefer the workspace-local skill paths under `.agents/skills/` when using Codex in this workspace.",
                 "- Claude and Gemini continue to use their native `.claude/skills/` and `.gemini/skills/` directories.",
             ]
         )
@@ -333,14 +341,18 @@ class SkillSync:
     def _replace_workspace_skills_dir(self, target_dir: Path) -> None:
         target_dir.mkdir(parents=True, exist_ok=True)
         for child in list(target_dir.iterdir()):
-            if child.is_symlink() or child.is_file():
-                child.unlink()
-            elif child.is_dir():
-                shutil.rmtree(child)
+            self._remove_path(child)
 
         for skill_dir in self._collect_skills(self._skills_path):
             dest = target_dir / skill_dir.name
             shutil.copytree(skill_dir, dest)
+
+    @staticmethod
+    def _remove_path(path: Path) -> None:
+        if path.is_symlink() or path.is_file():
+            path.unlink()
+        elif path.is_dir():
+            shutil.rmtree(path)
 
     @staticmethod
     def _ensure_symlink(source: Path, link: Path) -> None:

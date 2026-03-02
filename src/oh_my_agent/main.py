@@ -367,7 +367,7 @@ async def _async_main(config: dict, logger: logging.Logger) -> None:
             workspace_skills_dirs = [
                 workspace / ".claude" / "skills",
                 workspace / ".gemini" / "skills",
-                workspace / ".codex" / "skills",
+                workspace / ".agents" / "skills",
             ]
 
         forward, reverse = skill_syncer.full_sync(extra_source_dirs=workspace_skills_dirs)

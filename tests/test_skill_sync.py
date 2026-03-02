@@ -26,11 +26,14 @@ def test_sync_creates_symlinks(skill_dir, tmp_path):
 
     gemini_link = project_root / ".gemini" / "skills" / "test-skill"
     claude_link = project_root / ".claude" / "skills" / "test-skill"
+    codex_link = project_root / ".agents" / "skills" / "test-skill"
 
     assert gemini_link.is_symlink()
     assert claude_link.is_symlink()
+    assert codex_link.is_symlink()
     assert (gemini_link / "SKILL.md").exists()
     assert (claude_link / "SKILL.md").exists()
+    assert (codex_link / "SKILL.md").exists()
 
 
 def test_sync_skips_dirs_without_skill_md(tmp_path):
@@ -63,7 +66,7 @@ def test_refresh_workspace_dirs_copies_skill_dirs(skill_dir, tmp_path):
     workspace_targets = [
         tmp_path / "agent-workspace" / ".claude" / "skills",
         tmp_path / "agent-workspace" / ".gemini" / "skills",
-        tmp_path / "agent-workspace" / ".codex" / "skills",
+        tmp_path / "agent-workspace" / ".agents" / "skills",
     ]
 
     count = syncer.refresh_workspace_dirs(workspace_targets)
@@ -81,7 +84,7 @@ def test_refresh_workspace_dirs_copies_skill_dirs(skill_dir, tmp_path):
     assert content.startswith("# Generated Workspace AGENTS")
     assert "Source repo AGENTS:" in content
     assert "# Repo Rules" in content
-    assert ".codex/skills/test-skill/SKILL.md" in content
+    assert ".agents/skills/test-skill/SKILL.md" in content
     assert "A test skill" in content
 
 
@@ -99,7 +102,7 @@ def test_setup_workspace_uses_agents_md_not_agent_compat_files(skill_dir, tmp_pa
     assert not (workspace / "AGENT.md").exists()
     assert not (workspace / "CLAUDE.md").exists()
     assert not (workspace / "GEMINI.md").exists()
-    assert (workspace / ".codex" / "skills" / "test-skill" / "SKILL.md").exists()
+    assert (workspace / ".agents" / "skills" / "test-skill" / "SKILL.md").exists()
     assert (workspace / ".oh-my-agent-state.json").exists()
 
 
@@ -137,5 +140,5 @@ def test_workspace_needs_refresh_when_skill_changes(skill_dir, tmp_path):
     assert syncer.workspace_needs_refresh(workspace) is True
 
     syncer.refresh_workspace(workspace)
-    copied = workspace / ".codex" / "skills" / "test-skill" / "scripts" / "run.sh"
+    copied = workspace / ".agents" / "skills" / "test-skill" / "scripts" / "run.sh"
     assert "changed" in copied.read_text(encoding="utf-8")

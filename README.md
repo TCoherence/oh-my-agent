@@ -165,7 +165,7 @@ Check the installed version:
 ### Workspace Refresh
 
 - `~/.oh-my-agent/agent-workspace/AGENTS.md` is a generated file, not a hand-maintained source file.
-- Its top section is copied from repo-root `AGENTS.md`; its workspace extension section is generated from synced workspace `.codex/skills/`.
+- Its top section is copied from repo-root `AGENTS.md`; its workspace extension section is generated from synced workspace `.agents/skills/`.
 - The base workspace stores a small source-state manifest and refreshes automatically before short-workspace turns when repo `AGENTS.md` or canonical `skills/` change.
 - Session workspaces inherit the refreshed base workspace, so normal chat turns see updated rules and skills without a manual rebuild.
 
@@ -223,17 +223,15 @@ Check the installed version:
 ## Codex Integration Notes
 
 - Codex support is currently grounded in CLI execution, `AGENTS.md`, and platform-level routing/runtime behavior.
-- Project-level native Codex skill discovery is not treated as a reliable primitive yet.
 - The practical near-term assumption is:
   - Claude/Gemini use workspace skill directories refreshed by `SkillSync`
-  - Codex uses global Codex skills plus a generated workspace `AGENTS.md` that references workspace-local `.codex/skills/`
-- `.codex/skills` remains deferred until there is confirmed project-level native discovery behavior.
+  - Codex uses repo/workspace `.agents/skills/` plus a generated workspace `AGENTS.md` that summarizes the local skill set
 
 ## Workspace Layout
 
 - `~/.oh-my-agent/agent-workspace/` is the base external workspace used by CLI agents.
 - `~/.oh-my-agent/agent-workspace/sessions/` stores per-thread transient workspaces for normal chat turns.
-- `~/.oh-my-agent/agent-workspace/.codex/skills/` is refreshed so the workspace can expose Codex-oriented skill references through `AGENTS.md`.
+- `~/.oh-my-agent/agent-workspace/.agents/skills/` is refreshed so Codex can use official repo/workspace skill discovery in external workspaces too.
 - `~/.oh-my-agent/runtime/tasks/` stores isolated runtime task worktrees and artifact task output directories.
 - The external workspace now uses a generated `AGENTS.md` as the single injected context document. Repo-root `AGENT.md`, `CLAUDE.md`, and `GEMINI.md` are no longer mirrored into the external workspace or session workspaces.
 - The generated workspace `AGENTS.md` includes visible metadata so it is clear when you are looking at a derived file instead of the repo source file.
@@ -250,7 +248,7 @@ Check the installed version:
 
 - Artifact delivery is not finished yet: generated artifacts are tracked, but attachment-first and link-fallback delivery still needs a dedicated adapter layer.
 - Runtime observability still lacks an in-memory live excerpt layer; `/task_logs` can read live agent log tails, but Discord status cards do not yet show the latest agent activity summary.
-- Codex skill integration is still weaker than Claude/Gemini because project-level native Codex skill discovery is not yet a trusted path.
+- Codex repo/workspace skill discovery now uses official `.agents/skills/`, but the generated `AGENTS.md` remains useful as a visible summary of repo rules and local skill availability.
 - Adaptive memory uses Jaccard word-overlap for similarity; date-based organization is planned for v0.7, semantic (vector) retrieval for v0.8+.
 
 ## Documentation

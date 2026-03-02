@@ -45,8 +45,8 @@
 - [x] 支持"把这个 workflow 变成 skill"类请求的路由
 - [x] 增加 merge 前的 skill 验证闭环
 - [x] 增加 skill memory / provenance 元数据
-- [x] 跨 agent skill 分发：统一 SKILL.md 格式，SkillSync 分发到 `.claude/`、`.gemini/`、`.codex/` 目录；AGENTS.md 桥接 Codex 发现
-- [x] Codex 接入：`AGENTS.md` + workspace `.codex/skills/`；reverse sync 现在扫描全部三个 CLI 目录
+- [x] 跨 agent skill 分发：统一 SKILL.md 格式，SkillSync 分发到 `.claude/`、`.gemini/` 和 `.agents/skills/`；生成的 `AGENTS.md` 汇总 repo 规则和本地 Codex 可见 skill
+- [x] Codex 接入：官方 repo/workspace `.agents/skills/` + 生成的 `AGENTS.md`；reverse sync 现在扫描 Claude/Gemini/Codex 原生 skill 目录
 - [x] Skill 调用与修改分离：`/skill-name` → 普通对话路径；"创建 skill" → `TASK_TYPE_SKILL_CHANGE` runtime task，专用 prompt、验证和自动合并
 
 ### Adaptive Memory（已完成）

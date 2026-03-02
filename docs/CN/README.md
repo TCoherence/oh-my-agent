@@ -65,7 +65,7 @@ git clone <repo-url>
 cd oh-my-agent
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e .
+./.venv/bin/pip install -e .
 cp .env.example .env
 cp config.yaml.example config.yaml
 ```
@@ -131,8 +131,7 @@ Runtime 产物默认放在 `~/.oh-my-agent/runtime/`（包括 memory DB、日志
 ### 启动
 
 ```bash
-source .venv/bin/activate
-oh-my-agent
+./.venv/bin/oh-my-agent
 ```
 
 ## 使用方式
@@ -152,6 +151,13 @@ oh-my-agent
 - 进程重启后，gateway 会从 SQLite 恢复这些 session，并优先继续原始 CLI 会话，而不是每轮都重新拼接完整 history。
 - 如果某个 session 已经明显失效或不可恢复，会自动清理，下一轮回退为 fresh session。
 - 如果前置 agent 的 stale session 失效但 fallback agent 成功，旧的持久化 session 也会被一起删除。
+
+### Workspace 自动刷新
+
+- `~/.oh-my-agent/agent-workspace/AGENTS.md` 是生成文件，不是手工维护的源文件。
+- 它的上半部分来自 repo 根的 `AGENTS.md`，下半部分来自同步后的 workspace `.agents/skills/`。
+- base workspace 会保存一个很小的 source-state manifest；当 repo `AGENTS.md` 或 canonical `skills/` 变化时，会在短对话 workspace 创建前自动刷新。
+- session workspace 继承刷新后的 base workspace，所以普通聊天不需要手动重建也能看到最新规则和 skill。
 
 ### Slash 命令
 
@@ -197,14 +203,15 @@ oh-my-agent
 
 ## Codex 接入说明
 
-- Codex 接入基础是 CLI 执行 + `AGENTS.md` + workspace `.codex/skills/`。
-- `SkillSync` 把所有 skill 同步到 workspace `.codex/skills/`，并生成 `AGENTS.md` 列出每个 skill 的路径和描述供 Codex 读取。
-- Claude/Gemini 通过原生 skill 目录发现；Codex 通过 AGENTS.md 桥接，等待官方支持 project-level skill 后平滑迁移。
+- Codex 接入基础是 CLI 执行 + repo/workspace `.agents/skills/` + 生成的 `AGENTS.md`。
+- `SkillSync` 会把 canonical `skills/` 同步到 repo/workspace `.agents/skills/`，并生成 `AGENTS.md` 列出本地可见 skill 和 repo 规则。
+- Claude/Gemini 继续通过各自原生 skill 目录发现；Codex 使用官方 `.agents/skills/` 约定，`AGENTS.md` 作为补充说明层。
 
 ## Workspace 布局
 
 - `~/.oh-my-agent/agent-workspace/` — CLI agent 的基础外置 workspace
 - `~/.oh-my-agent/agent-workspace/sessions/` — 普通聊天 thread 的临时工作区（TTL 清理）
+- `~/.oh-my-agent/agent-workspace/.agents/skills/` — Codex 在外置 workspace 中使用的 repo/workspace 原生 skill 目录
 - `~/.oh-my-agent/runtime/tasks/` — runtime 长任务的 worktree 和 artifact 产物
 - `~/.oh-my-agent/runtime/logs/` — service log + per-agent 底层日志
 - `~/.oh-my-agent/memories.yaml` — adaptive memory 持久化存储
@@ -221,6 +228,7 @@ oh-my-agent
 
 - Artifact delivery 还没完全做完：附件优先、链接兜底的交付适配层还需要补齐。
 - Runtime 可观测性还缺少内存级 live excerpt；`/task_logs` 可读 live agent log tail，但 Discord 状态卡不会直接展示"最近在做什么"的摘要。
+- Codex repo/workspace skill 发现现在已经走官方 `.agents/skills/`，但生成的 `AGENTS.md` 仍然保留，作为 repo 规则和可用 skill 的可见摘要。
 - Adaptive memory 目前使用 Jaccard 词重叠做相似度；日期驱动组织计划在 v0.7 实现，语义检索（向量搜索）在 v0.8+。
 
 ## 文档

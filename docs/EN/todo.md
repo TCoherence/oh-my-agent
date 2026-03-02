@@ -45,8 +45,8 @@
 - [x] Add skill routing for "turn this workflow into a skill" requests
 - [x] Add skill validation loop before merge
 - [x] Add skill memory / provenance metadata
-- [x] Cross-agent skill delivery: unified SKILL.md format, SkillSync distributes to `.claude/`, `.gemini/`, `.codex/` directories; AGENTS.md bridges Codex discovery
-- [x] Codex integration: `AGENTS.md` + workspace `.codex/skills/`; reverse sync now scans all three CLI dirs
+- [x] Cross-agent skill delivery: unified SKILL.md format, SkillSync distributes to `.claude/`, `.gemini/`, and `.agents/skills/`; generated `AGENTS.md` summarizes repo rules and local Codex-visible skills
+- [x] Codex integration: official repo/workspace `.agents/skills/` support plus generated `AGENTS.md`; reverse sync scans Claude/Gemini/Codex native skill dirs
 - [x] Skill invocation vs mutation: `/skill-name` → normal chat path; "create skill" → `TASK_TYPE_SKILL_CHANGE` runtime task with dedicated prompt, validation, and auto-merge
 
 ### Adaptive Memory (complete)

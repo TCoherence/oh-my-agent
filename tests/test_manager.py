@@ -411,7 +411,7 @@ async def test_handle_message_uses_short_workspace_override(tmp_path):
     (base / "AGENTS.md").write_text("# workspace agents\n", encoding="utf-8")
     (base / ".claude").mkdir(exist_ok=True)
     (base / ".gemini").mkdir(exist_ok=True)
-    (base / ".codex").mkdir(exist_ok=True)
+    (base / ".agents").mkdir(exist_ok=True)
 
     channel = MagicMock()
     channel.platform = "discord"
@@ -448,7 +448,8 @@ async def test_handle_message_uses_short_workspace_override(tmp_path):
     assert isinstance(ws, Path)
     assert ws.parent == (tmp_path / "sessions")
     assert (ws / "AGENTS.md").exists()
-    assert (ws / ".codex").exists()
+    assert (ws / ".agents").exists()
+    assert not (ws / ".codex").exists()
 
 
 @pytest.mark.asyncio
@@ -505,8 +506,8 @@ def test_prepare_workspace_compat_files_replaces_stale_entries(tmp_path):
     base = tmp_path / "base-workspace"
     base.mkdir(parents=True, exist_ok=True)
     (base / "AGENTS.md").write_text("# fresh agents\n", encoding="utf-8")
-    (base / ".codex").mkdir(exist_ok=True)
-    (base / ".codex" / "skills").mkdir(parents=True, exist_ok=True)
+    (base / ".agents").mkdir(exist_ok=True)
+    (base / ".agents" / "skills").mkdir(parents=True, exist_ok=True)
     (base / ".claude").mkdir(exist_ok=True)
     (base / ".gemini").mkdir(exist_ok=True)
 
@@ -521,8 +522,9 @@ def test_prepare_workspace_compat_files_replaces_stale_entries(tmp_path):
 
     assert (session_ws / "AGENTS.md").is_symlink()
     assert (session_ws / "AGENTS.md").resolve() == (base / "AGENTS.md")
-    assert (session_ws / ".codex").is_symlink()
-    assert (session_ws / ".codex").resolve() == (base / ".codex")
+    assert (session_ws / ".agents").is_symlink()
+    assert (session_ws / ".agents").resolve() == (base / ".agents")
+    assert not (session_ws / ".codex").exists()
 
 
 @pytest.mark.asyncio
