@@ -15,7 +15,7 @@ oh-my-agent
 
 # Tests
 pip install -e ".[dev]"
-pytest                            # all tests (240 tests)
+pytest                            # all tests (270 tests)
 pytest tests/test_memory_store.py # single file
 pytest -k "test_fallback"         # single test by name
 ```
@@ -38,16 +38,18 @@ The system has seven major subsystems.
   - `/ask` supports optional `agent` argument for new threads.
   - Thread messages support `@claude` / `@gemini` / `@codex` prefix to force one agent for that turn.
   - Prefix is stripped before dispatch; agent name is passed via `IncomingMessage.preferred_agent`.
-- Message flow: `on_message` → `IncomingMessage` → `GatewayManager.handle_message()` → (optional intent routing) → `AgentRegistry.run()` → `channel.send()`.
+- Image attachments: `Attachment` dataclass (`filename`, `content_type`, `local_path`, `original_url`, `size_bytes`, `is_image` property). Discord `on_message` downloads `image/*` attachments (≤10 MB) to temp dir. `IncomingMessage.attachments` carries them through the pipeline. Image-only messages get a default analysis prompt.
+- Message flow: `on_message` → `IncomingMessage` (+ attachments) → `GatewayManager.handle_message()` → (optional intent routing) → `AgentRegistry.run()` → `channel.send()` → temp file cleanup.
 - Owner gate: `GatewayManager` can enforce `access.owner_user_ids`; system-generated messages bypass this gate.
 
 **Agent layer** (`src/oh_my_agent/agents/`)
 
 - `BaseAgent` ABC: `async run(prompt, history) → AgentResponse`.
-- `AgentRegistry`: ordered `list[BaseAgent]` with automatic fallback — tries each in sequence, returns first success. Supports `force_agent` to bypass fallback. Passes `thread_id` for session resume.
+- `AgentRegistry`: ordered `list[BaseAgent]` with automatic fallback — tries each in sequence, returns first success. Supports `force_agent` to bypass fallback. Passes `thread_id`, `image_paths` etc. via `inspect.signature` dispatch.
 - `BaseCLIAgent` (`agents/cli/base.py`): subprocess runner for CLI agents. Accepts `workspace: Path | None` (sets subprocess `cwd`) and `passthrough_env: list[str] | None` (env var whitelist). Flattens `history` into prompt text. Subclasses override `_build_command()`.
 - Concrete CLI agents: `ClaudeAgent` (session resume via `--resume`), `GeminiCLIAgent`, `CodexCLIAgent`.
   - Codex runs `codex exec --full-auto --json --skip-git-repo-check` and extracts assistant text from JSONL events.
+  - Image handling: Claude and Gemini copy images to `workspace/_attachments/` and augment the prompt with file-reference instructions; Codex uses `--image` flag natively.
 - `agents/api/` — **deprecated since v0.4.0**. `AnthropicAPIAgent`, `OpenAIAPIAgent` kept for reference only.
 
 **Memory layer** (`src/oh_my_agent/memory/`)
