@@ -4,7 +4,23 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Protocol
+
+
+@dataclass
+class Attachment:
+    """A file attachment downloaded to the local filesystem."""
+
+    filename: str
+    content_type: str
+    local_path: Path
+    original_url: str
+    size_bytes: int
+
+    @property
+    def is_image(self) -> bool:
+        return self.content_type.startswith("image/")
 
 
 @dataclass
@@ -22,6 +38,8 @@ class IncomingMessage:
     preferred_agent: str | None = None
     # Internal/system-generated message (e.g. scheduler); bypasses owner gate.
     system: bool = False
+    # File attachments (e.g. images) downloaded to local temp paths.
+    attachments: list[Attachment] = field(default_factory=list)
 
 
 MessageHandler = Callable[[IncomingMessage], Awaitable[None]]

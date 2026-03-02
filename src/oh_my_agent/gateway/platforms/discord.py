@@ -1,19 +1,62 @@
 from __future__ import annotations
 
 import logging
+import tempfile
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import discord
 from discord import app_commands
 
-from oh_my_agent.gateway.base import BaseChannel, IncomingMessage, MessageHandler
+from oh_my_agent.gateway.base import Attachment, BaseChannel, IncomingMessage, MessageHandler
 from oh_my_agent.runtime.types import TaskDecisionEvent
 
 logger = logging.getLogger(__name__)
 
 THREAD_ARCHIVE_MINUTES = 60
 STATUS_MESSAGE_PREFIX = "**Task Status**"
+_MAX_IMAGE_BYTES = 10 * 1024 * 1024  # 10 MB
+_ATTACHMENT_DIR = Path(tempfile.gettempdir()) / "oh-my-agent" / "attachments"
+
+
+async def _download_discord_attachments(
+    attachments: list[discord.Attachment],
+) -> list[Attachment]:
+    """Download image attachments to a local temp directory.
+
+    Only ``image/*`` MIME types are accepted; files over 10 MB are skipped.
+    """
+    results: list[Attachment] = []
+    _ATTACHMENT_DIR.mkdir(parents=True, exist_ok=True)
+
+    for att in attachments:
+        ct = att.content_type or ""
+        if not ct.startswith("image/"):
+            continue
+        if att.size > _MAX_IMAGE_BYTES:
+            logger.warning(
+                "Skipping oversized attachment %s (%d bytes)", att.filename, att.size
+            )
+            continue
+        # Prefix filename with uuid to avoid collisions
+        safe_name = f"{uuid.uuid4().hex[:8]}_{att.filename}"
+        dest = _ATTACHMENT_DIR / safe_name
+        try:
+            await att.save(dest)
+            results.append(
+                Attachment(
+                    filename=att.filename,
+                    content_type=ct,
+                    local_path=dest,
+                    original_url=att.url,
+                    size_bytes=att.size,
+                )
+            )
+        except Exception:
+            logger.warning("Failed to download attachment %s", att.filename, exc_info=True)
+    return results
 
 
 class DiscordChannel(BaseChannel):
@@ -773,6 +816,11 @@ class DiscordChannel(BaseChannel):
             ch = message.channel
             content = message.content.strip()
 
+            # Download image attachments (non-image and oversized are skipped)
+            downloaded: list[Attachment] = []
+            if message.attachments:
+                downloaded = await _download_discord_attachments(message.attachments)
+
             # Detect "@agentname" prefix for per-message agent selection.
             # e.g. "@gemini does this look right?" routes only to gemini.
             preferred_agent: str | None = None
@@ -793,6 +841,7 @@ class DiscordChannel(BaseChannel):
                     content=content,
                     raw=message,
                     preferred_agent=preferred_agent,
+                    attachments=downloaded,
                 )
             # Message directly in our target channel → needs new thread
             elif ch.id == target_id:
@@ -805,11 +854,13 @@ class DiscordChannel(BaseChannel):
                     content=content,
                     raw=message,
                     preferred_agent=preferred_agent,
+                    attachments=downloaded,
                 )
             else:
                 return
 
-            if not msg.content:
+            # Allow image-only messages (no text content required)
+            if not msg.content and not msg.attachments:
                 return
 
             await _handler(msg)

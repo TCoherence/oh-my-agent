@@ -489,8 +489,31 @@ class GatewayManager:
             if handled:
                 return
 
+        # Extract image paths from attachments
+        image_paths = [
+            att.local_path for att in (msg.attachments or []) if att.is_image
+        ] or None
+
+        # Inject default prompt for image-only messages (no text)
+        if not msg.content and image_paths:
+            msg = IncomingMessage(
+                platform=msg.platform,
+                channel_id=msg.channel_id,
+                thread_id=msg.thread_id,
+                author=msg.author,
+                author_id=msg.author_id,
+                content="Please describe and analyze the attached image(s).",
+                raw=msg.raw,
+                preferred_agent=msg.preferred_agent,
+                system=msg.system,
+                attachments=msg.attachments,
+            )
+
         # Append user turn to history
-        await session.append_user(thread_id, msg.content, msg.author)
+        await session.append_user(
+            thread_id, msg.content, msg.author,
+            attachments=msg.attachments or None,
+        )
         prior_history = history[:-1] if len(history) > 1 else []
 
         logger.info(
@@ -539,6 +562,7 @@ class GatewayManager:
                 thread_id=thread_id,
                 force_agent=msg.preferred_agent,
                 workspace_override=workspace_override,
+                image_paths=image_paths,
             )
         elapsed_agent = time.perf_counter() - t_agent
         await self._sync_registry_sessions(session, thread_id, registry)
@@ -598,6 +622,14 @@ class GatewayManager:
             asyncio.create_task(
                 self._try_skill_sync(session, thread_id, req_id)
             )
+
+        # Clean up downloaded attachment temp files
+        if image_paths:
+            for p in image_paths:
+                try:
+                    p.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     async def _try_skill_sync(
         self,

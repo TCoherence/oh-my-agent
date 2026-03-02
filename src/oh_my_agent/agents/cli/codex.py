@@ -103,7 +103,9 @@ class CodexCLIAgent(BaseCLIAgent):
     def clear_session(self, thread_id: str) -> None:
         self._session_ids.pop(thread_id, None)
 
-    def _build_command(self, prompt: str) -> list[str]:
+    def _build_command(
+        self, prompt: str, *, image_paths: list[Path] | None = None
+    ) -> list[str]:
         cmd = [
             self._cli_path,
             "exec",
@@ -113,10 +115,14 @@ class CodexCLIAgent(BaseCLIAgent):
         ]
         if self._skip_git_repo_check:
             cmd.append("--skip-git-repo-check")
+        if image_paths:
+            cmd.extend(["--image", ",".join(str(p) for p in image_paths)])
         cmd.append(prompt)
         return cmd
 
-    def _build_resume_command(self, prompt: str, session_id: str) -> list[str]:
+    def _build_resume_command(
+        self, prompt: str, session_id: str, *, image_paths: list[Path] | None = None
+    ) -> list[str]:
         """Build a command that resumes an existing Codex session."""
         cmd = [
             self._cli_path,
@@ -129,6 +135,8 @@ class CodexCLIAgent(BaseCLIAgent):
         ]
         if self._skip_git_repo_check:
             cmd.append("--skip-git-repo-check")
+        if image_paths:
+            cmd.extend(["--image", ",".join(str(p) for p in image_paths)])
         cmd.append(prompt)
         return cmd
 
@@ -140,6 +148,7 @@ class CodexCLIAgent(BaseCLIAgent):
         thread_id: str | None = None,
         workspace_override: Path | None = None,
         log_path: Path | None = None,
+        image_paths: list[Path] | None = None,
     ) -> AgentResponse:
         """Run the Codex CLI.
 
@@ -149,11 +158,11 @@ class CodexCLIAgent(BaseCLIAgent):
         session_id = self._session_ids.get(thread_id) if thread_id else None
 
         if session_id:
-            cmd = self._build_resume_command(prompt, session_id)
+            cmd = self._build_resume_command(prompt, session_id, image_paths=image_paths)
             logger.info("Resuming %s session %s ...", self.name, session_id[:12])
         else:
             full_prompt = _build_prompt_with_history(prompt, history)
-            cmd = self._build_command(full_prompt)
+            cmd = self._build_command(full_prompt, image_paths=image_paths)
             logger.info("Running %s (new session) ...", self.name)
 
         try:

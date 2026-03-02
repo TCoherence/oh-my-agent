@@ -49,8 +49,19 @@ class ChannelSession:
         self._cache[thread_id] = []
         return self._cache[thread_id]
 
-    async def append_user(self, thread_id: str, content: str, author: str) -> None:
-        turn = {"role": "user", "content": content, "author": author}
+    async def append_user(
+        self,
+        thread_id: str,
+        content: str,
+        author: str,
+        attachments: list | None = None,
+    ) -> None:
+        turn: dict = {"role": "user", "content": content, "author": author}
+        if attachments:
+            turn["attachments"] = [
+                {"filename": a.filename, "content_type": a.content_type}
+                for a in attachments
+            ]
         history = await self.get_history(thread_id)
         history.append(turn)
         if self.memory_store:

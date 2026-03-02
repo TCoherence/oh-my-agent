@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from oh_my_agent.agents.base import AgentResponse, BaseAgent
 
@@ -32,6 +33,7 @@ class AgentRegistry:
         force_agent: str | None = None,
         workspace_override=None,
         log_path=None,
+        image_paths: list[Path] | None = None,
     ) -> tuple[BaseAgent, AgentResponse]:
         """Try each agent in order. Return the first successful (agent, response) pair.
 
@@ -57,6 +59,8 @@ class AgentRegistry:
                 kwargs["workspace_override"] = workspace_override
             if "log_path" in sig.parameters:
                 kwargs["log_path"] = log_path
+            if "image_paths" in sig.parameters:
+                kwargs["image_paths"] = image_paths
             response = await agent.run(prompt, history, **kwargs)
             return agent, response
 
@@ -75,6 +79,8 @@ class AgentRegistry:
                 kwargs["workspace_override"] = workspace_override
             if "log_path" in sig.parameters:
                 kwargs["log_path"] = log_path
+            if "image_paths" in sig.parameters:
+                kwargs["image_paths"] = image_paths
             response = await agent.run(prompt, history, **kwargs)
             if not response.error:
                 return agent, response

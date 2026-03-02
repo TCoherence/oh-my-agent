@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import shutil
 from pathlib import Path
 
 from oh_my_agent.agents.base import AgentResponse
@@ -71,6 +72,29 @@ class GeminiCLIAgent(BaseCLIAgent):
             "--output-format", "json",
         ]
 
+    def _augment_prompt_with_images(
+        self, prompt: str, image_paths: list[Path], cwd: Path | None
+    ) -> str:
+        """Copy images to the workspace and prepend file-reference instructions."""
+        if not image_paths:
+            return prompt
+        lines: list[str] = []
+        for img in image_paths:
+            if not img.is_file():
+                continue
+            if cwd:
+                dest_dir = cwd / "_attachments"
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                dest = dest_dir / img.name
+                shutil.copy2(img, dest)
+                ref = f"_attachments/{img.name}"
+            else:
+                ref = str(img)
+            lines.append(f"An image file is available at `{ref}`. Please read and analyze it.")
+        if not lines:
+            return prompt
+        return "\n".join(lines) + "\n\n" + prompt
+
     async def run(
         self,
         prompt: str,
@@ -79,6 +103,7 @@ class GeminiCLIAgent(BaseCLIAgent):
         thread_id: str | None = None,
         workspace_override: Path | None = None,
         log_path: Path | None = None,
+        image_paths: list[Path] | None = None,
     ) -> AgentResponse:
         """Run the Gemini CLI.
 
@@ -86,6 +111,11 @@ class GeminiCLIAgent(BaseCLIAgent):
         ``--resume`` to continue the session (avoiding history flattening).
         """
         session_id = self._session_ids.get(thread_id) if thread_id else None
+        cwd = self._resolve_cwd(workspace_override)
+
+        # Augment prompt with image references
+        if image_paths:
+            prompt = self._augment_prompt_with_images(prompt, image_paths, cwd)
 
         if session_id:
             cmd = self._build_resume_command(prompt, session_id)
@@ -98,7 +128,7 @@ class GeminiCLIAgent(BaseCLIAgent):
         try:
             returncode, stdout, stderr = await _stream_cli_process(
                 *cmd,
-                cwd=self._resolve_cwd(workspace_override),
+                cwd=cwd,
                 env=self._build_env(),
                 timeout=self._timeout,
                 log_path=log_path,
