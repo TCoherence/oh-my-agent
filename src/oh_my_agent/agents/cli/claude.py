@@ -101,7 +101,7 @@ class ClaudeAgent(BaseCLIAgent):
             if not img.is_file():
                 continue
             if cwd:
-                dest_dir = cwd / "_attachments"
+                dest_dir = Path(cwd) / "_attachments"
                 dest_dir.mkdir(parents=True, exist_ok=True)
                 dest = dest_dir / img.name
                 shutil.copy2(img, dest)
