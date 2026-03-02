@@ -643,6 +643,7 @@ async def test_runtime_merge_sends_terminal_notification_and_records_history(run
     result = await runtime.merge_task(task.id, actor_id="owner-1")
     assert "merged successfully" in result.lower()
     assert any("merged successfully" in text.lower() for _, text in channel.sent)
+    assert any(text.startswith("**Task Update**") for _, text in channel.sent)
 
     history = await session.get_history("thread-terminal")
     assistant_turns = [turn["content"] for turn in history if turn["role"] == "assistant"]

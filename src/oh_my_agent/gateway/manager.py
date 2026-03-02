@@ -10,6 +10,7 @@ import shutil
 import time
 import uuid
 from pathlib import Path
+import yaml
 
 from oh_my_agent.automation import ScheduledJob, Scheduler
 from oh_my_agent.gateway.base import BaseChannel, IncomingMessage
@@ -1000,6 +1001,44 @@ class GatewayManager:
             if child.is_dir() and (child / "SKILL.md").exists()
         }
 
+    def _known_skill_router_entries(self) -> list[tuple[str, str]]:
+        if not self._skill_syncer:
+            return []
+        skills_path = getattr(self._skill_syncer, "_skills_path", None)
+        if not isinstance(skills_path, Path) or not skills_path.is_dir():
+            return []
+
+        entries: list[tuple[str, str]] = []
+        for child in sorted(skills_path.iterdir(), key=lambda p: p.name):
+            skill_md = child / "SKILL.md"
+            if not child.is_dir() or not skill_md.exists():
+                continue
+            entries.append((child.name, self._read_skill_description(skill_md)))
+        return entries
+
+    @staticmethod
+    def _read_skill_description(skill_md: Path) -> str:
+        try:
+            content = skill_md.read_text(encoding="utf-8")
+        except OSError:
+            return ""
+        if not content.startswith("---\n"):
+            return ""
+        _, _, rest = content.partition("---\n")
+        frontmatter, sep, _ = rest.partition("\n---")
+        if not sep:
+            return ""
+        try:
+            meta = yaml.safe_load(frontmatter)
+        except yaml.YAMLError:
+            return ""
+        if not isinstance(meta, dict):
+            return ""
+        description = meta.get("description", "")
+        if not isinstance(description, str):
+            return ""
+        return description.strip().replace("\n", " ")
+
     async def _append_user_turn_if_needed(
         self,
         session: ChannelSession,
@@ -1033,13 +1072,14 @@ class GatewayManager:
                 if not content:
                     continue
                 lines.append(f"- {role}: {content[:240]}")
-        known_skills = sorted(self._known_skill_names())
+        known_skills = self._known_skill_router_entries()
         if known_skills:
             lines.append("Known skills available in this workspace:")
-            preview = ", ".join(known_skills[:12])
+            for name, description in known_skills[:12]:
+                suffix = f": {description}" if description else ""
+                lines.append(f"- {name}{suffix}")
             if len(known_skills) > 12:
-                preview += f", and {len(known_skills) - 12} more"
-            lines.append(f"- {preview}")
+                lines.append(f"- ... and {len(known_skills) - 12} more")
         recent_skill = self._recent_known_skill_reference(history)
         if recent_skill:
             lines.append(f"Most recently referenced skill: {recent_skill}")

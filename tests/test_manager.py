@@ -965,7 +965,10 @@ async def test_router_invoke_existing_skill_uses_recent_merged_skill_context(tmp
     skills_root = tmp_path / "skills"
     skill_dir = skills_root / "bilibili-video-summarizer"
     skill_dir.mkdir(parents=True)
-    (skill_dir / "SKILL.md").write_text("name: bilibili-video-summarizer\n", encoding="utf-8")
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: bilibili-video-summarizer\ndescription: Summarize Bilibili video links, transcripts, or screenshots into concise Chinese notes.\n---\n",
+        encoding="utf-8",
+    )
     syncer = MagicMock()
     syncer._skills_path = skills_root  # noqa: SLF001
 
@@ -989,6 +992,7 @@ async def test_router_invoke_existing_skill_uses_recent_merged_skill_context(tmp
 
     router_context = router.route.call_args.kwargs["context"]
     assert "bilibili-video-summarizer" in router_context
+    assert "Summarize Bilibili video links" in router_context
     registry.run.assert_awaited_once()
     prompt = registry.run.call_args.args[0]
     assert prompt.startswith("/bilibili-video-summarizer")
@@ -999,7 +1003,10 @@ def test_router_context_turn_limit_is_configurable(tmp_path):
     skills_root = tmp_path / "skills"
     skill_dir = skills_root / "demo-skill"
     skill_dir.mkdir(parents=True)
-    (skill_dir / "SKILL.md").write_text("name: demo-skill\n", encoding="utf-8")
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: demo-skill\ndescription: Summarize demo links into a short brief.\n---\n",
+        encoding="utf-8",
+    )
     syncer = MagicMock()
     syncer._skills_path = skills_root  # noqa: SLF001
 
@@ -1016,3 +1023,4 @@ def test_router_context_turn_limit_is_configurable(tmp_path):
     assert "turn-2" in context
     assert "turn-3" in context
     assert "demo-skill" in context
+    assert "Summarize demo links into a short brief." in context

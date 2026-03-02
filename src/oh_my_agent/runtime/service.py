@@ -58,6 +58,7 @@ from oh_my_agent.runtime.worktree import WorktreeError, WorktreeManager
 logger = logging.getLogger(__name__)
 
 _STATUS_MESSAGE_PREFIX = "**Task Status**"
+_TERMINAL_MESSAGE_PREFIX = "**Task Update**"
 
 _TERMINAL_CLEANUP_STATUSES = {
     TASK_STATUS_APPLIED,  # legacy
@@ -1797,7 +1798,7 @@ class RuntimeService:
         if record_history:
             await session.append_assistant(task.thread_id, text[:4000], "runtime")
         if terminal:
-            await session.channel.send(task.thread_id, text[:1900])
+            await session.channel.send(task.thread_id, self._format_terminal_message(text)[:1900])
 
     async def _signal_status_by_id(self, task: RuntimeTask, status: str) -> None:
         emoji = self._emoji_for_status(status)
@@ -1918,6 +1919,10 @@ class RuntimeService:
     @staticmethod
     def _format_status_message(text: str) -> str:
         return f"{_STATUS_MESSAGE_PREFIX}\n{text}"
+
+    @staticmethod
+    def _format_terminal_message(text: str) -> str:
+        return f"{_TERMINAL_MESSAGE_PREFIX}\n{text}"
 
     @staticmethod
     def _summarize_event_payload(payload: dict[str, Any]) -> str:
