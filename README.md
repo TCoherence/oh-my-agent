@@ -14,6 +14,7 @@ Inspired by [OpenClaw](https://openclaw.dev).
 - Optional LLM routing is implemented: incoming messages can be classified as `reply_once`, `invoke_existing_skill`, `propose_artifact_task`, `propose_repo_task`, or `create_skill`.
 - Runtime observability is implemented: `/task_logs`, sampled progress events in SQLite, and a single updatable Discord status message.
 - Runtime logging is split into service-level and per-agent logs under `~/.oh-my-agent/runtime/logs/`.
+- Gateway/message logs now distinguish direct replies, explicit skill invocations, and router-driven reply paths via `purpose=...`; background memory/compression agent runs inherit the same request ID for traceability.
 - Multi-type runtime is implemented: only `repo_change` and `skill_change` tasks use merge gate; `artifact` tasks complete without merge.
 - Runtime hardening is complete: true subprocess interruption, message-driven control (stop/pause/resume), PAUSED state, completion summaries, metrics.
 - Adaptive memory is implemented: auto-extraction from conversations, injection into agent prompts, `/memories` and `/forget` commands.
@@ -210,6 +211,8 @@ Check the installed version:
   - service log: `~/.oh-my-agent/runtime/logs/oh-my-agent.log`
   - underlying agent logs: `~/.oh-my-agent/runtime/logs/agents/<task>-step<step>-<agent>.log`
 - Discord progress prefers updating one status message instead of spamming many messages.
+- Normal reply logs include `purpose=...` on `AGENT starting`, `AGENT_OK`, and `AGENT_ERROR`.
+- Background memory extraction and history compression runs carry the originating request ID in both service logs and registry agent-attempt labels.
 
 ## Artifact Delivery
 

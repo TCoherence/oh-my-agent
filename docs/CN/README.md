@@ -15,6 +15,7 @@
 - Discord 审批交互采用按钮优先、slash 兜底，reaction 只做状态信号。
 - 可选的 LLM 路由已实现：消息可被分类为 `reply_once`、`invoke_existing_skill`、`propose_artifact_task`、`propose_repo_task` 或 `create_skill`。
 - Runtime 可观测性已实现：支持 `/task_logs`、SQLite 中采样式 progress 事件，以及 Discord 中单条可更新的状态消息。
+- Gateway/消息日志现在会用 `purpose=...` 区分普通回复、显式 skill 调用和 router 驱动回复；后台 memory/compression agent 调用会继承同一个 `req_id`，便于串联排查。
 - Runtime hardening 已完成：真正的子进程中断、消息驱动控制（stop/pause/resume）、PAUSED 状态、完成摘要、metrics。
 - Adaptive Memory 已实现：对话中自动提取记忆、注入 agent prompt、`/memories` 和 `/forget` 命令。
 - Claude / Codex / Gemini 的 CLI session resume 已实现，线程级 session ID 会持久化并在重启后恢复。
@@ -195,6 +196,8 @@ Runtime 产物默认放在 `~/.oh-my-agent/runtime/`（包括 memory DB、日志
 - 消息驱动控制：在线程内发送 `stop`、`pause`、`resume` 可直接控制任务状态。
 - `/task_logs` 用来查看最近 runtime 事件和输出 tail。
 - Runtime 写两层日志：service log 和 per-agent 底层日志，均在 `~/.oh-my-agent/runtime/logs/`。
+- 普通对话日志会在 `AGENT starting`、`AGENT_OK`、`AGENT_ERROR` 上带 `purpose=...`。
+- 后台 memory extraction 和 history compression 会把原始消息的 `req_id` 带到 service log 和 registry agent-attempt 日志里。
 
 ## Artifact Delivery
 

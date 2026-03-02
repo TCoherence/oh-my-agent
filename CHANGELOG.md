@@ -22,6 +22,7 @@ The format is intentionally lightweight and release-oriented rather than exhaust
 - Single-source package versioning via `src/oh_my_agent/_version.py`
 - Generated workspace `AGENTS.md` metadata with source path, source hash, and generation timestamp
 - Codex repo/workspace skill delivery via official `.agents/skills/`
+- Request-scoped observability labels for gateway agent runs and background memory/compression follow-up work
 
 ### Fixed
 
@@ -32,6 +33,7 @@ The format is intentionally lightweight and release-oriented rather than exhaust
 - Base workspace now refreshes synced skills and generated `AGENTS.md` together when repo `AGENTS.md` or canonical `skills/` change
 - Legacy workspace `.codex/` compatibility directories are removed during workspace refresh and session sync
 - Generated workspace `AGENTS.md` no longer enumerates workspace skill extensions now that Codex uses official `.agents/skills/`
+- Background memory extraction and history compression logs now carry the originating request ID, and gateway reply logs now expose `purpose=...` across start/success/error lines
 
 ## v0.6.1 - 2026-03-01
 
