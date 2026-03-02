@@ -515,10 +515,17 @@ class GatewayManager:
             attachments=msg.attachments or None,
         )
         prior_history = history[:-1] if len(history) > 1 else []
+        agent_purpose = self._agent_run_purpose(
+            explicit_skill=explicit_skill,
+            router_decision=router_decision,
+            router_threshold=(self._intent_router.confidence_threshold if self._intent_router else None),
+        )
 
         logger.info(
-            "[%s] AGENT starting registry=%s history_turns=%d",
+            "[%s] AGENT starting purpose=%s preferred_agent=%r registry=%s history_turns=%d",
             req_id,
+            agent_purpose,
+            msg.preferred_agent,
             [a.name for a in registry.agents],
             len(prior_history),
         )
@@ -873,6 +880,25 @@ class GatewayManager:
         if len(content) > THREAD_NAME_MAX:
             name += "..."
         return name
+
+    @staticmethod
+    def _agent_run_purpose(
+        *,
+        explicit_skill: str | None,
+        router_decision,
+        router_threshold: float | None,
+    ) -> str:
+        if explicit_skill:
+            return "explicit_skill"
+        if router_decision is None or router_threshold is None:
+            return "direct_reply"
+        if router_decision.confidence < router_threshold:
+            return "direct_reply"
+        if router_decision.decision == "reply_once":
+            return "router_reply_once"
+        if router_decision.decision == "invoke_existing_skill":
+            return "router_invoke_existing_skill"
+        return "direct_reply"
 
     @staticmethod
     def _format_usage(usage: dict) -> str:

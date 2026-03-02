@@ -155,6 +155,82 @@ async def test_handle_message_uses_existing_thread_id():
 
 
 @pytest.mark.asyncio
+async def test_handle_message_logs_direct_reply_purpose(caplog):
+    channel = MagicMock()
+    channel.platform = "discord"
+    channel.channel_id = "100"
+    channel.create_thread = AsyncMock()
+    channel.send = AsyncMock()
+    channel.typing = MagicMock()
+    channel.typing.return_value.__aenter__ = AsyncMock(return_value=None)
+    channel.typing.return_value.__aexit__ = AsyncMock(return_value=False)
+
+    mock_agent = MagicMock()
+    mock_agent.name = "claude"
+    registry = MagicMock(spec=AgentRegistry)
+    registry.agents = [mock_agent]
+    registry.run = AsyncMock(return_value=(mock_agent, AgentResponse(text="hi")))
+
+    session = _make_session(channel=channel, registry=registry)
+    gm = GatewayManager([])
+
+    with caplog.at_level("INFO"):
+        await gm.handle_message(session, registry, _make_msg(thread_id="existing-thread", content="follow up"))
+
+    assert "AGENT starting purpose=direct_reply" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_handle_message_logs_explicit_skill_purpose(caplog, tmp_path):
+    channel = MagicMock()
+    channel.platform = "discord"
+    channel.channel_id = "100"
+    channel.create_thread = AsyncMock(return_value="t1")
+    channel.send = AsyncMock()
+    channel.typing = MagicMock()
+    channel.typing.return_value.__aenter__ = AsyncMock(return_value=None)
+    channel.typing.return_value.__aexit__ = AsyncMock(return_value=False)
+
+    mock_agent = MagicMock()
+    mock_agent.name = "claude"
+    registry = MagicMock(spec=AgentRegistry)
+    registry.agents = [mock_agent]
+    registry.run = AsyncMock(return_value=(mock_agent, AgentResponse(text="reply")))
+
+    runtime = MagicMock()
+    runtime.maybe_handle_thread_context = AsyncMock(return_value=False)
+    runtime.maybe_handle_incoming = AsyncMock(return_value=False)
+    runtime.create_skill_task = AsyncMock()
+
+    router = MagicMock()
+    router.confidence_threshold = 0.55
+    router.route = AsyncMock()
+
+    skills_root = tmp_path / "skills"
+    skill_dir = skills_root / "top-5-daily-news"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("name: top-5-daily-news\n", encoding="utf-8")
+    syncer = MagicMock()
+    syncer._skills_path = skills_root  # noqa: SLF001
+
+    session = _make_session(channel=channel, registry=registry)
+    gm = GatewayManager(
+        [],
+        runtime_service=runtime,
+        intent_router=router,
+        skill_syncer=syncer,
+    )
+
+    msg = _make_msg(thread_id="thread-1", content="/top-5-daily-news")
+    msg.preferred_agent = "claude"
+
+    with caplog.at_level("INFO"):
+        await gm.handle_message(session, registry, msg)
+
+    assert "AGENT starting purpose=explicit_skill preferred_agent='claude'" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_handle_message_error_response_sent_and_history_cleaned():
     channel = MagicMock()
     channel.platform = "discord"
