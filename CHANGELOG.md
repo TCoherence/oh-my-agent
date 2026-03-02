@@ -6,8 +6,19 @@ The format is intentionally lightweight and release-oriented rather than exhaust
 
 ## Unreleased
 
+## v0.6.3 - 2026-03-01
+
 ### Added
 
+- Image attachment support for Discord messages:
+  - `Attachment` dataclass with `is_image` property in gateway base
+  - Discord `on_message` downloads `image/*` attachments (≤10 MB) to temp dir
+  - `IncomingMessage.attachments` field carries attachments through the pipeline
+  - Image-only messages (no text) get a default analysis prompt
+  - Claude/Gemini: copy images to `workspace/_attachments/` and augment prompt with file-reference instructions
+  - Codex: native `--image` flag support
+  - Session history stores attachment metadata (filename, content_type)
+  - Temp files cleaned up after agent response
 - Date-based two-tier memory system (`DateBasedMemoryStore`):
   - Daily logs (`memory/daily/YYYY-MM-DD.yaml`) with exponential time decay
   - Curated long-term memories (`memory/curated.yaml`) — no decay

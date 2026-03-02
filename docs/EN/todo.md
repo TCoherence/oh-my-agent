@@ -1,6 +1,6 @@
 # Todo / Roadmap
 
-## Snapshot (2026-02-28)
+## Snapshot (2026-03-01)
 
 - `/search` is implemented.
 - SkillSync reverse sync is implemented.
@@ -12,6 +12,7 @@
 - Multi-type runtime is implemented (`artifact`, `repo_change`, `skill_change`).
 - Adaptive memory is implemented (auto-extraction, injection, `/memories`, `/forget`).
 - Date-based memory is implemented (daily/curated two-tier, auto-promotion, MEMORY.md synthesis, `/promote`).
+- Image attachment support is implemented (Discord download, per-agent handling, temp file lifecycle).
 
 ## v0.5 Runtime Hardening (complete)
 

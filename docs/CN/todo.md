@@ -1,6 +1,6 @@
 # Todo / 路线图
 
-## 当前快照（2026-02-28）
+## 当前快照（2026-03-01）
 
 - `/search` 已实现。
 - SkillSync reverse sync 已实现。
@@ -12,6 +12,7 @@
 - 多类型 runtime 已实现（`artifact`、`repo_change`、`skill_change`）。
 - Adaptive Memory 已实现（自动提取、注入、`/memories`、`/forget`）。
 - 基于日期的记忆系统已实现（daily/curated 两层架构、自动晋升、MEMORY.md 合成、`/promote`）。
+- 图片附件支持已实现（Discord 下载、per-agent 处理、临时文件生命周期管理）。
 
 ## v0.5 Runtime 加固（已完成）
 
