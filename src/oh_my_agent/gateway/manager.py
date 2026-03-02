@@ -73,6 +73,7 @@ class GatewayManager:
             if short_cfg.get("base_workspace")
             else None
         )
+        self._recent_thread_skills: dict[tuple[str, str, str], str] = {}
         # key: "platform:channel_id" → ChannelSession
         self._sessions: dict[str, ChannelSession] = {}
 
@@ -306,7 +307,12 @@ class GatewayManager:
             and self._intent_router
             and self._runtime_service
         ):
-            router_context = self._build_router_context(history)
+            router_context = self._build_router_context(
+                history,
+                platform=session.platform,
+                channel_id=session.channel_id,
+                thread_id=thread_id,
+            )
             router_decision = await self._intent_router.route(msg.content, context=router_context)
             threshold = self._intent_router.confidence_threshold
             if router_decision is None:
@@ -623,6 +629,14 @@ class GatewayManager:
             elapsed_agent,
             len(response.text),
         )
+
+        if explicit_skill or routed_skill:
+            self._remember_thread_skill(
+                session.platform,
+                session.channel_id,
+                thread_id,
+                explicit_skill or routed_skill,
+            )
 
         # Record assistant response in history
         await session.append_assistant(thread_id, response.text, agent_used.name)
@@ -1039,6 +1053,39 @@ class GatewayManager:
             return ""
         return description.strip().replace("\n", " ")
 
+    def _thread_skill_key(self, platform: str, channel_id: str, thread_id: str) -> tuple[str, str, str]:
+        return (platform, channel_id, thread_id)
+
+    def _remember_thread_skill(
+        self,
+        platform: str,
+        channel_id: str,
+        thread_id: str,
+        skill_name: str | None,
+    ) -> None:
+        if not skill_name:
+            return
+        self._recent_thread_skills[self._thread_skill_key(platform, channel_id, thread_id)] = skill_name
+
+    def _recent_thread_skill(
+        self,
+        platform: str,
+        channel_id: str,
+        thread_id: str,
+    ) -> str | None:
+        return self._recent_thread_skills.get(self._thread_skill_key(platform, channel_id, thread_id))
+
+    def _skill_description_by_name(self, skill_name: str | None) -> str:
+        if not skill_name or not self._skill_syncer:
+            return ""
+        skills_path = getattr(self._skill_syncer, "_skills_path", None)
+        if not isinstance(skills_path, Path) or not skills_path.is_dir():
+            return ""
+        skill_md = skills_path / skill_name / "SKILL.md"
+        if not skill_md.exists():
+            return ""
+        return self._read_skill_description(skill_md)
+
     async def _append_user_turn_if_needed(
         self,
         session: ChannelSession,
@@ -1061,7 +1108,14 @@ class GatewayManager:
             attachments=msg.attachments or None,
         )
 
-    def _build_router_context(self, history: list[dict]) -> str:
+    def _build_router_context(
+        self,
+        history: list[dict],
+        *,
+        platform: str | None = None,
+        channel_id: str | None = None,
+        thread_id: str | None = None,
+    ) -> str:
         lines: list[str] = []
         if history:
             recent = history[-self._router_context_turns:]
@@ -1080,9 +1134,15 @@ class GatewayManager:
                 lines.append(f"- {name}{suffix}")
             if len(known_skills) > 12:
                 lines.append(f"- ... and {len(known_skills) - 12} more")
-        recent_skill = self._recent_known_skill_reference(history)
+        recent_skill = None
+        if platform and channel_id and thread_id:
+            recent_skill = self._recent_thread_skill(platform, channel_id, thread_id)
+        if not recent_skill:
+            recent_skill = self._recent_invoked_skill(history) or self._recent_known_skill_reference(history)
         if recent_skill:
-            lines.append(f"Most recently referenced skill: {recent_skill}")
+            desc = self._skill_description_by_name(recent_skill)
+            suffix = f": {desc}" if desc else ""
+            lines.append(f"Most recently invoked skill in this thread: {recent_skill}{suffix}")
         return "\n".join(lines)
 
     def _recent_known_skill_reference(self, history: list[dict]) -> str | None:

@@ -92,6 +92,8 @@ Upgrade adaptive memory from flat YAML to a date-organized, two-tier architectur
 - [ ] **User feedback signal**: thumbs-up/down reaction on skill output → persisted rating per skill
 - [ ] **Skill health dashboard**: `/skill_stats` showing success rate, usage frequency, last invoked, average latency per skill
 - [ ] **Auto-disable**: if a skill's failure rate exceeds threshold over a window, demote it from auto-invocation and notify the owner
+- [ ] **Duplicate-skill guard**: before auto-merging a new skill, compare its name/description/request against existing skills and force a repair/update path (or at least manual review) when it substantially overlaps an existing capability
+- [ ] **Source-grounded skill evaluation**: when a skill task is adapting an external repo/tool/reference, validate that the resulting skill actually internalizes the source workflow rather than only passing structural `quick_validate`
 
 ### Guest Session (temp isolation)
 

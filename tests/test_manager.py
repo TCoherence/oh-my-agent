@@ -1024,3 +1024,28 @@ def test_router_context_turn_limit_is_configurable(tmp_path):
     assert "turn-3" in context
     assert "demo-skill" in context
     assert "Summarize demo links into a short brief." in context
+
+
+def test_router_context_includes_recent_thread_skill_with_description(tmp_path):
+    skills_root = tmp_path / "skills"
+    skill_dir = skills_root / "bilibili-video-summarizer"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: bilibili-video-summarizer\ndescription: Summarize Bilibili links into concise Chinese notes.\n---\n",
+        encoding="utf-8",
+    )
+    syncer = MagicMock()
+    syncer._skills_path = skills_root  # noqa: SLF001
+
+    gm = GatewayManager([], skill_syncer=syncer)
+    gm._remember_thread_skill("discord", "100", "thread-1", "bilibili-video-summarizer")  # noqa: SLF001
+
+    context = gm._build_router_context(  # noqa: SLF001
+        [{"role": "user", "content": "请基于刚刚那个继续改进"}],
+        platform="discord",
+        channel_id="100",
+        thread_id="thread-1",
+    )
+
+    assert "Most recently invoked skill in this thread: bilibili-video-summarizer" in context
+    assert "Summarize Bilibili links into concise Chinese notes." in context
