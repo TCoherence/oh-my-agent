@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 import hashlib
 import inspect
 import logging
@@ -24,6 +25,12 @@ logger = logging.getLogger(__name__)
 THREAD_NAME_MAX = 90
 _EXPLICIT_SKILL_CALL_RE = re.compile(r"^/([a-zA-Z0-9][a-zA-Z0-9-_]{0,62})(?:\s|$)")
 
+
+@dataclass
+class ResponseDelivery:
+    first_message_id: str | None
+    chunk_count: int
+
 class GatewayManager:
     """Manages multiple platform channels and routes messages to agent sessions."""
 
@@ -40,6 +47,7 @@ class GatewayManager:
         repo_root: str | Path | None = None,
         intent_router=None,
         router_context_turns: int = 6,
+        skill_evaluation_config: dict | None = None,
         adaptive_memory_store=None,
         memory_extractor=None,
         adaptive_memory_budget: int = 500,
@@ -55,6 +63,15 @@ class GatewayManager:
         self._repo_root = Path(repo_root).expanduser().resolve() if repo_root else Path.cwd()
         self._intent_router = intent_router
         self._router_context_turns = max(1, int(router_context_turns))
+        eval_cfg = skill_evaluation_config or {}
+        auto_disable_cfg = eval_cfg.get("auto_disable", {})
+        self._skill_eval_enabled = bool(eval_cfg.get("enabled", True))
+        self._skill_feedback_emojis = [str(e) for e in eval_cfg.get("feedback_emojis", ["👍", "👎"])]
+        self._skill_auto_disable_enabled = bool(auto_disable_cfg.get("enabled", True))
+        self._skill_auto_disable_window = int(auto_disable_cfg.get("rolling_window", 20))
+        self._skill_auto_disable_min_invocations = int(auto_disable_cfg.get("min_invocations", 5))
+        self._skill_auto_disable_threshold = float(auto_disable_cfg.get("failure_rate_threshold", 0.60))
+        self._skill_stats_recent_days = int(eval_cfg.get("stats_recent_days", 7))
         self._adaptive_memory_store = adaptive_memory_store
         self._memory_extractor = memory_extractor
         self._adaptive_memory_budget = adaptive_memory_budget
@@ -74,6 +91,7 @@ class GatewayManager:
             else None
         )
         self._recent_thread_skills: dict[tuple[str, str, str], str] = {}
+        self._auto_disabled_skills: set[str] = set()
         # key: "platform:channel_id" → ChannelSession
         self._sessions: dict[str, ChannelSession] = {}
 
@@ -100,6 +118,104 @@ class GatewayManager:
         for session in self._sessions.values():
             session.memory_store = store
 
+    async def _refresh_auto_disabled_skills(self) -> None:
+        store = getattr(self, "_memory_store_ref", None)
+        if not store or not hasattr(store, "list_auto_disabled_skills"):
+            self._auto_disabled_skills = set()
+            return
+        self._auto_disabled_skills = await store.list_auto_disabled_skills()
+
+    def _is_skill_auto_disabled(self, skill_name: str | None) -> bool:
+        return bool(skill_name and skill_name in self._auto_disabled_skills)
+
+    @staticmethod
+    def _skill_invocation_outcome(response) -> str:
+        if not response.error:
+            return "success"
+        if response.error_kind == "timeout":
+            return "timeout"
+        if response.error_kind == "cancelled":
+            return "cancelled"
+        return "error"
+
+    async def _record_skill_invocation(
+        self,
+        *,
+        skill_name: str,
+        route_source: str,
+        req_id: str,
+        session: ChannelSession,
+        thread_id: str,
+        msg: IncomingMessage,
+        agent_name: str,
+        response,
+        latency_ms: int,
+    ) -> int | None:
+        store = getattr(self, "_memory_store_ref", None)
+        if not store or not self._skill_eval_enabled or not hasattr(store, "record_skill_invocation"):
+            return None
+        usage = response.usage or {}
+        invocation_id = await store.record_skill_invocation(
+            skill_name=skill_name,
+            agent_name=agent_name,
+            platform=session.platform,
+            channel_id=session.channel_id,
+            thread_id=thread_id,
+            user_id=msg.author_id,
+            route_source=route_source,
+            request_id=req_id,
+            outcome=self._skill_invocation_outcome(response),
+            error_kind=response.error_kind,
+            error_text=response.error[:500] if response.error else None,
+            latency_ms=latency_ms,
+            input_tokens=usage.get("input_tokens"),
+            output_tokens=usage.get("output_tokens"),
+            cache_read_input_tokens=usage.get("cache_read_input_tokens"),
+            cache_creation_input_tokens=usage.get("cache_creation_input_tokens"),
+        )
+        await self._recompute_skill_health(skill_name)
+        return invocation_id
+
+    async def _bind_skill_invocation_message(
+        self,
+        invocation_id: int | None,
+        message_id: str | None,
+    ) -> None:
+        if not invocation_id or not message_id:
+            return
+        store = getattr(self, "_memory_store_ref", None)
+        if not store or not hasattr(store, "set_skill_invocation_response_message"):
+            return
+        await store.set_skill_invocation_response_message(invocation_id, message_id)
+
+    async def _recompute_skill_health(self, skill_name: str) -> None:
+        store = getattr(self, "_memory_store_ref", None)
+        if (
+            not store
+            or not self._skill_eval_enabled
+            or not self._skill_auto_disable_enabled
+            or not hasattr(store, "list_recent_skill_invocations")
+            or not hasattr(store, "set_skill_auto_disabled")
+        ):
+            return
+
+        rows = await store.list_recent_skill_invocations(skill_name, limit=self._skill_auto_disable_window)
+        if len(rows) < self._skill_auto_disable_min_invocations:
+            await store.set_skill_auto_disabled(skill_name, disabled=False)
+            self._auto_disabled_skills.discard(skill_name)
+            return
+
+        failures = sum(1 for row in rows if row.get("outcome") in {"error", "timeout", "cancelled"})
+        rate = failures / max(len(rows), 1)
+        if rate >= self._skill_auto_disable_threshold:
+            reason = f"failure_rate={rate:.2f} over last {len(rows)} invocations"
+            await store.set_skill_auto_disabled(skill_name, disabled=True, reason=reason)
+            self._auto_disabled_skills.add(skill_name)
+            return
+
+        await store.set_skill_auto_disabled(skill_name, disabled=False)
+        self._auto_disabled_skills.discard(skill_name)
+
     async def _sync_session(self, session, thread_id: str, agent) -> None:
         """Persist or delete an agent's CLI session ID in the memory store."""
         store = getattr(self, "_memory_store_ref", None)
@@ -119,6 +235,7 @@ class GatewayManager:
 
     async def start(self) -> None:
         """Start all platform channels concurrently."""
+        await self._refresh_auto_disabled_skills()
         tasks = []
         for channel, registry in self._channels:
             session = self._get_session(channel, registry)
@@ -145,6 +262,15 @@ class GatewayManager:
             # Inject runtime service for /task_* (Discord-specific)
             if hasattr(channel, "set_runtime_service") and self._runtime_service:
                 channel.set_runtime_service(self._runtime_service)
+
+            if hasattr(channel, "set_skill_evaluation_config"):
+                channel.set_skill_evaluation_config(
+                    {
+                        "enabled": self._skill_eval_enabled,
+                        "stats_recent_days": self._skill_stats_recent_days,
+                        "feedback_emojis": self._skill_feedback_emojis,
+                    }
+                )
 
             if self._runtime_service:
                 self._runtime_service.register_session(session, registry)
@@ -288,6 +414,7 @@ class GatewayManager:
 
         history = await session.get_history(thread_id)
         user_turn_appended = False
+        await self._refresh_auto_disabled_skills()
 
         explicit_skill = self._detect_explicit_skill_invocation(msg.content)
         if explicit_skill:
@@ -604,6 +731,21 @@ class GatewayManager:
             )
         elapsed_agent = time.perf_counter() - t_agent
         await self._sync_registry_sessions(session, thread_id, registry)
+        tracked_skill = explicit_skill or routed_skill
+        route_source = "explicit" if explicit_skill else "router" if routed_skill else None
+        invocation_id = None
+        if tracked_skill and route_source:
+            invocation_id = await self._record_skill_invocation(
+                skill_name=tracked_skill,
+                route_source=route_source,
+                req_id=req_id,
+                session=session,
+                thread_id=thread_id,
+                msg=msg,
+                agent_name=agent_used.name,
+                response=response,
+                latency_ms=int(elapsed_agent * 1000),
+            )
 
         if response.error:
             logger.error(
@@ -642,20 +784,22 @@ class GatewayManager:
         await session.append_assistant(thread_id, response.text, agent_used.name)
 
         # Send with attribution header + chunked content.
-        chunks = await self._send_agent_response(
+        delivery = await self._send_agent_response(
             channel,
             thread_id,
             agent_name=agent_used.name,
             text=response.text,
             usage=response.usage,
         )
+        if invocation_id is not None:
+            await self._bind_skill_invocation_message(invocation_id, delivery.first_message_id)
 
         elapsed_total = time.perf_counter() - t_start
         logger.info(
             "[%s] DONE thread=%s chunks=%d total_elapsed=%.2fs",
             req_id,
             thread_id,
-            max(len(chunks), 1),
+            max(delivery.chunk_count, 1),
             elapsed_total,
         )
 
@@ -973,7 +1117,7 @@ class GatewayManager:
         agent_name: str,
         text: str,
         usage: dict | None = None,
-    ) -> list[str]:
+    ) -> ResponseDelivery:
         attribution = f"-# via **{agent_name}**"
         if usage:
             attribution += f" · {self._format_usage(usage)}"
@@ -981,16 +1125,19 @@ class GatewayManager:
         first_chunk_budget = max(1, 2000 - len(attribution) - 1)
         first_chunks = chunk_message(text, max_size=first_chunk_budget)
         if not first_chunks:
-            await channel.send(thread_id, f"{attribution}\n*(empty response)*")
-            return []
+            message_id = await channel.send(thread_id, f"{attribution}\n*(empty response)*")
+            return ResponseDelivery(first_message_id=message_id, chunk_count=1)
 
-        await channel.send(thread_id, f"{attribution}\n{first_chunks[0]}")
+        first_message_id = await channel.send(thread_id, f"{attribution}\n{first_chunks[0]}")
 
         remainder = text[len(first_chunks[0]):].lstrip()
         remaining_chunks = chunk_message(remainder) if remainder else []
         for chunk in remaining_chunks:
             await channel.send(thread_id, chunk)
-        return [first_chunks[0], *remaining_chunks]
+        return ResponseDelivery(
+            first_message_id=first_message_id,
+            chunk_count=1 + len(remaining_chunks),
+        )
 
     def _detect_explicit_skill_invocation(self, content: str) -> str | None:
         match = _EXPLICIT_SKILL_CALL_RE.match(content.strip())
@@ -1026,6 +1173,8 @@ class GatewayManager:
         for child in sorted(skills_path.iterdir(), key=lambda p: p.name):
             skill_md = child / "SKILL.md"
             if not child.is_dir() or not skill_md.exists():
+                continue
+            if self._is_skill_auto_disabled(child.name):
                 continue
             entries.append((child.name, self._read_skill_description(skill_md)))
         return entries
@@ -1171,9 +1320,11 @@ class GatewayManager:
             return None
         known = self._known_skill_names()
         if router_decision.skill_name and router_decision.skill_name in known:
+            if self._is_skill_auto_disabled(router_decision.skill_name):
+                return None
             return router_decision.skill_name
         recent = self._recent_invoked_skill(history) or self._recent_known_skill_reference(history)
-        if recent and recent in known:
+        if recent and recent in known and not self._is_skill_auto_disabled(recent):
             return recent
         return None
 

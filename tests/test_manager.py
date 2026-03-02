@@ -260,6 +260,170 @@ async def test_handle_message_logs_error_purpose(caplog):
 
 
 @pytest.mark.asyncio
+async def test_skill_invocation_is_recorded_and_binds_first_response_message(tmp_path):
+    store = SQLiteMemoryStore(tmp_path / "runtime.db")
+    await store.init()
+    try:
+        channel = MagicMock()
+        channel.platform = "discord"
+        channel.channel_id = "100"
+        channel.create_thread = AsyncMock(return_value="thread-1")
+        channel.send = AsyncMock(side_effect=["msg-1"])
+        channel.typing = MagicMock()
+        channel.typing.return_value.__aenter__ = AsyncMock(return_value=None)
+        channel.typing.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        mock_agent = MagicMock()
+        mock_agent.name = "codex"
+        mock_agent.get_session_id = MagicMock(return_value=None)
+        registry = MagicMock(spec=AgentRegistry)
+        registry.agents = [mock_agent]
+        registry.run = AsyncMock(
+            return_value=(
+                mock_agent,
+                AgentResponse(
+                    text="weather reply",
+                    usage={"input_tokens": 11, "output_tokens": 22},
+                ),
+            )
+        )
+
+        skills_root = tmp_path / "skills"
+        skill_dir = skills_root / "weather"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: weather\ndescription: Check weather quickly\n---\n",
+            encoding="utf-8",
+        )
+        syncer = MagicMock(spec=SkillSync)
+        syncer._skills_path = skills_root  # noqa: SLF001
+
+        session = ChannelSession(
+            platform="discord",
+            channel_id="100",
+            channel=channel,
+            registry=registry,
+            memory_store=store,
+        )
+        gm = GatewayManager([], skill_syncer=syncer, skill_evaluation_config={"enabled": True})
+        gm.set_memory_store(store)
+
+        await gm.handle_message(session, registry, _make_msg(thread_id="thread-1", content="/weather", author_id="u-1"))
+
+        stats = await store.get_skill_stats("weather", recent_days=7)
+        assert len(stats) == 1
+        assert stats[0]["total_invocations"] == 1
+        invocation = await store.get_skill_invocation_by_message("msg-1")
+        assert invocation is not None
+        assert invocation["skill_name"] == "weather"
+        assert invocation["route_source"] == "explicit"
+        assert invocation["outcome"] == "success"
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_auto_disabled_skills_are_hidden_from_router_entries_but_explicit_calls_still_work(tmp_path):
+    store = SQLiteMemoryStore(tmp_path / "runtime.db")
+    await store.init()
+    try:
+        await store.set_skill_auto_disabled("weather", disabled=True, reason="too many failures")
+
+        channel = MagicMock()
+        channel.platform = "discord"
+        channel.channel_id = "100"
+        channel.create_thread = AsyncMock(return_value="thread-1")
+        channel.send = AsyncMock(side_effect=["msg-1"])
+        channel.typing = MagicMock()
+        channel.typing.return_value.__aenter__ = AsyncMock(return_value=None)
+        channel.typing.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        mock_agent = MagicMock()
+        mock_agent.name = "codex"
+        mock_agent.get_session_id = MagicMock(return_value=None)
+        registry = MagicMock(spec=AgentRegistry)
+        registry.agents = [mock_agent]
+        registry.run = AsyncMock(return_value=(mock_agent, AgentResponse(text="ok")))
+
+        skills_root = tmp_path / "skills"
+        skill_dir = skills_root / "weather"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: weather\ndescription: Check weather quickly\n---\n",
+            encoding="utf-8",
+        )
+        syncer = MagicMock(spec=SkillSync)
+        syncer._skills_path = skills_root  # noqa: SLF001
+
+        session = ChannelSession(
+            platform="discord",
+            channel_id="100",
+            channel=channel,
+            registry=registry,
+            memory_store=store,
+        )
+        gm = GatewayManager([], skill_syncer=syncer, skill_evaluation_config={"enabled": True})
+        gm.set_memory_store(store)
+        await gm._refresh_auto_disabled_skills()
+
+        assert gm._known_skill_router_entries() == []
+        assert "weather" in gm._known_skill_names()
+
+        await gm.handle_message(session, registry, _make_msg(thread_id="thread-1", content="/weather", author_id="u-1"))
+        registry.run.assert_awaited()
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_recompute_skill_health_auto_disables_unhealthy_skill(tmp_path):
+    store = SQLiteMemoryStore(tmp_path / "runtime.db")
+    await store.init()
+    try:
+        gm = GatewayManager(
+            [],
+            skill_evaluation_config={
+                "enabled": True,
+                "auto_disable": {
+                    "enabled": True,
+                    "rolling_window": 5,
+                    "min_invocations": 5,
+                    "failure_rate_threshold": 0.60,
+                },
+            },
+        )
+        gm.set_memory_store(store)
+        for idx in range(5):
+            await store.record_skill_invocation(
+                skill_name="weather",
+                agent_name="codex",
+                platform="discord",
+                channel_id="100",
+                thread_id="thread-1",
+                user_id="u-1",
+                route_source="explicit",
+                request_id=f"req-{idx}",
+                outcome="error" if idx < 4 else "success",
+                error_kind="cli_error" if idx < 4 else None,
+                error_text="boom" if idx < 4 else None,
+                latency_ms=1000,
+                input_tokens=1,
+                output_tokens=1,
+                cache_read_input_tokens=0,
+                cache_creation_input_tokens=0,
+            )
+
+        await gm._recompute_skill_health("weather")
+
+        disabled = await store.list_auto_disabled_skills()
+        assert disabled == {"weather"}
+        stats = await store.get_skill_stats("weather", recent_days=7)
+        assert stats[0]["auto_disabled"] == 1
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
 async def test_handle_message_error_response_sent_and_history_cleaned():
     channel = MagicMock()
     channel.platform = "discord"

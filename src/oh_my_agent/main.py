@@ -138,6 +138,25 @@ def _build_channel(cfg: dict, *, owner_user_ids: set[str] | None = None):
 
 
 def _apply_v052_defaults(config: dict) -> None:
+    skills_cfg = config.setdefault("skills", {})
+    skills_cfg.setdefault("enabled", True)
+    skills_cfg.setdefault("path", "skills/")
+    skill_eval_cfg = skills_cfg.setdefault("evaluation", {})
+    skill_eval_cfg.setdefault("enabled", True)
+    skill_eval_cfg.setdefault("stats_recent_days", 7)
+    skill_eval_cfg.setdefault("feedback_emojis", ["👍", "👎"])
+    auto_disable_cfg = skill_eval_cfg.setdefault("auto_disable", {})
+    auto_disable_cfg.setdefault("enabled", True)
+    auto_disable_cfg.setdefault("rolling_window", 20)
+    auto_disable_cfg.setdefault("min_invocations", 5)
+    auto_disable_cfg.setdefault("failure_rate_threshold", 0.60)
+    overlap_cfg = skill_eval_cfg.setdefault("overlap_guard", {})
+    overlap_cfg.setdefault("enabled", True)
+    overlap_cfg.setdefault("review_similarity_threshold", 0.45)
+    source_cfg = skill_eval_cfg.setdefault("source_grounded", {})
+    source_cfg.setdefault("enabled", True)
+    source_cfg.setdefault("block_auto_merge", True)
+
     config.setdefault("workspace", "~/.oh-my-agent/agent-workspace")
     short_ws_cfg = config.setdefault("short_workspace", {})
     short_ws_cfg.setdefault("enabled", True)
@@ -398,7 +417,10 @@ async def _async_main(config: dict, logger: logging.Logger) -> None:
 
         runtime_service = RuntimeService(
             memory_store,
-            config=runtime_cfg,
+            config={
+                **runtime_cfg,
+                "skill_evaluation": config.get("skills", {}).get("evaluation", {}),
+            },
             owner_user_ids=owner_user_ids,
             repo_root=project_root,
             skill_syncer=skill_syncer,
@@ -490,6 +512,7 @@ async def _async_main(config: dict, logger: logging.Logger) -> None:
         repo_root=project_root,
         intent_router=intent_router,
         router_context_turns=int(router_cfg.get("context_turns", 10)),
+        skill_evaluation_config=config.get("skills", {}).get("evaluation", {}),
         adaptive_memory_store=adaptive_store,
         memory_extractor=memory_extractor,
         adaptive_memory_budget=int(adaptive_cfg.get("injection_budget_chars", 500)),

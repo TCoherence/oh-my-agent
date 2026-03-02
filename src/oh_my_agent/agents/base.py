@@ -15,6 +15,7 @@ class AgentResponse:
     # Keys: input_tokens, output_tokens, cache_read_input_tokens,
     #       cache_creation_input_tokens, cost_usd (all optional).
     usage: dict | None = None
+    error_kind: str | None = None
 
 
 class BaseAgent(ABC):

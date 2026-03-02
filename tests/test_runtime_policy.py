@@ -34,6 +34,15 @@ def test_strict_risk_flags_sensitive_and_budget_overrides():
     assert "steps_over_8" in r3.reasons
 
 
+def test_strict_risk_does_not_confuse_adapt_with_apt():
+    risk = evaluate_strict_risk(
+        "Adapt the BibiGPT-v1 project into a bilibili summarizer skill",
+        max_steps=6,
+        max_minutes=15,
+    )
+    assert risk.require_approval is False
+
+
 def test_parse_task_state_and_block_reason():
     text = "Work done\nTASK_STATE: DONE"
     assert parse_task_state(text) == ("DONE", None)

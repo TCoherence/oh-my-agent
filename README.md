@@ -96,6 +96,25 @@ short_workspace:
   ttl_hours: 24
   cleanup_interval_minutes: 1440
 
+skills:
+  enabled: true
+  path: skills/
+  evaluation:
+    enabled: true
+    stats_recent_days: 7
+    feedback_emojis: ["👍", "👎"]
+    auto_disable:
+      enabled: true
+      rolling_window: 20
+      min_invocations: 5
+      failure_rate_threshold: 0.60
+    overlap_guard:
+      enabled: true
+      review_similarity_threshold: 0.45
+    source_grounded:
+      enabled: true
+      block_auto_merge: true
+
 router:
   enabled: true
   provider: openai_compatible
@@ -171,6 +190,21 @@ Check the installed version:
 - The base workspace stores a small source-state manifest and refreshes automatically before short-workspace turns when repo `AGENTS.md` or canonical `skills/` change.
 - Session workspaces inherit the refreshed base workspace, so normal chat turns see updated rules and skills without a manual rebuild.
 
+### Skill Evaluation
+
+- Chat-path skill executions are tracked as structured telemetry with route source, latency, usage, and outcome.
+- Discord `👍` / `👎` reactions on the first attributed skill response are stored as per-invocation feedback.
+- `/skill_stats [skill]` reports recent success rate, usage, latency, feedback, and latest evaluation findings.
+- `/skill_enable <skill>` clears an auto-disabled skill so router-based invocation can use it again.
+- Auto-disable only removes a skill from automatic routing. Explicit `/skill-name` still works.
+- Skill mutation tasks now gate auto-merge on:
+  - overlap review for likely duplicate skills
+  - source-grounded review for external repo/tool/reference adaptations
+- External-source skill adaptations should populate `SKILL.md` frontmatter metadata:
+  - `metadata.source_urls`
+  - `metadata.adapted_from`
+  - `metadata.adaptation_notes`
+
 ### Slash Commands
 
 - `/ask <question> [agent]`
@@ -194,6 +228,8 @@ Check the installed version:
 - `/memories [category]`
 - `/forget <memory_id>`
 - `/reload-skills`
+- `/skill_stats [skill]`
+- `/skill_enable <skill>`
 
 ## Autonomous Runtime
 

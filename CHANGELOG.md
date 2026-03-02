@@ -10,6 +10,14 @@ The format is intentionally lightweight and release-oriented rather than exhaust
 
 ### Added
 
+- Skill evaluation end-to-end loop:
+  - chat-path skill invocation telemetry stored in SQLite
+  - per-invocation Discord reaction feedback (`👍` / `👎`)
+  - `/skill_stats [skill]` operator surface
+  - `/skill_enable <skill>` manual recovery for auto-disabled skills
+  - auto-disable guard that removes unhealthy skills from automatic routing while preserving explicit `/skill-name`
+  - duplicate-skill overlap review before skill auto-merge
+  - source-grounded review for external repo/tool/reference skill adaptations
 - Image attachment support for Discord messages:
   - `Attachment` dataclass with `is_image` property in gateway base
   - Discord `on_message` downloads `image/*` attachments (≤10 MB) to temp dir
@@ -37,6 +45,9 @@ The format is intentionally lightweight and release-oriented rather than exhaust
 
 ### Fixed
 
+- Runtime skill mutation flow no longer auto-merges likely duplicate skills or weak external-source adaptations without review
+- Router-visible skill list now excludes auto-disabled skills, while explicit skill invocation remains available
+- Strict risk detection no longer misclassifies `adapt ...` requests as `apt ...` package-management operations
 - Hardened persisted CLI session resume for Claude, Codex, and Gemini:
   - invalid/stale resumed sessions are now cleared more selectively
   - stale persisted sessions are deleted even when fallback succeeds through another agent

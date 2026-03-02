@@ -95,6 +95,25 @@ short_workspace:
   ttl_hours: 24
   cleanup_interval_minutes: 1440
 
+skills:
+  enabled: true
+  path: skills/
+  evaluation:
+    enabled: true
+    stats_recent_days: 7
+    feedback_emojis: ["👍", "👎"]
+    auto_disable:
+      enabled: true
+      rolling_window: 20
+      min_invocations: 5
+      failure_rate_threshold: 0.60
+    overlap_guard:
+      enabled: true
+      review_similarity_threshold: 0.45
+    source_grounded:
+      enabled: true
+      block_auto_merge: true
+
 router:
   enabled: true
   provider: openai_compatible
@@ -160,6 +179,21 @@ Runtime 产物默认放在 `~/.oh-my-agent/runtime/`（包括 memory DB、日志
 - base workspace 会保存一个很小的 source-state manifest；当 repo `AGENTS.md` 或 canonical `skills/` 变化时，会在短对话 workspace 创建前自动刷新。
 - session workspace 继承刷新后的 base workspace，所以普通聊天不需要手动重建也能看到最新规则和 skill。
 
+### Skill 评估
+
+- 普通聊天路径上的 skill 调用现在会记录结构化遥测：路由来源、延迟、usage 和结果状态。
+- Discord 上对第一条带 `via **agent**` 的 skill 回复加 `👍` / `👎`，会被持久化成逐次调用反馈。
+- `/skill_stats [skill]` 可查看最近成功率、调用次数、平均延迟、反馈，以及最近的评估结论。
+- `/skill_enable <skill>` 可清除 auto-disabled 状态，让 router 自动调用重新纳入该 skill。
+- 自动降级只影响自动路由；显式 `/skill-name` 仍然可以继续执行。
+- `skill_change` 任务现在会在自动合并前增加两层评估：
+  - 重复能力 overlap review
+  - 外部 repo/tool/reference 内化任务的 source-grounded review
+- 如果 skill 要内化外部来源，需要在 `SKILL.md` frontmatter 的 `metadata` 中补齐：
+  - `source_urls`
+  - `adapted_from`
+  - `adaptation_notes`
+
 ### Slash 命令
 
 - `/ask <question> [agent]`
@@ -170,6 +204,8 @@ Runtime 产物默认放在 `~/.oh-my-agent/runtime/`（包括 memory DB、日志
 - `/memories [category]`
 - `/forget <memory_id>`
 - `/reload-skills`
+- `/skill_stats [skill]`
+- `/skill_enable <skill>`
 - `/task_start`
 - `/task_status <task_id>`
 - `/task_list [status]`

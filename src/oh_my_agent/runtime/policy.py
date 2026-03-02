@@ -66,8 +66,6 @@ _ARTIFACT_HINTS = (
 _HIGH_RISK_HINTS = (
     "pip install",
     "npm install",
-    "apt ",
-    "brew ",
     "network",
     "internet",
     ".env",
@@ -132,7 +130,7 @@ def evaluate_strict_risk(
         reasons.append("steps_over_8")
     if max_minutes > 20:
         reasons.append("minutes_over_20")
-    if any(hint in lowered for hint in _HIGH_RISK_HINTS):
+    if any(hint in lowered for hint in _HIGH_RISK_HINTS) or re.search(r"\b(?:apt|brew)\b", lowered):
         reasons.append("contains_sensitive_keywords")
     if "across the repo" in lowered or "all files" in lowered or "large refactor" in lowered:
         reasons.append("possible_large_change")

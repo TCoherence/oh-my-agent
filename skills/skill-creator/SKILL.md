@@ -318,6 +318,18 @@ Only include other optional interface fields when the user explicitly provides t
 
 When editing the (newly-generated or existing) skill, remember that the skill is being created for another instance of Codex to use. Include information that would be beneficial and non-obvious to Codex. Consider what procedural knowledge, domain-specific details, or reusable assets would help another Codex instance execute these tasks more effectively.
 
+#### Prefer Updating an Existing Skill When the Capability Already Exists
+
+If the repo already contains a skill covering the same capability, prefer updating that skill instead of creating a parallel variant.
+
+Use a new skill only when the capability is genuinely distinct. Do not create a thin wrapper that mostly rephrases or lightly repackages an existing skill.
+
+When the user references an external repo/tool/project to improve an existing capability:
+
+- treat the task as an update whenever practical
+- internalize the useful workflow, scripts, constraints, or evidence-gathering strategy
+- avoid inventing a new sibling skill unless the user explicitly wants a separate capability boundary
+
 #### Start with Reusable Skill Contents
 
 To begin implementation, start with the reusable resources identified above: `scripts/`, `references/`, and `assets/` files. Note that this step may require user input. For example, when implementing a `brand-guidelines` skill, the user may need to provide brand assets or templates to store in `assets/`, or documentation to store in `references/`.
@@ -325,6 +337,18 @@ To begin implementation, start with the reusable resources identified above: `sc
 Added scripts must be tested by actually running them to ensure there are no bugs and that the output matches what is expected. If there are many similar scripts, only a representative sample needs to be tested to ensure confidence that they all work while balancing time to completion.
 
 If you used `--examples`, delete any placeholder files that are not needed for the skill. Only create resource directories that are actually required.
+
+#### External-Source Skills Must Be Source-Grounded
+
+If the user gave a GitHub repo, URL, tool name, or reference implementation, do not stop at a generic shell skill that only passes structural validation.
+
+You should:
+
+1. inspect the referenced source enough to understand the real workflow or capability
+2. internalize the reusable parts that matter: workflow structure, scripts, references, constraints, or evidence collection strategy
+3. document what was truly internalized and what was intentionally left out
+
+Do not claim adaptation unless the resulting skill clearly reflects the source.
 
 #### Update SKILL.md
 
@@ -340,7 +364,29 @@ Write the YAML frontmatter with `name` and `description`:
   - Include all "when to use" information here - Not in the body. The body is only loaded after triggering, so "When to Use This Skill" sections in the body are not helpful to Codex.
   - Example description for a `docx` skill: "Comprehensive document creation, editing, and analysis with support for tracked changes, comments, formatting preservation, and text extraction. Use when Codex needs to work with professional documents (.docx files) for: (1) Creating new documents, (2) Modifying or editing content, (3) Working with tracked changes, (4) Adding comments, or any other document tasks"
 
-Do not include any other fields in YAML frontmatter.
+Use additional frontmatter sparingly. The main allowed exception is `metadata` for external-source adaptations.
+
+If the user asks to adapt or internalize an external repo, tool, workflow, or reference into a skill, add:
+
+- `metadata.source_urls`: list of external URLs referenced by the adaptation
+- `metadata.adapted_from`: short repo/tool/project label
+- `metadata.adaptation_notes`: what was actually internalized, and what was intentionally omitted
+
+Example:
+
+```yaml
+---
+name: bibigpt-v1-adapter
+description: Summarize Bilibili video links using a workflow adapted from an external project. Use when Codex needs to analyze Bilibili URLs, title pages, transcripts, or screenshots and produce a concise Chinese summary.
+metadata:
+  source_urls:
+    - https://github.com/example/BibiGPT-v1
+  adapted_from: BibiGPT-v1
+  adaptation_notes: Internalized the Bilibili summarization workflow and omitted the original web UI.
+---
+```
+
+Do not add fake or empty metadata. If the request does not clearly adapt an external source, omit this block.
 
 ##### Body
 
@@ -355,6 +401,8 @@ scripts/quick_validate.py <path/to/skill-folder>
 ```
 
 The validation script checks YAML frontmatter format, required fields, and naming rules. If validation fails, fix the reported issues and run the command again.
+
+For external-source adaptations, structural validation is not enough by itself. Ensure the skill also includes the required `metadata` fields and clearly reflects the referenced source, otherwise merge review may be required even when `quick_validate.py` passes.
 
 ### Step 6: Iterate
 

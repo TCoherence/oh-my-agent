@@ -88,12 +88,12 @@
 
 ### Skill 评估
 
-- [ ] **结果追踪**：记录 skill 调用结果（成功/失败/超时）到 `skill_provenance`
-- [ ] **用户反馈信号**：skill 输出后的 thumbs-up/down 反应 → 持久化评分
-- [ ] **Skill 健康看板**：`/skill_stats` 展示成功率、使用频率、最近调用时间、平均延迟
-- [ ] **自动降级**：当 skill 失败率超过窗口阈值时，从自动调用中降级并通知 owner
-- [ ] **重复 skill 防重护栏**：新 skill 自动合并前，对名称/描述/请求与现有 skills 做重叠判断；如果能力明显重合，应优先走 repair/update，或至少强制人工 review
-- [ ] **基于来源的 skill 评估**：当 skill task 要内化外部 repo/tool/reference 时，验证结果是否真的吸收了上游 workflow，而不是只靠结构层面的 `quick_validate` 通过
+- [x] **结果追踪**：记录普通聊天路径上的 skill 调用结果（成功/错误/超时/取消），并保留路由来源、延迟和 usage 遥测
+- [x] **用户反馈信号**：对第一条带 agent attribution 的 skill 回复加 thumbs-up/down reaction，会按逐次调用持久化评分
+- [x] **Skill 健康看板**：`/skill_stats [skill]` 展示成功率、使用频率、最近调用时间、平均延迟和最近评估结论
+- [x] **自动降级**：当 skill 失败率超过滚动窗口阈值时，将其从自动路由中移除，但保留显式 `/skill-name`；`/skill_enable` 可人工恢复
+- [x] **重复 skill 防重护栏**：新 skill 自动合并前，对名称/描述/请求与现有 skills 做重叠判断；如果能力明显重合，则强制进入人工 merge review
+- [x] **基于来源的 skill 评估**：当 skill task 要内化外部 repo/tool/reference 时，要求补齐来源元数据，并在自动合并前跑 source-grounded review
 
 ### 访客会话（临时隔离）
 

@@ -7,6 +7,7 @@ import os
 import tempfile
 import uuid
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -221,6 +222,61 @@ class MemoryStore(ABC):
     async def get_skill_provenance(self, skill_name: str) -> dict[str, Any] | None:
         return None
 
+    async def record_skill_invocation(self, **kwargs) -> int | None:
+        return None
+
+    async def set_skill_invocation_response_message(
+        self,
+        invocation_id: int,
+        message_id: str,
+    ) -> None:
+        return None
+
+    async def get_skill_invocation_by_message(
+        self,
+        message_id: str,
+    ) -> dict[str, Any] | None:
+        return None
+
+    async def upsert_skill_feedback(self, **kwargs) -> None:
+        return None
+
+    async def delete_skill_feedback(self, *, invocation_id: int, actor_id: str) -> None:
+        return None
+
+    async def list_recent_skill_invocations(self, skill_name: str, *, limit: int) -> list[dict[str, Any]]:
+        return []
+
+    async def get_skill_stats(self, skill_name: str | None = None, *, recent_days: int = 7) -> list[dict[str, Any]]:
+        return []
+
+    async def set_skill_auto_disabled(
+        self,
+        skill_name: str,
+        *,
+        disabled: bool,
+        reason: str | None = None,
+    ) -> None:
+        return None
+
+    async def list_auto_disabled_skills(self) -> set[str]:
+        return set()
+
+    async def add_skill_evaluation(self, **kwargs) -> None:
+        return None
+
+    async def get_latest_skill_evaluations(
+        self,
+        skill_name: str,
+    ) -> list[dict[str, Any]]:
+        return []
+
+
+@dataclass
+class SkillInvocationDelivery:
+    invocation_id: int | None = None
+    response_message_id: str | None = None
+
 
 # --------------------------------------------------------------------------- #
 #  SQLite implementation                                                        #
@@ -388,12 +444,75 @@ CREATE TABLE IF NOT EXISTS skill_provenance (
     validated           INTEGER NOT NULL DEFAULT 0,
     validation_warnings TEXT,
     merged_commit_hash  TEXT,
+    auto_disabled       INTEGER NOT NULL DEFAULT 0,
+    auto_disabled_reason TEXT,
+    auto_disabled_at    TIMESTAMP,
     created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_skill_provenance_task
     ON skill_provenance(source_task_id);
+
+CREATE TABLE IF NOT EXISTS skill_invocations (
+    id                        INTEGER PRIMARY KEY AUTOINCREMENT,
+    skill_name                TEXT NOT NULL,
+    agent_name                TEXT NOT NULL,
+    platform                  TEXT,
+    channel_id                TEXT,
+    thread_id                 TEXT,
+    user_id                   TEXT,
+    route_source              TEXT NOT NULL,
+    request_id                TEXT,
+    response_message_id       TEXT,
+    outcome                   TEXT NOT NULL,
+    error_kind                TEXT,
+    error_text                TEXT,
+    latency_ms                INTEGER NOT NULL,
+    input_tokens              INTEGER,
+    output_tokens             INTEGER,
+    cache_read_input_tokens   INTEGER,
+    cache_creation_input_tokens INTEGER,
+    created_at                TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_skill_invocations_skill_created
+    ON skill_invocations(skill_name, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_skill_invocations_message
+    ON skill_invocations(response_message_id);
+CREATE INDEX IF NOT EXISTS idx_skill_invocations_thread_created
+    ON skill_invocations(thread_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS skill_feedback (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    invocation_id INTEGER NOT NULL,
+    actor_id      TEXT NOT NULL,
+    platform      TEXT,
+    channel_id    TEXT,
+    thread_id     TEXT,
+    score         INTEGER NOT NULL,
+    source        TEXT NOT NULL,
+    created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(invocation_id, actor_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_skill_feedback_invocation
+    ON skill_feedback(invocation_id);
+
+CREATE TABLE IF NOT EXISTS skill_evaluations (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    skill_name      TEXT NOT NULL,
+    source_task_id  TEXT,
+    evaluation_type TEXT NOT NULL,
+    status          TEXT NOT NULL,
+    summary         TEXT NOT NULL,
+    details_json    TEXT,
+    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_skill_evaluations_skill_created
+    ON skill_evaluations(skill_name, created_at DESC);
 """
 
 
@@ -439,6 +558,9 @@ class SQLiteMemoryStore(MemoryStore):
         await self._ensure_column("runtime_tasks", "workspace_cleaned_at", "TIMESTAMP")
         await self._ensure_column("runtime_tasks", "task_type", "TEXT NOT NULL DEFAULT 'repo_change'")
         await self._ensure_column("runtime_tasks", "skill_name", "TEXT")
+        await self._ensure_column("skill_provenance", "auto_disabled", "INTEGER NOT NULL DEFAULT 0")
+        await self._ensure_column("skill_provenance", "auto_disabled_reason", "TEXT")
+        await self._ensure_column("skill_provenance", "auto_disabled_at", "TIMESTAMP")
         db = await self._conn()
         await db.execute("UPDATE runtime_tasks SET task_type='repo_change' WHERE task_type='code'")
         await db.execute("UPDATE runtime_tasks SET task_type='skill_change' WHERE task_type='skill'")
@@ -979,8 +1101,9 @@ class SQLiteMemoryStore(MemoryStore):
             await db.execute(
                 "INSERT INTO skill_provenance ("
                 " skill_name, source_task_id, created_by, agent_name, platform, channel_id, thread_id,"
-                " validation_mode, validated, validation_warnings, merged_commit_hash, updated_at"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP) "
+                " validation_mode, validated, validation_warnings, merged_commit_hash, auto_disabled,"
+                " auto_disabled_reason, auto_disabled_at, updated_at"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP) "
                 "ON CONFLICT(skill_name) DO UPDATE SET "
                 "source_task_id=CASE WHEN excluded.source_task_id IS NOT NULL THEN excluded.source_task_id ELSE source_task_id END, "
                 "created_by=CASE WHEN excluded.source_task_id IS NOT NULL THEN excluded.created_by ELSE created_by END, "
@@ -1005,6 +1128,9 @@ class SQLiteMemoryStore(MemoryStore):
                     int(bool(kwargs.get("validated", False))),
                     warnings_json,
                     kwargs.get("merged_commit_hash"),
+                    int(bool(kwargs.get("auto_disabled", False))),
+                    kwargs.get("auto_disabled_reason"),
+                    kwargs.get("auto_disabled_at"),
                 ),
             )
             await db.commit()
@@ -1028,6 +1154,276 @@ class SQLiteMemoryStore(MemoryStore):
         else:
             data["validation_warnings"] = []
         return data
+
+    async def record_skill_invocation(self, **kwargs) -> int | None:
+        async with self._runtime_write_lock:
+            db = await self._conn()
+            cursor = await db.execute(
+                "INSERT INTO skill_invocations ("
+                " skill_name, agent_name, platform, channel_id, thread_id, user_id, route_source, request_id,"
+                " response_message_id, outcome, error_kind, error_text, latency_ms, input_tokens, output_tokens,"
+                " cache_read_input_tokens, cache_creation_input_tokens"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    kwargs["skill_name"],
+                    kwargs["agent_name"],
+                    kwargs.get("platform"),
+                    kwargs.get("channel_id"),
+                    kwargs.get("thread_id"),
+                    kwargs.get("user_id"),
+                    kwargs["route_source"],
+                    kwargs.get("request_id"),
+                    kwargs.get("response_message_id"),
+                    kwargs["outcome"],
+                    kwargs.get("error_kind"),
+                    kwargs.get("error_text"),
+                    int(kwargs.get("latency_ms", 0)),
+                    kwargs.get("input_tokens"),
+                    kwargs.get("output_tokens"),
+                    kwargs.get("cache_read_input_tokens"),
+                    kwargs.get("cache_creation_input_tokens"),
+                ),
+            )
+            await db.commit()
+            return int(cursor.lastrowid)
+
+    async def set_skill_invocation_response_message(
+        self,
+        invocation_id: int,
+        message_id: str,
+    ) -> None:
+        db = await self._conn()
+        await db.execute(
+            "UPDATE skill_invocations SET response_message_id=? WHERE id=?",
+            (message_id, int(invocation_id)),
+        )
+        await db.commit()
+
+    async def get_skill_invocation_by_message(
+        self,
+        message_id: str,
+    ) -> dict[str, Any] | None:
+        db = await self._conn()
+        cursor = await db.execute(
+            "SELECT * FROM skill_invocations WHERE response_message_id=? ORDER BY id DESC LIMIT 1",
+            (message_id,),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def upsert_skill_feedback(self, **kwargs) -> None:
+        db = await self._conn()
+        await db.execute(
+            "INSERT INTO skill_feedback ("
+            " invocation_id, actor_id, platform, channel_id, thread_id, score, source, updated_at"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP) "
+            "ON CONFLICT(invocation_id, actor_id) DO UPDATE SET "
+            "score=excluded.score, platform=excluded.platform, channel_id=excluded.channel_id, "
+            "thread_id=excluded.thread_id, source=excluded.source, updated_at=CURRENT_TIMESTAMP",
+            (
+                int(kwargs["invocation_id"]),
+                kwargs["actor_id"],
+                kwargs.get("platform"),
+                kwargs.get("channel_id"),
+                kwargs.get("thread_id"),
+                int(kwargs["score"]),
+                kwargs.get("source", "reaction"),
+            ),
+        )
+        await db.commit()
+
+    async def delete_skill_feedback(self, *, invocation_id: int, actor_id: str) -> None:
+        db = await self._conn()
+        await db.execute(
+            "DELETE FROM skill_feedback WHERE invocation_id=? AND actor_id=?",
+            (int(invocation_id), actor_id),
+        )
+        await db.commit()
+
+    async def list_recent_skill_invocations(self, skill_name: str, *, limit: int) -> list[dict[str, Any]]:
+        db = await self._conn()
+        cursor = await db.execute(
+            "SELECT * FROM skill_invocations WHERE skill_name=? ORDER BY created_at DESC, id DESC LIMIT ?",
+            (skill_name, int(limit)),
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def get_skill_stats(self, skill_name: str | None = None, *, recent_days: int = 7) -> list[dict[str, Any]]:
+        db = await self._conn()
+        params: list[Any] = [f"-{int(recent_days)} days"]
+        skill_filter = ""
+        if skill_name:
+            skill_filter = "WHERE s.skill_name = ?"
+            params.append(skill_name)
+        query = f"""
+WITH recent AS (
+    SELECT
+        skill_name,
+        COUNT(*) AS recent_invocations,
+        SUM(CASE WHEN outcome='success' THEN 1 ELSE 0 END) AS recent_successes,
+        SUM(CASE WHEN outcome='error' THEN 1 ELSE 0 END) AS recent_errors,
+        SUM(CASE WHEN outcome='timeout' THEN 1 ELSE 0 END) AS recent_timeouts,
+        SUM(CASE WHEN outcome='cancelled' THEN 1 ELSE 0 END) AS recent_cancelled,
+        AVG(latency_ms) AS recent_avg_latency_ms,
+        MAX(created_at) AS last_invoked_at
+    FROM skill_invocations
+    WHERE created_at >= datetime('now', ?)
+    GROUP BY skill_name
+),
+overall AS (
+    SELECT
+        skill_name,
+        COUNT(*) AS total_invocations
+    FROM skill_invocations
+    GROUP BY skill_name
+),
+feedback AS (
+    SELECT
+        si.skill_name AS skill_name,
+        SUM(CASE WHEN sf.score > 0 THEN 1 ELSE 0 END) AS thumbs_up,
+        SUM(CASE WHEN sf.score < 0 THEN 1 ELSE 0 END) AS thumbs_down,
+        COALESCE(SUM(sf.score), 0) AS net_feedback
+    FROM skill_feedback sf
+    JOIN skill_invocations si ON si.id = sf.invocation_id
+    GROUP BY si.skill_name
+),
+skills AS (
+    SELECT skill_name FROM skill_provenance
+    UNION
+    SELECT skill_name FROM skill_invocations
+)
+SELECT
+    s.skill_name,
+    sp.agent_name,
+    sp.validated,
+    sp.validation_mode,
+    sp.validation_warnings,
+    sp.merged_commit_hash,
+    sp.auto_disabled,
+    sp.auto_disabled_reason,
+    sp.auto_disabled_at,
+    COALESCE(o.total_invocations, 0) AS total_invocations,
+    COALESCE(r.recent_invocations, 0) AS recent_invocations,
+    COALESCE(r.recent_successes, 0) AS recent_successes,
+    COALESCE(r.recent_errors, 0) AS recent_errors,
+    COALESCE(r.recent_timeouts, 0) AS recent_timeouts,
+    COALESCE(r.recent_cancelled, 0) AS recent_cancelled,
+    COALESCE(r.recent_avg_latency_ms, 0) AS recent_avg_latency_ms,
+    r.last_invoked_at AS last_invoked_at,
+    COALESCE(f.thumbs_up, 0) AS thumbs_up,
+    COALESCE(f.thumbs_down, 0) AS thumbs_down,
+    COALESCE(f.net_feedback, 0) AS net_feedback
+FROM skills s
+LEFT JOIN skill_provenance sp ON sp.skill_name = s.skill_name
+LEFT JOIN recent r ON r.skill_name = s.skill_name
+LEFT JOIN overall o ON o.skill_name = s.skill_name
+LEFT JOIN feedback f ON f.skill_name = s.skill_name
+{skill_filter}
+ORDER BY recent_invocations DESC, s.skill_name ASC
+"""
+        cursor = await db.execute(query, tuple(params))
+        rows = await cursor.fetchall()
+        items = []
+        for row in rows:
+            item = dict(row)
+            raw_warnings = item.get("validation_warnings")
+            if raw_warnings:
+                try:
+                    item["validation_warnings"] = json.loads(raw_warnings)
+                except Exception:
+                    item["validation_warnings"] = [str(raw_warnings)]
+            else:
+                item["validation_warnings"] = []
+            items.append(item)
+        return items
+
+    async def set_skill_auto_disabled(
+        self,
+        skill_name: str,
+        *,
+        disabled: bool,
+        reason: str | None = None,
+    ) -> None:
+        db = await self._conn()
+        if disabled:
+            await db.execute(
+                "INSERT INTO skill_provenance (skill_name, auto_disabled, auto_disabled_reason, auto_disabled_at, updated_at) "
+                "VALUES (?, 1, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) "
+                "ON CONFLICT(skill_name) DO UPDATE SET "
+                "auto_disabled=1, auto_disabled_reason=excluded.auto_disabled_reason, "
+                "auto_disabled_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP",
+                (skill_name, reason),
+            )
+        else:
+            await db.execute(
+                "INSERT INTO skill_provenance (skill_name, auto_disabled, updated_at) "
+                "VALUES (?, 0, CURRENT_TIMESTAMP) "
+                "ON CONFLICT(skill_name) DO UPDATE SET "
+                "auto_disabled=0, auto_disabled_reason=NULL, auto_disabled_at=NULL, updated_at=CURRENT_TIMESTAMP",
+                (skill_name,),
+            )
+        await db.commit()
+
+    async def list_auto_disabled_skills(self) -> set[str]:
+        db = await self._conn()
+        cursor = await db.execute(
+            "SELECT skill_name FROM skill_provenance WHERE auto_disabled=1"
+        )
+        rows = await cursor.fetchall()
+        return {str(row["skill_name"]) for row in rows}
+
+    async def add_skill_evaluation(self, **kwargs) -> None:
+        db = await self._conn()
+        details_json = (
+            json.dumps(kwargs.get("details_json"), ensure_ascii=False)
+            if kwargs.get("details_json") is not None and not isinstance(kwargs.get("details_json"), str)
+            else kwargs.get("details_json")
+        )
+        await db.execute(
+            "INSERT INTO skill_evaluations (skill_name, source_task_id, evaluation_type, status, summary, details_json) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                kwargs["skill_name"],
+                kwargs.get("source_task_id"),
+                kwargs["evaluation_type"],
+                kwargs["status"],
+                kwargs["summary"],
+                details_json,
+            ),
+        )
+        await db.commit()
+
+    async def get_latest_skill_evaluations(
+        self,
+        skill_name: str,
+    ) -> list[dict[str, Any]]:
+        db = await self._conn()
+        cursor = await db.execute(
+            """
+            SELECT se.*
+            FROM skill_evaluations se
+            JOIN (
+                SELECT evaluation_type, MAX(id) AS latest_id
+                FROM skill_evaluations
+                WHERE skill_name=?
+                GROUP BY evaluation_type
+            ) latest ON latest.latest_id = se.id
+            ORDER BY se.evaluation_type ASC
+            """,
+            (skill_name,),
+        )
+        rows = await cursor.fetchall()
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            raw_details = item.get("details_json")
+            if raw_details:
+                try:
+                    item["details_json"] = json.loads(raw_details)
+                except Exception:
+                    pass
+            items.append(item)
+        return items
 
     @staticmethod
     def _normalize_runtime_task_row(data: dict[str, Any]) -> dict[str, Any]:

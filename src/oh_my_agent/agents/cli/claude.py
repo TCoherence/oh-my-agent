@@ -158,11 +158,16 @@ class ClaudeAgent(BaseCLIAgent):
                 log_path=log_path,
             )
         except asyncio.TimeoutError:
-            return AgentResponse(text="", error=f"{self.name} CLI timed out after {self._timeout}s")
+            return AgentResponse(
+                text="",
+                error=f"{self.name} CLI timed out after {self._timeout}s",
+                error_kind="timeout",
+            )
         except FileNotFoundError:
             return AgentResponse(
                 text="",
                 error=f"{self.name} CLI not found at '{self._cli_path}'. Is it installed?",
+                error_kind="cli_error",
             )
 
         if returncode != 0:
@@ -174,6 +179,7 @@ class ClaudeAgent(BaseCLIAgent):
             return AgentResponse(
                 text="",
                 error=f"{self.name} exited {returncode}: {err_msg[:400]}",
+                error_kind="cli_error",
             )
 
         raw = stdout.decode(errors="replace").strip()

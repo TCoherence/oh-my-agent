@@ -12,6 +12,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from oh_my_agent.agents.base import AgentResponse
 from oh_my_agent.agents.registry import AgentRegistry
 from oh_my_agent.gateway.base import IncomingMessage
@@ -127,6 +129,14 @@ class RuntimeService:
         )
 
         self._skill_auto_approve = bool(cfg.get("skill_auto_approve", True))
+        skill_eval_cfg = cfg.get("skill_evaluation", {})
+        overlap_cfg = skill_eval_cfg.get("overlap_guard", {})
+        source_cfg = skill_eval_cfg.get("source_grounded", {})
+        self._skill_eval_enabled = bool(skill_eval_cfg.get("enabled", True))
+        self._skill_overlap_guard_enabled = bool(overlap_cfg.get("enabled", True))
+        self._skill_overlap_threshold = float(overlap_cfg.get("review_similarity_threshold", 0.45))
+        self._skill_source_grounded_enabled = bool(source_cfg.get("enabled", True))
+        self._skill_source_grounded_block_auto_merge = bool(source_cfg.get("block_auto_merge", True))
 
         self._store = store
         self._owner_user_ids = owner_user_ids or set()
@@ -147,6 +157,352 @@ class RuntimeService:
         self._workers: list[asyncio.Task] = []
         self._janitor_task: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
+
+    @staticmethod
+    def _extract_skill_frontmatter(skill_md: Path) -> dict[str, Any]:
+        try:
+            content = skill_md.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return {}
+        if not content.startswith("---"):
+            return {}
+        parts = content.split("---", 2)
+        if len(parts) < 3:
+            return {}
+        meta = yaml.safe_load(parts[1]) or {}
+        return meta if isinstance(meta, dict) else {}
+
+    @staticmethod
+    def _skill_description_from_dir(skill_dir: Path) -> str:
+        meta = RuntimeService._extract_skill_frontmatter(skill_dir / "SKILL.md")
+        return str(meta.get("description") or "").strip()
+
+    @staticmethod
+    def _normalize_similarity_tokens(text: str) -> set[str]:
+        return set(re.findall(r"[a-z0-9]+", text.lower()))
+
+    @classmethod
+    def _jaccard_similarity(cls, left: str, right: str) -> float:
+        left_tokens = cls._normalize_similarity_tokens(left)
+        right_tokens = cls._normalize_similarity_tokens(right)
+        if not left_tokens or not right_tokens:
+            return 0.0
+        overlap = left_tokens & right_tokens
+        union = left_tokens | right_tokens
+        return len(overlap) / max(len(union), 1)
+
+    @staticmethod
+    def _extract_urls(text: str | None) -> list[str]:
+        if not text:
+            return []
+        return re.findall(r"https?://[^\s)>]+", text)
+
+    @classmethod
+    def _has_external_source_signals(cls, text: str | None) -> bool:
+        hay = (text or "").lower()
+        if not hay:
+            return False
+        if cls._extract_urls(text):
+            return True
+        hints = (
+            "adapt",
+            "internalize",
+            "based on",
+            "reference",
+            "github",
+            "repo",
+            "tool",
+            "project",
+            "参考",
+            "内化",
+            "基于",
+            "改造成",
+        )
+        return any(hint in hay for hint in hints)
+
+    def _skill_tree_summary(self, skill_dir: Path) -> str:
+        if not skill_dir.exists():
+            return "(skill directory missing)"
+        lines: list[str] = []
+        for path in sorted(skill_dir.rglob("*")):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(skill_dir).as_posix()
+            lines.append(f"- {rel}")
+            if rel == "SKILL.md":
+                snippet = path.read_text(encoding="utf-8", errors="ignore")[:2000].strip()
+                if snippet:
+                    lines.append("```md")
+                    lines.append(snippet[:1200])
+                    lines.append("```")
+            if len(lines) >= 24:
+                break
+        return "\n".join(lines) if lines else "(no files)"
+
+    async def _record_skill_evaluation(
+        self,
+        *,
+        skill_name: str,
+        source_task_id: str,
+        evaluation_type: str,
+        status: str,
+        summary: str,
+        details_json: dict[str, Any] | None = None,
+    ) -> None:
+        if not hasattr(self._store, "add_skill_evaluation"):
+            return
+        await self._store.add_skill_evaluation(
+            skill_name=skill_name,
+            source_task_id=source_task_id,
+            evaluation_type=evaluation_type,
+            status=status,
+            summary=summary,
+            details_json=details_json,
+        )
+
+    async def _evaluate_skill_overlap(
+        self,
+        task: RuntimeTask,
+        skill_dir: Path,
+    ) -> dict[str, Any] | None:
+        if (
+            not self._skill_eval_enabled
+            or not self._skill_overlap_guard_enabled
+            or not self._skills_path
+            or not task.skill_name
+        ):
+            return None
+        candidate_description = self._skill_description_from_dir(skill_dir)
+        candidate_text = " ".join(
+            part for part in (task.skill_name, candidate_description, task.original_request or task.goal) if part
+        )
+        best: dict[str, Any] | None = None
+        for child in sorted(self._skills_path.iterdir()):
+            if not child.is_dir() or child.name == task.skill_name:
+                continue
+            existing_description = self._skill_description_from_dir(child)
+            score = self._jaccard_similarity(
+                candidate_text,
+                " ".join(part for part in (child.name, existing_description) if part),
+            )
+            if best is None or score > float(best["score"]):
+                best = {
+                    "skill_name": child.name,
+                    "description": existing_description,
+                    "score": score,
+                }
+        if not best or float(best["score"]) < self._skill_overlap_threshold:
+            if task.skill_name:
+                await self._record_skill_evaluation(
+                    skill_name=task.skill_name,
+                    source_task_id=task.id,
+                    evaluation_type="overlap",
+                    status="pass",
+                    summary="No strong overlap with existing skills detected.",
+                    details_json={"top_match": best},
+                )
+            return None
+
+        summary = (
+            f"Candidate skill `{task.skill_name}` overlaps with existing skill "
+            f"`{best['skill_name']}` (similarity={float(best['score']):.2f})."
+        )
+        result = {
+            "evaluation_type": "overlap",
+            "status": "review_required",
+            "summary": summary,
+            "details_json": {
+                "candidate_skill": task.skill_name,
+                "matched_skill": best["skill_name"],
+                "matched_description": best["description"],
+                "similarity": round(float(best["score"]), 3),
+            },
+        }
+        await self._record_skill_evaluation(
+            skill_name=task.skill_name,
+            source_task_id=task.id,
+            evaluation_type="overlap",
+            status="review_required",
+            summary=summary,
+            details_json=result["details_json"],
+        )
+        return result
+
+    @staticmethod
+    def _extract_json_object(text: str) -> dict[str, Any] | None:
+        raw = text.strip()
+        candidates = [raw]
+        fenced = re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", raw, flags=re.DOTALL)
+        candidates.extend(fenced)
+        brace_match = re.search(r"(\{.*\})", raw, flags=re.DOTALL)
+        if brace_match:
+            candidates.append(brace_match.group(1))
+        for candidate in candidates:
+            try:
+                data = json.loads(candidate)
+            except Exception:
+                continue
+            if isinstance(data, dict):
+                return data
+        return None
+
+    async def _evaluate_skill_source_grounding(
+        self,
+        task: RuntimeTask,
+        registry: AgentRegistry,
+        skill_dir: Path,
+    ) -> dict[str, Any] | None:
+        request_text = task.original_request or task.goal
+        if (
+            not self._skill_eval_enabled
+            or not self._skill_source_grounded_enabled
+            or not task.skill_name
+            or not self._has_external_source_signals(request_text)
+        ):
+            return None
+
+        meta = self._extract_skill_frontmatter(skill_dir / "SKILL.md")
+        metadata = meta.get("metadata") if isinstance(meta.get("metadata"), dict) else {}
+        source_urls = metadata.get("source_urls")
+        adapted_from = metadata.get("adapted_from")
+        adaptation_notes = metadata.get("adaptation_notes")
+        missing_fields = [
+            field
+            for field, value in (
+                ("metadata.source_urls", source_urls),
+                ("metadata.adapted_from", adapted_from),
+                ("metadata.adaptation_notes", adaptation_notes),
+            )
+            if not value
+        ]
+        extracted_urls = self._extract_urls(request_text)
+        if missing_fields:
+            summary = (
+                "External-source skill adaptation is missing required metadata: "
+                + ", ".join(missing_fields)
+            )
+            details = {
+                "missing_fields": missing_fields,
+                "request_urls": extracted_urls,
+            }
+            await self._record_skill_evaluation(
+                skill_name=task.skill_name,
+                source_task_id=task.id,
+                evaluation_type="source_grounded",
+                status="review_required",
+                summary=summary,
+                details_json=details,
+            )
+            return {
+                "evaluation_type": "source_grounded",
+                "status": "review_required",
+                "summary": summary,
+                "details_json": details,
+            }
+
+        prompt = "\n".join(
+            [
+                "You are reviewing whether a generated skill is genuinely adapted from the referenced external source.",
+                "Return strict JSON only with keys: status, summary, evidence.",
+                "Allowed status values: pass, review_required.",
+                "",
+                f"Original request:\n{request_text}",
+                "",
+                f"Extracted source URLs: {json.dumps(extracted_urls, ensure_ascii=False)}",
+                f"Skill metadata: {json.dumps(metadata, ensure_ascii=False)}",
+                "",
+                "Skill tree summary:",
+                self._skill_tree_summary(skill_dir),
+                "",
+                "Mark review_required if the skill looks generic, thin, or not clearly grounded in the referenced source.",
+            ]
+        )
+        agent_name, response = await registry.run(
+            prompt,
+            [],
+            thread_id=f"{task.id}:source_grounded",
+            force_agent=self._default_agent,
+            workspace_override=skill_dir.parent.parent,
+            run_label=f"source_grounded_eval task={task.id}",
+        )
+        del agent_name
+        if response.error:
+            summary = f"Source-grounded evaluation could not complete: {response.error[:200]}"
+            details = {"error_kind": response.error_kind, "error": response.error[:400]}
+            await self._record_skill_evaluation(
+                skill_name=task.skill_name,
+                source_task_id=task.id,
+                evaluation_type="source_grounded",
+                status="review_required",
+                summary=summary,
+                details_json=details,
+            )
+            return {
+                "evaluation_type": "source_grounded",
+                "status": "review_required",
+                "summary": summary,
+                "details_json": details,
+            }
+
+        payload = self._extract_json_object(response.text)
+        status = str((payload or {}).get("status") or "review_required")
+        if status not in {"pass", "review_required"}:
+            status = "review_required"
+        summary = str((payload or {}).get("summary") or "Source-grounded evaluation returned an invalid payload.")
+        details = {"evidence": (payload or {}).get("evidence"), "raw": response.text[:1200]}
+        await self._record_skill_evaluation(
+            skill_name=task.skill_name,
+            source_task_id=task.id,
+            evaluation_type="source_grounded",
+            status=status,
+            summary=summary,
+            details_json=details,
+        )
+        if status == "pass":
+            return None
+        return {
+            "evaluation_type": "source_grounded",
+            "status": status,
+            "summary": summary,
+            "details_json": details,
+        }
+
+    async def _evaluate_skill_task(
+        self,
+        task: RuntimeTask,
+        *,
+        registry: AgentRegistry,
+        workspace: Path,
+    ) -> list[dict[str, Any]]:
+        if not task.skill_name or not self._skills_path:
+            return []
+
+        skill_dir = workspace / "skills" / task.skill_name
+        findings: list[dict[str, Any]] = []
+        await self._record_skill_evaluation(
+            skill_name=task.skill_name,
+            source_task_id=task.id,
+            evaluation_type="structure",
+            status="pass",
+            summary="Skill passed quick_validate structural checks.",
+            details_json={"validation_mode": "quick_validate"},
+        )
+        overlap = await self._evaluate_skill_overlap(task, skill_dir)
+        if overlap:
+            findings.append(overlap)
+        source_grounded = await self._evaluate_skill_source_grounding(task, registry, skill_dir)
+        if source_grounded:
+            findings.append(source_grounded)
+        return findings
+
+    @staticmethod
+    def _format_evaluation_findings(findings: list[dict[str, Any]]) -> list[str]:
+        lines: list[str] = []
+        for item in findings:
+            if item.get("status") != "review_required":
+                continue
+            lines.append(f"- `{item['evaluation_type']}`: {item['summary']}")
+        return lines
 
     @property
     def enabled(self) -> bool:
@@ -1025,6 +1381,15 @@ class RuntimeService:
                     prior_failure=prior_failure,
                     resume_instruction=current.resume_instruction,
                 )
+                if self._has_external_source_signals(current.original_request or task.goal):
+                    prompt += (
+                        "\n\nExternal-source adaptation requirements:\n"
+                        "- If this skill adapts a repo/tool/reference from the request, set SKILL.md frontmatter metadata:\n"
+                        "  metadata.source_urls: [<urls>]\n"
+                        "  metadata.adapted_from: <repo or tool name>\n"
+                        "  metadata.adaptation_notes: <what was internalized or intentionally omitted>\n"
+                        "- Do not claim adaptation without concrete source-grounded changes."
+                    )
             else:
                 prompt = build_runtime_prompt(
                     goal=task.goal,
@@ -1229,6 +1594,13 @@ class RuntimeService:
                 return
 
             if test_ok and state == "DONE":
+                evaluation_findings: list[dict[str, Any]] = []
+                if task.task_type == TASK_TYPE_SKILL_CHANGE:
+                    evaluation_findings = await self._evaluate_skill_task(
+                        task,
+                        registry=registry,
+                        workspace=workspace,
+                    )
                 total_elapsed_s = time.monotonic() - start
                 summary = self._build_completion_summary(
                     task=task,
@@ -1240,6 +1612,9 @@ class RuntimeService:
                     total_elapsed_s=total_elapsed_s,
                     waiting_merge=self._uses_merge_flow(task) and self._merge_gate_enabled,
                 )
+                finding_lines = self._format_evaluation_findings(evaluation_findings)
+                if finding_lines:
+                    summary += "\nReview findings:\n" + "\n".join(finding_lines)
                 output_summary = self._build_output_summary(
                     task=task,
                     changed_files=changed_files,
@@ -1274,8 +1649,16 @@ class RuntimeService:
                 )
 
                 if self._uses_merge_flow(task) and self._merge_gate_enabled:
+                    auto_merge_allowed = not any(
+                        item.get("status") == "review_required"
+                        and (
+                            item.get("evaluation_type") != "source_grounded"
+                            or self._skill_source_grounded_block_auto_merge
+                        )
+                        for item in evaluation_findings
+                    )
                     # Auto-merge skill tasks when skill_auto_approve is enabled
-                    if self._skill_auto_approve and task.task_type == TASK_TYPE_SKILL_CHANGE:
+                    if self._skill_auto_approve and task.task_type == TASK_TYPE_SKILL_CHANGE and auto_merge_allowed:
                         try:
                             refreshed = await self._store.get_runtime_task(task.id) or task
                             result = await self._execute_merge(
@@ -1310,9 +1693,12 @@ class RuntimeService:
                     )
                     if msg_id:
                         await self._store.update_runtime_task(task.id, decision_message_id=msg_id)
+                    waiting_note = f"Task `{task.id}` completed in workspace and is waiting merge decision."
+                    if finding_lines:
+                        waiting_note += "\nReview findings:\n" + "\n".join(finding_lines)
                     await self._notify(
                         task,
-                        f"Task `{task.id}` completed in workspace and is waiting merge decision.",
+                        waiting_note,
                         record_history=True,
                         terminal=True,
                     )
@@ -1987,6 +2373,14 @@ class RuntimeService:
                 lines.append("")
                 lines.append("Latest test result:")
                 lines.append(f"```text\n{test_tail[:500]}\n```")
+
+        if task.task_type == TASK_TYPE_SKILL_CHANGE and task.skill_name and hasattr(self._store, "get_latest_skill_evaluations"):
+            evals = await self._store.get_latest_skill_evaluations(task.skill_name)
+            if evals:
+                lines.append("")
+                lines.append("Skill evaluation findings:")
+                for item in evals:
+                    lines.append(f"- `{item['evaluation_type']}` [{item['status']}] {item['summary']}")
 
         lines.extend(
             [

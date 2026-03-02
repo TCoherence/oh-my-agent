@@ -26,6 +26,12 @@ ALLOWED_RESOURCES = {"scripts", "references", "assets"}
 SKILL_TEMPLATE = """---
 name: {skill_name}
 description: [TODO: Complete and informative explanation of what the skill does and when to use it. Include WHEN to use this skill - specific scenarios, file types, or tasks that trigger it.]
+# Optional for external-source adaptations only:
+# metadata:
+#   source_urls:
+#     - https://github.com/example/project
+#   adapted_from: Example Project
+#   adaptation_notes: Internalized the key workflow and intentionally omitted the original UI.
 ---
 
 # {skill_title}

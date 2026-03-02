@@ -16,6 +16,21 @@ memory:
 skills:
   enabled: true
   path: skills/
+  evaluation:
+    enabled: true
+    stats_recent_days: 7
+    feedback_emojis: ["👍", "👎"]
+    auto_disable:
+      enabled: true
+      rolling_window: 20
+      min_invocations: 5
+      failure_rate_threshold: 0.60
+    overlap_guard:
+      enabled: true
+      review_similarity_threshold: 0.45
+    source_grounded:
+      enabled: true
+      block_auto_merge: true
 
 access:
   # Optional owner-only mode. When set, only these user IDs can use the bot.

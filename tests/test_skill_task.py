@@ -81,6 +81,80 @@ class _ClaudeSkillAgent(BaseAgent):
         return AgentResponse(text=f"{prompt}\nTASK_STATE: DONE")
 
 
+class _OverlapSkillAgent(BaseAgent):
+    @property
+    def name(self) -> str:
+        return "codex"
+
+    async def run(
+        self,
+        prompt: str,
+        history: list[dict] | None = None,
+        *,
+        thread_id: str | None = None,
+        workspace_override: Path | None = None,
+    ) -> AgentResponse:
+        del history, thread_id
+        assert workspace_override is not None
+        skill_dir = workspace_override / "skills" / "weather-adapter"
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: weather-adapter\ndescription: Check weather quickly with a concise forecast summary\n---\n\nUse this skill for weather.\n",
+            encoding="utf-8",
+        )
+        return AgentResponse(text=f"{prompt}\nTASK_STATE: DONE")
+
+
+class _SourceGroundedSkillAgent(BaseAgent):
+    def __init__(self, *, with_metadata: bool, review_status: str = "pass") -> None:
+        self._with_metadata = with_metadata
+        self._review_status = review_status
+
+    @property
+    def name(self) -> str:
+        return "codex"
+
+    async def run(
+        self,
+        prompt: str,
+        history: list[dict] | None = None,
+        *,
+        thread_id: str | None = None,
+        workspace_override: Path | None = None,
+    ) -> AgentResponse:
+        del history, thread_id
+        assert workspace_override is not None
+        if "You are reviewing whether a generated skill is genuinely adapted" in prompt:
+            return AgentResponse(
+                text=(
+                    '{"status": "'
+                    + self._review_status
+                    + '", "summary": "Source adaptation is clearly documented.", "evidence": ["metadata present", "workflow adapted"]}'
+                )
+            )
+
+        skill_dir = workspace_override / "skills" / "bibigpt-v1-adapter"
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        metadata = ""
+        if self._with_metadata:
+            metadata = (
+                "metadata:\n"
+                "  source_urls:\n"
+                "    - https://github.com/example/BibiGPT-v1\n"
+                "  adapted_from: BibiGPT-v1\n"
+                "  adaptation_notes: Internalized the bilibili summarization workflow.\n"
+            )
+        (skill_dir / "SKILL.md").write_text(
+            "---\n"
+            "name: bibigpt-v1-adapter\n"
+            "description: Summarize bilibili links using a source-grounded adaptation.\n"
+            f"{metadata}"
+            "---\n\nUse this skill for bilibili links.\n",
+            encoding="utf-8",
+        )
+        return AgentResponse(text=f"{prompt}\nTASK_STATE: DONE")
+
+
 class _FakeSkillSyncer:
     def __init__(self) -> None:
         self.calls = 0
@@ -346,3 +420,108 @@ async def test_skill_task_merge_records_provenance(skill_runtime_env, tmp_path):
     assert provenance["merged_commit_hash"]
 
     await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_skill_task_overlap_review_blocks_auto_merge(skill_runtime_env):
+    runtime: RuntimeService = skill_runtime_env["runtime"]
+    channel: _FakeChannel = skill_runtime_env["channel"]
+    store: SQLiteMemoryStore = skill_runtime_env["store"]
+    repo: Path = skill_runtime_env["repo"]
+
+    existing_dir = repo / "skills" / "weather"
+    existing_dir.mkdir(parents=True, exist_ok=True)
+    (existing_dir / "SKILL.md").write_text(
+        "---\nname: weather\ndescription: Check weather quickly with a concise forecast summary\n---\n",
+        encoding="utf-8",
+    )
+
+    registry = AgentRegistry([_OverlapSkillAgent()])
+    session = ChannelSession(platform="discord", channel_id="100", channel=channel, registry=registry)
+    runtime.register_session(session, registry)
+    await runtime.start()
+
+    task = await runtime.create_skill_task(
+        session=session,
+        registry=registry,
+        thread_id="thread-overlap",
+        goal="Create a weather adapter skill that checks weather quickly with a concise forecast summary",
+        raw_request="Create a weather adapter skill that checks weather quickly with a concise forecast summary",
+        created_by="owner-1",
+        skill_name="weather-adapter",
+        source="router",
+    )
+
+    waiting = await _wait_for_status(store, task.id, {TASK_STATUS_WAITING_MERGE})
+    assert waiting.status == TASK_STATUS_WAITING_MERGE
+    assert waiting.merge_commit_hash is None
+
+    evals = await store.get_latest_skill_evaluations("weather-adapter")
+    overlap = next(row for row in evals if row["evaluation_type"] == "overlap")
+    assert overlap["status"] == "review_required"
+    assert "weather" in overlap["summary"]
+    assert any("Review findings" in text for _, text in channel.sent)
+
+
+@pytest.mark.asyncio
+async def test_skill_task_source_grounded_missing_metadata_forces_review(skill_runtime_env):
+    runtime: RuntimeService = skill_runtime_env["runtime"]
+    channel: _FakeChannel = skill_runtime_env["channel"]
+    store: SQLiteMemoryStore = skill_runtime_env["store"]
+
+    registry = AgentRegistry([_SourceGroundedSkillAgent(with_metadata=False)])
+    session = ChannelSession(platform="discord", channel_id="100", channel=channel, registry=registry)
+    runtime.register_session(session, registry)
+    await runtime.start()
+
+    task = await runtime.create_skill_task(
+        session=session,
+        registry=registry,
+        thread_id="thread-source-review",
+        goal="Adapt the BibiGPT-v1 project into a bilibili summarizer skill",
+        raw_request="Adapt https://github.com/example/BibiGPT-v1 into a bilibili summarizer skill",
+        created_by="owner-1",
+        skill_name="bibigpt-v1-adapter",
+        source="router",
+    )
+
+    waiting = await _wait_for_status(store, task.id, {TASK_STATUS_WAITING_MERGE})
+    assert waiting.status == TASK_STATUS_WAITING_MERGE
+    assert waiting.merge_commit_hash is None
+
+    evals = await store.get_latest_skill_evaluations("bibigpt-v1-adapter")
+    source_eval = next(row for row in evals if row["evaluation_type"] == "source_grounded")
+    assert source_eval["status"] == "review_required"
+    assert "metadata.source_urls" in source_eval["summary"]
+
+
+@pytest.mark.asyncio
+async def test_skill_task_source_grounded_pass_allows_auto_merge(skill_runtime_env):
+    runtime: RuntimeService = skill_runtime_env["runtime"]
+    channel: _FakeChannel = skill_runtime_env["channel"]
+    store: SQLiteMemoryStore = skill_runtime_env["store"]
+    repo: Path = skill_runtime_env["repo"]
+
+    registry = AgentRegistry([_SourceGroundedSkillAgent(with_metadata=True, review_status="pass")])
+    session = ChannelSession(platform="discord", channel_id="100", channel=channel, registry=registry)
+    runtime.register_session(session, registry)
+    await runtime.start()
+
+    task = await runtime.create_skill_task(
+        session=session,
+        registry=registry,
+        thread_id="thread-source-pass",
+        goal="Adapt the BibiGPT-v1 project into a bilibili summarizer skill",
+        raw_request="Adapt https://github.com/example/BibiGPT-v1 into a bilibili summarizer skill",
+        created_by="owner-1",
+        skill_name="bibigpt-v1-adapter",
+        source="router",
+    )
+
+    merged = await _wait_for_status(store, task.id, {TASK_STATUS_MERGED})
+    assert merged.status == TASK_STATUS_MERGED
+    assert (repo / "skills" / "bibigpt-v1-adapter" / "SKILL.md").exists()
+
+    evals = await store.get_latest_skill_evaluations("bibigpt-v1-adapter")
+    source_eval = next(row for row in evals if row["evaluation_type"] == "source_grounded")
+    assert source_eval["status"] == "pass"

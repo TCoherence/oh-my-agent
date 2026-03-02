@@ -88,12 +88,12 @@ Upgrade adaptive memory from flat YAML to a date-organized, two-tier architectur
 
 ### Skill Evaluation
 
-- [ ] **Outcome tracking**: record skill invocation results (success/failure/timeout) in `skill_provenance`
-- [ ] **User feedback signal**: thumbs-up/down reaction on skill output → persisted rating per skill
-- [ ] **Skill health dashboard**: `/skill_stats` showing success rate, usage frequency, last invoked, average latency per skill
-- [ ] **Auto-disable**: if a skill's failure rate exceeds threshold over a window, demote it from auto-invocation and notify the owner
-- [ ] **Duplicate-skill guard**: before auto-merging a new skill, compare its name/description/request against existing skills and force a repair/update path (or at least manual review) when it substantially overlaps an existing capability
-- [ ] **Source-grounded skill evaluation**: when a skill task is adapting an external repo/tool/reference, validate that the resulting skill actually internalizes the source workflow rather than only passing structural `quick_validate`
+- [x] **Outcome tracking**: record chat-path skill invocation results (success/error/timeout/cancelled) with route source, latency, and usage telemetry
+- [x] **User feedback signal**: thumbs-up/down reaction on the first attributed skill response → persisted per-invocation rating
+- [x] **Skill health dashboard**: `/skill_stats [skill]` showing success rate, usage frequency, last invoked, average latency, and latest evaluation findings
+- [x] **Auto-disable**: if a skill's failure rate exceeds threshold over a rolling window, remove it from automatic routing while preserving explicit `/skill-name`; `/skill_enable` clears the flag
+- [x] **Duplicate-skill guard**: before auto-merging a new skill, compare its name/description/request against existing skills and force manual merge review when it substantially overlaps an existing capability
+- [x] **Source-grounded skill evaluation**: when a skill task adapts an external repo/tool/reference, require source metadata and run a review pass before allowing auto-merge
 
 ### Guest Session (temp isolation)
 

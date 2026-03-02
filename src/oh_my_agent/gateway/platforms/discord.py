@@ -79,6 +79,9 @@ class DiscordChannel(BaseChannel):
         self._workspace_skills_dirs = None  # list[Path] | None
         self._runtime_service = None  # RuntimeService
         self._adaptive_memory_store = None  # AdaptiveMemoryStore
+        self._skill_eval_enabled = True
+        self._skill_stats_recent_days = 7
+        self._skill_feedback_emojis = {"👍", "👎"}
 
     @property
     def platform(self) -> str:
@@ -107,6 +110,13 @@ class DiscordChannel(BaseChannel):
         """Inject adaptive memory store for /memories and /forget commands."""
         self._adaptive_memory_store = store
 
+    def set_skill_evaluation_config(self, cfg: dict | None) -> None:
+        cfg = cfg or {}
+        self._skill_eval_enabled = bool(cfg.get("enabled", True))
+        self._skill_stats_recent_days = int(cfg.get("stats_recent_days", 7))
+        emojis = cfg.get("feedback_emojis", ["👍", "👎"])
+        self._skill_feedback_emojis = {str(e) for e in emojis if str(e)}
+
     def supports_buttons(self) -> bool:
         return True
 
@@ -120,6 +130,73 @@ class DiscordChannel(BaseChannel):
         self._client = client
 
         target_id = int(self._channel_id)
+
+        def _format_skill_health_row(row: dict) -> str:
+            recent = int(row.get("recent_invocations") or 0)
+            successes = int(row.get("recent_successes") or 0)
+            rate = (successes / recent) if recent else 0.0
+            avg_ms = float(row.get("recent_avg_latency_ms") or 0.0)
+            badge = "disabled" if int(row.get("auto_disabled") or 0) else "enabled"
+            return (
+                f"- `{row['skill_name']}` [{badge}] "
+                f"success {rate:.0%} · recent {recent} · avg {avg_ms/1000:.2f}s · feedback {int(row.get('net_feedback') or 0):+d}"
+            )
+
+        def _format_skill_eval_lines(evals: list[dict]) -> list[str]:
+            lines: list[str] = []
+            for item in evals:
+                lines.append(
+                    f"- `{item['evaluation_type']}` [{item['status']}] {item['summary']}"
+                )
+            return lines
+
+        async def _sync_skill_feedback_from_payload(payload: discord.RawReactionActionEvent) -> None:
+            if not self._skill_eval_enabled or not self._memory_store:
+                return
+            emoji = str(payload.emoji)
+            if emoji not in self._skill_feedback_emojis:
+                return
+            if self._owner_user_ids and str(payload.user_id) not in self._owner_user_ids:
+                return
+            if hasattr(client, "user") and client.user and payload.user_id == client.user.id:
+                return
+            if not hasattr(self._memory_store, "get_skill_invocation_by_message"):
+                return
+
+            invocation = await self._memory_store.get_skill_invocation_by_message(str(payload.message_id))
+            if not invocation:
+                return
+
+            channel_obj = client.get_channel(payload.channel_id)
+            if channel_obj is None:
+                channel_obj = await client.fetch_channel(payload.channel_id)
+            message = await channel_obj.fetch_message(payload.message_id)
+
+            active_score = None
+            for reaction in message.reactions:
+                reaction_emoji = str(reaction.emoji)
+                if reaction_emoji not in self._skill_feedback_emojis:
+                    continue
+                users = [u async for u in reaction.users()]
+                if any(u.id == payload.user_id for u in users):
+                    active_score = 1 if reaction_emoji == "👍" else -1
+
+            if active_score is None:
+                await self._memory_store.delete_skill_feedback(
+                    invocation_id=int(invocation["id"]),
+                    actor_id=str(payload.user_id),
+                )
+                return
+
+            await self._memory_store.upsert_skill_feedback(
+                invocation_id=int(invocation["id"]),
+                actor_id=str(payload.user_id),
+                platform=self.platform,
+                channel_id=self._channel_id,
+                thread_id=str(payload.channel_id),
+                score=active_score,
+                source="reaction",
+            )
 
         # ---- Slash commands ------------------------------------------------
 
@@ -359,6 +436,95 @@ class DiscordChannel(BaseChannel):
                 await interaction.followup.send("\n".join(summary)[:2000])
             except Exception as exc:
                 await interaction.followup.send(f"Skill reload failed: {exc}")
+
+        @tree.command(name="skill_stats", description="Show skill health and evaluation stats")
+        @app_commands.describe(skill="Optional skill name")
+        async def slash_skill_stats(
+            interaction: discord.Interaction,
+            skill: str | None = None,
+        ):
+            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
+                await interaction.response.send_message(
+                    "This command is restricted to the configured owner.",
+                    ephemeral=True,
+                )
+                return
+            if not self._memory_store or not hasattr(self._memory_store, "get_skill_stats"):
+                await interaction.response.send_message(
+                    "Skill evaluation store is not configured.",
+                    ephemeral=True,
+                )
+                return
+
+            await interaction.response.defer(ephemeral=True)
+            rows = await self._memory_store.get_skill_stats(
+                skill,
+                recent_days=self._skill_stats_recent_days,
+            )
+            if not rows:
+                label = f" `{skill}`" if skill else ""
+                await interaction.followup.send(f"No skill stats found for{label}.", ephemeral=True)
+                return
+
+            if skill:
+                row = rows[0]
+                lines = [
+                    f"**Skill** `{row['skill_name']}`",
+                    f"- State: `{'auto-disabled' if int(row.get('auto_disabled') or 0) else 'enabled'}`",
+                    f"- Total invocations: {int(row.get('total_invocations') or 0)}",
+                    f"- Recent invocations ({self._skill_stats_recent_days}d): {int(row.get('recent_invocations') or 0)}",
+                    f"- Recent success/error/timeout/cancelled: {int(row.get('recent_successes') or 0)}/{int(row.get('recent_errors') or 0)}/{int(row.get('recent_timeouts') or 0)}/{int(row.get('recent_cancelled') or 0)}",
+                    f"- Avg latency: {float(row.get('recent_avg_latency_ms') or 0.0)/1000:.2f}s",
+                    f"- Feedback: 👍 {int(row.get('thumbs_up') or 0)} / 👎 {int(row.get('thumbs_down') or 0)} / net {int(row.get('net_feedback') or 0):+d}",
+                ]
+                if row.get("last_invoked_at"):
+                    lines.append(f"- Last invoked: {row['last_invoked_at']}")
+                if row.get("merged_commit_hash"):
+                    lines.append(f"- Last merged commit: `{row['merged_commit_hash']}`")
+                if row.get("auto_disabled_reason"):
+                    lines.append(f"- Auto-disabled reason: {row['auto_disabled_reason']}")
+                if hasattr(self._memory_store, "get_latest_skill_evaluations"):
+                    evals = await self._memory_store.get_latest_skill_evaluations(row["skill_name"])
+                    if evals:
+                        lines.append("**Latest evaluations**")
+                        lines.extend(_format_skill_eval_lines(evals))
+                await interaction.followup.send("\n".join(lines)[:2000], ephemeral=True)
+                return
+
+            lines = [f"**Skill stats** — last {self._skill_stats_recent_days} day(s)"]
+            lines.extend(_format_skill_health_row(row) for row in rows[:15])
+            if len(rows) > 15:
+                lines.append(f"_…and {len(rows) - 15} more_")
+            await interaction.followup.send("\n".join(lines)[:2000], ephemeral=True)
+
+        @tree.command(name="skill_enable", description="Re-enable an auto-disabled skill")
+        @app_commands.describe(skill="Skill name")
+        async def slash_skill_enable(interaction: discord.Interaction, skill: str):
+            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
+                await interaction.response.send_message(
+                    "This command is restricted to the configured owner.",
+                    ephemeral=True,
+                )
+                return
+            if not self._memory_store or not hasattr(self._memory_store, "get_skill_provenance"):
+                await interaction.response.send_message(
+                    "Skill evaluation store is not configured.",
+                    ephemeral=True,
+                )
+                return
+            row = await self._memory_store.get_skill_provenance(skill)
+            if not row:
+                await interaction.response.send_message(
+                    f"Skill `{skill}` not found.",
+                    ephemeral=True,
+                )
+                return
+            if hasattr(self._memory_store, "set_skill_auto_disabled"):
+                await self._memory_store.set_skill_auto_disabled(skill, disabled=False)
+            await interaction.response.send_message(
+                f"Skill `{skill}` re-enabled for automatic routing.",
+                ephemeral=True,
+            )
 
         @tree.command(name="task_start", description="Create an autonomous runtime task")
         @app_commands.describe(
@@ -864,6 +1030,20 @@ class DiscordChannel(BaseChannel):
                 return
 
             await _handler(msg)
+
+        @client.event
+        async def on_raw_reaction_add(payload: discord.RawReactionActionEvent) -> None:
+            try:
+                await _sync_skill_feedback_from_payload(payload)
+            except Exception:
+                logger.debug("Failed to sync skill feedback from reaction add", exc_info=True)
+
+        @client.event
+        async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent) -> None:
+            try:
+                await _sync_skill_feedback_from_payload(payload)
+            except Exception:
+                logger.debug("Failed to sync skill feedback from reaction remove", exc_info=True)
 
         await client.start(self._token)
 
