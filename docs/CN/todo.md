@@ -124,6 +124,7 @@
 - [ ] Adaptive Memory 加密存储 + 认证后明文访问
 - [ ] Adaptive Memory 编辑权限控制
 - [ ] 在 `.agents/skills/` 迁移稳定后，再评估是否还需要保留生成的 workspace `AGENTS.md`
+- [ ] 重新梳理 agent turn-budget 语义：决定是否继续暴露 `max_turns`，明确它与 `timeout`、runtime `max_steps` 的职责边界，并清理或说明当前不同 provider 上并不一致的实际生效情况
 - [x] Codex / Gemini CLI session resume
 - [ ] Feishu/Lark 适配器
 - [ ] Slack 适配器

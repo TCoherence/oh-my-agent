@@ -75,6 +75,9 @@ async def test_manager_routes_create_skill_from_router():
     runtime_service.maybe_handle_incoming.assert_not_called()
     registry.run.assert_not_called()
     assert channel.send.await_count >= 1
+    history = await session.get_history("thread-1")
+    assert history[-1]["role"] == "user"
+    assert history[-1]["content"] == "create a skill for weather"
 
 
 @pytest.mark.asyncio

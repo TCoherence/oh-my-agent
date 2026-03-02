@@ -373,12 +373,14 @@ class RuntimeService:
             await self._notify(
                 task,
                 f"Task `{task.id}` is waiting for approval. Use buttons or `/task_approve {task.id}`.",
+                record_history=True,
             )
             await self._signal_status_by_id(task, TASK_STATUS_DRAFT)
         else:
             await self._notify(
                 task,
                 f"Task `{task.id}` queued (`{chosen_agent}`), max {steps} steps / {minutes} min.",
+                record_history=True,
             )
             await self._signal_status_by_id(task, TASK_STATUS_PENDING)
 
@@ -1147,7 +1149,12 @@ class RuntimeService:
                     summary="Test command timed out.",
                     error=timeout_msg[:2000],
                 )
-                await self._notify(task, f"Task `{task.id}` timed out during tests.\n```text\n{test_display}\n```")
+                await self._notify(
+                    task,
+                    f"Task `{task.id}` timed out during tests.\n```text\n{test_display}\n```",
+                    record_history=True,
+                    terminal=True,
+                )
                 await self._signal_status_by_id(task, TASK_STATUS_TIMEOUT)
                 return
 
@@ -1214,6 +1221,8 @@ class RuntimeService:
                         f"Task `{task.id}` blocked: {block_reason or 'unknown reason'}\n"
                         f"Provide missing context and resume with `/task_resume {task.id} <instruction>`."
                     ),
+                    record_history=True,
+                    terminal=True,
                 )
                 await self._signal_status_by_id(task, TASK_STATUS_BLOCKED)
                 return
@@ -1303,6 +1312,8 @@ class RuntimeService:
                     await self._notify(
                         task,
                         f"Task `{task.id}` completed in workspace and is waiting merge decision.",
+                        record_history=True,
+                        terminal=True,
                     )
                     await self._signal_status_by_id(task, TASK_STATUS_WAITING_MERGE)
                     logger.info("Runtime task=%s WAITING_MERGE step=%d", task.id, step)
@@ -1314,7 +1325,7 @@ class RuntimeService:
                     changed_files=changed_files,
                     test_summary=test_summary,
                 )
-                await self._notify(task, completion_text)
+                await self._notify(task, completion_text, record_history=True, terminal=True)
                 await self._signal_status_by_id(task, TASK_STATUS_COMPLETED)
                 return
 
@@ -1497,7 +1508,7 @@ class RuntimeService:
                     f" Skill `{task.skill_name}` merged and synced to active Claude/Gemini workspaces. "
                     "If an existing session still does not see it, run `/reload-skills`."
                 )
-            await self._notify(task, merged_note)
+            await self._notify(task, merged_note, record_history=True, terminal=True)
             await self._signal_status_by_id(task, TASK_STATUS_MERGED)
             return merged_note
         except WorktreeError as exc:
@@ -1541,6 +1552,8 @@ class RuntimeService:
                 "Check whether another process or uncommitted change is touching the main repository. "
                 "Reply `retry merge` after cleanup, `wait` to keep it pending, or `discard` to end it."
             ),
+            record_history=True,
+            terminal=True,
         )
         await self._signal_status_by_id(blocked_task, TASK_STATUS_WAITING_MERGE)
         return f"Task `{task.id}` merge blocked: {error[:200]}"
@@ -1613,7 +1626,12 @@ class RuntimeService:
         )
         await self._store.add_runtime_event(task.id, "task.failed", {"error": error[:1000]})
         logger.error("Runtime task=%s FAILED error=%s", task.id, error[:600])
-        await self._notify(task, f"Task `{task.id}` failed: {error[:400]}")
+        await self._notify(
+            task,
+            f"Task `{task.id}` failed: {error[:400]}",
+            record_history=True,
+            terminal=True,
+        )
         await self._signal_status_by_id(task, TASK_STATUS_FAILED)
 
     async def _on_skill_task_merged(
@@ -1754,7 +1772,14 @@ class RuntimeService:
         await session.channel.send(thread_id, text)
         return None
 
-    async def _notify(self, task: RuntimeTask, text: str) -> None:
+    async def _notify(
+        self,
+        task: RuntimeTask,
+        text: str,
+        *,
+        record_history: bool = False,
+        terminal: bool = False,
+    ) -> None:
         session = self._session_for(task)
         if session is None:
             return
@@ -1769,6 +1794,10 @@ class RuntimeService:
         if msg_id:
             if not current or current.status_message_id != msg_id:
                 await self._store.update_runtime_task(task.id, status_message_id=msg_id)
+        if record_history:
+            await session.append_assistant(task.thread_id, text[:4000], "runtime")
+        if terminal:
+            await session.channel.send(task.thread_id, text[:1900])
 
     async def _signal_status_by_id(self, task: RuntimeTask, status: str) -> None:
         emoji = self._emoji_for_status(status)

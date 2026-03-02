@@ -154,6 +154,7 @@ def _apply_v052_defaults(config: dict) -> None:
     router_cfg.setdefault("timeout_seconds", 8)
     router_cfg.setdefault("max_retries", 1)
     router_cfg.setdefault("confidence_threshold", 0.55)
+    router_cfg.setdefault("context_turns", 10)
     router_cfg.setdefault("require_user_confirm", True)
 
     memory_cfg = config.setdefault("memory", {})
@@ -488,6 +489,7 @@ async def _async_main(config: dict, logger: logging.Logger) -> None:
         },
         repo_root=project_root,
         intent_router=intent_router,
+        router_context_turns=int(router_cfg.get("context_turns", 10)),
         adaptive_memory_store=adaptive_store,
         memory_extractor=memory_extractor,
         adaptive_memory_budget=int(adaptive_cfg.get("injection_budget_chars", 500)),

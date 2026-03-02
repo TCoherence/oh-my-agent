@@ -63,6 +63,8 @@ class OpenAICompatibleRouter:
                         "Output strict JSON only with keys: decision, confidence, goal, risk_hints, skill_name, task_type, completion_mode.\n"
                         "decision must be 'reply_once', 'invoke_existing_skill', 'propose_artifact_task', 'propose_repo_task', 'create_skill', or 'repair_skill'.\n"
                         "If invoke_existing_skill, keep goal empty when possible and provide skill_name if obvious.\n"
+                        "Prefer invoke_existing_skill when recent context shows a known skill was just merged, synced, or recently used, "
+                        "and the current message is a follow-up asking to try again, analyze now, run it now, or continue with that skill.\n"
                         "If propose_artifact_task, propose_repo_task, create_skill, or repair_skill, write a concise executable goal.\n"
                         "If create_skill or repair_skill, also provide skill_name as a hyphen-case slug.\n"
                         "Use repair_skill when the user is giving feedback on an existing skill or asking to fix/update one based on recent skill output.\n"

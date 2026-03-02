@@ -124,6 +124,7 @@ Upgrade adaptive memory from flat YAML to a date-organized, two-tier architectur
 - [ ] Adaptive Memory encrypted storage + authenticated plaintext access
 - [ ] Adaptive Memory edit permission control
 - [ ] Revisit whether generated workspace `AGENTS.md` is still needed at all once the `.agents/skills/` migration settles
+- [ ] Revisit agent turn-budget semantics: decide whether `max_turns` should remain exposed, clarify its boundary against `timeout` and runtime `max_steps`, and remove or document provider-specific gaps where the setting is not uniformly enforced
 - [x] Codex / Gemini CLI session resume
 - [ ] Feishu/Lark adapter
 - [ ] Slack adapter

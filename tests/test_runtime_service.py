@@ -613,6 +613,46 @@ async def test_runtime_legacy_applied_is_mergeable(runtime_env):
 
 
 @pytest.mark.asyncio
+async def test_runtime_merge_sends_terminal_notification_and_records_history(runtime_env):
+    store: SQLiteMemoryStore = runtime_env["store"]
+    runtime: RuntimeService = runtime_env["runtime"]
+    channel: _FakeChannel = runtime_env["channel"]
+    repo: Path = runtime_env["repo"]
+    registry = AgentRegistry([_DoneAgent()])
+    session = ChannelSession(
+        platform="discord",
+        channel_id="100",
+        channel=channel,
+        registry=registry,
+        memory_store=store,
+    )
+    runtime.register_session(session, registry)
+    await runtime.start()
+
+    task = await runtime.create_task(
+        session=session,
+        registry=registry,
+        thread_id="thread-terminal",
+        goal="create runtime file and merge it",
+        created_by="owner-1",
+        source="slash",
+    )
+    waiting = await _wait_for_status(store, task.id, {TASK_STATUS_WAITING_MERGE})
+    assert waiting.status == TASK_STATUS_WAITING_MERGE
+
+    result = await runtime.merge_task(task.id, actor_id="owner-1")
+    assert "merged successfully" in result.lower()
+    assert any("merged successfully" in text.lower() for _, text in channel.sent)
+
+    history = await session.get_history("thread-terminal")
+    assistant_turns = [turn["content"] for turn in history if turn["role"] == "assistant"]
+    assert any("queued" in text for text in assistant_turns)
+    assert any("waiting merge decision" in text for text in assistant_turns)
+    assert any("merged successfully" in text for text in assistant_turns)
+    assert (repo / "src" / "runtime.txt").exists()
+
+
+@pytest.mark.asyncio
 async def test_runtime_merge_blocked_can_wait_and_retry_from_thread(runtime_env):
     store: SQLiteMemoryStore = runtime_env["store"]
     runtime: RuntimeService = runtime_env["runtime"]

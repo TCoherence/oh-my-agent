@@ -926,3 +926,93 @@ async def test_router_repair_skill_creates_skill_task_with_thread_context(tmp_pa
     assert "/top-5-daily-news" in routed_context
     assert "some result" in routed_context
     registry.run.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_router_invoke_existing_skill_uses_recent_merged_skill_context(tmp_path):
+    channel = MagicMock()
+    channel.platform = "discord"
+    channel.channel_id = "100"
+    channel.create_thread = AsyncMock(return_value="t1")
+    channel.send = AsyncMock()
+    channel.typing = MagicMock()
+    channel.typing.return_value.__aenter__ = AsyncMock(return_value=None)
+    channel.typing.return_value.__aexit__ = AsyncMock(return_value=False)
+
+    mock_agent = MagicMock()
+    mock_agent.name = "codex"
+    registry = MagicMock(spec=AgentRegistry)
+    registry.agents = [mock_agent]
+    registry.run = AsyncMock(return_value=(mock_agent, AgentResponse(text="analysis ready")))
+
+    runtime = MagicMock()
+    runtime.maybe_handle_thread_context = AsyncMock(return_value=False)
+    runtime.maybe_handle_incoming = AsyncMock(return_value=False)
+
+    router = MagicMock()
+    router.confidence_threshold = 0.55
+    router.route = AsyncMock(
+        return_value=RouteDecision(
+            decision="invoke_existing_skill",
+            confidence=0.93,
+            goal="",
+            risk_hints=[],
+            raw_text="",
+            skill_name="",
+        )
+    )
+
+    skills_root = tmp_path / "skills"
+    skill_dir = skills_root / "bilibili-video-summarizer"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("name: bilibili-video-summarizer\n", encoding="utf-8")
+    syncer = MagicMock()
+    syncer._skills_path = skills_root  # noqa: SLF001
+
+    session = _make_session(channel=channel, registry=registry)
+    await session.append_user("thread-1", "https://www.bilibili.com/video/BV1eGZSB6EnL/", "alice")
+    await session.append_assistant(
+        "thread-1",
+        "Task `abc123` merged successfully. Skill `bilibili-video-summarizer` merged and synced.",
+        "runtime",
+    )
+
+    gm = GatewayManager(
+        [],
+        runtime_service=runtime,
+        intent_router=router,
+        skill_syncer=syncer,
+        router_context_turns=4,
+    )
+
+    await gm.handle_message(session, registry, _make_msg(thread_id="thread-1", content="你现在可以分析了吗？"))
+
+    router_context = router.route.call_args.kwargs["context"]
+    assert "bilibili-video-summarizer" in router_context
+    registry.run.assert_awaited_once()
+    prompt = registry.run.call_args.args[0]
+    assert prompt.startswith("/bilibili-video-summarizer")
+    assert "你现在可以分析了吗" in prompt
+
+
+def test_router_context_turn_limit_is_configurable(tmp_path):
+    skills_root = tmp_path / "skills"
+    skill_dir = skills_root / "demo-skill"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("name: demo-skill\n", encoding="utf-8")
+    syncer = MagicMock()
+    syncer._skills_path = skills_root  # noqa: SLF001
+
+    gm = GatewayManager([], skill_syncer=syncer, router_context_turns=2)
+    history = [
+        {"role": "user", "content": "turn-1"},
+        {"role": "assistant", "content": "turn-2"},
+        {"role": "user", "content": "turn-3"},
+    ]
+
+    context = gm._build_router_context(history)  # noqa: SLF001
+
+    assert "turn-1" not in context
+    assert "turn-2" in context
+    assert "turn-3" in context
+    assert "demo-skill" in context

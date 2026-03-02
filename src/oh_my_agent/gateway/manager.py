@@ -15,7 +15,7 @@ from oh_my_agent.automation import ScheduledJob, Scheduler
 from oh_my_agent.gateway.base import BaseChannel, IncomingMessage
 from oh_my_agent.gateway.session import ChannelSession
 from oh_my_agent.agents.registry import AgentRegistry
-from oh_my_agent.runtime.policy import is_skill_intent
+from oh_my_agent.runtime.policy import is_artifact_intent, is_long_task_intent, is_skill_intent
 from oh_my_agent.utils.chunker import chunk_message
 
 logger = logging.getLogger(__name__)
@@ -38,6 +38,7 @@ class GatewayManager:
         short_workspace: dict | None = None,
         repo_root: str | Path | None = None,
         intent_router=None,
+        router_context_turns: int = 6,
         adaptive_memory_store=None,
         memory_extractor=None,
         adaptive_memory_budget: int = 500,
@@ -52,6 +53,7 @@ class GatewayManager:
         self._runtime_service = runtime_service
         self._repo_root = Path(repo_root).expanduser().resolve() if repo_root else Path.cwd()
         self._intent_router = intent_router
+        self._router_context_turns = max(1, int(router_context_turns))
         self._adaptive_memory_store = adaptive_memory_store
         self._memory_extractor = memory_extractor
         self._adaptive_memory_budget = adaptive_memory_budget
@@ -283,6 +285,7 @@ class GatewayManager:
                 return
 
         history = await session.get_history(thread_id)
+        user_turn_appended = False
 
         explicit_skill = self._detect_explicit_skill_invocation(msg.content)
         if explicit_skill:
@@ -320,6 +323,8 @@ class GatewayManager:
                 and router_decision.decision == "repair_skill"
                 and router_decision.confidence >= threshold
             ):
+                await self._append_user_turn_if_needed(session, thread_id, msg)
+                user_turn_appended = True
                 repair_skill = router_decision.skill_name or self._recent_invoked_skill(history) or "skill"
                 repair_request = self._build_skill_repair_request(repair_skill, history, msg.content)
                 goal = router_decision.goal or f"Update existing skill '{repair_skill}' based on recent user feedback."
@@ -354,6 +359,8 @@ class GatewayManager:
                 and router_decision.decision == "create_skill"
                 and router_decision.confidence >= threshold
             ):
+                await self._append_user_turn_if_needed(session, thread_id, msg)
+                user_turn_appended = True
                 goal = router_decision.goal or msg.content
                 await self._runtime_service.create_skill_task(
                     session=session,
@@ -386,6 +393,8 @@ class GatewayManager:
                 and router_decision.decision == "propose_artifact_task"
                 and router_decision.confidence >= threshold
             ):
+                await self._append_user_turn_if_needed(session, thread_id, msg)
+                user_turn_appended = True
                 goal = router_decision.goal or msg.content
                 await self._runtime_service.create_artifact_task(
                     session=session,
@@ -417,6 +426,8 @@ class GatewayManager:
                 and router_decision.decision == "propose_repo_task"
                 and router_decision.confidence >= threshold
             ):
+                await self._append_user_turn_if_needed(session, thread_id, msg)
+                user_turn_appended = True
                 goal = router_decision.goal or msg.content
                 await self._runtime_service.create_repo_change_task(
                     session=session,
@@ -464,6 +475,8 @@ class GatewayManager:
 
         if self._runtime_service and should_try_heuristic and not explicit_skill:
             if is_skill_intent(msg.content):
+                await self._append_user_turn_if_needed(session, thread_id, msg)
+                user_turn_appended = True
                 await self._runtime_service.create_skill_task(
                     session=session,
                     registry=registry,
@@ -480,6 +493,9 @@ class GatewayManager:
                     "Heuristic skill-intent detection created a draft. Approve to start autonomous execution.",
                 )
                 return
+            if is_artifact_intent(msg.content) or is_long_task_intent(msg.content):
+                await self._append_user_turn_if_needed(session, thread_id, msg)
+                user_turn_appended = True
             handled = await self._runtime_service.maybe_handle_incoming(
                 session,
                 registry,
@@ -510,13 +526,19 @@ class GatewayManager:
             )
 
         # Append user turn to history
-        await session.append_user(
-            thread_id, msg.content, msg.author,
-            attachments=msg.attachments or None,
-        )
+        if not user_turn_appended:
+            await session.append_user(
+                thread_id, msg.content, msg.author,
+                attachments=msg.attachments or None,
+            )
         prior_history = history[:-1] if len(history) > 1 else []
+        routed_skill = self._routed_skill_name(
+            router_decision=router_decision,
+            router_threshold=(self._intent_router.confidence_threshold if self._intent_router else None),
+            history=history,
+        )
         agent_purpose = self._agent_run_purpose(
-            explicit_skill=explicit_skill,
+            explicit_skill=explicit_skill or routed_skill,
             router_decision=router_decision,
             router_threshold=(self._intent_router.confidence_threshold if self._intent_router else None),
         )
@@ -543,6 +565,8 @@ class GatewayManager:
 
         # Inject adaptive memory context if available
         agent_prompt = msg.content
+        if routed_skill and not explicit_skill:
+            agent_prompt = f"/{routed_skill}\n\n{agent_prompt}".strip()
         if self._adaptive_memory_store:
             try:
                 relevant = await self._adaptive_memory_store.get_relevant(
@@ -976,19 +1000,82 @@ class GatewayManager:
             if child.is_dir() and (child / "SKILL.md").exists()
         }
 
-    @staticmethod
-    def _build_router_context(history: list[dict]) -> str:
-        if not history:
-            return ""
-        recent = history[-6:]
-        lines = ["Recent thread context:"]
-        for turn in recent:
-            role = turn.get("role", "unknown")
-            content = str(turn.get("content", "")).strip().replace("\n", " ")
-            if not content:
-                continue
-            lines.append(f"- {role}: {content[:240]}")
+    async def _append_user_turn_if_needed(
+        self,
+        session: ChannelSession,
+        thread_id: str,
+        msg: IncomingMessage,
+    ) -> None:
+        history = await session.get_history(thread_id)
+        if history:
+            last = history[-1]
+            if (
+                last.get("role") == "user"
+                and last.get("content") == msg.content
+                and last.get("author") == msg.author
+            ):
+                return
+        await session.append_user(
+            thread_id,
+            msg.content,
+            msg.author,
+            attachments=msg.attachments or None,
+        )
+
+    def _build_router_context(self, history: list[dict]) -> str:
+        lines: list[str] = []
+        if history:
+            recent = history[-self._router_context_turns:]
+            lines.append("Recent thread context:")
+            for turn in recent:
+                role = turn.get("role", "unknown")
+                content = str(turn.get("content", "")).strip().replace("\n", " ")
+                if not content:
+                    continue
+                lines.append(f"- {role}: {content[:240]}")
+        known_skills = sorted(self._known_skill_names())
+        if known_skills:
+            lines.append("Known skills available in this workspace:")
+            preview = ", ".join(known_skills[:12])
+            if len(known_skills) > 12:
+                preview += f", and {len(known_skills) - 12} more"
+            lines.append(f"- {preview}")
+        recent_skill = self._recent_known_skill_reference(history)
+        if recent_skill:
+            lines.append(f"Most recently referenced skill: {recent_skill}")
         return "\n".join(lines)
+
+    def _recent_known_skill_reference(self, history: list[dict]) -> str | None:
+        known = self._known_skill_names()
+        if not known:
+            return None
+        for turn in reversed(history):
+            content = str(turn.get("content", ""))
+            for token in re.findall(r"`([a-zA-Z0-9][a-zA-Z0-9-_]{0,62})`", content):
+                if token in known:
+                    return token
+        return None
+
+    def _routed_skill_name(
+        self,
+        *,
+        router_decision,
+        router_threshold: float | None,
+        history: list[dict],
+    ) -> str | None:
+        if router_decision is None or router_threshold is None:
+            return None
+        if router_decision.confidence < router_threshold:
+            return None
+        if router_decision.decision != "invoke_existing_skill":
+            return None
+        known = self._known_skill_names()
+        if router_decision.skill_name and router_decision.skill_name in known:
+            return router_decision.skill_name
+        recent = self._recent_invoked_skill(history) or self._recent_known_skill_reference(history)
+        if recent and recent in known:
+            return recent
+        return None
 
     def _recent_invoked_skill(self, history: list[dict]) -> str | None:
         known = self._known_skill_names()
