@@ -42,9 +42,9 @@ async def test_compression_triggered_above_threshold(store):
     for i in range(8):
         await store.append("d", "c", "t1", {"role": "user", "content": f"msg-{i}"})
 
-    result = await compressor.maybe_compress("d", "c", "t1", registry)
+    result = await compressor.maybe_compress("d", "c", "t1", registry, req_id="req123")
     assert result is True
-    assert registry.run.call_args.kwargs["run_label"] == "history_compress thread=t1"
+    assert registry.run.call_args.kwargs["run_label"] == "history_compress req=req123 thread=t1"
 
     # Should now have 5 raw turns + summary accessible
     history = await store.load_history("d", "c", "t1")

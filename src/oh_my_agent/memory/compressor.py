@@ -44,11 +44,13 @@ class HistoryCompressor:
         channel_id: str,
         thread_id: str,
         registry: AgentRegistry,
+        req_id: str | None = None,
     ) -> bool:
         """Compress if the thread exceeds *max_turns*.
 
         Returns ``True`` if compression was performed.
         """
+        req_prefix = f"[{req_id}] " if req_id else ""
         count = await self._store.count_turns(platform, channel_id, thread_id)
         if count <= self._max_turns:
             return False
@@ -86,18 +88,19 @@ class HistoryCompressor:
         try:
             agent_used, response = await registry.run(
                 prompt,
-                run_label=f"history_compress thread={thread_id}",
+                run_label=f"history_compress req={req_id or '-'} thread={thread_id}",
             )
             if not response.error and response.text.strip():
                 summary_text = response.text.strip()[:self._summary_max_chars]
                 logger.info(
-                    "Generated summary for thread %s via %s (%d chars)",
+                    "%sGenerated summary for thread %s via %s (%d chars)",
+                    req_prefix,
                     thread_id,
                     agent_used.name,
                     len(summary_text),
                 )
         except Exception as exc:
-            logger.warning("Summary generation failed: %s", exc)
+            logger.warning("%sSummary generation failed: %s", req_prefix, exc)
 
         if summary_text:
             await self._store.save_summary(
@@ -107,7 +110,8 @@ class HistoryCompressor:
         else:
             # Fallback: just delete old turns (pure truncation)
             logger.warning(
-                "Falling back to truncation for thread %s (%d turns removed)",
+                "%sFalling back to truncation for thread %s (%d turns removed)",
+                req_prefix,
                 thread_id,
                 n_to_compress,
             )

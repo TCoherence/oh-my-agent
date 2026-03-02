@@ -36,12 +36,12 @@ async def test_valid_json_parsing(extractor, store):
         {"role": "assistant", "content": "Noted!"},
     ]
 
-    result = await extractor.extract(turns, registry, thread_id="t1")
+    result = await extractor.extract(turns, registry, thread_id="t1", req_id="req123")
     assert len(result) == 1
     assert result[0].summary == "User prefers dark mode"
     assert result[0].category == "preference"
     assert len(store.memories) == 1
-    assert registry.run.call_args.kwargs["run_label"] == "memory_extract thread=t1"
+    assert registry.run.call_args.kwargs["run_label"] == "memory_extract req=req123 thread=t1"
 
 
 @pytest.mark.asyncio

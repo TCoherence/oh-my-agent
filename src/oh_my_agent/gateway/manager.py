@@ -712,7 +712,7 @@ class GatewayManager:
     ) -> None:
         try:
             did_compress = await self._compressor.maybe_compress(
-                session.platform, session.channel_id, thread_id, registry,
+                session.platform, session.channel_id, thread_id, registry, req_id=req_id,
             )
             if did_compress:
                 # Invalidate cache so next load picks up the summary
@@ -735,7 +735,7 @@ class GatewayManager:
                 history = await session.get_history(thread_id)
                 if len(history) >= 4:
                     entries = await self._memory_extractor.extract(
-                        history, registry, thread_id=thread_id,
+                        history, registry, thread_id=thread_id, req_id=req_id,
                     )
                     if entries:
                         logger.info(

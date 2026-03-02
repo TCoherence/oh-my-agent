@@ -47,6 +47,7 @@ class MemoryExtractor:
         conversation_turns: list[dict],
         registry,
         thread_id: str | None = None,
+        req_id: str | None = None,
     ) -> list[MemoryEntry]:
         """Extract memories from conversation, add to store, return new entries."""
         if not conversation_turns:
@@ -75,17 +76,23 @@ class MemoryExtractor:
             conversation=conversation_text[:3000],
             existing_context=existing_context,
         )
-        run_label = f"memory_extract thread={thread_id or '-'}"
+        req_prefix = f"[{req_id}] " if req_id else ""
+        run_label = f"memory_extract req={req_id or '-'} thread={thread_id or '-'}"
 
         try:
-            logger.info("Memory extraction started thread=%s turns=%d", thread_id or "-", len(conversation_turns))
+            logger.info(
+                "%sMemory extraction started thread=%s turns=%d",
+                req_prefix,
+                thread_id or "-",
+                len(conversation_turns),
+            )
             _agent, response = await registry.run(prompt, run_label=run_label)
         except Exception as exc:
-            logger.warning("Memory extraction agent call failed: %s", exc)
+            logger.warning("%sMemory extraction agent call failed: %s", req_prefix, exc)
             return []
 
         if response.error:
-            logger.warning("Memory extraction agent returned error: %s", response.error)
+            logger.warning("%sMemory extraction agent returned error: %s", req_prefix, response.error)
             return []
 
         # Parse JSON from response
@@ -94,7 +101,7 @@ class MemoryExtractor:
             return entries
 
         added = await self._store.add_memories(entries)
-        logger.info("Memory extraction: parsed=%d, added=%d", len(entries), added)
+        logger.info("%sMemory extraction: parsed=%d, added=%d", req_prefix, len(entries), added)
         return entries
 
     @staticmethod
