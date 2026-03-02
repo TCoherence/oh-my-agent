@@ -1,0 +1,4 @@
+interface:
+  display_name: "BibiGPT v1 Adapter"
+  short_description: "BibiGPT-style digests for long-form media"
+  default_prompt: "Use $bibigpt-v1-adapter to turn this Bilibili link, video URL, or transcript into a BibiGPT-style brief with explicit evidence labels."
