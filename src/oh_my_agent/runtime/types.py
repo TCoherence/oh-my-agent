@@ -31,6 +31,7 @@ TASK_STATUS_TIMEOUT = "TIMEOUT"
 TASK_STATUS_STOPPED = "STOPPED"
 TASK_STATUS_REJECTED = "REJECTED"
 TASK_STATUS_PAUSED = "PAUSED"
+TASK_STATUS_WAITING_USER_INPUT = "WAITING_USER_INPUT"
 
 TaskStatus = Literal[
     "DRAFT",
@@ -49,6 +50,7 @@ TaskStatus = Literal[
     "STOPPED",
     "REJECTED",
     "PAUSED",
+    "WAITING_USER_INPUT",
 ]
 TaskType = Literal["artifact", "repo_change", "skill_change"]
 TaskCompletionMode = Literal["reply", "artifact", "merge"]

@@ -37,6 +37,16 @@ access:
   # For Discord, use the numeric user ID as string.
   owner_user_ids: []
 
+auth:
+  enabled: true
+  storage_root: ~/.oh-my-agent/runtime/auth
+  qr_poll_interval_seconds: 3
+  qr_default_timeout_seconds: 180
+  providers:
+    bilibili:
+      enabled: true
+      scope_key: default
+
 # Agent workspace (Layer 0 sandbox). Defaults to external path.
 workspace: ~/.oh-my-agent/agent-workspace
 

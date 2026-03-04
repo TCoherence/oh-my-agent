@@ -13,6 +13,7 @@ from typing import Any
 
 import aiosqlite
 
+from oh_my_agent.auth.types import AUTH_SCOPE_DEFAULT, AuthFlow, CredentialHandle
 from oh_my_agent.runtime.types import RuntimeTask
 
 logger = logging.getLogger(__name__)
@@ -200,6 +201,48 @@ class MemoryStore(ABC):
     ) -> list[RuntimeTask]:
         return []
 
+    # -- auth persistence -------------------------------------------------
+
+    async def upsert_auth_credential(self, **kwargs) -> CredentialHandle:
+        raise NotImplementedError
+
+    async def get_auth_credential(
+        self,
+        provider: str,
+        owner_user_id: str,
+        *,
+        scope_key: str = AUTH_SCOPE_DEFAULT,
+    ) -> CredentialHandle | None:
+        return None
+
+    async def delete_auth_credential(
+        self,
+        provider: str,
+        owner_user_id: str,
+        *,
+        scope_key: str = AUTH_SCOPE_DEFAULT,
+    ) -> None:
+        return None
+
+    async def create_auth_flow(self, **kwargs) -> AuthFlow:
+        raise NotImplementedError
+
+    async def get_auth_flow(self, flow_id: str) -> AuthFlow | None:
+        return None
+
+    async def get_active_auth_flow(
+        self,
+        provider: str,
+        owner_user_id: str,
+    ) -> AuthFlow | None:
+        return None
+
+    async def update_auth_flow(self, flow_id: str, **updates) -> AuthFlow | None:
+        return None
+
+    async def list_active_auth_flows(self, *, limit: int = 100) -> list[AuthFlow]:
+        return []
+
     # -- short-conversation ephemeral workspaces -------------------------
 
     async def upsert_ephemeral_workspace(self, workspace_key: str, workspace_path: str) -> None:
@@ -373,6 +416,48 @@ CREATE INDEX IF NOT EXISTS idx_runtime_tasks_status
     ON runtime_tasks(status, updated_at);
 CREATE INDEX IF NOT EXISTS idx_runtime_tasks_channel
     ON runtime_tasks(platform, channel_id, created_at);
+
+CREATE TABLE IF NOT EXISTS auth_credentials (
+    id              TEXT PRIMARY KEY,
+    provider        TEXT NOT NULL,
+    owner_user_id   TEXT NOT NULL,
+    scope_key       TEXT NOT NULL DEFAULT 'default',
+    status          TEXT NOT NULL,
+    storage_path    TEXT NOT NULL,
+    metadata_json   TEXT,
+    last_verified_at TIMESTAMP,
+    expires_at      TIMESTAMP,
+    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(provider, owner_user_id, scope_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_auth_credentials_owner
+    ON auth_credentials(provider, owner_user_id, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS auth_flows (
+    id               TEXT PRIMARY KEY,
+    provider         TEXT NOT NULL,
+    owner_user_id    TEXT NOT NULL,
+    platform         TEXT NOT NULL,
+    channel_id       TEXT NOT NULL,
+    thread_id        TEXT NOT NULL,
+    linked_task_id   TEXT,
+    status           TEXT NOT NULL,
+    provider_flow_id TEXT NOT NULL,
+    qr_payload       TEXT NOT NULL,
+    qr_image_path    TEXT,
+    error            TEXT,
+    expires_at       TIMESTAMP,
+    created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    completed_at     TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_auth_flows_owner
+    ON auth_flows(provider, owner_user_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_auth_flows_status
+    ON auth_flows(status, updated_at DESC);
 
 CREATE TABLE IF NOT EXISTS runtime_task_events (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -558,6 +643,7 @@ class SQLiteMemoryStore(MemoryStore):
         await self._ensure_column("runtime_tasks", "workspace_cleaned_at", "TIMESTAMP")
         await self._ensure_column("runtime_tasks", "task_type", "TEXT NOT NULL DEFAULT 'repo_change'")
         await self._ensure_column("runtime_tasks", "skill_name", "TEXT")
+        await self._ensure_column("auth_credentials", "scope_key", "TEXT NOT NULL DEFAULT 'default'")
         await self._ensure_column("skill_provenance", "auto_disabled", "INTEGER NOT NULL DEFAULT 0")
         await self._ensure_column("skill_provenance", "auto_disabled_reason", "TEXT")
         await self._ensure_column("skill_provenance", "auto_disabled_at", "TIMESTAMP")
@@ -1089,6 +1175,164 @@ class SQLiteMemoryStore(MemoryStore):
         rows = await cursor.fetchall()
         return [RuntimeTask.from_row(dict(r)) for r in rows]
 
+    async def upsert_auth_credential(self, **kwargs) -> CredentialHandle:
+        async with self._runtime_write_lock:
+            db = await self._conn()
+            metadata_json = (
+                json.dumps(kwargs.get("metadata_json"), ensure_ascii=False)
+                if kwargs.get("metadata_json") is not None and not isinstance(kwargs.get("metadata_json"), str)
+                else kwargs.get("metadata_json")
+            )
+            await db.execute(
+                "INSERT INTO auth_credentials ("
+                " id, provider, owner_user_id, scope_key, status, storage_path, metadata_json, last_verified_at, expires_at"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(provider, owner_user_id, scope_key) DO UPDATE SET "
+                "id=excluded.id, "
+                "status=excluded.status, "
+                "storage_path=excluded.storage_path, "
+                "metadata_json=excluded.metadata_json, "
+                "last_verified_at=excluded.last_verified_at, "
+                "expires_at=excluded.expires_at, "
+                "updated_at=CURRENT_TIMESTAMP",
+                (
+                    kwargs["credential_id"],
+                    kwargs["provider"],
+                    kwargs["owner_user_id"],
+                    kwargs.get("scope_key", AUTH_SCOPE_DEFAULT),
+                    kwargs["status"],
+                    kwargs["storage_path"],
+                    metadata_json,
+                    kwargs.get("last_verified_at"),
+                    kwargs.get("expires_at"),
+                ),
+            )
+            await db.commit()
+        credential = await self.get_auth_credential(
+            kwargs["provider"],
+            kwargs["owner_user_id"],
+            scope_key=kwargs.get("scope_key", AUTH_SCOPE_DEFAULT),
+        )
+        if credential is None:
+            raise RuntimeError("Failed to upsert auth credential")
+        return credential
+
+    async def get_auth_credential(
+        self,
+        provider: str,
+        owner_user_id: str,
+        *,
+        scope_key: str = AUTH_SCOPE_DEFAULT,
+    ) -> CredentialHandle | None:
+        db = await self._conn()
+        cursor = await db.execute(
+            "SELECT * FROM auth_credentials WHERE provider=? AND owner_user_id=? AND scope_key=?",
+            (provider, owner_user_id, scope_key),
+        )
+        row = await cursor.fetchone()
+        return CredentialHandle.from_row(self._normalize_auth_credential_row(dict(row))) if row else None
+
+    async def delete_auth_credential(
+        self,
+        provider: str,
+        owner_user_id: str,
+        *,
+        scope_key: str = AUTH_SCOPE_DEFAULT,
+    ) -> None:
+        db = await self._conn()
+        await db.execute(
+            "DELETE FROM auth_credentials WHERE provider=? AND owner_user_id=? AND scope_key=?",
+            (provider, owner_user_id, scope_key),
+        )
+        await db.commit()
+
+    async def create_auth_flow(self, **kwargs) -> AuthFlow:
+        async with self._runtime_write_lock:
+            db = await self._conn()
+            await db.execute(
+                "INSERT INTO auth_flows ("
+                " id, provider, owner_user_id, platform, channel_id, thread_id, linked_task_id, status, provider_flow_id,"
+                " qr_payload, qr_image_path, error, expires_at"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    kwargs["flow_id"],
+                    kwargs["provider"],
+                    kwargs["owner_user_id"],
+                    kwargs["platform"],
+                    kwargs["channel_id"],
+                    kwargs["thread_id"],
+                    kwargs.get("linked_task_id"),
+                    kwargs["status"],
+                    kwargs["provider_flow_id"],
+                    kwargs["qr_payload"],
+                    kwargs.get("qr_image_path"),
+                    kwargs.get("error"),
+                    kwargs.get("expires_at"),
+                ),
+            )
+            await db.commit()
+        flow = await self.get_auth_flow(kwargs["flow_id"])
+        if flow is None:
+            raise RuntimeError("Failed to create auth flow")
+        return flow
+
+    async def get_auth_flow(self, flow_id: str) -> AuthFlow | None:
+        db = await self._conn()
+        cursor = await db.execute("SELECT * FROM auth_flows WHERE id=?", (flow_id,))
+        row = await cursor.fetchone()
+        return AuthFlow.from_row(dict(row)) if row else None
+
+    async def get_active_auth_flow(
+        self,
+        provider: str,
+        owner_user_id: str,
+    ) -> AuthFlow | None:
+        db = await self._conn()
+        cursor = await db.execute(
+            "SELECT * FROM auth_flows "
+            "WHERE provider=? AND owner_user_id=? AND status IN ('pending', 'qr_ready') "
+            "ORDER BY updated_at DESC, created_at DESC LIMIT 1",
+            (provider, owner_user_id),
+        )
+        row = await cursor.fetchone()
+        return AuthFlow.from_row(dict(row)) if row else None
+
+    async def update_auth_flow(self, flow_id: str, **updates) -> AuthFlow | None:
+        if not updates:
+            return await self.get_auth_flow(flow_id)
+        async with self._runtime_write_lock:
+            db = await self._conn()
+            sets: list[str] = []
+            values: list[Any] = []
+            completed_at_now = bool(updates.pop("completed_at_now", False))
+            if completed_at_now:
+                updates["completed_at"] = "__NOW__"
+            for key, value in updates.items():
+                if value == "__NOW__":
+                    sets.append(f"{key}=CURRENT_TIMESTAMP")
+                else:
+                    sets.append(f"{key}=?")
+                    values.append(value)
+            sets.append("updated_at=CURRENT_TIMESTAMP")
+            values.append(flow_id)
+            await db.execute(
+                f"UPDATE auth_flows SET {', '.join(sets)} WHERE id=?",
+                tuple(values),
+            )
+            await db.commit()
+        return await self.get_auth_flow(flow_id)
+
+    async def list_active_auth_flows(self, *, limit: int = 100) -> list[AuthFlow]:
+        db = await self._conn()
+        cursor = await db.execute(
+            "SELECT * FROM auth_flows "
+            "WHERE status IN ('pending', 'qr_ready') "
+            "ORDER BY updated_at ASC, created_at ASC LIMIT ?",
+            (int(limit),),
+        )
+        rows = await cursor.fetchall()
+        return [AuthFlow.from_row(dict(row)) for row in rows]
+
     async def upsert_skill_provenance(self, skill_name: str, **kwargs) -> None:
         async with self._runtime_write_lock:
             db = await self._conn()
@@ -1433,6 +1677,18 @@ ORDER BY recent_invocations DESC, s.skill_name ASC
                 data["artifact_manifest"] = json.loads(raw_manifest)
             except Exception:
                 pass
+        return data
+
+    @staticmethod
+    def _normalize_auth_credential_row(data: dict[str, Any]) -> dict[str, Any]:
+        raw_meta = data.get("metadata_json")
+        if raw_meta:
+            try:
+                data["metadata_json"] = json.loads(raw_meta)
+            except Exception:
+                pass
+        else:
+            data["metadata_json"] = {}
         return data
 
     # -- search ------------------------------------------------------------

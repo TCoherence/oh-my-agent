@@ -10,7 +10,13 @@ from pathlib import Path
 import discord
 from discord import app_commands
 
-from oh_my_agent.gateway.base import Attachment, BaseChannel, IncomingMessage, MessageHandler
+from oh_my_agent.gateway.base import (
+    Attachment,
+    BaseChannel,
+    IncomingMessage,
+    MessageHandler,
+    OutgoingAttachment,
+)
 from oh_my_agent.runtime.types import TaskDecisionEvent
 
 logger = logging.getLogger(__name__)
@@ -197,6 +203,16 @@ class DiscordChannel(BaseChannel):
                 score=active_score,
                 source="reaction",
             )
+
+        def _interaction_thread_id(interaction: discord.Interaction) -> str | None:
+            ch = interaction.channel
+            if isinstance(ch, discord.Thread):
+                if ch.parent_id != target_id:
+                    return None
+                return str(ch.id)
+            if interaction.channel_id == target_id:
+                return str(interaction.channel_id)
+            return None
 
         # ---- Slash commands ------------------------------------------------
 
@@ -641,6 +657,81 @@ class DiscordChannel(BaseChannel):
             if task.workspace_path:
                 lines.append(f"- Workspace: `{task.workspace_path}`")
             await interaction.response.send_message("\n".join(lines)[:1900], ephemeral=True)
+
+        @tree.command(name="auth_login", description="Start a QR login flow for a provider")
+        @app_commands.describe(provider="Auth provider name")
+        async def slash_auth_login(interaction: discord.Interaction, provider: str = "bilibili"):
+            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
+                await interaction.response.send_message(
+                    "This command is restricted to the configured owner.",
+                    ephemeral=True,
+                )
+                return
+            if not self._runtime_service:
+                await interaction.response.send_message(
+                    "Runtime service is not enabled.",
+                    ephemeral=True,
+                )
+                return
+            thread_id = _interaction_thread_id(interaction)
+            if thread_id is None:
+                await interaction.response.send_message(
+                    "Use this command in the configured channel or one of its threads.",
+                    ephemeral=True,
+                )
+                return
+            await interaction.response.defer(ephemeral=True)
+            result = await self._runtime_service.start_auth_login(
+                platform=self.platform,
+                channel_id=self._channel_id,
+                thread_id=thread_id,
+                provider=provider.strip().lower() or "bilibili",
+                actor_id=str(interaction.user.id),
+            )
+            await interaction.followup.send(result[:1900], ephemeral=True)
+
+        @tree.command(name="auth_status", description="Show auth credential and flow state")
+        @app_commands.describe(provider="Auth provider name")
+        async def slash_auth_status(interaction: discord.Interaction, provider: str | None = None):
+            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
+                await interaction.response.send_message(
+                    "This command is restricted to the configured owner.",
+                    ephemeral=True,
+                )
+                return
+            if not self._runtime_service:
+                await interaction.response.send_message(
+                    "Runtime service is not enabled.",
+                    ephemeral=True,
+                )
+                return
+            text = await self._runtime_service.get_auth_status(
+                provider=(provider or "bilibili").strip().lower(),
+                actor_id=str(interaction.user.id),
+            )
+            await interaction.response.send_message(text[:1900], ephemeral=True)
+
+        @tree.command(name="auth_clear", description="Clear auth credential and cancel active login flow")
+        @app_commands.describe(provider="Auth provider name")
+        async def slash_auth_clear(interaction: discord.Interaction, provider: str = "bilibili"):
+            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
+                await interaction.response.send_message(
+                    "This command is restricted to the configured owner.",
+                    ephemeral=True,
+                )
+                return
+            if not self._runtime_service:
+                await interaction.response.send_message(
+                    "Runtime service is not enabled.",
+                    ephemeral=True,
+                )
+                return
+            await interaction.response.defer(ephemeral=True)
+            text = await self._runtime_service.clear_auth(
+                provider=provider.strip().lower() or "bilibili",
+                actor_id=str(interaction.user.id),
+            )
+            await interaction.followup.send(text[:1900], ephemeral=True)
 
         @tree.command(name="task_list", description="List runtime tasks for this channel")
         @app_commands.describe(status="Optional status filter", limit="Max rows (default 10)")
@@ -1184,6 +1275,33 @@ class DiscordChannel(BaseChannel):
         thread = await self._resolve_channel(thread_id)
         msg = await thread.send(text)
         return str(msg.id)
+
+    async def send_attachment(
+        self,
+        thread_id: str,
+        attachment: OutgoingAttachment,
+    ) -> str | None:
+        thread = await self._resolve_channel(thread_id)
+        msg = await thread.send(
+            content=attachment.caption,
+            file=discord.File(attachment.local_path, filename=attachment.filename),
+        )
+        return str(msg.id)
+
+    async def send_attachments(
+        self,
+        thread_id: str,
+        attachments: list[OutgoingAttachment],
+        *,
+        text: str | None = None,
+    ) -> list[str]:
+        thread = await self._resolve_channel(thread_id)
+        files = [
+            discord.File(attachment.local_path, filename=attachment.filename)
+            for attachment in attachments
+        ]
+        msg = await thread.send(content=text, files=files)
+        return [str(msg.id)]
 
     async def upsert_status_message(
         self,

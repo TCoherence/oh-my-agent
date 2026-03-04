@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from oh_my_agent.auth.types import AuthFlow, CredentialHandle
 from oh_my_agent.agents.base import AgentResponse, BaseAgent
 from oh_my_agent.agents.registry import AgentRegistry
 from oh_my_agent.gateway.base import IncomingMessage
@@ -22,6 +23,7 @@ from oh_my_agent.runtime import (
     TASK_STATUS_PAUSED,
     TASK_STATUS_STOPPED,
     TASK_STATUS_TIMEOUT,
+    TASK_STATUS_WAITING_USER_INPUT,
     TASK_STATUS_WAITING_MERGE,
 )
 
@@ -36,6 +38,7 @@ class _FakeChannel:
     status_history: list[tuple[str, str, str]] = field(default_factory=list)
     drafts: list[dict] = field(default_factory=list)
     signals: list[tuple[str, str | None, str]] = field(default_factory=list)
+    attachments: list[tuple[str, str, Path, str | None]] = field(default_factory=list)
 
     async def send(self, thread_id: str, text: str) -> str:
         self.sent.append((thread_id, text))
@@ -84,6 +87,94 @@ class _FakeChannel:
 
     async def signal_task_status(self, thread_id: str, message_id: str | None, emoji: str) -> None:
         self.signals.append((thread_id, message_id, emoji))
+
+    async def send_attachment(self, thread_id: str, attachment) -> str:
+        self.attachments.append(
+            (thread_id, attachment.filename, attachment.local_path, attachment.caption)
+        )
+        msg_id = f"a-{self._next_msg_id}"
+        self._next_msg_id += 1
+        return msg_id
+
+
+class _FakeAuthService:
+    def __init__(self) -> None:
+        self.enabled = True
+        self._listeners = []
+        self._flows: dict[str, AuthFlow] = {}
+        self._next_id = 1
+        self.cleared: list[tuple[str, str]] = []
+        self.credential = CredentialHandle(
+            id="cred-1",
+            provider="bilibili",
+            owner_user_id="owner-1",
+            scope_key="default",
+            status="valid",
+            storage_path="/tmp/cookies.txt",
+            metadata={},
+            last_verified_at="2026-03-03 00:00:00",
+        )
+
+    def add_listener(self, listener) -> None:
+        self._listeners.append(listener)
+
+    async def start(self) -> None:
+        return None
+
+    async def stop(self) -> None:
+        return None
+
+    async def start_qr_flow(
+        self,
+        provider: str,
+        *,
+        owner_user_id: str,
+        platform: str,
+        channel_id: str,
+        thread_id: str,
+        linked_task_id: str | None,
+        force_new: bool = False,
+    ) -> AuthFlow:
+        del force_new
+        flow_id = f"flow-{self._next_id}"
+        self._next_id += 1
+        qr_path = Path("/tmp") / f"{flow_id}.png"
+        flow = AuthFlow(
+            id=flow_id,
+            provider=provider,
+            owner_user_id=owner_user_id,
+            platform=platform,
+            channel_id=channel_id,
+            thread_id=thread_id,
+            linked_task_id=linked_task_id,
+            status="qr_ready",
+            provider_flow_id=f"provider-{flow_id}",
+            qr_payload="https://example.com/qr",
+            qr_image_path=str(qr_path),
+            error=None,
+            expires_at="2026-03-03 00:03:00",
+        )
+        self._flows[flow.id] = flow
+        return flow
+
+    async def get_status(self, provider: str, owner_user_id: str) -> dict:
+        active_flow = next(
+            (flow for flow in reversed(list(self._flows.values())) if flow.provider == provider and flow.owner_user_id == owner_user_id),
+            None,
+        )
+        return {
+            "provider": provider,
+            "credential": self.credential,
+            "active_flow": active_flow,
+        }
+
+    async def clear_credential(self, provider: str, owner_user_id: str) -> None:
+        self.cleared.append((provider, owner_user_id))
+
+    async def emit(self, event_type: str, flow_id: str, message: str | None = None) -> None:
+        flow = self._flows[flow_id]
+        for listener in self._listeners:
+            await listener(event_type, flow, self.credential, message)
 
 
 class _DoneAgent(BaseAgent):
@@ -1290,3 +1381,109 @@ async def test_runtime_suggest_action_resends_decision_surface(runtime_env):
     latest_draft = channel.drafts[-1]
     assert "add --no-build-isolation flag" in latest_draft["draft_text"]
     assert "Suggestion Recorded" in latest_draft["draft_text"]
+
+
+@pytest.mark.asyncio
+async def test_start_auth_login_sends_qr_prompt(tmp_path):
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    store = SQLiteMemoryStore(tmp_path / "auth-runtime.db")
+    await store.init()
+    auth = _FakeAuthService()
+    runtime = RuntimeService(
+        store,
+        config={
+            "enabled": True,
+            "worker_concurrency": 1,
+            "worktree_root": str(tmp_path / "worktrees"),
+            "default_agent": "done-agent",
+            "default_test_command": "true",
+            "risk_profile": "strict",
+            "cleanup": {"enabled": False},
+            "merge_gate": {"enabled": True},
+        },
+        owner_user_ids={"owner-1"},
+        repo_root=repo,
+        auth_service=auth,
+    )
+    channel = _FakeChannel()
+    registry = AgentRegistry([_DoneAgent()])
+    session = ChannelSession(platform="discord", channel_id="100", channel=channel, registry=registry)
+    runtime.register_session(session, registry)
+
+    result = await runtime.start_auth_login(
+        platform="discord",
+        channel_id="100",
+        thread_id="thread-1",
+        provider="bilibili",
+        actor_id="owner-1",
+    )
+
+    assert "QR code sent" in result
+    assert channel.sent
+    assert channel.attachments
+
+    await runtime.stop()
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_mark_task_auth_required_waits_then_resumes(tmp_path):
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    store = SQLiteMemoryStore(tmp_path / "auth-runtime.db")
+    await store.init()
+    auth = _FakeAuthService()
+    runtime = RuntimeService(
+        store,
+        config={
+            "enabled": True,
+            "worker_concurrency": 1,
+            "worktree_root": str(tmp_path / "worktrees"),
+            "default_agent": "done-agent",
+            "default_test_command": "true",
+            "risk_profile": "strict",
+            "cleanup": {"enabled": False},
+            "merge_gate": {"enabled": True},
+        },
+        owner_user_ids={"owner-1"},
+        repo_root=repo,
+        auth_service=auth,
+    )
+    channel = _FakeChannel()
+    registry = AgentRegistry([_DoneAgent()])
+    session = ChannelSession(platform="discord", channel_id="100", channel=channel, registry=registry)
+    runtime.register_session(session, registry)
+
+    task = await store.create_runtime_task(
+        task_id="task-auth-1",
+        platform="discord",
+        channel_id="100",
+        thread_id="thread-1",
+        created_by="owner-1",
+        goal="wait for auth",
+        preferred_agent="done-agent",
+        status="RUNNING",
+        max_steps=4,
+        max_minutes=5,
+        test_command="true",
+    )
+
+    result = await runtime.mark_task_auth_required(
+        task.id,
+        provider="bilibili",
+        reason="login_required",
+    )
+    waiting = await store.get_runtime_task(task.id)
+
+    assert "waiting for `bilibili` login" in result
+    assert waiting is not None
+    assert waiting.status == TASK_STATUS_WAITING_USER_INPUT
+
+    await auth.emit("approved", "flow-1")
+    resumed = await store.get_runtime_task(task.id)
+    assert resumed is not None
+    assert resumed.status == "PENDING"
+
+    await runtime.stop()
+    await store.close()

@@ -19,6 +19,7 @@
 - Runtime hardening 已完成：真正的子进程中断、消息驱动控制（stop/pause/resume）、PAUSED 状态、完成摘要、metrics。
 - Adaptive Memory 已实现：对话中自动提取记忆、注入 agent prompt、`/memories` 和 `/forget` 命令。
 - Claude / Codex / Gemini 的 CLI session resume 已实现，线程级 session ID 会持久化并在重启后恢复。
+- Auth-first 二维码登录基础设施已实现：Discord owner 可手动发起登录，登录态会本地持久化，并可恢复等待中的 runtime task。
 
 ## 架构
 
@@ -142,6 +143,16 @@ runtime:
     retention_hours: 72
     prune_git_worktrees: true
     merged_immediate: true
+
+auth:
+  enabled: true
+  storage_root: ~/.oh-my-agent/runtime/auth
+  qr_poll_interval_seconds: 3
+  qr_default_timeout_seconds: 180
+  providers:
+    bilibili:
+      enabled: true
+      scope_key: default
 ```
 
 敏感信息放在 `.env` 文件中，`config.yaml` 里的 `${VAR}` 会自动替换。
@@ -219,6 +230,19 @@ Runtime 产物默认放在 `~/.oh-my-agent/runtime/`（包括 memory DB、日志
 - `/task_changes <task_id>`
 - `/task_logs <task_id>`
 - `/task_cleanup [task_id]`
+- `/auth_login [provider]`
+- `/auth_status [provider]`
+- `/auth_clear [provider]`
+
+### 二维码登录
+
+- auth 能力默认只对 `access.owner_user_ids` 白名单用户开放；如果没配置 owner，`/auth_*` 命令会禁用。
+- 第一版 provider 只支持 `bilibili`。
+- `/auth_login bilibili` 会在当前配置频道或 thread 里发送二维码图片。
+- 登录成功后，cookie 会落盘到 `~/.oh-my-agent/runtime/auth/providers/bilibili/<owner_user_id>/`。
+- 当 skill 或脚本返回 `auth_required` 时，runtime task 会进入 `WAITING_USER_INPUT`。
+- 二维码登录完成后，绑定的 task 会自动回到 `PENDING`，无需用户再手动 resume。
+- 在线程里回复 `retry login`、`重新登录`、`重新扫码` 可以重发二维码。
 
 ## 自主任务 Runtime
 
@@ -227,6 +251,7 @@ Runtime 产物默认放在 `~/.oh-my-agent/runtime/`（包括 memory DB、日志
   - `artifact`：长执行但只返回回复或产物，不进入 merge gate
   - `repo_change`：修改 repo 中代码/文档/测试/配置，最终需要 merge
   - `skill_change`：修改 canonical `skills/<name>`，验证后需要 merge
+- `WAITING_USER_INPUT` 专门用于等待 owner 交互，例如二维码登录。
 - `repo_change` 和 `skill_change` 在独立 git worktree 中执行：`~/.oh-my-agent/runtime/tasks/<task_id>`。
 - `MERGED` 任务在合并成功后立即清理 worktree；其他终态任务默认保留 72 小时后由 janitor 清理。
 - 消息驱动控制：在线程内发送 `stop`、`pause`、`resume` 可直接控制任务状态。
@@ -268,7 +293,7 @@ Runtime 产物默认放在 `~/.oh-my-agent/runtime/`（包括 memory DB、日志
 - Artifact delivery 还没完全做完：附件优先、链接兜底的交付适配层还需要补齐。
 - Runtime 可观测性还缺少内存级 live excerpt；`/task_logs` 可读 live agent log tail，但 Discord 状态卡不会直接展示"最近在做什么"的摘要。
 - 服务挂掉或启动失败时，Discord 侧还没有面向 operator 的 doctor / 自诊断入口；当前排查仍然需要直接去服务器上看日志。
-- Runtime 还没有一等的 Human-in-the-Loop 状态机；目前只能通过 `BLOCKED + 线程回复 resume` 近似实现，缺少明确的 `WAITING_USER_INPUT` 协议。
+- Runtime 现在已经有一等的 `WAITING_USER_INPUT` 状态，但当前主要先用于二维码登录；更通用的 agent 主动追问流程还没有完全抽象出来。
 - Codex repo/workspace skill 发现现在已经走官方 `.agents/skills/`；生成的 `AGENTS.md` 不再承担 workspace skill 列举逻辑。
 - 记忆检索目前仍使用 Jaccard 词重叠做相似度；语义检索（向量搜索）仍是 v0.8+ 项目。
 

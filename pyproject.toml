@@ -20,6 +20,7 @@ dependencies = [
     "python-dotenv>=1.0,<2",
     "PyYAML>=6.0,<7",
     "aiosqlite>=0.20",
+    "qrcode[pil]>=7.4,<9",
 ]
 
 [project.urls]

@@ -14,6 +14,7 @@ from typing import Any
 
 import yaml
 
+from oh_my_agent.auth.types import AuthFlow, CredentialHandle
 from oh_my_agent.agents.base import AgentResponse
 from oh_my_agent.agents.registry import AgentRegistry
 from oh_my_agent.gateway.base import IncomingMessage
@@ -51,6 +52,7 @@ from oh_my_agent.runtime.types import (
     TASK_STATUS_STOPPED,
     TASK_STATUS_TIMEOUT,
     TASK_STATUS_VALIDATING,
+    TASK_STATUS_WAITING_USER_INPUT,
     TASK_STATUS_WAITING_MERGE,
     RuntimeTask,
     TaskDecisionEvent,
@@ -88,6 +90,7 @@ class RuntimeService:
         skill_syncer=None,
         skills_path: Path | None = None,
         workspace_skills_dirs: list[Path] | None = None,
+        auth_service=None,
     ) -> None:
         cfg = config or {}
         self._enabled = bool(cfg.get("enabled", True))
@@ -149,6 +152,9 @@ class RuntimeService:
         self._worktree = WorktreeManager(self._repo_root, worktree_root)
         self._agent_logs_root = self._runtime_workspace_root.parent / "logs" / "agents"
         self._agent_logs_root.mkdir(parents=True, exist_ok=True)
+        self._auth_service = auth_service
+        if self._auth_service is not None:
+            self._auth_service.add_listener(self._on_auth_flow_event)
 
         self._sessions: dict[str, ChannelSession] = {}
         self._registries: dict[str, AgentRegistry] = {}
@@ -516,6 +522,8 @@ class RuntimeService:
     async def start(self) -> None:
         if not self._enabled:
             return
+        if self._auth_service is not None:
+            await self._auth_service.start()
         requeued = await self._store.requeue_inflight_runtime_tasks()
         cleaned_on_start = 0
         if self._cleanup_enabled:
@@ -536,6 +544,8 @@ class RuntimeService:
 
     async def stop(self) -> None:
         self._stop_event.set()
+        if self._auth_service is not None:
+            await self._auth_service.stop()
         if self._janitor_task:
             self._janitor_task.cancel()
         for task in self._workers:
@@ -627,6 +637,19 @@ class RuntimeService:
                 result = await self.discard_task(active.id, actor_id=actor)
             else:
                 result = "Unknown control action."
+            await session.channel.send(thread_id, result)
+            return True
+
+        if active.status == TASK_STATUS_WAITING_USER_INPUT and self._is_auth_retry_intent(msg.content):
+            result = await self.start_auth_login(
+                platform=session.platform,
+                channel_id=session.channel_id,
+                thread_id=thread_id,
+                provider="bilibili",
+                actor_id=actor,
+                linked_task_id=active.id,
+                force_new=True,
+            )
             await session.channel.send(thread_id, result)
             return True
 
@@ -947,6 +970,143 @@ class RuntimeService:
         await self._notify(task, f"Task `{task.id}` resumed and queued.")
         await self._signal_status_by_id(task, TASK_STATUS_PENDING)
         return f"Task `{task.id}` resumed and queued."
+
+    async def start_auth_login(
+        self,
+        *,
+        platform: str,
+        channel_id: str,
+        thread_id: str,
+        provider: str,
+        actor_id: str,
+        linked_task_id: str | None = None,
+        force_new: bool = False,
+    ) -> str:
+        if not self._auth_service or not self._auth_service.enabled:
+            return "Auth service is not enabled."
+        if not self._owner_user_ids:
+            return "Auth commands are disabled because no owner_user_ids are configured."
+        if not self._is_authorized(actor_id):
+            return "This command is restricted to the configured owner."
+        try:
+            flow = await self._auth_service.start_qr_flow(
+                provider,
+                owner_user_id=actor_id,
+                platform=platform,
+                channel_id=channel_id,
+                thread_id=thread_id,
+                linked_task_id=linked_task_id,
+                force_new=force_new,
+            )
+            session = self._sessions.get(self._key(platform, channel_id))
+            if session is None:
+                return f"Started `{provider}` auth flow `{flow.id}`, but there is no live session to deliver the QR code."
+            await self._send_auth_prompt(session.channel, flow)
+            return f"Auth flow `{flow.id}` for `{provider}` is ready. QR code sent to the current thread."
+        except Exception as exc:
+            logger.warning("Failed to start auth flow provider=%s actor=%s", provider, actor_id, exc_info=True)
+            return f"Failed to start `{provider}` auth flow: {exc}"
+
+    async def get_auth_status(self, *, provider: str, actor_id: str) -> str:
+        if not self._auth_service or not self._auth_service.enabled:
+            return "Auth service is not enabled."
+        if not self._owner_user_ids:
+            return "Auth commands are disabled because no owner_user_ids are configured."
+        if not self._is_authorized(actor_id):
+            return "This command is restricted to the configured owner."
+
+        try:
+            status = await self._auth_service.get_status(provider, actor_id)
+        except Exception as exc:
+            logger.warning("Failed to read auth status provider=%s actor=%s", provider, actor_id, exc_info=True)
+            return f"Failed to read `{provider}` auth status: {exc}"
+        credential = status["credential"]
+        flow = status["active_flow"]
+        lines = [f"**Auth status** `{provider}`"]
+        if credential is None:
+            lines.append("- Credential: none")
+        else:
+            lines.append(f"- Credential: `{credential.status}`")
+            lines.append(f"- Path: `{credential.storage_path}`")
+            if credential.last_verified_at:
+                lines.append(f"- Last verified: `{credential.last_verified_at}`")
+            if credential.expires_at:
+                lines.append(f"- Expires: `{credential.expires_at}`")
+        if flow is None:
+            lines.append("- Active flow: none")
+        else:
+            lines.append(f"- Active flow: `{flow.id}` [{flow.status}]")
+            lines.append(f"- Thread: `{flow.thread_id}`")
+            if flow.linked_task_id:
+                lines.append(f"- Linked task: `{flow.linked_task_id}`")
+            if flow.expires_at:
+                lines.append(f"- Flow expires: `{flow.expires_at}`")
+        return "\n".join(lines)
+
+    async def clear_auth(self, *, provider: str, actor_id: str) -> str:
+        if not self._auth_service or not self._auth_service.enabled:
+            return "Auth service is not enabled."
+        if not self._owner_user_ids:
+            return "Auth commands are disabled because no owner_user_ids are configured."
+        if not self._is_authorized(actor_id):
+            return "This command is restricted to the configured owner."
+        try:
+            await self._auth_service.clear_credential(provider, actor_id)
+        except Exception as exc:
+            logger.warning("Failed to clear auth provider=%s actor=%s", provider, actor_id, exc_info=True)
+            return f"Failed to clear `{provider}` auth state: {exc}"
+        return f"Cleared `{provider}` credential and cancelled any active auth flow."
+
+    async def mark_task_auth_required(
+        self,
+        task_id: str,
+        *,
+        provider: str,
+        reason: str,
+    ) -> str:
+        task = await self._store.get_runtime_task(task_id)
+        if task is None:
+            return f"Task `{task_id}` not found."
+        if not self._auth_service or not self._auth_service.enabled:
+            return "Auth service is not enabled."
+        if not self._owner_user_ids:
+            return "Auth commands are disabled because no owner_user_ids are configured."
+        if not self._is_authorized(task.created_by):
+            return f"Task `{task.id}` was not created by an authorized owner."
+        session = self._session_for(task)
+        if session is None:
+            return f"Task `{task.id}` has no live session bound to its channel."
+
+        try:
+            flow = await self._auth_service.start_qr_flow(
+                provider,
+                owner_user_id=task.created_by,
+                platform=task.platform,
+                channel_id=task.channel_id,
+                thread_id=task.thread_id,
+                linked_task_id=task.id,
+                force_new=False,
+            )
+        except Exception as exc:
+            logger.warning("Failed to trigger auth-required flow for task=%s provider=%s", task.id, provider, exc_info=True)
+            return f"Failed to start `{provider}` auth flow for task `{task.id}`: {exc}"
+        await self._store.update_runtime_task(
+            task.id,
+            status=TASK_STATUS_WAITING_USER_INPUT,
+            blocked_reason=f"Awaiting {provider} login ({reason}).",
+            resume_instruction=None,
+            ended_at=None,
+        )
+        await self._store.add_runtime_event(
+            task.id,
+            "task.auth_required",
+            {"provider": provider, "reason": reason, "flow_id": flow.id},
+        )
+        updated = await self._store.get_runtime_task(task.id)
+        await self._send_auth_prompt(session.channel, flow)
+        if updated is not None:
+            await self._signal_status_by_id(updated, TASK_STATUS_WAITING_USER_INPUT)
+        return f"Task `{task.id}` is waiting for `{provider}` login."
 
     async def merge_task(self, task_id: str, *, actor_id: str) -> str:
         if not self._is_authorized(actor_id):
@@ -2432,6 +2592,8 @@ class RuntimeService:
             return "🧪"
         if status in {TASK_STATUS_DRAFT, TASK_STATUS_PENDING, TASK_STATUS_WAITING_MERGE}:
             return "⏳"
+        if status == TASK_STATUS_WAITING_USER_INPUT:
+            return "🔐"
         if status in {TASK_STATUS_MERGED, TASK_STATUS_APPLIED, TASK_STATUS_COMPLETED}:
             return "✅"
         if status == TASK_STATUS_DISCARDED:
@@ -2499,6 +2661,14 @@ class RuntimeService:
                 return ("discard", "")
         return None
 
+    @staticmethod
+    def _is_auth_retry_intent(text: str) -> bool:
+        lowered = text.strip().lower()
+        if lowered in {"retry login", "retry auth"}:
+            return True
+        stripped = text.strip()
+        return any(hint in stripped for hint in ("重新登录", "重新扫码"))
+
     async def _active_task_for_thread(
         self, platform: str, channel_id: str, thread_id: str
     ) -> "RuntimeTask | None":
@@ -2507,6 +2677,7 @@ class RuntimeService:
             TASK_STATUS_RUNNING,
             TASK_STATUS_VALIDATING,
             TASK_STATUS_BLOCKED,
+            TASK_STATUS_WAITING_USER_INPUT,
             TASK_STATUS_PAUSED,
             TASK_STATUS_PENDING,
             TASK_STATUS_WAITING_MERGE,
@@ -2522,6 +2693,86 @@ class RuntimeService:
             if task.thread_id == thread_id and task.status in active_statuses:
                 return task
         return None
+
+    async def _send_auth_prompt(self, channel, flow: AuthFlow) -> None:
+        await channel.send(
+            flow.thread_id,
+            (
+                f"**Auth Login Required**\n"
+                f"Provider: `{flow.provider}`\n"
+                f"Flow: `{flow.id}`\n"
+                "Open the Bilibili app and scan the QR code. It is valid for about 3 minutes."
+            ),
+        )
+        if not flow.qr_image_path:
+            return
+        from oh_my_agent.gateway.base import OutgoingAttachment
+
+        await channel.send_attachment(
+            flow.thread_id,
+            attachment=OutgoingAttachment(
+                filename=Path(flow.qr_image_path).name,
+                content_type="image/png",
+                local_path=Path(flow.qr_image_path),
+                caption="Bilibili login QR code",
+            ),
+        )
+
+    async def _on_auth_flow_event(
+        self,
+        event_type: str,
+        flow: AuthFlow,
+        credential: CredentialHandle | None,
+        message: str | None,
+    ) -> None:
+        del credential
+        session = self._sessions.get(self._key(flow.platform, flow.channel_id))
+        if session is not None:
+            if event_type == "approved":
+                await session.channel.send(
+                    flow.thread_id,
+                    "Login confirmed. Continuing the linked task if one is waiting.",
+                )
+            elif event_type == "expired":
+                await session.channel.send(
+                    flow.thread_id,
+                    "QR code expired. Reply `retry login` or run `/auth_login bilibili` to generate a new one.",
+                )
+            elif event_type == "failed":
+                await session.channel.send(
+                    flow.thread_id,
+                    f"Auth flow failed: {(message or 'unknown error')[:300]}",
+                )
+
+        if not flow.linked_task_id:
+            return
+        task = await self._store.get_runtime_task(flow.linked_task_id)
+        if task is None:
+            return
+        if event_type == "approved":
+            await self._store.update_runtime_task(
+                task.id,
+                status=TASK_STATUS_PENDING,
+                blocked_reason=None,
+                resume_instruction="Auth flow completed.",
+                error=None,
+                ended_at=None,
+            )
+            await self._store.add_runtime_event(
+                task.id,
+                "task.auth_completed",
+                {"provider": flow.provider, "flow_id": flow.id},
+            )
+            updated = await self._store.get_runtime_task(task.id)
+            if updated is not None:
+                await self._signal_status_by_id(updated, TASK_STATUS_PENDING)
+        elif event_type in {"expired", "failed"}:
+            await self._store.update_runtime_task(
+                task.id,
+                status=TASK_STATUS_WAITING_USER_INPUT,
+                blocked_reason=message or f"{flow.provider} login did not complete.",
+                ended_at=None,
+            )
 
     @staticmethod
     def _build_completion_summary(

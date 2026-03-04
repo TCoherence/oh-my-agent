@@ -1,5 +1,6 @@
 import pytest
 
+from oh_my_agent.auth.types import AUTH_SCOPE_DEFAULT
 from oh_my_agent.memory.store import SQLiteMemoryStore
 from oh_my_agent.runtime.types import (
     TASK_COMPLETION_MERGE,
@@ -188,3 +189,51 @@ async def test_runtime_task_stores_artifact_fields(store):
     assert loaded.completion_mode == TASK_COMPLETION_REPLY
     assert loaded.output_summary == "Artifacts (1): report.md"
     assert loaded.artifact_manifest == ["report.md"]
+
+
+@pytest.mark.asyncio
+async def test_auth_credential_and_flow_crud(store):
+    credential = await store.upsert_auth_credential(
+        credential_id="cred-1",
+        provider="bilibili",
+        owner_user_id="owner-1",
+        scope_key=AUTH_SCOPE_DEFAULT,
+        status="valid",
+        storage_path="/tmp/cookies.txt",
+        metadata_json={"mid": 123},
+        last_verified_at="2026-03-03 00:00:00",
+        expires_at="2026-03-04 00:00:00",
+    )
+    assert credential.provider == "bilibili"
+    assert credential.metadata["mid"] == 123
+
+    loaded_credential = await store.get_auth_credential("bilibili", "owner-1")
+    assert loaded_credential is not None
+    assert loaded_credential.storage_path == "/tmp/cookies.txt"
+
+    flow = await store.create_auth_flow(
+        flow_id="flow-1",
+        provider="bilibili",
+        owner_user_id="owner-1",
+        platform="discord",
+        channel_id="100",
+        thread_id="thread-1",
+        linked_task_id="task-1",
+        status="qr_ready",
+        provider_flow_id="provider-flow-1",
+        qr_payload="https://example.com/qr",
+        qr_image_path="/tmp/flow-1.png",
+        expires_at="2026-03-03 00:03:00",
+    )
+    assert flow.linked_task_id == "task-1"
+
+    active = await store.get_active_auth_flow("bilibili", "owner-1")
+    assert active is not None
+    assert active.id == "flow-1"
+
+    updated = await store.update_auth_flow("flow-1", status="approved", completed_at_now=True)
+    assert updated is not None
+    assert updated.status == "approved"
+
+    active_after = await store.get_active_auth_flow("bilibili", "owner-1")
+    assert active_after is None

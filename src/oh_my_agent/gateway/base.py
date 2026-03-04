@@ -24,6 +24,16 @@ class Attachment:
 
 
 @dataclass
+class OutgoingAttachment:
+    """A file attachment to upload to the chat platform."""
+
+    filename: str
+    content_type: str
+    local_path: Path
+    caption: str | None = None
+
+
+@dataclass
 class IncomingMessage:
     """Platform-agnostic representation of a received message."""
 
@@ -102,6 +112,32 @@ class BaseChannel(ABC):
         """Create or update a platform status message. Default fallback sends a new message."""
         del message_id
         return await self.send(thread_id, text)
+
+    async def send_attachment(
+        self,
+        thread_id: str,
+        attachment: OutgoingAttachment,
+    ) -> str | None:
+        note = attachment.caption or f"Attachment available: {attachment.filename}"
+        return await self.send(thread_id, note)
+
+    async def send_attachments(
+        self,
+        thread_id: str,
+        attachments: list[OutgoingAttachment],
+        *,
+        text: str | None = None,
+    ) -> list[str]:
+        message_ids: list[str] = []
+        if text:
+            msg_id = await self.send(thread_id, text)
+            if msg_id:
+                message_ids.append(msg_id)
+        for attachment in attachments:
+            msg_id = await self.send_attachment(thread_id, attachment)
+            if msg_id:
+                message_ids.append(msg_id)
+        return message_ids
 
     @asynccontextmanager
     async def typing(self, thread_id: str) -> AsyncIterator[None]:

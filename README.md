@@ -20,6 +20,7 @@ Inspired by [OpenClaw](https://openclaw.dev).
 - Runtime hardening is complete: true subprocess interruption, message-driven control (stop/pause/resume), PAUSED state, completion summaries, metrics.
 - Adaptive memory is implemented: auto-extraction from conversations, injection into agent prompts, `/memories` and `/forget` commands.
 - CLI session resume is implemented for Claude, Codex, and Gemini, with persisted session IDs restored after restart.
+- Auth-first QR login infrastructure is implemented for Discord owner flows, with local credential persistence and runtime resume hooks.
 
 ## Architecture
 
@@ -147,6 +148,16 @@ runtime:
     retention_hours: 72
     prune_git_worktrees: true
     merged_immediate: true
+
+auth:
+  enabled: true
+  storage_root: ~/.oh-my-agent/runtime/auth
+  qr_poll_interval_seconds: 3
+  qr_default_timeout_seconds: 180
+  providers:
+    bilibili:
+      enabled: true
+      scope_key: default
 ```
 
 Secrets should live in `.env`; `${VAR}` placeholders are substituted automatically.
@@ -225,6 +236,18 @@ Check the installed version:
 - `/task_changes <task_id>`
 - `/task_logs <task_id>`
 - `/task_cleanup [task_id]`
+- `/auth_login [provider]`
+- `/auth_status [provider]`
+- `/auth_clear [provider]`
+
+### Auth QR Login
+
+- Auth flows are owner-only; if `access.owner_user_ids` is empty, `/auth_*` commands stay disabled.
+- Current provider support is intentionally narrow: `bilibili` only.
+- `/auth_login bilibili` sends a QR code image into the current configured channel or thread.
+- Successful scans persist cookies under `~/.oh-my-agent/runtime/auth/providers/bilibili/<owner_user_id>/`.
+- Runtime tasks can move into `WAITING_USER_INPUT` when a skill reports `auth_required`; once the QR flow completes, the linked task is re-queued automatically.
+- In a waiting thread, replying `retry login`, `重新登录`, or `重新扫码` reissues the QR flow.
 - `/memories [category]`
 - `/forget <memory_id>`
 - `/reload-skills`
@@ -238,6 +261,7 @@ Check the installed version:
   - `artifact`: long-running execution that returns a reply or generated artifact and does not use merge gate
   - `repo_change`: code/docs/test/config changes that run in worktrees and require merge
   - `skill_change`: canonical `skills/<name>` changes that validate and then require merge
+- `WAITING_USER_INPUT` is reserved for runtime tasks blocked on owner interaction such as QR auth.
 - `repo_change` and `skill_change` execute in isolated git worktrees under `~/.oh-my-agent/runtime/tasks/<task_id>`.
 - `artifact` tasks use runtime orchestration without entering `WAITING_MERGE`; `TASK_STATE: DONE` plus successful validation leads to `COMPLETED`.
 - High-risk tasks go to `DRAFT`; low-risk `artifact` tasks can run without approval by default.
@@ -289,7 +313,7 @@ Check the installed version:
 - Artifact delivery is not finished yet: generated artifacts are tracked, but attachment-first and link-fallback delivery still needs a dedicated adapter layer.
 - Runtime observability still lacks an in-memory live excerpt layer; `/task_logs` can read live agent log tails, but Discord status cards do not yet show the latest agent activity summary.
 - There is still no operator-facing doctor/self-diagnostics entrypoint in Discord when the service crashes or fails to start; today, debugging still requires direct access to server logs.
-- Runtime still lacks a first-class human-in-the-loop state for agent-initiated questions; today, blocked tasks can be resumed from thread replies, but there is no explicit `WAITING_USER_INPUT` flow yet.
+- Human-in-the-loop support is still narrow: `WAITING_USER_INPUT` now exists for QR auth, but broader agent-driven clarification flows are not generalized yet.
 - Codex repo/workspace skill discovery now uses official `.agents/skills/`; the generated `AGENTS.md` is no longer used to enumerate workspace skills.
 - Memory retrieval still uses Jaccard word-overlap for similarity; semantic (vector) retrieval remains a v0.8+ item.
 

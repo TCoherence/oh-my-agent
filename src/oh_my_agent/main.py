@@ -180,6 +180,16 @@ def _apply_v052_defaults(config: dict) -> None:
     memory_cfg.setdefault("backend", "sqlite")
     memory_cfg.setdefault("path", "~/.oh-my-agent/runtime/memory.db")
 
+    auth_cfg = config.setdefault("auth", {})
+    auth_cfg.setdefault("enabled", True)
+    auth_cfg.setdefault("storage_root", "~/.oh-my-agent/runtime/auth")
+    auth_cfg.setdefault("qr_poll_interval_seconds", 3)
+    auth_cfg.setdefault("qr_default_timeout_seconds", 180)
+    auth_providers_cfg = auth_cfg.setdefault("providers", {})
+    auth_bili_cfg = auth_providers_cfg.setdefault("bilibili", {})
+    auth_bili_cfg.setdefault("enabled", True)
+    auth_bili_cfg.setdefault("scope_key", "default")
+
     runtime_cfg = config.setdefault("runtime", {})
     runtime_cfg.setdefault("enabled", True)
     runtime_cfg.setdefault("worker_concurrency", 3)
@@ -412,9 +422,17 @@ async def _async_main(config: dict, logger: logging.Logger) -> None:
     # Build runtime service (optional, defaults enabled when memory store exists)
     runtime_cfg = config.get("runtime", {"enabled": True})
     runtime_service = None
+    auth_service = None
     if memory_store and bool(runtime_cfg.get("enabled", True)):
+        from oh_my_agent.auth.providers.bilibili import BilibiliAuthProvider
+        from oh_my_agent.auth.service import AuthService
         from oh_my_agent.runtime import RuntimeService
 
+        auth_service = AuthService(
+            memory_store,
+            config=config.get("auth", {}),
+            providers=[BilibiliAuthProvider()],
+        )
         runtime_service = RuntimeService(
             memory_store,
             config={
@@ -426,6 +444,7 @@ async def _async_main(config: dict, logger: logging.Logger) -> None:
             skill_syncer=skill_syncer,
             skills_path=(Path(skills_cfg.get("path", "skills/")).resolve() if skills_cfg.get("enabled", False) else None),
             workspace_skills_dirs=workspace_skills_dirs,
+            auth_service=auth_service,
         )
         logger.info(
             "Runtime enabled (workers=%s, default_agent=%s)",
