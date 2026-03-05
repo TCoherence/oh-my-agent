@@ -64,10 +64,23 @@ def test_codex_resume_command_has_json_flag():
     assert "--json" in cmd
 
 
-def test_codex_resume_command_has_full_auto():
+def test_codex_resume_command_sets_sandbox_via_config_for_default_mode():
     agent = _agent()
     cmd = agent._build_resume_command("hello", "sess-xyz")
-    assert "--full-auto" in cmd
+    assert "-c" in cmd
+    assert 'sandbox_mode="workspace-write"' in cmd
+
+
+def test_codex_resume_command_sets_sandbox_via_config_for_nondefault_mode():
+    agent = CodexCLIAgent(
+        cli_path="codex",
+        model="o4-mini-test",
+        sandbox_mode="danger-full-access",
+    )
+    cmd = agent._build_resume_command("hello", "sess-xyz")
+    assert "-c" in cmd
+    assert 'sandbox_mode="danger-full-access"' in cmd
+    assert "--sandbox" not in cmd
 
 
 def test_codex_resume_command_includes_prompt():

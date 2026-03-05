@@ -14,7 +14,7 @@ from typing import Any
 import aiosqlite
 
 from oh_my_agent.auth.types import AUTH_SCOPE_DEFAULT, AuthFlow, CredentialHandle
-from oh_my_agent.runtime.types import RuntimeTask
+from oh_my_agent.runtime.types import RuntimeTask, SuspendedAgentRun
 
 logger = logging.getLogger(__name__)
 
@@ -243,6 +243,27 @@ class MemoryStore(ABC):
     async def list_active_auth_flows(self, *, limit: int = 100) -> list[AuthFlow]:
         return []
 
+    # -- suspended agent runs --------------------------------------------
+
+    async def create_suspended_agent_run(self, **kwargs) -> SuspendedAgentRun:
+        raise NotImplementedError
+
+    async def get_suspended_agent_run(self, run_id: str) -> SuspendedAgentRun | None:
+        return None
+
+    async def get_active_suspended_agent_run(
+        self,
+        *,
+        platform: str,
+        channel_id: str,
+        thread_id: str,
+        provider: str | None = None,
+    ) -> SuspendedAgentRun | None:
+        return None
+
+    async def update_suspended_agent_run(self, run_id: str, **updates) -> SuspendedAgentRun | None:
+        return None
+
     # -- short-conversation ephemeral workspaces -------------------------
 
     async def upsert_ephemeral_workspace(self, workspace_key: str, workspace_path: str) -> None:
@@ -458,6 +479,28 @@ CREATE INDEX IF NOT EXISTS idx_auth_flows_owner
     ON auth_flows(provider, owner_user_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_auth_flows_status
     ON auth_flows(status, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS suspended_agent_runs (
+    id                    TEXT PRIMARY KEY,
+    platform              TEXT NOT NULL,
+    channel_id            TEXT NOT NULL,
+    thread_id             TEXT NOT NULL,
+    agent_name            TEXT NOT NULL,
+    status                TEXT NOT NULL,
+    provider              TEXT NOT NULL,
+    control_envelope_json TEXT NOT NULL,
+    session_id_snapshot   TEXT,
+    resume_context_json   TEXT,
+    created_by            TEXT NOT NULL,
+    created_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    completed_at          TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_suspended_agent_runs_thread
+    ON suspended_agent_runs(platform, channel_id, thread_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_suspended_agent_runs_status
+    ON suspended_agent_runs(status, updated_at DESC);
 
 CREATE TABLE IF NOT EXISTS runtime_task_events (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1332,6 +1375,93 @@ class SQLiteMemoryStore(MemoryStore):
         )
         rows = await cursor.fetchall()
         return [AuthFlow.from_row(dict(row)) for row in rows]
+
+    async def create_suspended_agent_run(self, **kwargs) -> SuspendedAgentRun:
+        async with self._runtime_write_lock:
+            db = await self._conn()
+            resume_context_json = kwargs.get("resume_context_json")
+            if resume_context_json is not None and not isinstance(resume_context_json, str):
+                resume_context_json = json.dumps(resume_context_json, ensure_ascii=False)
+            await db.execute(
+                "INSERT INTO suspended_agent_runs ("
+                " id, platform, channel_id, thread_id, agent_name, status, provider, control_envelope_json,"
+                " session_id_snapshot, resume_context_json, created_by"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    kwargs["run_id"],
+                    kwargs["platform"],
+                    kwargs["channel_id"],
+                    kwargs["thread_id"],
+                    kwargs["agent_name"],
+                    kwargs["status"],
+                    kwargs["provider"],
+                    kwargs["control_envelope_json"],
+                    kwargs.get("session_id_snapshot"),
+                    resume_context_json,
+                    kwargs["created_by"],
+                ),
+            )
+            await db.commit()
+        run = await self.get_suspended_agent_run(kwargs["run_id"])
+        if run is None:
+            raise RuntimeError("Failed to create suspended agent run")
+        return run
+
+    async def get_suspended_agent_run(self, run_id: str) -> SuspendedAgentRun | None:
+        db = await self._conn()
+        cursor = await db.execute("SELECT * FROM suspended_agent_runs WHERE id=?", (run_id,))
+        row = await cursor.fetchone()
+        return SuspendedAgentRun.from_row(dict(row)) if row else None
+
+    async def get_active_suspended_agent_run(
+        self,
+        *,
+        platform: str,
+        channel_id: str,
+        thread_id: str,
+        provider: str | None = None,
+    ) -> SuspendedAgentRun | None:
+        db = await self._conn()
+        sql = (
+            "SELECT * FROM suspended_agent_runs "
+            "WHERE platform=? AND channel_id=? AND thread_id=? "
+            "AND status IN ('waiting_auth', 'resuming')"
+        )
+        params: list[Any] = [platform, channel_id, thread_id]
+        if provider is not None:
+            sql += " AND provider=?"
+            params.append(provider)
+        sql += " ORDER BY updated_at DESC, created_at DESC LIMIT 1"
+        cursor = await db.execute(sql, tuple(params))
+        row = await cursor.fetchone()
+        return SuspendedAgentRun.from_row(dict(row)) if row else None
+
+    async def update_suspended_agent_run(self, run_id: str, **updates) -> SuspendedAgentRun | None:
+        if not updates:
+            return await self.get_suspended_agent_run(run_id)
+        async with self._runtime_write_lock:
+            db = await self._conn()
+            sets: list[str] = []
+            values: list[Any] = []
+            completed_at_now = bool(updates.pop("completed_at_now", False))
+            if completed_at_now:
+                updates["completed_at"] = "__NOW__"
+            for key, value in updates.items():
+                if key == "resume_context_json" and value is not None and not isinstance(value, str):
+                    value = json.dumps(value, ensure_ascii=False)
+                if value == "__NOW__":
+                    sets.append(f"{key}=CURRENT_TIMESTAMP")
+                else:
+                    sets.append(f"{key}=?")
+                    values.append(value)
+            sets.append("updated_at=CURRENT_TIMESTAMP")
+            values.append(run_id)
+            await db.execute(
+                f"UPDATE suspended_agent_runs SET {', '.join(sets)} WHERE id=?",
+                tuple(values),
+            )
+            await db.commit()
+        return await self.get_suspended_agent_run(run_id)
 
     async def upsert_skill_provenance(self, skill_name: str, **kwargs) -> None:
         async with self._runtime_write_lock:

@@ -7,6 +7,7 @@ import shutil
 from pathlib import Path
 
 from oh_my_agent.agents.base import AgentResponse
+from oh_my_agent.agents.control_prompt import inject_control_protocol
 from oh_my_agent.agents.cli.base import (
     BaseCLIAgent,
     _build_prompt_with_history,
@@ -30,12 +31,16 @@ class GeminiCLIAgent(BaseCLIAgent):
         self,
         cli_path: str = "gemini",
         model: str = "gemini-3-flash-preview",
+        yolo: bool = True,
+        extra_args: list[str] | None = None,
         timeout: int = 300,
         workspace: Path | None = None,
         passthrough_env: list[str] | None = None,
     ) -> None:
         super().__init__(cli_path=cli_path, timeout=timeout, workspace=workspace, passthrough_env=passthrough_env)
         self._model = model
+        self._yolo = bool(yolo)
+        self._extra_args = [str(arg) for arg in (extra_args or []) if str(arg).strip()]
         # thread_id → Gemini CLI session ID (for --resume)
         self._session_ids: dict[str, str] = {}
 
@@ -53,24 +58,32 @@ class GeminiCLIAgent(BaseCLIAgent):
         self._session_ids.pop(thread_id, None)
 
     def _build_command(self, prompt: str) -> list[str]:
-        return [
+        cmd = [
             self._cli_path,
             "-p", prompt,
             "--model", self._model,
-            "--yolo",               # non-interactive, auto-approve all tool calls
             "--output-format", "json",  # structured output with session_id + token stats
         ]
+        if self._yolo:
+            cmd.append("--yolo")  # non-interactive, auto-approve all tool calls
+        if self._extra_args:
+            cmd.extend(self._extra_args)
+        return cmd
 
     def _build_resume_command(self, prompt: str, session_id: str) -> list[str]:
         """Build a command that resumes an existing Gemini session."""
-        return [
+        cmd = [
             self._cli_path,
             "-p", prompt,
             "--resume", session_id,
             "--model", self._model,
-            "--yolo",
             "--output-format", "json",
         ]
+        if self._yolo:
+            cmd.append("--yolo")
+        if self._extra_args:
+            cmd.extend(self._extra_args)
+        return cmd
 
     def _augment_prompt_with_images(
         self, prompt: str, image_paths: list[Path], cwd: str | Path | None
@@ -111,6 +124,7 @@ class GeminiCLIAgent(BaseCLIAgent):
         If *thread_id* is given and a session ID exists for it, uses
         ``--resume`` to continue the session (avoiding history flattening).
         """
+        prompt = inject_control_protocol(prompt)
         session_id = self._session_ids.get(thread_id) if thread_id else None
         cwd = self._resolve_cwd(workspace_override)
 

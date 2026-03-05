@@ -71,6 +71,18 @@ def test_gemini_resume_command_includes_yolo():
     assert "--yolo" in cmd
 
 
+def test_gemini_command_can_disable_yolo():
+    agent = GeminiCLIAgent(cli_path="gemini", model="gemini-test", yolo=False)
+    cmd = agent._build_command("hello")
+    assert "--yolo" not in cmd
+
+
+def test_gemini_command_supports_extra_args():
+    agent = GeminiCLIAgent(cli_path="gemini", model="gemini-test", extra_args=["--debug"])
+    cmd = agent._build_command("hello")
+    assert "--debug" in cmd
+
+
 # ---------------------------------------------------------------------------
 # Output parsing: _parse_output
 # ---------------------------------------------------------------------------

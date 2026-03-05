@@ -20,6 +20,7 @@
 - Adaptive Memory 已实现：对话中自动提取记忆、注入 agent prompt、`/memories` 和 `/forget` 命令。
 - Claude / Codex / Gemini 的 CLI session resume 已实现，线程级 session ID 会持久化并在重启后恢复。
 - Auth-first 二维码登录基础设施已实现：Discord owner 可手动发起登录，登录态会本地持久化，并可恢复等待中的 runtime task。
+- Agent 与 core 之间现已支持 `OMA_CONTROL` 控制帧：普通聊天或显式 skill 调用遇到登录态 challenge 时也能暂停、扫码后恢复。
 
 ## 架构
 
@@ -240,7 +241,8 @@ Runtime 产物默认放在 `~/.oh-my-agent/runtime/`（包括 memory DB、日志
 - 第一版 provider 只支持 `bilibili`。
 - `/auth_login bilibili` 会在当前配置频道或 thread 里发送二维码图片。
 - 登录成功后，cookie 会落盘到 `~/.oh-my-agent/runtime/auth/providers/bilibili/<owner_user_id>/`。
-- 当 skill 或脚本返回 `auth_required` 时，runtime task 会进入 `WAITING_USER_INPUT`。
+- 当 agent 输出 `OMA_CONTROL` 的 `auth_required` challenge 时，runtime task 会进入 `WAITING_USER_INPUT`。
+- 普通聊天 / 显式 skill 路径现在也支持同样的 auth challenge：core 会挂起当前 run，扫码完成后优先恢复原 CLI session。
 - 二维码登录完成后，绑定的 task 会自动回到 `PENDING`，无需用户再手动 resume。
 - 在线程里回复 `retry login`、`重新登录`、`重新扫码` 可以重发二维码。
 

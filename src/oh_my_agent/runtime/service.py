@@ -17,6 +17,12 @@ import yaml
 from oh_my_agent.auth.types import AuthFlow, CredentialHandle
 from oh_my_agent.agents.base import AgentResponse
 from oh_my_agent.agents.registry import AgentRegistry
+from oh_my_agent.control.protocol import (
+    ProtocolError,
+    extract_control_frame,
+    parse_auth_challenge,
+    parse_control_envelope,
+)
 from oh_my_agent.gateway.base import IncomingMessage
 from oh_my_agent.gateway.session import ChannelSession
 from oh_my_agent.runtime.policy import (
@@ -55,9 +61,11 @@ from oh_my_agent.runtime.types import (
     TASK_STATUS_WAITING_USER_INPUT,
     TASK_STATUS_WAITING_MERGE,
     RuntimeTask,
+    SuspendedAgentRun,
     TaskDecisionEvent,
 )
 from oh_my_agent.runtime.worktree import WorktreeError, WorktreeManager
+from oh_my_agent.utils.chunker import chunk_message
 
 logger = logging.getLogger(__name__)
 
@@ -617,6 +625,22 @@ class RuntimeService:
         actor = msg.author_id or msg.author
         active = await self._active_task_for_thread(session.platform, session.channel_id, thread_id)
         if active is None:
+            suspended = await self._store.get_active_suspended_agent_run(
+                platform=session.platform,
+                channel_id=session.channel_id,
+                thread_id=thread_id,
+            )
+            if suspended and suspended.status == "waiting_auth" and self._is_auth_retry_intent(msg.content):
+                result = await self.start_auth_login(
+                    platform=session.platform,
+                    channel_id=session.channel_id,
+                    thread_id=thread_id,
+                    provider=suspended.provider,
+                    actor_id=actor,
+                    force_new=True,
+                )
+                await session.channel.send(thread_id, result)
+                return True
             return False
 
         # 1. Try control command first (stop/pause/resume)
@@ -1001,7 +1025,20 @@ class RuntimeService:
             session = self._sessions.get(self._key(platform, channel_id))
             if session is None:
                 return f"Started `{provider}` auth flow `{flow.id}`, but there is no live session to deliver the QR code."
-            await self._send_auth_prompt(session.channel, flow)
+            try:
+                await self._send_auth_prompt(session.channel, flow)
+            except Exception as exc:
+                logger.warning(
+                    "Auth flow created but delivery failed flow=%s provider=%s thread=%s",
+                    flow.id,
+                    provider,
+                    thread_id,
+                    exc_info=True,
+                )
+                return (
+                    f"Auth flow `{flow.id}` for `{provider}` is ready, "
+                    f"but failed to deliver the QR code in thread `{thread_id}`: {exc}"
+                )
             return f"Auth flow `{flow.id}` for `{provider}` is ready. QR code sent to the current thread."
         except Exception as exc:
             logger.warning("Failed to start auth flow provider=%s actor=%s", provider, actor_id, exc_info=True)
@@ -1103,10 +1140,276 @@ class RuntimeService:
             {"provider": provider, "reason": reason, "flow_id": flow.id},
         )
         updated = await self._store.get_runtime_task(task.id)
-        await self._send_auth_prompt(session.channel, flow)
+        try:
+            await self._send_auth_prompt(session.channel, flow)
+        except Exception as exc:
+            logger.warning(
+                "Task auth flow delivery failed task=%s flow=%s provider=%s",
+                task.id,
+                flow.id,
+                provider,
+                exc_info=True,
+            )
+            return (
+                f"Task `{task.id}` is waiting for `{provider}` login, "
+                f"but QR delivery failed in thread `{task.thread_id}`: {exc}"
+            )
         if updated is not None:
             await self._signal_status_by_id(updated, TASK_STATUS_WAITING_USER_INPUT)
         return f"Task `{task.id}` is waiting for `{provider}` login."
+
+    async def mark_thread_auth_required(
+        self,
+        *,
+        platform: str,
+        channel_id: str,
+        thread_id: str,
+        provider: str,
+        reason: str,
+        actor_id: str,
+        agent_name: str,
+        control_envelope_json: str,
+        resume_context: dict[str, Any] | None = None,
+        session_id_snapshot: str | None = None,
+    ) -> str:
+        if not self._auth_service or not self._auth_service.enabled:
+            return "Auth service is not enabled."
+        if not self._owner_user_ids:
+            return "Auth commands are disabled because no owner_user_ids are configured."
+        if not self._is_authorized(actor_id):
+            return "This action is restricted to the configured owner."
+        session = self._sessions.get(self._key(platform, channel_id))
+        if session is None:
+            return f"Thread `{thread_id}` has no live session bound to its channel."
+
+        existing = await self._store.get_active_suspended_agent_run(
+            platform=platform,
+            channel_id=channel_id,
+            thread_id=thread_id,
+        )
+        if existing is None:
+            run = await self._store.create_suspended_agent_run(
+                run_id=uuid.uuid4().hex[:12],
+                platform=platform,
+                channel_id=channel_id,
+                thread_id=thread_id,
+                agent_name=agent_name,
+                status="waiting_auth",
+                provider=provider,
+                control_envelope_json=control_envelope_json,
+                session_id_snapshot=session_id_snapshot,
+                resume_context_json=resume_context or {},
+                created_by=actor_id,
+            )
+        else:
+            run = await self._store.update_suspended_agent_run(
+                existing.id,
+                agent_name=agent_name,
+                status="waiting_auth",
+                provider=provider,
+                control_envelope_json=control_envelope_json,
+                session_id_snapshot=session_id_snapshot,
+                resume_context_json=resume_context or existing.resume_context,
+                created_by=actor_id,
+                completed_at=None,
+            ) or existing
+        try:
+            flow = await self._auth_service.start_qr_flow(
+                provider,
+                owner_user_id=actor_id,
+                platform=platform,
+                channel_id=channel_id,
+                thread_id=thread_id,
+                linked_task_id=None,
+                force_new=False,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to trigger thread auth-required flow thread=%s provider=%s",
+                thread_id,
+                provider,
+                exc_info=True,
+            )
+            await self._store.update_suspended_agent_run(
+                run.id,
+                status="failed",
+                resume_context_json={**(resume_context or {}), "auth_error": str(exc)},
+                completed_at_now=True,
+            )
+            return f"Failed to start `{provider}` auth flow: {exc}"
+        await self._store.update_suspended_agent_run(
+            run.id,
+            status="waiting_auth",
+            resume_context_json={**(resume_context or {}), "auth_reason": reason, "flow_id": flow.id},
+        )
+        try:
+            await self._send_auth_prompt(session.channel, flow)
+        except Exception as exc:
+            logger.warning(
+                "Thread auth flow delivery failed thread=%s flow=%s provider=%s",
+                thread_id,
+                flow.id,
+                provider,
+                exc_info=True,
+            )
+            await self._store.update_suspended_agent_run(
+                run.id,
+                resume_context_json={
+                    **(resume_context or {}),
+                    "auth_reason": reason,
+                    "flow_id": flow.id,
+                    "auth_delivery_error": str(exc),
+                },
+            )
+            return (
+                f"Thread `{thread_id}` is waiting for `{provider}` login, "
+                f"but QR delivery failed: {exc}"
+            )
+        return f"Thread `{thread_id}` is waiting for `{provider}` login."
+
+    async def resume_suspended_agent_run(self, run_id: str) -> str:
+        run = await self._store.get_suspended_agent_run(run_id)
+        if run is None:
+            return f"Suspended run `{run_id}` not found."
+        session = self._sessions.get(self._key(run.platform, run.channel_id))
+        registry = self._registries.get(self._key(run.platform, run.channel_id))
+        if session is None or registry is None:
+            return f"Thread `{run.thread_id}` has no live session/registry to resume."
+
+        logger.info(
+            "SUSPENDED_RESUME_START run=%s platform=%s channel=%s thread=%s agent=%s provider=%s",
+            run.id,
+            run.platform,
+            run.channel_id,
+            run.thread_id,
+            run.agent_name,
+            run.provider,
+        )
+        await self._store.update_suspended_agent_run(run.id, status="resuming")
+        agent = registry.get_agent(run.agent_name)
+        if agent is None:
+            await self._store.update_suspended_agent_run(run.id, status="failed", completed_at_now=True)
+            return f"Agent `{run.agent_name}` is not available for suspended run `{run.id}`."
+
+        await self._restore_thread_agent_session(
+            session=session,
+            thread_id=run.thread_id,
+            agent=agent,
+            fallback_session_id=run.session_id_snapshot,
+        )
+        current_session_id = agent.get_session_id(run.thread_id) if hasattr(agent, "get_session_id") else None
+        logger.info(
+            "SUSPENDED_RESUME_SESSION run=%s thread=%s session_id=%s",
+            run.id,
+            run.thread_id,
+            (current_session_id[:12] if isinstance(current_session_id, str) else None),
+        )
+
+        resume_context = run.resume_context or {}
+        prompt = self._build_suspended_run_resume_prompt(run, include_original_request=True)
+        log_path = self.chat_agent_log_base_path(
+            thread_id=run.thread_id,
+            request_id=run.id,
+            purpose="resume",
+        )
+        response = await self._invoke_thread_agent(
+            registry=registry,
+            session=session,
+            prompt=prompt,
+            thread_id=run.thread_id,
+            force_agent=run.agent_name,
+            log_path=log_path,
+        )
+        if response.error and getattr(agent, "get_session_id", None):
+            logger.warning(
+                "SUSPENDED_RESUME_PRIMARY_FAILED run=%s thread=%s agent=%s error=%s",
+                run.id,
+                run.thread_id,
+                run.agent_name,
+                response.error[:400],
+            )
+            self._clear_thread_agent_session(agent, run.thread_id)
+            prompt = self._build_suspended_run_resume_prompt(run, include_original_request=True)
+            response = await self._invoke_thread_agent(
+                registry=registry,
+                session=session,
+                prompt=prompt,
+                thread_id=run.thread_id,
+                force_agent=run.agent_name,
+                log_path=self.chat_agent_log_base_path(
+                    thread_id=run.thread_id,
+                    request_id=f"{run.id}-fresh",
+                    purpose="resume",
+                ),
+            )
+
+        await self._sync_thread_agent_session(session=session, thread_id=run.thread_id, agent=agent)
+        logger.info(
+            "SUSPENDED_RESUME_AGENT_DONE run=%s thread=%s agent=%s response_error=%s response_len=%d",
+            run.id,
+            run.thread_id,
+            run.agent_name,
+            bool(response.error),
+            len(response.text or ""),
+        )
+        if response.error:
+            await self._store.update_suspended_agent_run(run.id, status="failed", completed_at_now=True)
+            await session.channel.send(
+                run.thread_id,
+                f"Login completed, but resuming `{run.agent_name}` failed: {response.error[:500]}",
+            )
+            return f"Suspended run `{run.id}` failed to resume."
+
+        auth_challenge = None
+        try:
+            envelope = parse_control_envelope(response.text) if extract_control_frame(response.text) else None
+            if envelope is not None:
+                auth_challenge = parse_auth_challenge(envelope)
+        except ProtocolError as exc:
+            logger.warning("Suspended run=%s control frame parse failed: %s", run.id, exc)
+            envelope = None
+        if envelope is not None and auth_challenge is not None:
+            await self._store.update_suspended_agent_run(
+                run.id,
+                status="waiting_auth",
+                control_envelope_json=envelope.raw_json,
+                completed_at=None,
+            )
+            logger.info(
+                "SUSPENDED_RESUME_REAUTH_REQUIRED run=%s thread=%s provider=%s",
+                run.id,
+                run.thread_id,
+                auth_challenge.provider,
+            )
+            return await self.mark_thread_auth_required(
+                platform=run.platform,
+                channel_id=run.channel_id,
+                thread_id=run.thread_id,
+                provider=auth_challenge.provider,
+                reason=auth_challenge.reason,
+                actor_id=run.created_by,
+                agent_name=run.agent_name,
+                control_envelope_json=envelope.raw_json,
+                resume_context=run.resume_context,
+                session_id_snapshot=agent.get_session_id(run.thread_id) if hasattr(agent, "get_session_id") else run.session_id_snapshot,
+            )
+
+        await session.append_assistant(run.thread_id, response.text, run.agent_name)
+        await self._send_thread_agent_response(
+            session=session,
+            thread_id=run.thread_id,
+            agent_name=run.agent_name,
+            text=response.text,
+            usage=response.usage,
+        )
+        await self._store.update_suspended_agent_run(run.id, status="completed", completed_at_now=True)
+        logger.info(
+            "SUSPENDED_RESUME_COMPLETED run=%s thread=%s agent=%s",
+            run.id,
+            run.thread_id,
+            run.agent_name,
+        )
+        return f"Suspended run `{run.id}` resumed successfully."
 
     async def merge_task(self, task_id: str, *, actor_id: str) -> str:
         if not self._is_authorized(actor_id):
@@ -1579,6 +1882,36 @@ class RuntimeService:
                 await self._fail(task, f"{agent_name}: {response.error}")
                 return
 
+            envelope = None
+            auth_challenge = None
+            if extract_control_frame(response.text) is not None:
+                try:
+                    envelope = parse_control_envelope(response.text)
+                    auth_challenge = parse_auth_challenge(envelope)
+                except ProtocolError as exc:
+                    logger.warning(
+                        "Runtime task=%s step=%d control frame parse failed: %s",
+                        task.id,
+                        step,
+                        exc,
+                    )
+            if auth_challenge is not None:
+                await self._store.add_runtime_event(
+                    task.id,
+                    "task.auth_challenge",
+                    {
+                        "provider": auth_challenge.provider,
+                        "reason": auth_challenge.reason,
+                        "control_envelope": envelope.raw_json if envelope else None,
+                    },
+                )
+                await self.mark_task_auth_required(
+                    task.id,
+                    provider=auth_challenge.provider,
+                    reason=auth_challenge.reason,
+                )
+                return
+
             state, block_reason = parse_task_state(response.text)
             logger.info(
                 "Runtime task=%s step=%d AGENT_OK agent=%s elapsed=%.2fs response_len=%d state=%s",
@@ -1979,6 +2312,17 @@ class RuntimeService:
         safe_agent = re.sub(r"[^a-zA-Z0-9._-]+", "-", agent_name).strip("-") or "agent"
         return self._agent_logs_root / f"{task.id}-step{step}-{safe_agent}.log"
 
+    def chat_agent_log_base_path(
+        self,
+        *,
+        thread_id: str,
+        request_id: str,
+        purpose: str,
+    ) -> Path:
+        safe_thread = re.sub(r"[^a-zA-Z0-9._-]+", "-", thread_id).strip("-") or "thread"
+        safe_purpose = re.sub(r"[^a-zA-Z0-9._-]+", "-", purpose).strip("-") or "chat"
+        return self._agent_logs_root / f"chat-{safe_thread}-{safe_purpose}-{request_id}.log"
+
     async def _execute_merge(self, task: RuntimeTask, *, actor_id: str, source: str) -> str:
         if task.status not in {TASK_STATUS_WAITING_MERGE, TASK_STATUS_APPLIED, TASK_STATUS_MERGE_FAILED}:
             return f"Task `{task.id}` is not waiting merge (status: {task.status})."
@@ -2378,6 +2722,151 @@ class RuntimeService:
     def _key(platform: str, channel_id: str) -> str:
         return f"{platform}:{channel_id}"
 
+    async def _restore_thread_agent_session(
+        self,
+        *,
+        session: ChannelSession,
+        thread_id: str,
+        agent,
+        fallback_session_id: str | None = None,
+    ) -> None:
+        if not hasattr(agent, "set_session_id") or not hasattr(agent, "get_session_id"):
+            return
+        if agent.get_session_id(thread_id):
+            return
+        stored = await self._store.load_session(
+            session.platform,
+            session.channel_id,
+            thread_id,
+            agent.name,
+        )
+        if stored:
+            agent.set_session_id(thread_id, stored)
+            return
+        if fallback_session_id:
+            agent.set_session_id(thread_id, fallback_session_id)
+
+    async def _sync_thread_agent_session(
+        self,
+        *,
+        session: ChannelSession,
+        thread_id: str,
+        agent,
+    ) -> None:
+        if not hasattr(agent, "get_session_id"):
+            return
+        current = agent.get_session_id(thread_id)
+        if current:
+            await self._store.save_session(
+                session.platform,
+                session.channel_id,
+                thread_id,
+                agent.name,
+                current,
+            )
+        else:
+            await self._store.delete_session(
+                session.platform,
+                session.channel_id,
+                thread_id,
+                agent.name,
+            )
+
+    @staticmethod
+    def _clear_thread_agent_session(agent, thread_id: str) -> None:
+        if hasattr(agent, "clear_session"):
+            agent.clear_session(thread_id)
+
+    async def _invoke_thread_agent(
+        self,
+        *,
+        registry: AgentRegistry,
+        session: ChannelSession,
+        prompt: str,
+        thread_id: str,
+        force_agent: str,
+        log_path: Path | None,
+    ) -> AgentResponse:
+        history = await session.get_history(thread_id)
+        _agent, response = await registry.run(
+            prompt,
+            history,
+            thread_id=thread_id,
+            force_agent=force_agent,
+            log_path=log_path,
+            run_label=f"suspended_resume thread={thread_id}",
+        )
+        return response
+
+    def _build_suspended_run_resume_prompt(
+        self,
+        run: SuspendedAgentRun,
+        *,
+        include_original_request: bool = False,
+    ) -> str:
+        context = run.resume_context or {}
+        lines = [
+            "[System Resume Context]",
+            f"- The previous run paused because provider auth was required for `{run.provider}`.",
+            f"- Auth for provider `{run.provider}` has now completed successfully.",
+            "- Continue from where you left off.",
+            "- Do not ask the user to login again unless a new auth challenge occurs.",
+            "- For transcript/video extraction, trust only data fetched in this resumed run.",
+            "- Do not use transcript-like text from old local logs/sessions as evidence.",
+        ]
+        credential_path = str(context.get("auth_credential_path") or "").strip()
+        if credential_path:
+            lines.append(f"- Auth credential path: `{credential_path}`")
+            if str(run.provider).lower() == "bilibili":
+                lines.append(
+                    f"- When calling the bilibili extractor, pass `--cookies-path '{credential_path}'`."
+                )
+        source_text = str(context.get("original_user_content") or context.get("agent_prompt") or "")
+        url_match = re.search(r"https?://\S+", source_text)
+        if url_match and str(run.provider).lower() == "bilibili":
+            target_url = url_match.group(0).rstrip(").,;!?")
+            lines.append(f"- Target URL: `{target_url}`")
+            lines.append("- Re-run the bilibili extraction for this URL in this resumed run and base your summary only on that JSON output.")
+        if context.get("skill_name"):
+            lines.append(f"- Continue using skill `{context['skill_name']}` if still relevant.")
+        if context.get("original_user_content"):
+            lines.append(f"- Original user request: {context['original_user_content']}")
+        if include_original_request and context.get("agent_prompt"):
+            lines.append("")
+            lines.append("Original request context:")
+            lines.append(str(context["agent_prompt"]))
+        return "\n".join(lines)
+
+    async def _send_thread_agent_response(
+        self,
+        *,
+        session: ChannelSession,
+        thread_id: str,
+        agent_name: str,
+        text: str,
+        usage: dict[str, Any] | None,
+    ) -> None:
+        attribution = f"-# via **{agent_name}**"
+        if usage:
+            input_tokens = usage.get("input_tokens")
+            output_tokens = usage.get("output_tokens")
+            parts: list[str] = []
+            if input_tokens is not None:
+                parts.append(f"in {input_tokens}")
+            if output_tokens is not None:
+                parts.append(f"out {output_tokens}")
+            if parts:
+                attribution += " · " + " / ".join(parts)
+        first_chunk_budget = max(1, 2000 - len(attribution) - 1)
+        first_chunks = chunk_message(text, max_size=first_chunk_budget)
+        if not first_chunks:
+            await session.channel.send(thread_id, f"{attribution}\n*(empty response)*")
+            return
+        await session.channel.send(thread_id, f"{attribution}\n{first_chunks[0]}")
+        remainder = text[len(first_chunks[0]):].lstrip()
+        for chunk in chunk_message(remainder) if remainder else []:
+            await session.channel.send(thread_id, chunk)
+
     def _is_authorized(self, actor_id: str) -> bool:
         if not self._owner_user_ids:
             return True
@@ -2695,7 +3184,7 @@ class RuntimeService:
         return None
 
     async def _send_auth_prompt(self, channel, flow: AuthFlow) -> None:
-        await channel.send(
+        intro_msg_id = await channel.send(
             flow.thread_id,
             (
                 f"**Auth Login Required**\n"
@@ -2704,11 +3193,18 @@ class RuntimeService:
                 "Open the Bilibili app and scan the QR code. It is valid for about 3 minutes."
             ),
         )
+        logger.info(
+            "Auth prompt intro sent flow=%s provider=%s thread=%s message_id=%s",
+            flow.id,
+            flow.provider,
+            flow.thread_id,
+            intro_msg_id,
+        )
         if not flow.qr_image_path:
             return
         from oh_my_agent.gateway.base import OutgoingAttachment
 
-        await channel.send_attachment(
+        qr_msg_id = await channel.send_attachment(
             flow.thread_id,
             attachment=OutgoingAttachment(
                 filename=Path(flow.qr_image_path).name,
@@ -2716,6 +3212,14 @@ class RuntimeService:
                 local_path=Path(flow.qr_image_path),
                 caption="Bilibili login QR code",
             ),
+        )
+        logger.info(
+            "Auth prompt QR sent flow=%s provider=%s thread=%s message_id=%s path=%s",
+            flow.id,
+            flow.provider,
+            flow.thread_id,
+            qr_msg_id,
+            flow.qr_image_path,
         )
 
     async def _on_auth_flow_event(
@@ -2725,7 +3229,17 @@ class RuntimeService:
         credential: CredentialHandle | None,
         message: str | None,
     ) -> None:
-        del credential
+        logger.info(
+            "AUTH_FLOW_EVENT event=%s flow=%s provider=%s platform=%s channel=%s thread=%s linked_task=%s has_credential=%s",
+            event_type,
+            flow.id,
+            flow.provider,
+            flow.platform,
+            flow.channel_id,
+            flow.thread_id,
+            flow.linked_task_id,
+            credential is not None,
+        )
         session = self._sessions.get(self._key(flow.platform, flow.channel_id))
         if session is not None:
             if event_type == "approved":
@@ -2745,6 +3259,38 @@ class RuntimeService:
                 )
 
         if not flow.linked_task_id:
+            suspended = await self._store.get_active_suspended_agent_run(
+                platform=flow.platform,
+                channel_id=flow.channel_id,
+                thread_id=flow.thread_id,
+                provider=flow.provider,
+            )
+            if suspended is None:
+                return
+            if event_type == "approved":
+                updated_context = dict(suspended.resume_context or {})
+                if credential and credential.storage_path:
+                    updated_context["auth_credential_path"] = credential.storage_path
+                    logger.info(
+                        "AUTH_FLOW_EVENT credential injected into suspended run run=%s provider=%s path=%s",
+                        suspended.id,
+                        flow.provider,
+                        credential.storage_path,
+                    )
+                await self._store.update_suspended_agent_run(
+                    suspended.id,
+                    resume_context_json=updated_context,
+                )
+                asyncio.create_task(self.resume_suspended_agent_run(suspended.id))
+            elif event_type in {"expired", "failed"}:
+                await self._store.update_suspended_agent_run(
+                    suspended.id,
+                    status="waiting_auth",
+                    resume_context_json={
+                        **suspended.resume_context,
+                        "auth_error": message or f"{flow.provider} login did not complete.",
+                    },
+                )
             return
         task = await self._store.get_runtime_task(flow.linked_task_id)
         if task is None:

@@ -59,6 +59,8 @@ def _build_agent(name: str, cfg: dict, workspace: Path | None = None):
             return GeminiCLIAgent(
                 cli_path=cfg.get("cli_path", "gemini"),
                 model=cfg.get("model", "gemini-3-flash-preview"),
+                yolo=bool(cfg.get("yolo", True)),
+                extra_args=cfg.get("extra_args"),
                 timeout=timeout,
                 workspace=workspace,
                 passthrough_env=passthrough_env,
@@ -70,6 +72,11 @@ def _build_agent(name: str, cfg: dict, workspace: Path | None = None):
                 cli_path=cfg.get("cli_path", "codex"),
                 model=cfg.get("model", "o4-mini"),
                 skip_git_repo_check=bool(cfg.get("skip_git_repo_check", True)),
+                sandbox_mode=str(cfg.get("sandbox_mode", "workspace-write")),
+                dangerously_bypass_approvals_and_sandbox=bool(
+                    cfg.get("dangerously_bypass_approvals_and_sandbox", False)
+                ),
+                extra_args=cfg.get("extra_args"),
                 timeout=timeout,
                 workspace=workspace,
                 passthrough_env=passthrough_env,
@@ -84,6 +91,9 @@ def _build_agent(name: str, cfg: dict, workspace: Path | None = None):
                 max_turns=int(cfg.get("max_turns", 25)),
                 allowed_tools=tools,
                 model=cfg.get("model", "sonnet"),
+                dangerously_skip_permissions=bool(cfg.get("dangerously_skip_permissions", True)),
+                permission_mode=cfg.get("permission_mode"),
+                extra_args=cfg.get("extra_args"),
                 timeout=timeout,
                 workspace=workspace,
                 passthrough_env=passthrough_env,
@@ -189,6 +199,21 @@ def _apply_v052_defaults(config: dict) -> None:
     auth_bili_cfg = auth_providers_cfg.setdefault("bilibili", {})
     auth_bili_cfg.setdefault("enabled", True)
     auth_bili_cfg.setdefault("scope_key", "default")
+
+    agents_cfg = config.setdefault("agents", {})
+    claude_cfg = agents_cfg.setdefault("claude", {})
+    claude_cfg.setdefault("dangerously_skip_permissions", True)
+    claude_cfg.setdefault("permission_mode", None)
+    claude_cfg.setdefault("extra_args", [])
+
+    gemini_cfg = agents_cfg.setdefault("gemini", {})
+    gemini_cfg.setdefault("yolo", True)
+    gemini_cfg.setdefault("extra_args", [])
+
+    codex_cfg = agents_cfg.setdefault("codex", {})
+    codex_cfg.setdefault("sandbox_mode", "workspace-write")
+    codex_cfg.setdefault("dangerously_bypass_approvals_and_sandbox", False)
+    codex_cfg.setdefault("extra_args", [])
 
     runtime_cfg = config.setdefault("runtime", {})
     runtime_cfg.setdefault("enabled", True)

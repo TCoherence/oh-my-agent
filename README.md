@@ -21,6 +21,7 @@ Inspired by [OpenClaw](https://openclaw.dev).
 - Adaptive memory is implemented: auto-extraction from conversations, injection into agent prompts, `/memories` and `/forget` commands.
 - CLI session resume is implemented for Claude, Codex, and Gemini, with persisted session IDs restored after restart.
 - Auth-first QR login infrastructure is implemented for Discord owner flows, with local credential persistence and runtime resume hooks.
+- Agent/control cooperation now supports `OMA_CONTROL` envelopes for auth challenges, so direct chat runs can pause for provider login and resume afterward.
 
 ## Architecture
 
@@ -246,7 +247,8 @@ Check the installed version:
 - Current provider support is intentionally narrow: `bilibili` only.
 - `/auth_login bilibili` sends a QR code image into the current configured channel or thread.
 - Successful scans persist cookies under `~/.oh-my-agent/runtime/auth/providers/bilibili/<owner_user_id>/`.
-- Runtime tasks can move into `WAITING_USER_INPUT` when a skill reports `auth_required`; once the QR flow completes, the linked task is re-queued automatically.
+- Runtime tasks can move into `WAITING_USER_INPUT` when an agent emits an `OMA_CONTROL` auth challenge; once the QR flow completes, the linked task is re-queued automatically.
+- Direct chat / explicit skill runs can also suspend on `OMA_CONTROL` auth challenges, store a resumable suspended run record, and continue the same agent session after login when possible.
 - In a waiting thread, replying `retry login`, `重新登录`, or `重新扫码` reissues the QR flow.
 - `/memories [category]`
 - `/forget <memory_id>`

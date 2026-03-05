@@ -14,6 +14,7 @@ from pathlib import Path
 import yaml
 
 from oh_my_agent.automation import ScheduledJob, Scheduler
+from oh_my_agent.control.protocol import ProtocolError, extract_control_frame, parse_auth_challenge, parse_control_envelope
 from oh_my_agent.gateway.base import BaseChannel, IncomingMessage
 from oh_my_agent.gateway.session import ChannelSession
 from oh_my_agent.agents.registry import AgentRegistry
@@ -232,6 +233,100 @@ class GatewayManager:
         """Synchronize persisted session state for every resume-capable agent."""
         for agent in registry.agents:
             await self._sync_session(session, thread_id, agent)
+
+    def _chat_agent_log_base_path(
+        self,
+        *,
+        thread_id: str,
+        request_id: str,
+        purpose: str,
+    ) -> Path | None:
+        runtime = self._runtime_service
+        builder = getattr(runtime, "chat_agent_log_base_path", None) if runtime is not None else None
+        if not callable(builder):
+            return None
+        candidate = builder(
+            thread_id=thread_id,
+            request_id=request_id,
+            purpose=purpose,
+        )
+        if candidate is None or not isinstance(candidate, (str, Path)):
+            return None
+        return Path(candidate)
+
+    async def _maybe_handle_control_challenge(
+        self,
+        *,
+        req_id: str,
+        session: ChannelSession,
+        registry: AgentRegistry,
+        thread_id: str,
+        msg: IncomingMessage,
+        agent_used,
+        response,
+        agent_prompt: str,
+        explicit_skill: str | None,
+        routed_skill: str | None,
+    ) -> bool:
+        if extract_control_frame(response.text) is None:
+            return False
+        try:
+            envelope = parse_control_envelope(response.text)
+            auth_challenge = parse_auth_challenge(envelope)
+        except ProtocolError as exc:
+            logger.warning("[%s] CONTROL_FRAME_PARSE_FAILED thread=%s error=%s", req_id, thread_id, exc)
+            return False
+        if auth_challenge is None:
+            await session.channel.send(
+                thread_id,
+                "The agent requested an unsupported interactive step. This challenge type is not implemented yet.",
+            )
+            return True
+        if not self._runtime_service or not hasattr(self._runtime_service, "mark_thread_auth_required"):
+            await session.channel.send(
+                thread_id,
+                f"Authentication is required for `{auth_challenge.provider}`, but runtime auth handling is unavailable.",
+            )
+            return True
+
+        session_snapshot = None
+        if hasattr(agent_used, "get_session_id"):
+            session_snapshot = agent_used.get_session_id(thread_id)
+        result = await self._runtime_service.mark_thread_auth_required(
+            platform=session.platform,
+            channel_id=session.channel_id,
+            thread_id=thread_id,
+            provider=auth_challenge.provider,
+            reason=auth_challenge.reason,
+            actor_id=msg.author_id or msg.author,
+            agent_name=agent_used.name,
+            control_envelope_json=envelope.raw_json,
+            session_id_snapshot=session_snapshot,
+            resume_context={
+                "agent_prompt": agent_prompt,
+                "original_user_content": msg.content,
+                "skill_name": explicit_skill or routed_skill,
+                "preferred_agent": msg.preferred_agent,
+            },
+        )
+        logger.info(
+            "[%s] CONTROL_FRAME_AUTH_REQUIRED provider=%s agent=%s thread=%s",
+            req_id,
+            auth_challenge.provider,
+            agent_used.name,
+            thread_id,
+        )
+        try:
+            await session.channel.send(thread_id, result)
+        except Exception:
+            logger.warning(
+                "[%s] CONTROL_FRAME_RESULT_SEND_FAILED thread=%s provider=%s",
+                req_id,
+                thread_id,
+                auth_challenge.provider,
+                exc_info=True,
+            )
+        return True
 
     async def start(self) -> None:
         """Start all platform channels concurrently."""
@@ -719,6 +814,11 @@ class GatewayManager:
 
         # Run agent (with fallback, or targeted if preferred_agent is set)
         workspace_override = await self._resolve_short_workspace(session, thread_id)
+        log_path = self._chat_agent_log_base_path(
+            thread_id=thread_id,
+            request_id=req_id,
+            purpose=agent_purpose,
+        )
         t_agent = time.perf_counter()
         async with channel.typing(thread_id):
             agent_used, response = await registry.run(
@@ -727,6 +827,7 @@ class GatewayManager:
                 thread_id=thread_id,
                 force_agent=msg.preferred_agent,
                 workspace_override=workspace_override,
+                log_path=log_path,
                 image_paths=image_paths,
             )
         elapsed_agent = time.perf_counter() - t_agent
@@ -779,6 +880,20 @@ class GatewayManager:
                 thread_id,
                 explicit_skill or routed_skill,
             )
+
+        if await self._maybe_handle_control_challenge(
+            req_id=req_id,
+            session=session,
+            registry=registry,
+            thread_id=thread_id,
+            msg=msg,
+            agent_used=agent_used,
+            response=response,
+            agent_prompt=agent_prompt,
+            explicit_skill=explicit_skill,
+            routed_skill=routed_skill,
+        ):
+            return
 
         # Record assistant response in history
         await session.append_assistant(thread_id, response.text, agent_used.name)

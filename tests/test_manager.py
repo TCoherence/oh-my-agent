@@ -233,6 +233,80 @@ async def test_handle_message_logs_explicit_skill_purpose(caplog, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_handle_message_passes_log_path_for_chat_runs(tmp_path):
+    channel = MagicMock()
+    channel.platform = "discord"
+    channel.channel_id = "100"
+    channel.create_thread = AsyncMock()
+    channel.send = AsyncMock()
+    channel.typing = MagicMock()
+    channel.typing.return_value.__aenter__ = AsyncMock(return_value=None)
+    channel.typing.return_value.__aexit__ = AsyncMock(return_value=False)
+
+    mock_agent = MagicMock()
+    mock_agent.name = "codex"
+    registry = MagicMock(spec=AgentRegistry)
+    registry.agents = [mock_agent]
+    registry.run = AsyncMock(return_value=(mock_agent, AgentResponse(text="hi")))
+
+    runtime = MagicMock()
+    runtime.chat_agent_log_base_path.return_value = tmp_path / "chat-thread.log"
+    runtime.maybe_handle_thread_context = AsyncMock(return_value=False)
+    runtime.maybe_handle_incoming = AsyncMock(return_value=False)
+
+    session = _make_session(channel=channel, registry=registry)
+    gm = GatewayManager([], runtime_service=runtime)
+
+    await gm.handle_message(session, registry, _make_msg(thread_id="thread-1", content="follow up"))
+
+    assert registry.run.await_args.kwargs["log_path"] == tmp_path / "chat-thread.log"
+
+
+@pytest.mark.asyncio
+async def test_handle_message_intercepts_auth_control_frame():
+    channel = MagicMock()
+    channel.platform = "discord"
+    channel.channel_id = "100"
+    channel.create_thread = AsyncMock()
+    channel.send = AsyncMock()
+    channel.typing = MagicMock()
+    channel.typing.return_value.__aenter__ = AsyncMock(return_value=None)
+    channel.typing.return_value.__aexit__ = AsyncMock(return_value=False)
+
+    mock_agent = MagicMock()
+    mock_agent.name = "codex"
+    mock_agent.get_session_id.return_value = "sess-123"
+    registry = MagicMock(spec=AgentRegistry)
+    registry.agents = [mock_agent]
+    registry.run = AsyncMock(
+        return_value=(
+            mock_agent,
+            AgentResponse(
+                text=(
+                    '<OMA_CONTROL>{"version":1,"type":"challenge","data":{"challenge_type":"auth_required",'
+                    '"provider":"bilibili","reason":"login_required"}}</OMA_CONTROL>'
+                )
+            ),
+        )
+    )
+
+    runtime = MagicMock()
+    runtime.maybe_handle_thread_context = AsyncMock(return_value=False)
+    runtime.maybe_handle_incoming = AsyncMock(return_value=False)
+    runtime.mark_thread_auth_required = AsyncMock(return_value="Thread `thread-1` is waiting for `bilibili` login.")
+
+    session = _make_session(channel=channel, registry=registry)
+    gm = GatewayManager([], runtime_service=runtime)
+
+    await gm.handle_message(session, registry, _make_msg(thread_id="thread-1", content="follow up", author_id="owner-1"))
+
+    runtime.mark_thread_auth_required.assert_awaited_once()
+    assert channel.send.await_args_list[-1].args[1] == "Thread `thread-1` is waiting for `bilibili` login."
+    history = await session.get_history("thread-1")
+    assert [turn["role"] for turn in history] == ["user"]
+
+
+@pytest.mark.asyncio
 async def test_handle_message_logs_error_purpose(caplog):
     channel = MagicMock()
     channel.platform = "discord"

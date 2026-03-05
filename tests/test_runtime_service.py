@@ -198,6 +198,40 @@ class _DoneAgent(BaseAgent):
         return AgentResponse(text=f"{prompt}\nTASK_STATE: DONE")
 
 
+class _ResumableAuthAgent(BaseAgent):
+    def __init__(self) -> None:
+        self._session_ids: dict[str, str] = {}
+        self.prompts: list[str] = []
+
+    @property
+    def name(self) -> str:
+        return "resume-agent"
+
+    def get_session_id(self, thread_id: str) -> str | None:
+        return self._session_ids.get(thread_id)
+
+    def set_session_id(self, thread_id: str, session_id: str) -> None:
+        self._session_ids[thread_id] = session_id
+
+    def clear_session(self, thread_id: str) -> None:
+        self._session_ids.pop(thread_id, None)
+
+    async def run(
+        self,
+        prompt: str,
+        history: list[dict] | None = None,
+        *,
+        thread_id: str | None = None,
+        workspace_override: Path | None = None,
+        log_path: Path | None = None,
+    ) -> AgentResponse:
+        del history, workspace_override, log_path
+        self.prompts.append(prompt)
+        if thread_id and thread_id not in self._session_ids:
+            self._session_ids[thread_id] = "sess-restored"
+        return AgentResponse(text="final resumed answer")
+
+
 class _RootReadmeAgent(BaseAgent):
     @property
     def name(self) -> str:
@@ -1484,6 +1518,82 @@ async def test_mark_task_auth_required_waits_then_resumes(tmp_path):
     resumed = await store.get_runtime_task(task.id)
     assert resumed is not None
     assert resumed.status == "PENDING"
+
+    await runtime.stop()
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_mark_thread_auth_required_waits_then_resumes(tmp_path):
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    store = SQLiteMemoryStore(tmp_path / "auth-thread.db")
+    await store.init()
+    auth = _FakeAuthService()
+    runtime = RuntimeService(
+        store,
+        config={
+            "enabled": True,
+            "worker_concurrency": 1,
+            "worktree_root": str(tmp_path / "worktrees"),
+            "default_agent": "resume-agent",
+            "default_test_command": "true",
+            "risk_profile": "strict",
+            "cleanup": {"enabled": False},
+            "merge_gate": {"enabled": True},
+        },
+        owner_user_ids={"owner-1"},
+        repo_root=repo,
+        auth_service=auth,
+    )
+    channel = _FakeChannel()
+    agent = _ResumableAuthAgent()
+    registry = AgentRegistry([agent])
+    session = ChannelSession(platform="discord", channel_id="100", channel=channel, registry=registry)
+    session.memory_store = store
+    await session.append_user("thread-1", "summarize the video", "alice")
+    runtime.register_session(session, registry)
+
+    result = await runtime.mark_thread_auth_required(
+        platform="discord",
+        channel_id="100",
+        thread_id="thread-1",
+        provider="bilibili",
+        reason="login_required",
+        actor_id="owner-1",
+        agent_name="resume-agent",
+        control_envelope_json=(
+            '{"version":1,"type":"challenge","data":{"challenge_type":"auth_required","provider":"bilibili","reason":"login_required"}}'
+        ),
+        session_id_snapshot="sess-123",
+        resume_context={"agent_prompt": "summarize the video", "skill_name": "bilibili-video-summary"},
+    )
+
+    assert "waiting for `bilibili` login" in result
+    run = await store.get_active_suspended_agent_run(
+        platform="discord",
+        channel_id="100",
+        thread_id="thread-1",
+        provider="bilibili",
+    )
+    assert run is not None
+    assert run.status == "waiting_auth"
+
+    await auth.emit("approved", "flow-1")
+    for _ in range(10):
+        await asyncio.sleep(0.05)
+        run = await store.get_suspended_agent_run(run.id)
+        if run is not None and run.status == "completed":
+            break
+
+    run = await store.get_suspended_agent_run(run.id)
+    assert run is not None
+    assert run.status == "completed"
+    assert channel.sent[-1][1].endswith("final resumed answer")
+    assert any("--cookies-path '/tmp/cookies.txt'" in prompt for prompt in agent.prompts)
+    history = await session.get_history("thread-1")
+    assert history[-1]["role"] == "assistant"
+    assert history[-1]["content"] == "final resumed answer"
 
     await runtime.stop()
     await store.close()

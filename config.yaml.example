@@ -141,6 +141,9 @@ agents:
     model: sonnet
     timeout: 300                 # 秒，超时后 fallback 下一个 agent
     allowed_tools: [Bash, Read, Write, Edit, Glob, Grep]
+    dangerously_skip_permissions: true
+    # permission_mode: default    # set to disable bypass, or use other CLI-supported modes
+    extra_args: []
     # env_passthrough: [ANTHROPIC_API_KEY]  # env vars forwarded when workspace is set
 
   gemini:
@@ -149,6 +152,8 @@ agents:
     max_turns: 10
     model: gemini-3.0-flash
     timeout: 120                 # 默认比其他 agent 短，避免长时间卡住 fallback
+    yolo: true
+    extra_args: []
     # env_passthrough: []
 
   codex:
@@ -157,6 +162,9 @@ agents:
     model: gpt-5.3-codex
     timeout: 300
     skip_git_repo_check: true    # 非 trusted git 目录时可继续运行
+    sandbox_mode: workspace-write
+    dangerously_bypass_approvals_and_sandbox: false
+    extra_args: []
     # env_passthrough: [OPENAI_API_KEY]
 
   # ----- API agents (deprecated since v0.4.0, use CLI agents instead) -----

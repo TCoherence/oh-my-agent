@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+import re
 
 from oh_my_agent.agents.base import AgentResponse, BaseAgent
 
@@ -23,6 +24,14 @@ class AgentRegistry:
     def get_agent(self, name: str) -> BaseAgent | None:
         """Return the agent with the given name, or None if not found."""
         return next((a for a in self._agents if a.name == name), None)
+
+    @staticmethod
+    def _agent_log_path(log_path: Path | None, agent_name: str) -> Path | None:
+        if log_path is None:
+            return None
+        safe_agent = re.sub(r"[^A-Za-z0-9_.-]+", "-", agent_name).strip("-") or "agent"
+        suffix = log_path.suffix or ".log"
+        return log_path.with_name(f"{log_path.stem}-{safe_agent}{suffix}")
 
     async def run(
         self,
@@ -61,7 +70,7 @@ class AgentRegistry:
             if "workspace_override" in sig.parameters:
                 kwargs["workspace_override"] = workspace_override
             if "log_path" in sig.parameters:
-                kwargs["log_path"] = log_path
+                kwargs["log_path"] = self._agent_log_path(log_path, agent.name)
             if "image_paths" in sig.parameters:
                 kwargs["image_paths"] = image_paths
             response = await agent.run(prompt, history, **kwargs)
@@ -81,7 +90,7 @@ class AgentRegistry:
             if "workspace_override" in sig.parameters:
                 kwargs["workspace_override"] = workspace_override
             if "log_path" in sig.parameters:
-                kwargs["log_path"] = log_path
+                kwargs["log_path"] = self._agent_log_path(log_path, agent.name)
             if "image_paths" in sig.parameters:
                 kwargs["image_paths"] = image_paths
             response = await agent.run(prompt, history, **kwargs)

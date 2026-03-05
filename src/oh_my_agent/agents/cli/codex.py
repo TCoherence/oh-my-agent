@@ -6,6 +6,7 @@ import logging
 from pathlib import Path
 
 from oh_my_agent.agents.base import AgentResponse
+from oh_my_agent.agents.control_prompt import inject_control_protocol
 from oh_my_agent.agents.cli.base import (
     BaseCLIAgent,
     _build_prompt_with_history,
@@ -15,6 +16,7 @@ from oh_my_agent.agents.cli.base import (
 )
 
 logger = logging.getLogger(__name__)
+_VALID_CODEX_SANDBOX_MODES = {"read-only", "workspace-write", "danger-full-access"}
 
 
 def _extract_codex_text(event: dict) -> str:
@@ -67,8 +69,8 @@ def _extract_codex_text(event: dict) -> str:
 class CodexCLIAgent(BaseCLIAgent):
     """Agent that delegates to the OpenAI ``codex`` CLI.
 
-    Uses ``codex exec --full-auto`` which auto-approves all tool calls
-    and runs in a sandboxed environment by default.
+    Uses ``codex exec`` with explicit sandbox flags by default,
+    with configurable sandbox and bypass flags.
 
     Supports session resume via ``codex exec resume <session_id>``.
 
@@ -80,6 +82,9 @@ class CodexCLIAgent(BaseCLIAgent):
         cli_path: str = "codex",
         model: str = "o4-mini",
         skip_git_repo_check: bool = True,
+        sandbox_mode: str = "workspace-write",
+        dangerously_bypass_approvals_and_sandbox: bool = False,
+        extra_args: list[str] | None = None,
         timeout: int = 300,
         workspace: Path | None = None,
         passthrough_env: list[str] | None = None,
@@ -87,6 +92,15 @@ class CodexCLIAgent(BaseCLIAgent):
         super().__init__(cli_path=cli_path, timeout=timeout, workspace=workspace, passthrough_env=passthrough_env)
         self._model = model
         self._skip_git_repo_check = skip_git_repo_check
+        normalized_sandbox_mode = str(sandbox_mode).strip() or "workspace-write"
+        if normalized_sandbox_mode not in _VALID_CODEX_SANDBOX_MODES:
+            raise ValueError(
+                f"Unsupported Codex sandbox mode '{sandbox_mode}'. "
+                f"Expected one of {sorted(_VALID_CODEX_SANDBOX_MODES)}."
+            )
+        self._sandbox_mode = normalized_sandbox_mode
+        self._dangerously_bypass = bool(dangerously_bypass_approvals_and_sandbox)
+        self._extra_args = [str(arg) for arg in (extra_args or []) if str(arg).strip()]
         # thread_id → Codex CLI session ID (thread_id from thread.started event)
         self._session_ids: dict[str, str] = {}
 
@@ -103,18 +117,32 @@ class CodexCLIAgent(BaseCLIAgent):
     def clear_session(self, thread_id: str) -> None:
         self._session_ids.pop(thread_id, None)
 
+    def _automation_flags(self) -> list[str]:
+        if self._dangerously_bypass:
+            return ["--dangerously-bypass-approvals-and-sandbox"]
+        return ["--sandbox", self._sandbox_mode]
+
+    def _resume_automation_flags(self) -> list[str]:
+        if self._dangerously_bypass:
+            return ["--dangerously-bypass-approvals-and-sandbox"]
+        # `codex exec resume` currently does not accept `--sandbox` directly.
+        # Use config override so resume runs keep the configured sandbox mode.
+        return ["-c", f'sandbox_mode="{self._sandbox_mode}"']
+
     def _build_command(
         self, prompt: str, *, image_paths: list[Path] | None = None
     ) -> list[str]:
         cmd = [
             self._cli_path,
             "exec",
-            "--full-auto",          # auto-approve + workspace sandbox
+            *self._automation_flags(),
             "--model", self._model,
             "--json",               # JSONL event stream with usage in turn.completed
         ]
         if self._skip_git_repo_check:
             cmd.append("--skip-git-repo-check")
+        if self._extra_args:
+            cmd.extend(self._extra_args)
         if image_paths:
             cmd.extend(["--image", ",".join(str(p) for p in image_paths)])
         cmd.append(prompt)
@@ -129,12 +157,14 @@ class CodexCLIAgent(BaseCLIAgent):
             "exec",
             "resume",
             session_id,
-            "--full-auto",
+            *self._resume_automation_flags(),
             "--model", self._model,
             "--json",
         ]
         if self._skip_git_repo_check:
             cmd.append("--skip-git-repo-check")
+        if self._extra_args:
+            cmd.extend(self._extra_args)
         if image_paths:
             cmd.extend(["--image", ",".join(str(p) for p in image_paths)])
         cmd.append(prompt)
@@ -155,6 +185,7 @@ class CodexCLIAgent(BaseCLIAgent):
         If *thread_id* is given and a session ID exists for it, uses
         ``codex exec resume`` to continue the session (avoiding history flattening).
         """
+        prompt = inject_control_protocol(prompt)
         session_id = self._session_ids.get(thread_id) if thread_id else None
 
         if session_id:

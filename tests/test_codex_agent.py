@@ -13,6 +13,38 @@ def test_codex_command_can_disable_skip_git_repo_check():
     assert "--skip-git-repo-check" not in cmd
 
 
+def test_codex_command_supports_custom_sandbox_mode():
+    agent = CodexCLIAgent(
+        cli_path="codex",
+        model="gpt-test",
+        sandbox_mode="danger-full-access",
+    )
+    cmd = agent._build_command("hello")
+    assert "--sandbox" in cmd
+    assert "danger-full-access" in cmd
+
+
+def test_codex_command_supports_full_bypass_flag():
+    agent = CodexCLIAgent(
+        cli_path="codex",
+        model="gpt-test",
+        dangerously_bypass_approvals_and_sandbox=True,
+    )
+    cmd = agent._build_command("hello")
+    assert "--dangerously-bypass-approvals-and-sandbox" in cmd
+    assert "--sandbox" not in cmd
+
+
+def test_codex_command_supports_extra_args():
+    agent = CodexCLIAgent(
+        cli_path="codex",
+        model="gpt-test",
+        extra_args=["--search"],
+    )
+    cmd = agent._build_command("hello")
+    assert "--search" in cmd
+
+
 def test_codex_parse_output_handles_item_completed_agent_message():
     agent = CodexCLIAgent(cli_path="codex", model="gpt-test")
     raw = "\n".join([

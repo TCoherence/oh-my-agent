@@ -7,6 +7,7 @@ import shutil
 from pathlib import Path
 
 from oh_my_agent.agents.base import AgentResponse
+from oh_my_agent.agents.control_prompt import inject_control_protocol
 from oh_my_agent.agents.cli.base import (
     BaseCLIAgent,
     _build_prompt_with_history,
@@ -34,6 +35,9 @@ class ClaudeAgent(BaseCLIAgent):
         max_turns: int = 25,
         allowed_tools: list[str] | None = None,
         model: str = "sonnet",
+        dangerously_skip_permissions: bool = True,
+        permission_mode: str | None = None,
+        extra_args: list[str] | None = None,
         timeout: int = 300,
         workspace: Path | None = None,
         passthrough_env: list[str] | None = None,
@@ -42,6 +46,10 @@ class ClaudeAgent(BaseCLIAgent):
         self._max_turns = max_turns
         self._allowed_tools = allowed_tools or []
         self._model = model
+        self._dangerously_skip_permissions = bool(dangerously_skip_permissions)
+        normalized_permission_mode = str(permission_mode).strip() if permission_mode is not None else None
+        self._permission_mode = normalized_permission_mode or None
+        self._extra_args = [str(arg) for arg in (extra_args or []) if str(arg).strip()]
         # thread_id → Claude CLI session ID (for --resume)
         self._session_ids: dict[str, str] = {}
 
@@ -64,10 +72,15 @@ class ClaudeAgent(BaseCLIAgent):
             "-p", prompt,
             "--max-turns", str(self._max_turns),
             "--model", self._model,
-            "--dangerously-skip-permissions",
         ]
+        if self._permission_mode:
+            cmd.extend(["--permission-mode", self._permission_mode])
+        elif self._dangerously_skip_permissions:
+            cmd.append("--dangerously-skip-permissions")
         if self._allowed_tools:
             cmd.extend(["--allowedTools", ",".join(self._allowed_tools)])
+        if self._extra_args:
+            cmd.extend(self._extra_args)
         return cmd
 
     def _build_command(self, prompt: str) -> list[str]:
@@ -84,10 +97,15 @@ class ClaudeAgent(BaseCLIAgent):
             "--output-format", "json",
             "--max-turns", str(self._max_turns),
             "--model", self._model,
-            "--dangerously-skip-permissions",
         ]
+        if self._permission_mode:
+            cmd.extend(["--permission-mode", self._permission_mode])
+        elif self._dangerously_skip_permissions:
+            cmd.append("--dangerously-skip-permissions")
         if self._allowed_tools:
             cmd.extend(["--allowedTools", ",".join(self._allowed_tools)])
+        if self._extra_args:
+            cmd.extend(self._extra_args)
         return cmd
 
     def _augment_prompt_with_images(
@@ -131,6 +149,7 @@ class ClaudeAgent(BaseCLIAgent):
         If *thread_id* is given and a session ID exists for it, uses
         ``--resume`` to continue the session (avoiding history flattening).
         """
+        prompt = inject_control_protocol(prompt)
         session_id = self._session_ids.get(thread_id) if thread_id else None
         cwd = self._resolve_cwd(workspace_override)
 

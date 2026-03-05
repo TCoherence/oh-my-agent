@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from typing import Any, Literal
 
 TASK_TYPE_ARTIFACT = "artifact"
@@ -54,6 +55,7 @@ TaskStatus = Literal[
 ]
 TaskType = Literal["artifact", "repo_change", "skill_change"]
 TaskCompletionMode = Literal["reply", "artifact", "merge"]
+SuspendedAgentRunStatus = Literal["waiting_auth", "resuming", "completed", "cancelled", "failed"]
 
 DecisionAction = Literal[
     "approve",
@@ -155,3 +157,51 @@ class TaskDecisionEvent:
     nonce: str
     source: DecisionSource
     suggestion: str | None = None
+
+
+@dataclass(frozen=True)
+class SuspendedAgentRun:
+    id: str
+    platform: str
+    channel_id: str
+    thread_id: str
+    agent_name: str
+    status: SuspendedAgentRunStatus
+    provider: str
+    control_envelope_json: str
+    session_id_snapshot: str | None
+    resume_context: dict[str, Any]
+    created_by: str
+    created_at: str | None = None
+    updated_at: str | None = None
+    completed_at: str | None = None
+
+    @classmethod
+    def from_row(cls, row: dict[str, Any]) -> "SuspendedAgentRun":
+        raw_context = row.get("resume_context_json")
+        context: dict[str, Any] = {}
+        if isinstance(raw_context, str) and raw_context:
+            try:
+                parsed = json.loads(raw_context)
+                if isinstance(parsed, dict):
+                    context = parsed
+            except Exception:
+                context = {}
+        elif isinstance(raw_context, dict):
+            context = raw_context
+        return cls(
+            id=str(row["id"]),
+            platform=str(row["platform"]),
+            channel_id=str(row["channel_id"]),
+            thread_id=str(row["thread_id"]),
+            agent_name=str(row["agent_name"]),
+            status=str(row["status"]),
+            provider=str(row["provider"]),
+            control_envelope_json=str(row["control_envelope_json"]),
+            session_id_snapshot=row.get("session_id_snapshot"),
+            resume_context=context,
+            created_by=str(row["created_by"]),
+            created_at=row.get("created_at"),
+            updated_at=row.get("updated_at"),
+            completed_at=row.get("completed_at"),
+        )
