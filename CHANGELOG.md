@@ -6,6 +6,36 @@ The format is intentionally lightweight and release-oriented rather than exhaust
 
 ## Unreleased
 
+### Added
+
+- Auth-first QR login and structured agent control-flow integration:
+  - owner-only Discord auth commands: `/auth_login`, `/auth_status`, `/auth_clear`
+  - Bilibili QR login provider with local credential persistence
+  - runtime `WAITING_USER_INPUT` state for auth-blocked task execution
+  - `OMA_CONTROL` challenge envelope parsing for direct chat and runtime task paths
+  - suspended direct-chat agent runs that can resume after auth succeeds
+  - resumable auth-triggered agent runs with session-first resume and fresh-run fallback
+- Outbound Discord attachment support for auth QR delivery
+- Docker runtime workflow:
+  - image build/run helper scripts
+  - repo-mounted `/repo` source of truth for config and source code
+  - host-mounted `/home` runtime state root
+  - startup-time editable install from `/repo` so normal source edits only require restart
+  - preinstalled `claude`, `gemini`, and `codex` CLIs in the Docker image
+  - fail-fast startup validation for configured CLI binaries
+
+### Changed
+
+- Docker startup now reads config from `OMA_CONFIG_PATH` (default `/repo/config.yaml`) and loads `.env` from the config directory rather than relying on process `cwd`
+- Skill sync now anchors repo-native `.claude/`, `.gemini/`, and `.agents/skills/` paths to the resolved project root instead of the current working directory
+- Docker entrypoint was simplified to require prepared repo config instead of seeding runtime copies of `config.yaml`, `.env`, `skills/`, or root `AGENTS.md`
+- Docker docs now describe the mounted-repo workflow, restart-vs-rebuild expectations, and CLI/login requirements
+
+### Fixed
+
+- Runtime shutdown order now stops runtime workers/janitor before closing SQLite, preventing `no active connection` janitor crashes during process teardown
+- Runtime janitor now backs off after exceptions instead of spinning in a tight error loop
+
 ## v0.7.0 - 2026-03-01
 
 ### Added

@@ -55,7 +55,7 @@ User (Discord / Slack / ...)
 ### 前置条件
 
 - Python 3.11+
-- 至少安装一个 CLI agent：
+- 如果是本地宿主机运行，至少安装一个 CLI agent：
   - [`claude`](https://docs.anthropic.com/en/docs/claude-code)
   - [`gemini`](https://github.com/google-gemini/gemini-cli)
   - [`codex`](https://github.com/openai/codex)

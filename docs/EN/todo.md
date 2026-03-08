@@ -129,7 +129,7 @@ Upgrade adaptive memory from flat YAML to a date-organized, two-tier architectur
 - [ ] Delivery policy abstraction (`inline summary`, attachment, link)
 - [ ] Markdown-aware chunking for message delivery
 - [ ] Rate limiting / request queue
-- [ ] Docker-based agent isolation
+- [x] Docker-based agent isolation (host-mounted `/home`, repo-mounted `/repo`, config from repo, editable install on start, preinstalled CLI tools)
 - [ ] Discord `/restart` operator command that triggers a host-managed container restart path (securely scoped, implementation detail TBD)
 - [ ] Adaptive Memory encrypted storage + authenticated plaintext access
 - [ ] Adaptive Memory edit permission control

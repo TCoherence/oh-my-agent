@@ -55,7 +55,7 @@ Key layers:
 ### Prerequisites
 
 - Python 3.11+
-- At least one CLI agent installed:
+- For local host execution, at least one CLI agent installed:
   - [`claude`](https://docs.anthropic.com/en/docs/claude-code)
   - [`gemini`](https://github.com/google-gemini/gemini-cli)
   - [`codex`](https://github.com/openai/codex)
