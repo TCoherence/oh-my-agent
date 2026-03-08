@@ -202,7 +202,7 @@ def _apply_v052_defaults(config: dict) -> None:
 
     agents_cfg = config.setdefault("agents", {})
     claude_cfg = agents_cfg.setdefault("claude", {})
-    claude_cfg.setdefault("dangerously_skip_permissions", True)
+    claude_cfg.setdefault("dangerously_skip_permissions", False)
     claude_cfg.setdefault("permission_mode", None)
     claude_cfg.setdefault("extra_args", [])
 
@@ -249,6 +249,42 @@ def _apply_v052_defaults(config: dict) -> None:
     merge_cfg.setdefault("preflight_check", True)
     merge_cfg.setdefault("target_branch_mode", "current")
     merge_cfg.setdefault("commit_message_template", "runtime(task:{task_id}): {goal_short}")
+
+
+def _parse_env_bool(name: str) -> bool | None:
+    raw = os.environ.get(name)
+    if raw is None:
+        return None
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"Invalid boolean env for {name}: {raw!r}")
+
+
+def _apply_agent_env_overrides(config: dict) -> None:
+    agents_cfg = config.setdefault("agents", {})
+
+    claude_cfg = agents_cfg.setdefault("claude", {})
+    claude_skip = _parse_env_bool("OMA_AGENT_CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS")
+    if claude_skip is not None:
+        claude_cfg["dangerously_skip_permissions"] = claude_skip
+    if "OMA_AGENT_CLAUDE_PERMISSION_MODE" in os.environ:
+        value = os.environ.get("OMA_AGENT_CLAUDE_PERMISSION_MODE", "").strip()
+        claude_cfg["permission_mode"] = value or None
+
+    gemini_cfg = agents_cfg.setdefault("gemini", {})
+    gemini_yolo = _parse_env_bool("OMA_AGENT_GEMINI_YOLO")
+    if gemini_yolo is not None:
+        gemini_cfg["yolo"] = gemini_yolo
+
+    codex_cfg = agents_cfg.setdefault("codex", {})
+    if "OMA_AGENT_CODEX_SANDBOX_MODE" in os.environ:
+        codex_cfg["sandbox_mode"] = os.environ["OMA_AGENT_CODEX_SANDBOX_MODE"].strip()
+    codex_bypass = _parse_env_bool("OMA_AGENT_CODEX_DANGEROUSLY_BYPASS_APPROVALS_AND_SANDBOX")
+    if codex_bypass is not None:
+        codex_cfg["dangerously_bypass_approvals_and_sandbox"] = codex_bypass
 
 
 def _runtime_root(config: dict) -> Path:
@@ -606,6 +642,7 @@ def main() -> None:
         sys.exit(1)
 
     _apply_v052_defaults(config)
+    _apply_agent_env_overrides(config)
     runtime_root = _runtime_root(config)
     _setup_logging(runtime_root)
     logger = logging.getLogger(__name__)

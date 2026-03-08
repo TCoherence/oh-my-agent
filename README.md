@@ -203,12 +203,22 @@ On each container start, the entrypoint installs `/repo` as an editable Python p
 The image preinstalls `claude`, `gemini`, and `codex` CLIs.
 Startup performs a fail-fast check for configured `agents.*.cli_path` binaries (`OMA_FAIL_FAST_CLI=0` to disable).
 CLI login/auth state is still required and should be completed inside the mounted `/home` runtime path.
+`./scripts/docker-run.sh` also applies Docker-only agent permission overrides: Claude runs with `--dangerously-skip-permissions`, and Codex runs with `danger-full-access` plus bypass enabled. Direct host startup keeps the safer config defaults instead.
 
 Override mount paths when needed:
 
 ```bash
 OMA_DOCKER_MOUNT=/path/to/your/mount ./scripts/docker-run.sh
 OMA_DOCKER_REPO=/path/to/repo ./scripts/docker-run.sh
+```
+
+Override the Docker-only permission behavior when needed:
+
+```bash
+OMA_AGENT_CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS=false \
+OMA_AGENT_CODEX_SANDBOX_MODE=workspace-write \
+OMA_AGENT_CODEX_DANGEROUSLY_BYPASS_APPROVALS_AND_SANDBOX=false \
+./scripts/docker-run.sh
 ```
 
 By default, the container workdir is `/home`, while the host repo is mounted at `/repo`.

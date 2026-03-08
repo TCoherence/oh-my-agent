@@ -192,12 +192,22 @@ Runtime 产物默认放在 `~/.oh-my-agent/runtime/`（包括 memory DB、日志
 镜像内会预装 `claude`、`gemini`、`codex` 三个 CLI。
 启动时会对 `agents.*.cli_path` 做 fail-fast 检查（可用 `OMA_FAIL_FAST_CLI=0` 关闭）。
 但 CLI 登录态仍需在容器内完成，并持久化到挂载的 `/home` 路径。
+`./scripts/docker-run.sh` 还会注入 Docker 专用的 agent 权限覆盖：Claude 默认开启 `--dangerously-skip-permissions`，Codex 默认使用 `danger-full-access` 并开启 bypass；直接在 host 上启动时仍使用更保守的配置默认值。
 
 需要自定义挂载目录时可以覆盖环境变量：
 
 ```bash
 OMA_DOCKER_MOUNT=/path/to/your/mount ./scripts/docker-run.sh
 OMA_DOCKER_REPO=/path/to/repo ./scripts/docker-run.sh
+```
+
+如果你想临时收紧 Docker 内的权限，也可以覆盖这些环境变量：
+
+```bash
+OMA_AGENT_CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS=false \
+OMA_AGENT_CODEX_SANDBOX_MODE=workspace-write \
+OMA_AGENT_CODEX_DANGEROUSLY_BYPASS_APPROVALS_AND_SANDBOX=false \
+./scripts/docker-run.sh
 ```
 
 默认情况下，容器工作目录是 `/home`，宿主机 repo 挂载在 `/repo`。

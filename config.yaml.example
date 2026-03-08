@@ -141,7 +141,7 @@ agents:
     model: sonnet
     timeout: 300                 # 秒，超时后 fallback 下一个 agent
     allowed_tools: [Bash, Read, Write, Edit, Glob, Grep]
-    dangerously_skip_permissions: true
+    dangerously_skip_permissions: false
     # permission_mode: default    # set to disable bypass, or use other CLI-supported modes
     extra_args: []
     # env_passthrough: [ANTHROPIC_API_KEY]  # env vars forwarded when workspace is set
