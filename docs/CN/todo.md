@@ -130,6 +130,7 @@
 - [ ] Markdown 感知的分块发送
 - [ ] Rate limiting / request queue
 - [ ] Docker 隔离
+- [ ] Discord `/restart` 运维命令：触发 host 侧受控容器重启链路（安全边界先定，具体实现后续细化）
 - [ ] Adaptive Memory 加密存储 + 认证后明文访问
 - [ ] Adaptive Memory 编辑权限控制
 - [ ] 在 `.agents/skills/` 迁移稳定后，再评估是否还需要保留生成的 workspace `AGENTS.md`

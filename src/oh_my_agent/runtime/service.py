@@ -1753,6 +1753,8 @@ class RuntimeService:
                 raise
             except Exception as exc:
                 logger.exception("Runtime janitor failed: %s", exc)
+                # Avoid tight error loops when storage is temporarily unavailable during shutdown.
+                await asyncio.sleep(1.5)
 
     async def _run_task(self, task: RuntimeTask) -> None:
         session = self._session_for(task)

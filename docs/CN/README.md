@@ -166,6 +166,66 @@ Runtime 产物默认放在 `~/.oh-my-agent/runtime/`（包括 memory DB、日志
 ./.venv/bin/oh-my-agent
 ```
 
+### Docker（隔离 Host 运行）
+
+容器启动时会使用两个挂载：
+
+- 状态挂载（`/home`）：保存 `~/.oh-my-agent` 运行时数据和运行文件
+- 仓库挂载（默认当前 repo）：让 agent 直接修改项目代码
+
+构建镜像：
+
+```bash
+./scripts/docker-build.sh
+```
+
+启动容器（默认状态挂载：`${HOME}/oh-my-agent-docker-mount`，默认仓库挂载：当前 repo）：
+
+```bash
+./scripts/docker-run.sh
+```
+
+默认配置来源是 `/repo/config.yaml`（`OMA_CONFIG_PATH`）。
+环境变量替换会从配置文件同目录加载（通常是 `/repo/.env`）。
+因此容器启动前应先在 repo 中准备好配置。
+容器每次启动时会对 `/repo` 执行 editable install（`pip install -e /repo --no-deps`），因此普通源码修改通常不需要重新 build 镜像。
+镜像内会预装 `claude`、`gemini`、`codex` 三个 CLI。
+启动时会对 `agents.*.cli_path` 做 fail-fast 检查（可用 `OMA_FAIL_FAST_CLI=0` 关闭）。
+但 CLI 登录态仍需在容器内完成，并持久化到挂载的 `/home` 路径。
+
+需要自定义挂载目录时可以覆盖环境变量：
+
+```bash
+OMA_DOCKER_MOUNT=/path/to/your/mount ./scripts/docker-run.sh
+OMA_DOCKER_REPO=/path/to/repo ./scripts/docker-run.sh
+```
+
+默认情况下，容器工作目录是 `/home`，宿主机 repo 挂载在 `/repo`。
+这样日常运行与配置在 `/home`，同时仍可在 `/repo` 改代码并提交。
+
+如果你希望直接在挂载 repo 目录运行：
+
+```bash
+OMA_WORKDIR_IN_CONTAINER=/repo ./scripts/docker-run.sh
+```
+
+这时主要编辑状态挂载下的：
+
+- `${HOME}/oh-my-agent-docker-mount/...`（运行时状态/产物）
+
+配置文件请编辑 repo 内：
+
+- `/repo/config.yaml`（宿主机上就是挂载的 repo 路径）
+- `/repo/.env`（宿主机上就是挂载的 repo 路径）
+
+容器内 one-off 命令示例：
+
+```bash
+./scripts/docker-run.sh oh-my-agent --version
+```
+
+只有在修改容器层内容时才需要重新 build 镜像，例如 `Dockerfile`、`docker/entrypoint.sh`、Python/Node/system 依赖。单纯修改 `/repo/src` 下源码，一般只需要重启容器。
+
 ## 使用方式
 
 ### 消息交互

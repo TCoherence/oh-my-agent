@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+IMAGE_TAG="${OMA_IMAGE_TAG:-oh-my-agent:local}"
+MOUNT_PATH="${OMA_DOCKER_MOUNT:-${HOME}/oh-my-agent-docker-mount}"
+CONTAINER_NAME="${OMA_CONTAINER_NAME:-oh-my-agent}"
+REPO_MOUNT_PATH="${OMA_DOCKER_REPO:-${REPO_ROOT}}"
+WORKSPACE_MOUNT_TARGET="${OMA_WORKSPACE_MOUNT_TARGET:-/home}"
+REPO_MOUNT_TARGET="${OMA_REPO_MOUNT_TARGET:-/repo}"
+WORKDIR_IN_CONTAINER="${OMA_WORKDIR_IN_CONTAINER:-${WORKSPACE_MOUNT_TARGET}}"
+CONFIG_PATH_IN_CONTAINER="${OMA_CONFIG_PATH:-${REPO_MOUNT_TARGET}/config.yaml}"
+
+mkdir -p "${MOUNT_PATH}"
+if [[ ! -d "${REPO_MOUNT_PATH}" ]]; then
+  echo "[oma] repo mount path does not exist: ${REPO_MOUNT_PATH}" >&2
+  exit 1
+fi
+
+if ! docker image inspect "${IMAGE_TAG}" >/dev/null 2>&1; then
+  echo "[oma] image ${IMAGE_TAG} not found, building first..."
+  "${SCRIPT_DIR}/docker-build.sh"
+fi
+
+if docker ps -a --format '{{.Names}}' | grep -Fxq "${CONTAINER_NAME}"; then
+  echo "[oma] removing existing container ${CONTAINER_NAME}"
+  docker rm -f "${CONTAINER_NAME}" >/dev/null
+fi
+
+CMD=(
+  docker run --rm
+  --name "${CONTAINER_NAME}"
+  --user "$(id -u):$(id -g)"
+  --cap-drop ALL
+  --security-opt no-new-privileges
+  -e HOME="${WORKSPACE_MOUNT_TARGET}"
+  -e OMA_MOUNT_ROOT="${WORKSPACE_MOUNT_TARGET}"
+  -e OMA_WORKDIR="${WORKDIR_IN_CONTAINER}"
+  -e OMA_REPO_ROOT="${REPO_MOUNT_TARGET}"
+  -e OMA_CONFIG_PATH="${CONFIG_PATH_IN_CONTAINER}"
+  -v "${MOUNT_PATH}:${WORKSPACE_MOUNT_TARGET}"
+  -v "${REPO_MOUNT_PATH}:${REPO_MOUNT_TARGET}"
+  "${IMAGE_TAG}"
+)
+
+if [[ -t 0 && -t 1 ]]; then
+  CMD=(docker run --rm -it "${CMD[@]:3}")
+fi
+
+if [[ $# -gt 0 ]]; then
+  CMD+=("$@")
+fi
+
+echo "[oma] starting container ${CONTAINER_NAME}"
+echo "[oma] host mount: ${MOUNT_PATH} -> ${WORKSPACE_MOUNT_TARGET}"
+echo "[oma] repo mount: ${REPO_MOUNT_PATH} -> ${REPO_MOUNT_TARGET}"
+echo "[oma] workdir in container: ${WORKDIR_IN_CONTAINER}"
+echo "[oma] config path in container: ${CONFIG_PATH_IN_CONTAINER}"
+
+exec "${CMD[@]}"

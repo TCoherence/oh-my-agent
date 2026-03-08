@@ -177,6 +177,66 @@ Check the installed version:
 ./.venv/bin/oh-my-agent --version
 ```
 
+### Docker (Host-Isolated Runtime)
+
+Run the bot inside Docker while keeping two bind mounts:
+
+- runtime/state mount (`/home`) for `~/.oh-my-agent` data and runtime files
+- repo mount (default current repo) so the agent can edit project code directly
+
+Build image:
+
+```bash
+./scripts/docker-build.sh
+```
+
+Start container (default state mount: `${HOME}/oh-my-agent-docker-mount`, default repo mount: current repo):
+
+```bash
+./scripts/docker-run.sh
+```
+
+Default config source is `/repo/config.yaml` (`OMA_CONFIG_PATH`).
+Environment substitution is loaded from the config directory (typically `/repo/.env`).
+Container start now expects repo config to be prepared before launch.
+On each container start, the entrypoint installs `/repo` as an editable Python package (`pip install -e /repo --no-deps`) so normal source edits are picked up without rebuilding the image.
+The image preinstalls `claude`, `gemini`, and `codex` CLIs.
+Startup performs a fail-fast check for configured `agents.*.cli_path` binaries (`OMA_FAIL_FAST_CLI=0` to disable).
+CLI login/auth state is still required and should be completed inside the mounted `/home` runtime path.
+
+Override mount paths when needed:
+
+```bash
+OMA_DOCKER_MOUNT=/path/to/your/mount ./scripts/docker-run.sh
+OMA_DOCKER_REPO=/path/to/repo ./scripts/docker-run.sh
+```
+
+By default, the container workdir is `/home`, while the host repo is mounted at `/repo`.
+This keeps day-to-day runtime/config work in `/home`, while still allowing edits and git operations in `/repo`.
+
+If you prefer running from the mounted repo directly:
+
+```bash
+OMA_WORKDIR_IN_CONTAINER=/repo ./scripts/docker-run.sh
+```
+
+Then edit runtime config under the state mount:
+
+- `${HOME}/oh-my-agent-docker-mount/...` (runtime outputs/state only)
+
+Edit source config in repo:
+
+- `/repo/config.yaml` (host path: your mounted repo)
+- `/repo/.env` (host path: your mounted repo)
+
+Run one-off commands in the same image:
+
+```bash
+./scripts/docker-run.sh oh-my-agent --version
+```
+
+Rebuild the image only when you change container-layer concerns such as `Dockerfile`, `docker/entrypoint.sh`, or Python/Node/system dependencies. Pure source edits under `/repo/src` normally only need a restart.
+
 ## Usage
 
 ### Messages

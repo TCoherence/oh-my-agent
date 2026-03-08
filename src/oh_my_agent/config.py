@@ -25,7 +25,15 @@ def _substitute(value: Any) -> Any:
 
 def load_config(path: str | Path = "config.yaml") -> dict:
     """Load config.yaml with ${ENV_VAR} substitution from the environment."""
-    load_dotenv()
-    raw = Path(path).read_text(encoding="utf-8")
+    config_path = Path(path).expanduser().resolve()
+
+    # Prefer .env next to the selected config file. This works reliably when
+    # code is installed in a different prefix (e.g. Docker image) than the
+    # runtime-mounted workspace/repository.
+    load_dotenv(dotenv_path=config_path.parent / ".env", override=False)
+    # Keep default discovery as a compatibility fallback.
+    load_dotenv(override=False)
+
+    raw = config_path.read_text(encoding="utf-8")
     data = yaml.safe_load(raw)
     return _substitute(data)

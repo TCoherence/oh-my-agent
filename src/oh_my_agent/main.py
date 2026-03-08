@@ -331,7 +331,7 @@ def _setup_logging(runtime_root: Path | None = None) -> None:
     root.addHandler(file_handler)
 
 
-async def _async_main(config: dict, logger: logging.Logger) -> None:
+async def _async_main(config: dict, logger: logging.Logger, *, project_root: Path) -> None:
     """Async entry point — builds agents, memory, and starts gateway."""
 
     owner_user_ids = {
@@ -343,7 +343,6 @@ async def _async_main(config: dict, logger: logging.Logger) -> None:
         logger.info("Owner-only mode enabled for %d user(s)", len(owner_user_ids))
 
     # Setup workspace (Layer 0 sandbox isolation)
-    project_root = Path.cwd()
     workspace: Path | None = None
     if config.get("workspace"):
         skills_cfg_for_ws = config.get("skills", {})
@@ -416,7 +415,7 @@ async def _async_main(config: dict, logger: logging.Logger) -> None:
         from oh_my_agent.skills.skill_sync import SkillSync
 
         skills_path = skills_cfg.get("path", "skills/")
-        skill_syncer = SkillSync(skills_path)
+        skill_syncer = SkillSync(skills_path, project_root=project_root)
 
         if workspace is not None:
             workspace_skills_dirs = [
@@ -568,6 +567,8 @@ async def _async_main(config: dict, logger: logging.Logger) -> None:
     try:
         await gateway.start()
     finally:
+        if runtime_service:
+            await runtime_service.stop()
         if memory_store:
             await memory_store.close()
 
@@ -581,12 +582,18 @@ def main() -> None:
     )
     parser.parse_args()
 
-    # Locate config.yaml (next to cwd or project root)
-    config_path = Path("config.yaml")
+    config_path_raw = os.environ.get("OMA_CONFIG_PATH", "config.yaml").strip() or "config.yaml"
+    config_path = Path(config_path_raw).expanduser()
+    if not config_path.is_absolute():
+        config_path = (Path.cwd() / config_path).resolve()
+
     if not config_path.exists():
         _setup_logging()
         logger = logging.getLogger(__name__)
-        logger.error("config.yaml not found. Copy config.yaml.example and fill in your values.")
+        logger.error(
+            "Config file not found at %s. Set OMA_CONFIG_PATH or provide config.yaml.",
+            config_path,
+        )
         sys.exit(1)
 
     try:
@@ -595,16 +602,17 @@ def main() -> None:
     except Exception as exc:
         _setup_logging()
         logger = logging.getLogger(__name__)
-        logger.error("Failed to load config.yaml: %s", exc)
+        logger.error("Failed to load config %s: %s", config_path, exc)
         sys.exit(1)
 
     _apply_v052_defaults(config)
     runtime_root = _runtime_root(config)
     _setup_logging(runtime_root)
     logger = logging.getLogger(__name__)
-    _migrate_legacy_workspace(config, Path.cwd(), logger)
+    project_root = config_path.parent.resolve()
+    _migrate_legacy_workspace(config, project_root, logger)
 
-    asyncio.run(_async_main(config, logger))
+    asyncio.run(_async_main(config, logger, project_root=project_root))
 
 
 if __name__ == "__main__":

@@ -130,6 +130,7 @@ Upgrade adaptive memory from flat YAML to a date-organized, two-tier architectur
 - [ ] Markdown-aware chunking for message delivery
 - [ ] Rate limiting / request queue
 - [ ] Docker-based agent isolation
+- [ ] Discord `/restart` operator command that triggers a host-managed container restart path (securely scoped, implementation detail TBD)
 - [ ] Adaptive Memory encrypted storage + authenticated plaintext access
 - [ ] Adaptive Memory edit permission control
 - [ ] Revisit whether generated workspace `AGENTS.md` is still needed at all once the `.agents/skills/` migration settles
