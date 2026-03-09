@@ -199,7 +199,8 @@ Start container (default state mount: `${HOME}/oh-my-agent-docker-mount`, defaul
 Default config source is `/repo/config.yaml` (`OMA_CONFIG_PATH`).
 Environment substitution is loaded from the config directory (typically `/repo/.env`).
 Container start now expects repo config to be prepared before launch.
-On each container start, the entrypoint installs `/repo` as an editable Python package (`pip install -e /repo --no-deps`) so normal source edits are picked up without rebuilding the image.
+The image installs runtime dependencies only; normal execution does not rely on a second in-image source snapshot.
+On each container start, the entrypoint installs `/repo` as an editable Python package (`pip install -e /repo --no-deps`), so the mounted repo is the runtime source of truth.
 The image preinstalls `claude`, `gemini`, and `codex` CLIs.
 Startup performs a fail-fast check for configured `agents.*.cli_path` binaries (`OMA_FAIL_FAST_CLI=0` to disable).
 CLI login/auth state is still required and should be completed inside the mounted `/home` runtime path.

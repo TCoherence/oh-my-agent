@@ -21,6 +21,7 @@ The format is intentionally lightweight and release-oriented rather than exhaust
   - repo-mounted `/repo` source of truth for config and source code
   - host-mounted `/home` runtime state root
   - startup-time editable install from `/repo` so normal source edits only require restart
+  - image now carries runtime dependencies only instead of relying on a separate in-image source snapshot for execution
   - preinstalled `claude`, `gemini`, and `codex` CLIs in the Docker image
   - fail-fast startup validation for configured CLI binaries
 

@@ -293,6 +293,13 @@ def _runtime_root(config: dict) -> Path:
     return worktree_root.expanduser().resolve().parent
 
 
+def _resolve_project_path(path_value: str | Path, project_root: Path) -> Path:
+    raw_path = Path(path_value).expanduser()
+    if raw_path.is_absolute():
+        return raw_path.resolve()
+    return (project_root / raw_path).resolve()
+
+
 def _maybe_move(src: Path, dst: Path) -> bool:
     if not src.exists() or dst.exists():
         return False
@@ -383,7 +390,7 @@ async def _async_main(config: dict, logger: logging.Logger, *, project_root: Pat
     if config.get("workspace"):
         skills_cfg_for_ws = config.get("skills", {})
         skills_path_for_ws = (
-            Path(skills_cfg_for_ws.get("path", "skills/")).resolve()
+            _resolve_project_path(skills_cfg_for_ws.get("path", "skills/"), project_root)
             if skills_cfg_for_ws.get("enabled")
             else None
         )
@@ -450,7 +457,7 @@ async def _async_main(config: dict, logger: logging.Logger, *, project_root: Pat
     if skills_cfg.get("enabled", False):
         from oh_my_agent.skills.skill_sync import SkillSync
 
-        skills_path = skills_cfg.get("path", "skills/")
+        skills_path = _resolve_project_path(skills_cfg.get("path", "skills/"), project_root)
         skill_syncer = SkillSync(skills_path, project_root=project_root)
 
         if workspace is not None:
@@ -502,7 +509,11 @@ async def _async_main(config: dict, logger: logging.Logger, *, project_root: Pat
             owner_user_ids=owner_user_ids,
             repo_root=project_root,
             skill_syncer=skill_syncer,
-            skills_path=(Path(skills_cfg.get("path", "skills/")).resolve() if skills_cfg.get("enabled", False) else None),
+            skills_path=(
+                _resolve_project_path(skills_cfg.get("path", "skills/"), project_root)
+                if skills_cfg.get("enabled", False)
+                else None
+            ),
             workspace_skills_dirs=workspace_skills_dirs,
             auth_service=auth_service,
         )

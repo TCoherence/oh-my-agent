@@ -35,6 +35,7 @@ CMD=(
   --cap-drop ALL
   --security-opt no-new-privileges
   -e HOME="${WORKSPACE_MOUNT_TARGET}"
+  -e PATH="${WORKSPACE_MOUNT_TARGET}/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
   -e OMA_MOUNT_ROOT="${WORKSPACE_MOUNT_TARGET}"
   -e OMA_WORKDIR="${WORKDIR_IN_CONTAINER}"
   -e OMA_REPO_ROOT="${REPO_MOUNT_TARGET}"
@@ -61,6 +62,7 @@ echo "[oma] host mount: ${MOUNT_PATH} -> ${WORKSPACE_MOUNT_TARGET}"
 echo "[oma] repo mount: ${REPO_MOUNT_PATH} -> ${REPO_MOUNT_TARGET}"
 echo "[oma] workdir in container: ${WORKDIR_IN_CONTAINER}"
 echo "[oma] config path in container: ${CONFIG_PATH_IN_CONTAINER}"
+echo "[oma] path in container: ${WORKSPACE_MOUNT_TARGET}/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 echo "[oma] docker agent overrides: claude_skip_permissions=${OMA_AGENT_CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS:-true}, codex_sandbox=${OMA_AGENT_CODEX_SANDBOX_MODE:-danger-full-access}, codex_bypass=${OMA_AGENT_CODEX_DANGEROUSLY_BYPASS_APPROVALS_AND_SANDBOX:-true}"
 
 exec "${CMD[@]}"

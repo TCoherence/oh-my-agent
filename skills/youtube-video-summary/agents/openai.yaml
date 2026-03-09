@@ -1,0 +1,4 @@
+interface:
+  display_name: "YouTube Video Summary"
+  short_description: "Extract YouTube subtitles and summarize videos"
+  default_prompt: "Summarize this YouTube video as a polished article-style note with transcript-backed sections and key timestamps."

@@ -31,8 +31,12 @@ class SkillSync:
         skills_path: str | Path = "skills",
         project_root: str | Path | None = None,
     ) -> None:
-        self._skills_path = Path(skills_path).resolve()
         self._project_root = Path(project_root).resolve() if project_root else Path.cwd()
+        raw_skills_path = Path(skills_path).expanduser()
+        if raw_skills_path.is_absolute():
+            self._skills_path = raw_skills_path.resolve()
+        else:
+            self._skills_path = (self._project_root / raw_skills_path).resolve()
         self._state_filename = ".oh-my-agent-state.json"
 
     # ------------------------------------------------------------------ #

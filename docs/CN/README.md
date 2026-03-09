@@ -188,7 +188,8 @@ Runtime 产物默认放在 `~/.oh-my-agent/runtime/`（包括 memory DB、日志
 默认配置来源是 `/repo/config.yaml`（`OMA_CONFIG_PATH`）。
 环境变量替换会从配置文件同目录加载（通常是 `/repo/.env`）。
 因此容器启动前应先在 repo 中准备好配置。
-容器每次启动时会对 `/repo` 执行 editable install（`pip install -e /repo --no-deps`），因此普通源码修改通常不需要重新 build 镜像。
+镜像本身只安装运行依赖，正常执行时不再依赖镜像内另一份源码快照。
+容器每次启动时会对 `/repo` 执行 editable install（`pip install -e /repo --no-deps`），因此挂载的 repo 就是运行时源码真源，普通源码修改通常不需要重新 build 镜像。
 镜像内会预装 `claude`、`gemini`、`codex` 三个 CLI。
 启动时会对 `agents.*.cli_path` 做 fail-fast 检查（可用 `OMA_FAIL_FAST_CLI=0` 关闭）。
 但 CLI 登录态仍需在容器内完成，并持久化到挂载的 `/home` 路径。
