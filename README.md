@@ -265,6 +265,8 @@ Rebuild the image only when you change container-layer concerns such as `Dockerf
 - On restart, the gateway restores stored session IDs from SQLite and attempts to continue the original CLI conversation instead of flattening full history every turn.
 - If a stored session is clearly stale or invalid, it is cleared automatically so the next turn can start fresh.
 - Persisted stale sessions are also deleted when fallback succeeds through another agent.
+- Important caveat: router skill discovery reads the current canonical `skills/` directory, but an existing resumed CLI session may still answer from older session context and not immediately recognize a newly added skill.
+- In practice, new skills are most reliable in a fresh thread or fresh CLI session. `/reload-skills` refreshes skill directories, but it does not guarantee that an already-resumed Claude/Codex/Gemini session will pick up the new skill immediately.
 
 ### Workspace Refresh
 

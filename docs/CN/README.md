@@ -254,6 +254,8 @@ OMA_WORKDIR_IN_CONTAINER=/repo ./scripts/docker-run.sh
 - 进程重启后，gateway 会从 SQLite 恢复这些 session，并优先继续原始 CLI 会话，而不是每轮都重新拼接完整 history。
 - 如果某个 session 已经明显失效或不可恢复，会自动清理，下一轮回退为 fresh session。
 - 如果前置 agent 的 stale session 失效但 fallback agent 成功，旧的持久化 session 也会被一起删除。
+- 一个容易误解的点：router 对 skill 的发现是直接读取当前 canonical `skills/` 目录，但已经恢复中的 CLI session 仍可能沿用旧会话上下文，因此不会立刻认识新加的 skill。
+- 实际上，新 skill 在 fresh thread 或 fresh CLI session 中最可靠。`/reload-skills` 会刷新技能目录，但不保证已经 resume 的 Claude/Codex/Gemini 会话立刻获得这个新 skill 认知。
 
 ### Workspace 自动刷新
 
