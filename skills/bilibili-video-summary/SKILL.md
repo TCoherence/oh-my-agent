@@ -72,14 +72,53 @@ yt-dlp \
 
 - Default to the user's language.
 - Default to an article-style output, not just a bullet dump.
-- Let the section titles follow the actual content of the video; do not force a rigid template when the material suggests a better structure.
+- Use the section order in `Required Markdown Structure` unless the user asks for a different format.
+- Keep heading levels consistent: one `#` title, section headings with `##`, subsection headings with `###`.
 - Keep the opening answer readable and finished, like a publishable note or study brief.
 - Only include timestamps when they come from subtitle segments.
+- Timestamp style must be consistent across the whole answer: use `[MM:SS]` or `[HH:MM:SS]`; for ranges use `[MM:SS-MM:SS]`.
 - Add a short evidence note when the result is metadata-only.
+- Do not output empty sections. If a section has no reliable content, omit it.
 
-### Default article shape
+### Required Markdown Structure
 
-Use this as the baseline structure, but adapt it to the video:
+When the user asks for a summary or asks to "regenerate" because formatting was off, use this exact scaffold and fill with content-specific text:
+
+```md
+# <文章标题>
+
+一句话结论：<核心结论>
+
+## 摘要
+<1-2 段，交代视频主线与结论>
+
+## 核心内容
+### <主题1>
+<短段落>
+- 要点 ...
+- 要点 ...
+
+### <主题2>
+<短段落>
+- 要点 ...
+
+## 关键片段（按时间）
+- [00:00] ...
+- [12:34-13:10] ...
+
+## 结论与建议
+<面向读者的可执行建议，或明确写“无直接行动建议”>
+
+## 证据说明
+- 证据类型：`transcript_backed` | `metadata_only`
+- 来源：Bilibili subtitles / authenticated subtitles / public metadata
+```
+
+If the user's language is not Chinese, keep the same structure but localize heading text.
+
+### Optional richer shape
+
+Use this only when the user explicitly asks for a longer article, while keeping the required section order as the outer frame:
 
 ```md
 # <rewritten article-style title>
