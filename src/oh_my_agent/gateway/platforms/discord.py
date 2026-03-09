@@ -192,6 +192,13 @@ class DiscordChannel(BaseChannel):
                     invocation_id=int(invocation["id"]),
                     actor_id=str(payload.user_id),
                 )
+                logger.info(
+                    "[discord] SKILL_FEEDBACK_CLEAR skill=%s invocation=%s actor=%s message=%s",
+                    invocation.get("skill_name"),
+                    invocation.get("id"),
+                    payload.user_id,
+                    payload.message_id,
+                )
                 return
 
             await self._memory_store.upsert_skill_feedback(
@@ -202,6 +209,15 @@ class DiscordChannel(BaseChannel):
                 thread_id=str(payload.channel_id),
                 score=active_score,
                 source="reaction",
+            )
+            logger.info(
+                "[discord] SKILL_FEEDBACK_RECORDED skill=%s invocation=%s actor=%s score=%+d emoji=%s message=%s",
+                invocation.get("skill_name"),
+                invocation.get("id"),
+                payload.user_id,
+                active_score,
+                emoji,
+                payload.message_id,
             )
 
         def _interaction_thread_id(interaction: discord.Interaction) -> str | None:
