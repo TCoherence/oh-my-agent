@@ -283,6 +283,7 @@ async def test_handle_message_intercepts_auth_control_frame():
             mock_agent,
             AgentResponse(
                 text=(
+                    "我先按 bilibili-video-summary 流程检查这个链接的字幕提取情况。\n\n"
                     '<OMA_CONTROL>{"version":1,"type":"challenge","data":{"challenge_type":"auth_required",'
                     '"provider":"bilibili","reason":"login_required"}}</OMA_CONTROL>'
                 )
@@ -302,8 +303,11 @@ async def test_handle_message_intercepts_auth_control_frame():
 
     runtime.mark_thread_auth_required.assert_awaited_once()
     assert channel.send.await_args_list[-1].args[1] == "Thread `thread-1` is waiting for `bilibili` login."
+    first_message = channel.send.await_args_list[0].args[1]
+    assert first_message.startswith("-# via **codex**\n我先按 bilibili-video-summary 流程检查这个链接的字幕提取情况。")
     history = await session.get_history("thread-1")
-    assert [turn["role"] for turn in history] == ["user"]
+    assert [turn["role"] for turn in history] == ["user", "assistant"]
+    assert history[-1]["content"] == "我先按 bilibili-video-summary 流程检查这个链接的字幕提取情况。"
 
 
 @pytest.mark.asyncio

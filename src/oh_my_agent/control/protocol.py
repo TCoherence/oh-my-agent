@@ -51,6 +51,17 @@ def extract_control_frame(text: str) -> str | None:
     return matches[0]
 
 
+def strip_control_frame_text(text: str) -> str:
+    """Return visible text with the single OMA_CONTROL frame removed."""
+    if not text:
+        return ""
+    frame = extract_control_frame(text)
+    if frame is None:
+        return text.strip()
+    stripped = CONTROL_FRAME_RE.sub("", text, count=1).strip()
+    return re.sub(r"\n{3,}", "\n\n", stripped)
+
+
 def parse_control_envelope(text: str) -> ControlEnvelope:
     frame = extract_control_frame(text)
     if frame is None:

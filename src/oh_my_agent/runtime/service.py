@@ -22,6 +22,7 @@ from oh_my_agent.control.protocol import (
     extract_control_frame,
     parse_auth_challenge,
     parse_control_envelope,
+    strip_control_frame_text,
 )
 from oh_my_agent.gateway.base import IncomingMessage
 from oh_my_agent.gateway.session import ChannelSession
@@ -1369,6 +1370,16 @@ class RuntimeService:
             logger.warning("Suspended run=%s control frame parse failed: %s", run.id, exc)
             envelope = None
         if envelope is not None and auth_challenge is not None:
+            await self._send_auth_challenge_progress(
+                session=session,
+                thread_id=run.thread_id,
+                agent_name=run.agent_name,
+                text=response.text,
+                provider=auth_challenge.provider,
+                skill_name=str(resume_context.get("skill_name") or "") or None,
+                original_user_content=str(resume_context.get("original_user_content") or "") or None,
+                usage=response.usage,
+            )
             await self._store.update_suspended_agent_run(
                 run.id,
                 status="waiting_auth",
@@ -1898,6 +1909,16 @@ class RuntimeService:
                         exc,
                     )
             if auth_challenge is not None:
+                await self._send_auth_challenge_progress(
+                    session=self._session_for(task),
+                    thread_id=task.thread_id,
+                    agent_name=agent_name,
+                    text=response.text,
+                    provider=auth_challenge.provider,
+                    skill_name=task.skill_name,
+                    original_user_content=task.raw_request,
+                    usage=response.usage,
+                )
                 await self._store.add_runtime_event(
                     task.id,
                     "task.auth_challenge",
@@ -2868,6 +2889,70 @@ class RuntimeService:
         remainder = text[len(first_chunks[0]):].lstrip()
         for chunk in chunk_message(remainder) if remainder else []:
             await session.channel.send(thread_id, chunk)
+
+    async def _send_auth_challenge_progress(
+        self,
+        *,
+        session: ChannelSession | None,
+        thread_id: str,
+        agent_name: str,
+        text: str,
+        provider: str,
+        skill_name: str | None,
+        original_user_content: str | None,
+        usage: dict[str, Any] | None,
+    ) -> None:
+        if session is None:
+            return
+        visible_text = self._build_auth_pause_message(
+            raw_text=text,
+            provider=provider,
+            skill_name=skill_name,
+            original_user_content=original_user_content,
+        )
+        if not visible_text:
+            return
+        await session.append_assistant(thread_id, visible_text, agent_name)
+        await self._send_thread_agent_response(
+            session=session,
+            thread_id=thread_id,
+            agent_name=agent_name,
+            text=visible_text,
+            usage=usage,
+        )
+
+    @staticmethod
+    def _build_auth_pause_message(
+        *,
+        raw_text: str,
+        provider: str,
+        skill_name: str | None,
+        original_user_content: str | None,
+    ) -> str:
+        visible_text = strip_control_frame_text(raw_text)
+        if visible_text:
+            return visible_text
+
+        wants_zh = bool(original_user_content and re.search(r"[\u4e00-\u9fff]", original_user_content))
+        if wants_zh:
+            if skill_name:
+                return (
+                    f"继续按 `{skill_name}` 流程提取内容时，发现继续执行前需要先完成 `{provider}` 登录。"
+                    "我先暂停在这里，等你完成认证后自动继续。"
+                )
+            return (
+                f"继续处理这条请求时，发现继续执行前需要先完成 `{provider}` 登录。"
+                "我先暂停在这里，等你完成认证后自动继续。"
+            )
+        if skill_name:
+            return (
+                f"I continued via `{skill_name}`, but `{provider}` login is required before I can keep going. "
+                "I am pausing here and will resume automatically after authentication."
+            )
+        return (
+            f"I hit a `{provider}` login requirement while continuing this request. "
+            "I am pausing here and will resume automatically after authentication."
+        )
 
     def _is_authorized(self, actor_id: str) -> bool:
         if not self._owner_user_ids:

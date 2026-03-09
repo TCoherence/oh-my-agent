@@ -7,6 +7,7 @@ from oh_my_agent.control.protocol import (
     extract_control_frame,
     parse_auth_challenge,
     parse_control_envelope,
+    strip_control_frame_text,
 )
 
 
@@ -24,6 +25,15 @@ def test_extract_control_frame_rejects_multiple_frames():
     )
     with pytest.raises(ProtocolError):
         extract_control_frame(text)
+
+
+def test_strip_control_frame_text_keeps_visible_content():
+    text = (
+        'before\n\n'
+        '<OMA_CONTROL>{"version":1,"type":"challenge","data":{"challenge_type":"auth_required","provider":"bilibili","reason":"login_required"}}</OMA_CONTROL>'
+        '\n\nafter'
+    )
+    assert strip_control_frame_text(text) == "before\n\nafter"
 
 
 def test_parse_auth_challenge_validates_known_provider():

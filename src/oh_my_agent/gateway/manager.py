@@ -14,7 +14,13 @@ from pathlib import Path
 import yaml
 
 from oh_my_agent.automation import ScheduledJob, Scheduler
-from oh_my_agent.control.protocol import ProtocolError, extract_control_frame, parse_auth_challenge, parse_control_envelope
+from oh_my_agent.control.protocol import (
+    ProtocolError,
+    extract_control_frame,
+    parse_auth_challenge,
+    parse_control_envelope,
+    strip_control_frame_text,
+)
 from oh_my_agent.gateway.base import BaseChannel, IncomingMessage
 from oh_my_agent.gateway.session import ChannelSession
 from oh_my_agent.agents.registry import AgentRegistry
@@ -289,6 +295,22 @@ class GatewayManager:
             )
             return True
 
+        visible_text = self._build_auth_pause_message(
+            raw_text=response.text,
+            provider=auth_challenge.provider,
+            skill_name=explicit_skill or routed_skill,
+            original_user_content=msg.content,
+        )
+        if visible_text:
+            await session.append_assistant(thread_id, visible_text, agent_used.name)
+            await self._send_agent_response(
+                session.channel,
+                thread_id,
+                agent_name=agent_used.name,
+                text=visible_text,
+                usage=response.usage,
+            )
+
         session_snapshot = None
         if hasattr(agent_used, "get_session_id"):
             session_snapshot = agent_used.get_session_id(thread_id)
@@ -327,6 +349,39 @@ class GatewayManager:
                 exc_info=True,
             )
         return True
+
+    @staticmethod
+    def _build_auth_pause_message(
+        *,
+        raw_text: str,
+        provider: str,
+        skill_name: str | None,
+        original_user_content: str | None,
+    ) -> str:
+        visible_text = strip_control_frame_text(raw_text)
+        if visible_text:
+            return visible_text
+
+        wants_zh = bool(original_user_content and re.search(r"[\u4e00-\u9fff]", original_user_content))
+        if wants_zh:
+            if skill_name:
+                return (
+                    f"继续按 `{skill_name}` 流程提取内容时，发现继续执行前需要先完成 `{provider}` 登录。"
+                    "我先暂停在这里，等你完成认证后自动继续。"
+                )
+            return (
+                f"继续处理这条请求时，发现继续执行前需要先完成 `{provider}` 登录。"
+                "我先暂停在这里，等你完成认证后自动继续。"
+            )
+        if skill_name:
+            return (
+                f"I continued via `{skill_name}`, but `{provider}` login is required before I can keep going. "
+                "I am pausing here and will resume automatically after authentication."
+            )
+        return (
+            f"I hit a `{provider}` login requirement while continuing this request. "
+            "I am pausing here and will resume automatically after authentication."
+        )
 
     async def start(self) -> None:
         """Start all platform channels concurrently."""
