@@ -1,0 +1,4 @@
+interface:
+  display_name: "Bilibili Video Summary"
+  short_description: "Extract Bilibili subtitles and summarize videos"
+  default_prompt: "Summarize this Bilibili video as a polished article-style note with transcript-backed sections and key timestamps."
