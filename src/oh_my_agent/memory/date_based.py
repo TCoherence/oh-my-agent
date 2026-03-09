@@ -158,9 +158,7 @@ class DateBasedMemoryStore:
         self._load_daily(yd)
 
         # Auto-promote eligible entries
-        promoted = await self._promote_eligible()
-        if promoted:
-            self._needs_synthesis = True
+        await self._promote_eligible()
 
     async def save(self) -> None:
         """Persist curated and today's daily."""
@@ -220,6 +218,7 @@ class DateBasedMemoryStore:
             ]
 
             await self.save()
+            await self._promote_eligible()
             return added
 
     async def get_relevant(self, context: str, budget_chars: int = 500) -> list[MemoryEntry]:
@@ -376,6 +375,7 @@ class DateBasedMemoryStore:
     async def _promote_eligible(self) -> int:
         """Scan ALL daily files and promote entries that meet thresholds."""
         promoted = 0
+        changed = False
 
         # Scan all daily files on disk (not just cached ones)
         if self._daily_dir.exists():
@@ -414,16 +414,18 @@ class DateBasedMemoryStore:
                         for t in m.source_threads:
                             if t not in existing.source_threads:
                                 existing.source_threads.append(t)
+                        changed = True
                     else:
                         m.tier = "curated"
                         to_promote.append(m)
                 else:
                     remaining.append(m)
 
-            if to_promote:
+            if to_promote or len(remaining) != len(entries):
                 self._curated.extend(to_promote)
                 self._daily_cache[d] = remaining
                 promoted += len(to_promote)
+                changed = True
                 # Save updated daily file
                 if remaining:
                     _save_yaml_list(self._daily_dir / _daily_filename(d), remaining)
@@ -434,7 +436,11 @@ class DateBasedMemoryStore:
                         daily_path.unlink()
                     del self._daily_cache[d]
 
-        if promoted:
+        if changed:
             await self.save()
-            logger.info("Promoted %d daily memories to curated", promoted)
+            self._needs_synthesis = True
+            if promoted:
+                logger.info("Promoted %d daily memories to curated", promoted)
+            else:
+                logger.info("Updated curated memories from eligible daily observations")
         return promoted

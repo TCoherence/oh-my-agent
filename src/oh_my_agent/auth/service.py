@@ -137,9 +137,11 @@ class AuthService:
             await self._store.update_auth_flow(
                 existing.id,
                 status=AUTH_FLOW_STATUS_CANCELLED,
+                qr_image_path=None,
                 error="Superseded by a new QR flow.",
                 completed_at_now=True,
             )
+            await self._cleanup_qr_image(existing)
 
         started = await provider_impl.start_qr_login(owner_user_id)
         flow_id = uuid.uuid4().hex[:12]
@@ -187,9 +189,11 @@ class AuthService:
             await self._store.update_auth_flow(
                 flow.id,
                 status=AUTH_FLOW_STATUS_CANCELLED,
+                qr_image_path=None,
                 error="Cancelled by user.",
                 completed_at_now=True,
             )
+            await self._cleanup_qr_image(flow)
 
     async def get_status(
         self,
@@ -252,21 +256,25 @@ class AuthService:
             updated = await self._store.update_auth_flow(
                 flow.id,
                 status=AUTH_FLOW_STATUS_EXPIRED,
+                qr_image_path=None,
                 error=result.message,
                 completed_at_now=True,
             )
             if updated:
                 await self._emit("expired", updated, None, result.message)
+            await self._cleanup_qr_image(flow)
             return
         if result.status == AUTH_POLL_STATUS_FAILED:
             updated = await self._store.update_auth_flow(
                 flow.id,
                 status=AUTH_FLOW_STATUS_FAILED,
+                qr_image_path=None,
                 error=result.message,
                 completed_at_now=True,
             )
             if updated:
                 await self._emit("failed", updated, None, result.message)
+            await self._cleanup_qr_image(flow)
             return
         if result.status != AUTH_POLL_STATUS_APPROVED:
             return
@@ -287,11 +295,13 @@ class AuthService:
         updated = await self._store.update_auth_flow(
             flow.id,
             status=AUTH_FLOW_STATUS_APPROVED,
+            qr_image_path=None,
             error=None,
             completed_at_now=True,
         )
         if updated:
             await self._emit("approved", updated, credential, result.message)
+        await self._cleanup_qr_image(flow)
 
     async def _emit(
         self,
@@ -313,3 +323,12 @@ class AuthService:
     @staticmethod
     def _now_timestamp() -> str:
         return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+    async def _cleanup_qr_image(self, flow: AuthFlow) -> None:
+        if not flow.qr_image_path:
+            return
+        qr_path = Path(flow.qr_image_path)
+        try:
+            qr_path.unlink(missing_ok=True)
+        except OSError:
+            logger.debug("Failed to delete QR image %s", qr_path, exc_info=True)

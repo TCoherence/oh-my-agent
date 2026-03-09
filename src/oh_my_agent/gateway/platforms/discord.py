@@ -1043,6 +1043,17 @@ class DiscordChannel(BaseChannel):
 
             promoted = await self._adaptive_memory_store.promote_memory(memory_id)
             if promoted:
+                if (
+                    getattr(self._adaptive_memory_store, "needs_synthesis", False)
+                    and hasattr(self._adaptive_memory_store, "synthesize_memory_md")
+                    and self._registry is not None
+                ):
+                    try:
+                        await self._adaptive_memory_store.synthesize_memory_md(self._registry)
+                        if hasattr(self._adaptive_memory_store, "clear_synthesis_flag"):
+                            self._adaptive_memory_store.clear_synthesis_flag()
+                    except Exception:
+                        logger.warning("MEMORY.md synthesis after /promote failed", exc_info=True)
                 await interaction.response.send_message(
                     f"Memory `{memory_id}` promoted to curated.", ephemeral=True,
                 )

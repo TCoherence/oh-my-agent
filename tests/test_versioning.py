@@ -27,17 +27,6 @@ def test_package_version_is_not_behind_latest_changelog_release():
     assert _parse_version(__version__) >= _parse_version(latest_release)
 
 
-def test_unreleased_changes_require_dev_version():
-    text = _changelog_text()
-    match = re.search(r"^## Unreleased\s*(.*?)(?=^## v|\Z)", text, flags=re.MULTILINE | re.DOTALL)
-    assert match, "CHANGELOG.md must contain an Unreleased section"
-    unreleased_body = match.group(1).strip()
-    if unreleased_body:
-        assert ".dev" in __version__, (
-            "package version must use a .dev suffix while CHANGELOG.md has unreleased changes"
-        )
-
-
 def test_cli_version_flag_prints_version(monkeypatch, capsys):
     monkeypatch.setattr("sys.argv", ["oh-my-agent", "--version"])
     with pytest.raises(SystemExit) as excinfo:

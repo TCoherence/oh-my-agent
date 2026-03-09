@@ -4,14 +4,14 @@
 
 灵感来自 [OpenClaw](https://openclaw.dev)。
 
-## 当前状态（2026-03-01）
+## 当前状态（2026-03-08）
 
 - `/search` 已通过 SQLite FTS5 实现跨线程检索。
 - `SkillSync` reverse sync 已实现，并在启动时执行。
 - v0.5 runtime-first 已完成（包括 runtime hardening pass）。
 - v0.6 主线是 skill-first autonomy + adaptive memory；全部已完成。
-- v0.7 已经完成日期驱动记忆系统，当前继续推进 ops 基础、Human-in-the-Loop runtime 和 skill 评估。
-- v0.8+ 增加语义记忆检索（向量搜索）和 hybrid autonomy。
+- v0.7.1 在 v0.7 基线上补齐了 auth-first 暂停/恢复、Docker 隔离运行链路，以及 transcript-first 的 YouTube/Bilibili 视频 skill。
+- 后续版本继续推进语义记忆检索（向量搜索）和 hybrid autonomy。
 - Discord 审批交互采用按钮优先、slash 兜底，reaction 只做状态信号。
 - 可选的 LLM 路由已实现：消息可被分类为 `reply_once`、`invoke_existing_skill`、`propose_artifact_task`、`propose_repo_task` 或 `create_skill`。
 - Runtime 可观测性已实现：支持 `/task_logs`、SQLite 中采样式 progress 事件，以及 Discord 中单条可更新的状态消息。
@@ -87,7 +87,7 @@ memory:
   path: ~/.oh-my-agent/runtime/memory.db
   adaptive:
     enabled: true
-    path: ~/.oh-my-agent/memories.yaml
+    memory_dir: ~/.oh-my-agent/memory
 
 workspace: ~/.oh-my-agent/agent-workspace
 
@@ -314,6 +314,7 @@ OMA_WORKDIR_IN_CONTAINER=/repo ./scripts/docker-run.sh
 - 第一版 provider 只支持 `bilibili`。
 - `/auth_login bilibili` 会在当前配置频道或 thread 里发送二维码图片。
 - 登录成功后，cookie 会落盘到 `~/.oh-my-agent/runtime/auth/providers/bilibili/<owner_user_id>/`。
+- `~/.oh-my-agent/runtime/auth/qr/` 下的二维码 PNG 只是临时文件，flow 进入终态后会自动删除。
 - 当 agent 输出 `OMA_CONTROL` 的 `auth_required` challenge 时，runtime task 会进入 `WAITING_USER_INPUT`。
 - 普通聊天 / 显式 skill 路径现在也支持同样的 auth challenge：core 会挂起当前 run，扫码完成后优先恢复原 CLI session。
 - 二维码登录完成后，绑定的 task 会自动回到 `PENDING`，无需用户再手动 resume。
@@ -353,14 +354,17 @@ OMA_WORKDIR_IN_CONTAINER=/repo ./scripts/docker-run.sh
 - `~/.oh-my-agent/agent-workspace/.agents/skills/` — Codex 在外置 workspace 中使用的 repo/workspace 原生 skill 目录
 - `~/.oh-my-agent/runtime/tasks/` — runtime 长任务的 worktree 和 artifact 产物
 - `~/.oh-my-agent/runtime/logs/` — service log + per-agent 底层日志
-- `~/.oh-my-agent/memories.yaml` — adaptive memory 持久化存储
+- `~/.oh-my-agent/memory/daily/YYYY-MM-DD.yaml` — 每日追加的短期记忆
+- `~/.oh-my-agent/memory/curated.yaml` — 晋升后的长期记忆
+- `~/.oh-my-agent/memory/MEMORY.md` — 基于长期记忆自动合成的人类可读摘要
 
 ## 自主性方向
 
 - v0.5 建立 runtime-first 基线：长任务执行、恢复、审批和合并闭环（已完成）。
 - v0.6 聚焦 skill-first autonomy + adaptive memory：skill 创建路由验证、跨 session 用户记忆（已完成）。
-- v0.7 已经交付日期驱动记忆系统，当前继续推进 ops 基础、Human-in-the-Loop runtime 和 skill 评估。
-- v0.8+ 增加语义记忆检索和 hybrid autonomy。
+- v0.7 建立日期驱动记忆系统基线（已完成）。
+- v0.7.1 补齐 auth-first runtime、Docker 隔离运行和 transcript-first 视频 skill（已完成）。
+- 后续版本继续推进语义记忆检索和 hybrid autonomy。
 - 源代码自我更迭可以作为高风险、强审批的特殊能力存在，但不是默认自主性主线。
 
 ## 当前限制

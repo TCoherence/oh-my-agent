@@ -252,6 +252,32 @@ async def test_auto_promote_eligible(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_add_memories_triggers_promotion_scan_for_existing_daily(tmp_path):
+    mem_dir = tmp_path / "memory"
+    s = DateBasedMemoryStore(
+        memory_dir=mem_dir,
+        promotion_observation_threshold=3,
+        promotion_confidence_threshold=0.8,
+    )
+    await s.load()
+
+    old_date = (datetime.now(timezone.utc) - timedelta(days=3)).date()
+    eligible = _entry(
+        summary="user consistently prefers concise answers",
+        confidence=0.9,
+        observation_count=5,
+        created_at=(datetime.now(timezone.utc) - timedelta(days=3)).isoformat(),
+    )
+    _write_yaml(mem_dir / "daily" / f"{old_date.isoformat()}.yaml", [eligible])
+
+    await s.add_memories([_entry(summary="fresh daily memory")])
+
+    curated = [m for m in s.memories if m.tier == "curated"]
+    assert any(m.summary == "user consistently prefers concise answers" for m in curated)
+    assert s.needs_synthesis is True
+
+
+@pytest.mark.asyncio
 async def test_no_promote_low_count(tmp_path):
     mem_dir = tmp_path / "memory"
     daily_dir = mem_dir / "daily"

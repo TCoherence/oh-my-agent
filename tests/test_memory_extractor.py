@@ -127,6 +127,25 @@ async def test_thread_id_in_source(extractor, store):
 
 
 @pytest.mark.asyncio
+async def test_extract_triggers_memory_synthesis_when_needed():
+    store = MagicMock()
+    store.list_all = AsyncMock(return_value=[])
+    store.add_memories = AsyncMock(return_value=1)
+    type(store).needs_synthesis = property(lambda _self: True)
+    store.synthesize_memory_md = AsyncMock()
+    store.clear_synthesis_flag = MagicMock()
+
+    extractor = MemoryExtractor(store)
+    registry = _mock_registry('[{"summary": "User prefers concise summaries", "category": "preference", "confidence": 0.9}]')
+    turns = [{"role": "user", "content": "Keep it concise"}]
+
+    await extractor.extract(turns, registry, thread_id="thread-1")
+
+    store.synthesize_memory_md.assert_awaited_once_with(registry)
+    store.clear_synthesis_flag.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_parse_response_static():
     entries = MemoryExtractor._parse_response(
         '```\n[{"summary": "test", "category": "fact", "confidence": 0.5}]\n```',

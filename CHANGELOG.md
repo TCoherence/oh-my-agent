@@ -6,6 +6,8 @@ The format is intentionally lightweight and release-oriented rather than exhaust
 
 ## Unreleased
 
+## v0.7.1 - 2026-03-08
+
 ### Added
 
 - Auth-first QR login and structured agent control-flow integration:
@@ -24,6 +26,9 @@ The format is intentionally lightweight and release-oriented rather than exhaust
   - image now carries runtime dependencies only instead of relying on a separate in-image source snapshot for execution
   - preinstalled `claude`, `gemini`, and `codex` CLIs in the Docker image
   - fail-fast startup validation for configured CLI binaries
+- Transcript-first video skills:
+  - `youtube-video-summary` using `yt-dlp` for subtitle and metadata extraction
+  - `bilibili-video-summary` using `yt-dlp`, explicit `auth_required` signaling, and transcript-backed article-style summaries
 
 ### Changed
 
@@ -31,11 +36,16 @@ The format is intentionally lightweight and release-oriented rather than exhaust
 - Skill sync now anchors repo-native `.claude/`, `.gemini/`, and `.agents/skills/` paths to the resolved project root instead of the current working directory
 - Docker entrypoint was simplified to require prepared repo config instead of seeding runtime copies of `config.yaml`, `.env`, `skills/`, or root `AGENTS.md`
 - Docker docs now describe the mounted-repo workflow, restart-vs-rebuild expectations, and CLI/login requirements
+- Date-based memory now keeps promoting eligible daily observations into `curated.yaml` during normal runtime operation instead of only on startup
+- `MEMORY.md` synthesis is now wired into startup, memory extraction, and manual `/promote` flows when curated memory changes
+- Auth challenge UX now surfaces the agent's progress/update message before sending the QR prompt, so resume no longer appears to jump in abruptly
 
 ### Fixed
 
 - Runtime shutdown order now stops runtime workers/janitor before closing SQLite, preventing `no active connection` janitor crashes during process teardown
 - Runtime janitor now backs off after exceptions instead of spinning in a tight error loop
+- Auth QR PNG files are now cleaned up when flows reach terminal states (`approved`, `expired`, `failed`, `cancelled`)
+- Resumed CLI sessions are now documented as potentially stale with respect to newly added skills, matching actual router-vs-session behavior
 
 ## v0.7.0 - 2026-03-01
 

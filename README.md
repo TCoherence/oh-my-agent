@@ -4,13 +4,13 @@ Multi-platform bot that routes messages to CLI-based AI agents (Claude, Gemini, 
 
 Inspired by [OpenClaw](https://openclaw.dev).
 
-## Status Snapshot (2026-03-01)
+## Status Snapshot (2026-03-08)
 
 - `/search` is implemented with SQLite FTS5 across all threads.
 - `SkillSync` reverse sync is implemented and runs on startup.
 - v0.5 is runtime-first: durable autonomous task loops (`DRAFT -> RUNNING -> WAITING_MERGE -> MERGED/...`).
 - v0.6 skill-first autonomy + adaptive memory is complete.
-- v0.7 has shipped date-based memory and is now focused on ops foundation, human-in-the-loop runtime, and skill evaluation.
+- v0.7.1 extends the v0.7 line with auth-first runtime pause/resume, Docker isolation workflow, and transcript-first YouTube/Bilibili skills.
 - Discord approvals use buttons first, slash fallback, reactions as status-only signals.
 - Optional LLM routing is implemented: incoming messages can be classified as `reply_once`, `invoke_existing_skill`, `propose_artifact_task`, `propose_repo_task`, or `create_skill`.
 - Runtime observability is implemented: `/task_logs`, sampled progress events in SQLite, and a single updatable Discord status message.
@@ -88,7 +88,7 @@ memory:
   path: ~/.oh-my-agent/runtime/memory.db
   adaptive:
     enabled: true
-    path: ~/.oh-my-agent/memories.yaml
+    memory_dir: ~/.oh-my-agent/memory
 
 workspace: ~/.oh-my-agent/agent-workspace
 
@@ -320,6 +320,7 @@ Rebuild the image only when you change container-layer concerns such as `Dockerf
 - Current provider support is intentionally narrow: `bilibili` only.
 - `/auth_login bilibili` sends a QR code image into the current configured channel or thread.
 - Successful scans persist cookies under `~/.oh-my-agent/runtime/auth/providers/bilibili/<owner_user_id>/`.
+- QR PNGs under `~/.oh-my-agent/runtime/auth/qr/` are temporary and are deleted when the flow reaches a terminal state.
 - Runtime tasks can move into `WAITING_USER_INPUT` when an agent emits an `OMA_CONTROL` auth challenge; once the QR flow completes, the linked task is re-queued automatically.
 - Direct chat / explicit skill runs can also suspend on `OMA_CONTROL` auth challenges, store a resumable suspended run record, and continue the same agent session after login when possible.
 - In a waiting thread, replying `retry login`, `重新登录`, or `重新扫码` reissues the QR flow.
@@ -370,6 +371,10 @@ Rebuild the image only when you change container-layer concerns such as `Dockerf
 
 - `~/.oh-my-agent/agent-workspace/` is the base external workspace used by CLI agents.
 - `~/.oh-my-agent/agent-workspace/sessions/` stores per-thread transient workspaces for normal chat turns.
+- `~/.oh-my-agent/memory/` stores date-based memory files:
+  - `daily/YYYY-MM-DD.yaml` for append-only daily observations
+  - `curated.yaml` for promoted long-term memories
+  - `MEMORY.md` for the synthesized natural-language view of curated memory
 - `~/.oh-my-agent/agent-workspace/.agents/skills/` is refreshed so Codex can use official repo/workspace skill discovery in external workspaces too.
 - `~/.oh-my-agent/runtime/tasks/` stores isolated runtime task worktrees and artifact task output directories.
 - The external workspace now uses a generated `AGENTS.md` as the single injected context document. Repo-root `AGENT.md`, `CLAUDE.md`, and `GEMINI.md` are no longer mirrored into the external workspace or session workspaces.
@@ -379,8 +384,8 @@ Rebuild the image only when you change container-layer concerns such as `Dockerf
 
 - v0.5 establishes the runtime-first baseline: durable task execution, merge gating, and recovery.
 - v0.6 focuses on skill-first autonomy + adaptive memory: skill creation, skill routing, skill validation, reusable capability growth, and cross-session user knowledge.
-- v0.7 delivers date-based memory and continues with ops foundation, human-in-the-loop runtime, and skill evaluation.
-- v0.8+ adds semantic memory retrieval (vector search) and hybrid autonomy.
+- v0.7 delivers date-based memory; v0.7.1 closes the current auth/runtime/video integration pass on top of it.
+- v0.8+ adds semantic memory retrieval (vector search) and broader hybrid autonomy.
 - Source-code self-modification may exist as a high-risk, strongly gated capability, but it is not the default autonomy path.
 
 ## Current Limits
@@ -408,9 +413,7 @@ Rebuild the image only when you change container-layer concerns such as `Dockerf
 
 - The package version is sourced from [`src/oh_my_agent/_version.py`](src/oh_my_agent/_version.py).
 - `oh-my-agent --version` prints the installed version without requiring `config.yaml`.
-- `CHANGELOG.md` is expected to move with the package version:
-  - released sections use `vX.Y.Z`
-  - if `Unreleased` is non-empty, the package version should stay on a `.devN` suffix
+- `CHANGELOG.md` is expected to move with the package version; released sections use `vX.Y.Z`.
 
 ## License
 

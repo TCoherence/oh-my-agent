@@ -101,6 +101,13 @@ class MemoryExtractor:
             return entries
 
         added = await self._store.add_memories(entries)
+        if getattr(self._store, "needs_synthesis", False) and hasattr(self._store, "synthesize_memory_md"):
+            try:
+                await self._store.synthesize_memory_md(registry)
+                if hasattr(self._store, "clear_synthesis_flag"):
+                    self._store.clear_synthesis_flag()
+            except Exception as exc:
+                logger.warning("%sMemory synthesis failed: %s", req_prefix, exc)
         logger.info("%sMemory extraction: parsed=%d, added=%d", req_prefix, len(entries), added)
         return entries
 

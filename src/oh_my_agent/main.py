@@ -587,6 +587,14 @@ async def _async_main(config: dict, logger: logging.Logger, *, project_root: Pat
         logger.error("No channels configured in config.yaml")
         sys.exit(1)
 
+    if adaptive_store and getattr(adaptive_store, "needs_synthesis", False):
+        try:
+            await adaptive_store.synthesize_memory_md(channel_pairs[0][1])
+            adaptive_store.clear_synthesis_flag()
+            logger.info("Adaptive memory synthesis refreshed at startup.")
+        except Exception as exc:
+            logger.warning("Adaptive memory startup synthesis failed: %s", exc)
+
     gateway = GatewayManager(
         channel_pairs,
         compressor=compressor,
