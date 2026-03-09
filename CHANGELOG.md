@@ -6,6 +6,18 @@ The format is intentionally lightweight and release-oriented rather than exhaust
 
 ## Unreleased
 
+### Added
+
+- File-driven automation scheduling under `~/.oh-my-agent/automations/*.yaml`
+- Polling-based automation hot reload for file add/update/delete and per-file `enabled` toggles
+- Cron-based automation schedules with `interval_seconds` retained for high-frequency local testing
+
+### Changed
+
+- `config.yaml` no longer embeds `automations.jobs`; automation config now only carries global scheduler settings
+- Scheduler startup now watches the automation storage directory even when it initially contains 0 jobs
+- README and Chinese README now document the external automation directory, hot-reload semantics, and current in-memory-only runtime state behavior
+
 ## v0.7.1 - 2026-03-08
 
 ### Added

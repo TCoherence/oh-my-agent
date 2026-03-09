@@ -17,6 +17,7 @@
 - Runtime 可观测性已实现：支持 `/task_logs`、SQLite 中采样式 progress 事件，以及 Discord 中单条可更新的状态消息。
 - Gateway/消息日志现在会用 `purpose=...` 区分普通回复、显式 skill 调用和 router 驱动回复；后台 memory/compression agent 调用会继承同一个 `req_id`，便于串联排查。
 - Runtime hardening 已完成：真正的子进程中断、消息驱动控制（stop/pause/resume）、PAUSED 状态、完成摘要、metrics。
+- Automation 已迁到 `~/.oh-my-agent/automations/` 文件驱动目录，并支持轮询热加载和单条开关。
 - Adaptive Memory 已实现：对话中自动提取记忆、注入 agent prompt、`/memories` 和 `/forget` 命令。
 - Claude / Codex / Gemini 的 CLI session resume 已实现，线程级 session ID 会持久化并在重启后恢复。
 - Auth-first 二维码登录基础设施已实现：Discord owner 可手动发起登录，登录态会本地持久化，并可恢复等待中的 runtime task。
@@ -127,6 +128,11 @@ router:
   confidence_threshold: 0.55
   require_user_confirm: true
 
+automations:
+  enabled: true
+  storage_dir: ~/.oh-my-agent/automations
+  reload_interval_seconds: 5
+
 runtime:
   enabled: true
   worker_concurrency: 3
@@ -159,6 +165,7 @@ auth:
 敏感信息放在 `.env` 文件中，`config.yaml` 里的 `${VAR}` 会自动替换。
 
 Runtime 产物默认放在 `~/.oh-my-agent/runtime/`（包括 memory DB、日志、task worktree）。旧版 `.workspace/` 会在启动时自动迁移。
+Automation 定义文件现在放在 `~/.oh-my-agent/automations/*.yaml`，修改这些文件不需要重启进程。
 
 ### 启动
 
@@ -308,6 +315,49 @@ OMA_WORKDIR_IN_CONTAINER=/repo ./scripts/docker-run.sh
 - `/auth_status [provider]`
 - `/auth_clear [provider]`
 
+### Automation
+
+- Automation 的 source of truth 现在是 `~/.oh-my-agent/automations/*.yaml`，不再内嵌在 `config.yaml` 里。
+- Scheduler 会轮询该目录，对新增、修改、删除以及 `enabled` 开关变化自动热加载，无需重启进程。
+- 调度方式支持：
+  - `cron: "0 9 * * *"`：正常的日历时间调度
+  - `interval_seconds`：高频本地测试
+- `cron` 和 `interval_seconds` 互斥。
+- `initial_delay_seconds` 只支持和 `interval_seconds` 一起使用。
+- 第一版运行时状态只保存在内存：
+  - 重启后重新计算下一次触发时间
+  - 不持久化 `last_run` / `next_run` / `last_error`
+  - 进程停机期间错过的任务不会补跑
+
+示例 automation 文件：
+
+```yaml
+name: daily-standup
+enabled: true
+platform: discord
+channel_id: "${DISCORD_CHANNEL_ID}"
+delivery: channel
+prompt: "Summarize open TODOs and suggest top 3 coding tasks."
+agent: codex
+cron: "0 9 * * *"
+author: scheduler
+```
+
+本地高频测试示例：
+
+```yaml
+name: hello-from-codex
+enabled: false
+platform: discord
+channel_id: "${DISCORD_CHANNEL_ID}"
+delivery: dm
+prompt: "Hello from the other side! Just checking in."
+agent: codex
+interval_seconds: 20
+initial_delay_seconds: 10
+author: scheduler
+```
+
 ### 二维码登录
 
 - auth 能力默认只对 `access.owner_user_ids` 白名单用户开放；如果没配置 owner，`/auth_*` 命令会禁用。
@@ -354,6 +404,7 @@ OMA_WORKDIR_IN_CONTAINER=/repo ./scripts/docker-run.sh
 - `~/.oh-my-agent/agent-workspace/.agents/skills/` — Codex 在外置 workspace 中使用的 repo/workspace 原生 skill 目录
 - `~/.oh-my-agent/runtime/tasks/` — runtime 长任务的 worktree 和 artifact 产物
 - `~/.oh-my-agent/runtime/logs/` — service log + per-agent 底层日志
+- `~/.oh-my-agent/automations/` — 文件驱动的 automation 定义目录（支持热加载）
 - `~/.oh-my-agent/memory/daily/YYYY-MM-DD.yaml` — 每日追加的短期记忆
 - `~/.oh-my-agent/memory/curated.yaml` — 晋升后的长期记忆
 - `~/.oh-my-agent/memory/MEMORY.md` — 基于长期记忆自动合成的人类可读摘要

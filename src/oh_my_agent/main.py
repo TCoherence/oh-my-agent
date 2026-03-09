@@ -186,6 +186,11 @@ def _apply_v052_defaults(config: dict) -> None:
     router_cfg.setdefault("context_turns", 10)
     router_cfg.setdefault("require_user_confirm", True)
 
+    automations_cfg = config.setdefault("automations", {})
+    automations_cfg.setdefault("enabled", True)
+    automations_cfg.setdefault("storage_dir", "~/.oh-my-agent/automations")
+    automations_cfg.setdefault("reload_interval_seconds", 5)
+
     memory_cfg = config.setdefault("memory", {})
     memory_cfg.setdefault("backend", "sqlite")
     memory_cfg.setdefault("path", "~/.oh-my-agent/runtime/memory.db")
@@ -479,9 +484,14 @@ async def _async_main(config: dict, logger: logging.Logger, *, project_root: Pat
         scheduler = build_scheduler_from_config(
             config,
             default_target_user_id=default_target_user_id,
+            project_root=project_root,
         )
         if scheduler:
-            logger.info("Loaded scheduler with %d job(s)", len(scheduler.jobs))
+            logger.info(
+                "Loaded scheduler with %d active job(s) from %s",
+                len(scheduler.jobs),
+                config.get("automations", {}).get("storage_dir", "~/.oh-my-agent/automations"),
+            )
     except Exception as exc:
         logger.error("Failed to build scheduler from config: %s", exc)
         sys.exit(1)

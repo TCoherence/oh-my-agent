@@ -18,6 +18,7 @@ Inspired by [OpenClaw](https://openclaw.dev).
 - Gateway/message logs now distinguish direct replies, explicit skill invocations, and router-driven reply paths via `purpose=...`; background memory/compression agent runs inherit the same request ID for traceability.
 - Multi-type runtime is implemented: only `repo_change` and `skill_change` tasks use merge gate; `artifact` tasks complete without merge.
 - Runtime hardening is complete: true subprocess interruption, message-driven control (stop/pause/resume), PAUSED state, completion summaries, metrics.
+- Automations are now file-driven under `~/.oh-my-agent/automations/`, with polling-based hot reload and per-file enable/disable.
 - Adaptive memory is implemented: auto-extraction from conversations, injection into agent prompts, `/memories` and `/forget` commands.
 - CLI session resume is implemented for Claude, Codex, and Gemini, with persisted session IDs restored after restart.
 - Auth-first QR login infrastructure is implemented for Discord owner flows, with local credential persistence and runtime resume hooks.
@@ -128,6 +129,11 @@ router:
   confidence_threshold: 0.55
   require_user_confirm: true
 
+automations:
+  enabled: true
+  storage_dir: ~/.oh-my-agent/automations
+  reload_interval_seconds: 5
+
 runtime:
   enabled: true
   worker_concurrency: 3
@@ -164,6 +170,7 @@ auth:
 Secrets should live in `.env`; `${VAR}` placeholders are substituted automatically.
 
 Runtime artifacts default to `~/.oh-my-agent/runtime/` (memory DB, logs, task worktrees). Legacy `.workspace/` is migrated automatically on startup.
+Automation definitions now live under `~/.oh-my-agent/automations/*.yaml`; edits there are picked up automatically without restarting the process.
 
 ### Run
 
@@ -314,6 +321,49 @@ Rebuild the image only when you change container-layer concerns such as `Dockerf
 - `/auth_status [provider]`
 - `/auth_clear [provider]`
 
+### Automations
+
+- Automation source of truth is `~/.oh-my-agent/automations/*.yaml`, not `config.yaml`.
+- The scheduler polls that directory and hot-reloads file additions, edits, deletes, and `enabled` flips without restarting the process.
+- Scheduling supports:
+  - `cron: "0 9 * * *"` for normal wall-clock schedules
+  - `interval_seconds` for high-frequency local testing
+- `cron` and `interval_seconds` are mutually exclusive.
+- `initial_delay_seconds` is supported only with `interval_seconds`.
+- Runtime state is intentionally in-memory only for now:
+  - restart recomputes the next fire time
+  - there is no persisted `last_run` / `next_run` / `last_error`
+  - missed jobs while the process is down are not replayed
+
+Example automation file:
+
+```yaml
+name: daily-standup
+enabled: true
+platform: discord
+channel_id: "${DISCORD_CHANNEL_ID}"
+delivery: channel
+prompt: "Summarize open TODOs and suggest top 3 coding tasks."
+agent: codex
+cron: "0 9 * * *"
+author: scheduler
+```
+
+Local testing example:
+
+```yaml
+name: hello-from-codex
+enabled: false
+platform: discord
+channel_id: "${DISCORD_CHANNEL_ID}"
+delivery: dm
+prompt: "Hello from the other side! Just checking in."
+agent: codex
+interval_seconds: 20
+initial_delay_seconds: 10
+author: scheduler
+```
+
 ### Auth QR Login
 
 - Auth flows are owner-only; if `access.owner_user_ids` is empty, `/auth_*` commands stay disabled.
@@ -377,6 +427,7 @@ Rebuild the image only when you change container-layer concerns such as `Dockerf
   - `MEMORY.md` for the synthesized natural-language view of curated memory
 - `~/.oh-my-agent/agent-workspace/.agents/skills/` is refreshed so Codex can use official repo/workspace skill discovery in external workspaces too.
 - `~/.oh-my-agent/runtime/tasks/` stores isolated runtime task worktrees and artifact task output directories.
+- `~/.oh-my-agent/automations/` stores file-driven automation definitions with hot reload.
 - The external workspace now uses a generated `AGENTS.md` as the single injected context document. Repo-root `AGENT.md`, `CLAUDE.md`, and `GEMINI.md` are no longer mirrored into the external workspace or session workspaces.
 - The generated workspace `AGENTS.md` includes visible metadata so it is clear when you are looking at a derived file instead of the repo source file.
 

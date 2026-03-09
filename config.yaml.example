@@ -71,20 +71,9 @@ router:
   require_user_confirm: true
 
 automations:
-  enabled: false                      # global scheduler switch
-  jobs:
-    # - name: "daily-standup"
-    #   enabled: true                    # optional, default true
-    #   platform: discord
-    #   channel_id: "${DISCORD_CHANNEL_ID}"
-    #   delivery: channel                # "channel" (default) | "dm"
-    #   thread_id: "1234567890123456789"   # optional for channel delivery
-    #   target_user_id: "123456789012345678"  # optional for dm; defaults to first owner_user_ids
-    #   prompt: "Summarize open TODOs and suggest top 3 coding tasks."
-    #   agent: codex                         # optional: force a specific agent
-    #   interval_seconds: 86400
-    #   initial_delay_seconds: 10
-    #   author: "scheduler"
+  enabled: true
+  storage_dir: ~/.oh-my-agent/automations
+  reload_interval_seconds: 5       # polling-based hot reload for automation files
 
 runtime:
   enabled: true
