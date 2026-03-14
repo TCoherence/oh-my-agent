@@ -95,6 +95,7 @@ class RuntimeTask:
     completion_mode: str
     output_summary: str | None
     artifact_manifest: list[str] | None
+    automation_name: str | None
     workspace_cleaned_at: str | None
     created_at: str | None
     started_at: str | None
@@ -136,6 +137,7 @@ class RuntimeTask:
             completion_mode=str(row.get("completion_mode", TASK_COMPLETION_MERGE)),
             output_summary=row.get("output_summary"),
             artifact_manifest=row.get("artifact_manifest"),
+            automation_name=row.get("automation_name"),
             workspace_cleaned_at=row.get("workspace_cleaned_at"),
             created_at=row.get("created_at"),
             started_at=row.get("started_at"),

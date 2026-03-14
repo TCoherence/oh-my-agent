@@ -72,6 +72,8 @@ logger = logging.getLogger(__name__)
 
 _STATUS_MESSAGE_PREFIX = "**Task Status**"
 _TERMINAL_MESSAGE_PREFIX = "**Task Update**"
+_TASK_STATE_LINE_RE = re.compile(r"^\s*TASK_STATE:\s*\w+\s*$", re.MULTILINE)
+_BLOCK_REASON_LINE_RE = re.compile(r"^\s*BLOCK_REASON:\s*.+\s*$", re.MULTILINE)
 
 _TERMINAL_CLEANUP_STATUSES = {
     TASK_STATUS_APPLIED,  # legacy
@@ -83,6 +85,17 @@ _TERMINAL_CLEANUP_STATUSES = {
     TASK_STATUS_TIMEOUT,
     TASK_STATUS_STOPPED,
     TASK_STATUS_REJECTED,
+}
+
+_ACTIVE_AUTOMATION_TASK_STATUSES = {
+    TASK_STATUS_DRAFT,
+    TASK_STATUS_PENDING,
+    TASK_STATUS_RUNNING,
+    TASK_STATUS_VALIDATING,
+    TASK_STATUS_BLOCKED,
+    TASK_STATUS_PAUSED,
+    TASK_STATUS_WAITING_USER_INPUT,
+    TASK_STATUS_WAITING_MERGE,
 }
 
 
@@ -126,7 +139,7 @@ class RuntimeService:
         cleanup_cfg = cfg.get("cleanup", {})
         self._cleanup_enabled = bool(cleanup_cfg.get("enabled", True))
         self._cleanup_interval_minutes = int(cleanup_cfg.get("interval_minutes", 60))
-        self._cleanup_retention_hours = int(cleanup_cfg.get("retention_hours", 72))
+        self._cleanup_retention_hours = int(cleanup_cfg.get("retention_hours", 168))
         self._cleanup_prune_worktrees = bool(cleanup_cfg.get("prune_git_worktrees", True))
         self._cleanup_merged_immediately = bool(cleanup_cfg.get("merged_immediate", True))
 
@@ -535,8 +548,10 @@ class RuntimeService:
             await self._auth_service.start()
         requeued = await self._store.requeue_inflight_runtime_tasks()
         cleaned_on_start = 0
+        cleaned_logs_on_start = 0
         if self._cleanup_enabled:
             cleaned_on_start = await self._cleanup_expired_tasks()
+            cleaned_logs_on_start = await self._cleanup_expired_agent_logs()
         for idx in range(self._worker_concurrency):
             self._workers.append(
                 asyncio.create_task(self._worker_loop(idx), name=f"runtime-worker-{idx}")
@@ -544,11 +559,12 @@ class RuntimeService:
         if self._cleanup_enabled:
             self._janitor_task = asyncio.create_task(self._janitor_loop(), name="runtime-janitor")
         logger.info(
-            "Runtime started with %d worker(s)%s%s%s",
+            "Runtime started with %d worker(s)%s%s%s%s",
             len(self._workers),
             " + janitor" if self._janitor_task else "",
             f"; requeued {requeued} inflight task(s)" if requeued else "",
             f"; cleaned {cleaned_on_start} stale workspace(s) on start" if cleaned_on_start else "",
+            f"; pruned {cleaned_logs_on_start} stale agent log(s) on start" if cleaned_logs_on_start else "",
         )
 
     async def stop(self) -> None:
@@ -707,6 +723,7 @@ class RuntimeService:
         output_summary: str | None = None,
         artifact_manifest: list[str] | None = None,
         skill_name: str | None = None,
+        automation_name: str | None = None,
     ) -> RuntimeTask:
         self.register_session(session, registry)
 
@@ -741,6 +758,7 @@ class RuntimeService:
             completion_mode=completion_mode,
             output_summary=output_summary,
             artifact_manifest=artifact_manifest,
+            automation_name=automation_name,
             task_type=task_type,
             skill_name=skill_name,
         )
@@ -839,6 +857,7 @@ class RuntimeService:
         max_minutes: int | None = None,
         source: str,
         force_draft: bool = False,
+        automation_name: str | None = None,
     ) -> RuntimeTask:
         return await self.create_task(
             session=session,
@@ -855,6 +874,7 @@ class RuntimeService:
             force_draft=force_draft,
             task_type=TASK_TYPE_ARTIFACT,
             completion_mode=TASK_COMPLETION_REPLY,
+            automation_name=automation_name,
         )
 
     async def create_skill_task(
@@ -901,11 +921,29 @@ class RuntimeService:
         session: ChannelSession,
         registry: AgentRegistry,
         thread_id: str,
+        automation_name: str,
         prompt: str,
         author: str,
         preferred_agent: str | None,
-    ) -> RuntimeTask:
-        return await self.create_repo_change_task(
+    ) -> RuntimeTask | None:
+        tasks = await self._store.list_runtime_tasks(
+            platform=session.platform,
+            channel_id=session.channel_id,
+            limit=200,
+        )
+        for task in tasks:
+            if task.automation_name != automation_name:
+                continue
+            if task.status in _ACTIVE_AUTOMATION_TASK_STATUSES:
+                logger.info(
+                    "Scheduler job '%s' skipped: existing task %s is still %s",
+                    automation_name,
+                    task.id,
+                    task.status,
+                )
+                return None
+
+        return await self.create_artifact_task(
             session=session,
             registry=registry,
             thread_id=thread_id,
@@ -913,7 +951,11 @@ class RuntimeService:
             raw_request=prompt,
             created_by=author,
             preferred_agent=preferred_agent,
+            test_command="true",
+            max_steps=1,
+            max_minutes=10,
             source="scheduler",
+            automation_name=automation_name,
         )
 
     async def get_task(self, task_id: str) -> RuntimeTask | None:
@@ -1757,8 +1799,13 @@ class RuntimeService:
         while not self._stop_event.is_set():
             try:
                 cleaned = await self._cleanup_expired_tasks()
-                if cleaned:
-                    logger.info("Runtime janitor cleaned %d expired task workspace(s)", cleaned)
+                cleaned_logs = await self._cleanup_expired_agent_logs()
+                if cleaned or cleaned_logs:
+                    logger.info(
+                        "Runtime janitor cleaned %d expired task workspace(s) and %d expired agent log(s)",
+                        cleaned,
+                        cleaned_logs,
+                    )
                 await asyncio.sleep(max(1, self._cleanup_interval_minutes) * 60)
             except asyncio.CancelledError:
                 raise
@@ -1952,93 +1999,106 @@ class RuntimeService:
                     await self._fail(task, guard_error)
                     return
 
-            await self._store.update_runtime_task(task.id, status=TASK_STATUS_VALIDATING)
-            logger.info(
-                "Runtime task=%s step=%d status=VALIDATING test=%r changed=%d",
-                task.id,
-                step,
-                task.test_command,
-                len(changed_files),
-            )
-            await self._store.add_runtime_event(
-                task.id,
-                "task.phase",
-                {"step": step, "phase": "test_running", "command": task.test_command},
-            )
-            await self._notify(
-                task,
-                f"Task `{task.id}` step {step}: agent finished. Running tests: `{task.test_command}`",
-            )
-            await self._signal_status_by_id(task, TASK_STATUS_VALIDATING)
-            test_notice_state = {"last_notice": 0.0, "last_persist": 0.0}
-
-            async def _on_test_heartbeat(elapsed: float) -> None:
+            skip_validation = bool(task.automation_name and task.test_command.strip() == "true")
+            if skip_validation:
+                rc = 0
+                test_ok = True
+                test_summary = ""
+                test_display = ""
+                test_timed_out = False
+                await self._store.add_runtime_event(
+                    task.id,
+                    "task.phase",
+                    {"step": step, "phase": "test_skipped", "command": task.test_command},
+                )
+            else:
+                await self._store.update_runtime_task(task.id, status=TASK_STATUS_VALIDATING)
                 logger.info(
-                    "Runtime task=%s step=%d TEST_RUNNING elapsed=%.2fs command=%r",
+                    "Runtime task=%s step=%d status=VALIDATING test=%r changed=%d",
                     task.id,
                     step,
-                    elapsed,
                     task.test_command,
-                )
-                if elapsed - test_notice_state["last_persist"] >= self._progress_persist_seconds:
-                    test_notice_state["last_persist"] = elapsed
-                    await self._store.add_runtime_event(
-                        task.id,
-                        "task.test_progress",
-                        {"step": step, "elapsed_seconds": round(elapsed, 2), "command": task.test_command},
-                    )
-                if elapsed - test_notice_state["last_notice"] >= self._progress_notice_seconds:
-                    test_notice_state["last_notice"] = elapsed
-                    await self._notify(
-                        task,
-                        f"Task `{task.id}` step {step}: tests still running ({int(elapsed)}s elapsed).",
-                    )
-
-            t_test = time.perf_counter()
-            rc, out, err, test_timed_out = await self._worktree.run_shell(
-                workspace,
-                task.test_command,
-                timeout_seconds=self._test_timeout_seconds,
-                heartbeat_seconds=self._test_heartbeat_seconds,
-                on_heartbeat=_on_test_heartbeat,
-            )
-            total_test_s += time.perf_counter() - t_test
-            test_ok = rc == 0
-            test_summary = (out + ("\n" + err if err else "")).strip()
-            if not test_summary:
-                test_summary = f"exit={rc}"
-            test_display = self._format_test_output(test_summary)
-            logger.info(
-                "Runtime task=%s step=%d TEST_DONE rc=%d",
-                task.id,
-                step,
-                rc,
-            )
-            if test_timed_out:
-                timeout_msg = (
-                    f"Test command exceeded timeout ({int(self._test_timeout_seconds)}s). "
-                    f"Recent output:\n{test_display}"
+                    len(changed_files),
                 )
                 await self._store.add_runtime_event(
                     task.id,
-                    "task.test_timeout",
-                    {"step": step, "timeout_seconds": self._test_timeout_seconds},
-                )
-                await self._store.update_runtime_task(
-                    task.id,
-                    status=TASK_STATUS_TIMEOUT,
-                    ended_at_now=True,
-                    summary="Test command timed out.",
-                    error=timeout_msg[:2000],
+                    "task.phase",
+                    {"step": step, "phase": "test_running", "command": task.test_command},
                 )
                 await self._notify(
                     task,
-                    f"Task `{task.id}` timed out during tests.\n```text\n{test_display}\n```",
-                    record_history=True,
-                    terminal=True,
+                    f"Task `{task.id}` step {step}: agent finished. Running tests: `{task.test_command}`",
                 )
-                await self._signal_status_by_id(task, TASK_STATUS_TIMEOUT)
-                return
+                await self._signal_status_by_id(task, TASK_STATUS_VALIDATING)
+                test_notice_state = {"last_notice": 0.0, "last_persist": 0.0}
+
+                async def _on_test_heartbeat(elapsed: float) -> None:
+                    logger.info(
+                        "Runtime task=%s step=%d TEST_RUNNING elapsed=%.2fs command=%r",
+                        task.id,
+                        step,
+                        elapsed,
+                        task.test_command,
+                    )
+                    if elapsed - test_notice_state["last_persist"] >= self._progress_persist_seconds:
+                        test_notice_state["last_persist"] = elapsed
+                        await self._store.add_runtime_event(
+                            task.id,
+                            "task.test_progress",
+                            {"step": step, "elapsed_seconds": round(elapsed, 2), "command": task.test_command},
+                        )
+                    if elapsed - test_notice_state["last_notice"] >= self._progress_notice_seconds:
+                        test_notice_state["last_notice"] = elapsed
+                        await self._notify(
+                            task,
+                            f"Task `{task.id}` step {step}: tests still running ({int(elapsed)}s elapsed).",
+                        )
+
+                t_test = time.perf_counter()
+                rc, out, err, test_timed_out = await self._worktree.run_shell(
+                    workspace,
+                    task.test_command,
+                    timeout_seconds=self._test_timeout_seconds,
+                    heartbeat_seconds=self._test_heartbeat_seconds,
+                    on_heartbeat=_on_test_heartbeat,
+                )
+                total_test_s += time.perf_counter() - t_test
+                test_ok = rc == 0
+                test_summary = (out + ("\n" + err if err else "")).strip()
+                if not test_summary:
+                    test_summary = f"exit={rc}"
+                test_display = self._format_test_output(test_summary)
+                logger.info(
+                    "Runtime task=%s step=%d TEST_DONE rc=%d",
+                    task.id,
+                    step,
+                    rc,
+                )
+                if test_timed_out:
+                    timeout_msg = (
+                        f"Test command exceeded timeout ({int(self._test_timeout_seconds)}s). "
+                        f"Recent output:\n{test_display}"
+                    )
+                    await self._store.add_runtime_event(
+                        task.id,
+                        "task.test_timeout",
+                        {"step": step, "timeout_seconds": self._test_timeout_seconds},
+                    )
+                    await self._store.update_runtime_task(
+                        task.id,
+                        status=TASK_STATUS_TIMEOUT,
+                        ended_at_now=True,
+                        summary="Test command timed out.",
+                        error=timeout_msg[:2000],
+                    )
+                    await self._notify(
+                        task,
+                        f"Task `{task.id}` timed out during tests.\n```text\n{test_display}\n```",
+                        record_history=True,
+                        terminal=True,
+                    )
+                    await self._signal_status_by_id(task, TASK_STATUS_TIMEOUT)
+                    return
 
             await self._store.add_runtime_checkpoint(
                 task_id=task.id,
@@ -2131,10 +2191,14 @@ class RuntimeService:
                 finding_lines = self._format_evaluation_findings(evaluation_findings)
                 if finding_lines:
                     summary += "\nReview findings:\n" + "\n".join(finding_lines)
-                output_summary = self._build_output_summary(
-                    task=task,
-                    changed_files=changed_files,
-                    test_summary=test_summary,
+                output_summary = (
+                    strip_control_frame_text(response.text).strip()
+                    if task.automation_name
+                    else self._build_output_summary(
+                        task=task,
+                        changed_files=changed_files,
+                        test_summary=test_summary,
+                    )
                 )
                 artifact_manifest = changed_files if task.completion_mode != TASK_COMPLETION_MERGE else None
                 if self._uses_merge_flow(task) and self._merge_gate_enabled:
@@ -2223,11 +2287,18 @@ class RuntimeService:
                     return
 
                 logger.info("Runtime task=%s COMPLETED step=%d", task.id, step)
-                completion_text = self._completed_text(
-                    task=await self._store.get_runtime_task(task.id) or task,
-                    changed_files=changed_files,
-                    test_summary=test_summary,
-                )
+                completed_task = await self._store.get_runtime_task(task.id) or task
+                if task.automation_name:
+                    completion_text = await self._automation_completed_text(
+                        task=completed_task,
+                        changed_files=changed_files,
+                    )
+                else:
+                    completion_text = self._completed_text(
+                        task=completed_task,
+                        changed_files=changed_files,
+                        test_summary=test_summary,
+                    )
                 await self._notify(task, completion_text, record_history=True, terminal=True)
                 await self._signal_status_by_id(task, TASK_STATUS_COMPLETED)
                 return
@@ -2510,6 +2581,34 @@ class RuntimeService:
                 logger.debug("git worktree prune failed", exc_info=True)
         return cleaned
 
+    async def _cleanup_expired_agent_logs(self) -> int:
+        if not self._agent_logs_root.exists():
+            return 0
+        cutoff_ts = time.time() - (max(0, self._cleanup_retention_hours) * 3600)
+        cleaned = 0
+        for path in self._agent_logs_root.rglob("*"):
+            if not path.is_file():
+                continue
+            try:
+                if path.stat().st_mtime > cutoff_ts:
+                    continue
+                path.unlink(missing_ok=True)
+                cleaned += 1
+            except Exception as exc:
+                logger.warning("Failed to remove stale agent log %s: %s", path, exc)
+        self._live_agent_logs = {
+            task_id: path
+            for task_id, path in self._live_agent_logs.items()
+            if path.exists()
+        }
+        for directory in sorted(self._agent_logs_root.rglob("*"), reverse=True):
+            if directory.is_dir():
+                try:
+                    directory.rmdir()
+                except OSError:
+                    pass
+        return cleaned
+
     async def _cleanup_single_task(self, task: RuntimeTask) -> bool:
         if not task.workspace_path:
             return False
@@ -2616,6 +2715,8 @@ class RuntimeService:
     def _build_output_summary(self, task: RuntimeTask, changed_files: list[str], test_summary: str) -> str | None:
         if task.completion_mode == TASK_COMPLETION_MERGE:
             return None
+        if task.automation_name:
+            return None
         parts: list[str] = []
         if changed_files:
             parts.append(f"Artifacts ({len(changed_files)}): " + ", ".join(changed_files[:10]))
@@ -2641,6 +2742,142 @@ class RuntimeService:
             lines.append("Validation result:")
             lines.append(f"```text\n{formatted[:500]}\n```")
         return "\n".join(lines)[:1900]
+
+    async def _automation_completed_text(self, *, task: RuntimeTask, changed_files: list[str]) -> str:
+        artifact_preview = self._automation_artifact_preview(task, changed_files)
+        source_text = ""
+        artifact_path: str | None = None
+        if artifact_preview:
+            artifact_path, source_text = artifact_preview
+        elif task.output_summary:
+            source_text = task.output_summary
+
+        body, notes = self._split_automation_output(source_text)
+        if artifact_path:
+            notes.append(f"artifact: `{artifact_path}`")
+        elif changed_files:
+            notes.append(
+                "artifacts: " + ", ".join(f"`{path}`" for path in changed_files[:4])
+            )
+            if len(changed_files) > 4:
+                notes[-1] += f" and {len(changed_files) - 4} more"
+        if task.workspace_path:
+            run_dir = Path(task.workspace_path).name
+            notes.append(f"run dir: `_artifacts/{run_dir}`")
+
+        lines: list[str] = []
+        if body:
+            lines.append("**Output**")
+            lines.append(body)
+        elif notes:
+            lines.append("**Output**")
+            lines.append("Automation run completed.")
+        else:
+            lines.append("**Output**")
+            lines.append("Automation run completed.")
+
+        if notes:
+            lines.append("")
+            for note in notes:
+                lines.append(f"-# {note}")
+
+        lines.append("")
+        lines.append("-# ✅ automation run complete")
+        return "\n".join(lines)[:1900]
+
+    def _automation_artifact_preview(
+        self,
+        task: RuntimeTask,
+        changed_files: list[str],
+    ) -> tuple[str, str] | None:
+        if not task.workspace_path or len(changed_files) != 1:
+            return None
+        rel_path = changed_files[0]
+        candidate = Path(task.workspace_path) / rel_path
+        if not candidate.is_file():
+            return None
+        if candidate.stat().st_size > 32_000:
+            return None
+        try:
+            content = candidate.read_text(encoding="utf-8", errors="replace").strip()
+        except Exception:
+            return None
+        if not content or "\x00" in content:
+            return None
+        return rel_path, content[:3500]
+
+    @staticmethod
+    def _split_automation_output(text: str) -> tuple[str, list[str]]:
+        cleaned = _TASK_STATE_LINE_RE.sub("", text or "")
+        cleaned = _BLOCK_REASON_LINE_RE.sub("", cleaned)
+        cleaned = cleaned.strip()
+        if not cleaned:
+            return "", []
+
+        paragraphs = [part.strip() for part in re.split(r"\n\s*\n", cleaned) if part.strip()]
+        if not paragraphs:
+            return "", []
+
+        body_parts: list[str] = []
+        notes: list[str] = []
+        for paragraph in paragraphs:
+            if RuntimeService._is_automation_note_paragraph(paragraph):
+                notes.append(RuntimeService._normalize_automation_note(paragraph))
+                continue
+            body_parts.append(paragraph)
+
+        if not body_parts and notes:
+            return "", notes
+
+        if len(body_parts) > 1:
+            leading = body_parts[0]
+            if RuntimeService._is_automation_prep_paragraph(leading):
+                notes.insert(0, RuntimeService._normalize_automation_note(leading))
+                body_parts = body_parts[1:]
+
+        body = "\n\n".join(body_parts).strip()
+        return body, notes
+
+    @staticmethod
+    def _is_automation_note_paragraph(text: str) -> bool:
+        lowered = " ".join(text.split()).lower()
+        if "`" in text and "/" in text:
+            return True
+        return lowered.startswith(
+            (
+                "created ",
+                "implemented in ",
+                "saved ",
+                "wrote ",
+                "written to ",
+                "artifact:",
+                "artifacts:",
+                "output:",
+            )
+        )
+
+    @staticmethod
+    def _is_automation_prep_paragraph(text: str) -> bool:
+        lowered = " ".join(text.split()).lower()
+        return lowered.startswith(
+            (
+                "i'll ",
+                "i will ",
+                "i’m going to ",
+                "i'm going to ",
+                "the workspace is empty",
+                "the directory is empty",
+                "i have the current ",
+                "i'll fetch ",
+                "i will fetch ",
+                "i'm generating ",
+                "i am generating ",
+            )
+        )
+
+    @staticmethod
+    def _normalize_automation_note(text: str) -> str:
+        return " ".join(text.split())
 
     async def _resolve_last_agent_name(self, task: RuntimeTask) -> str:
         events = await self._store.list_runtime_events(task.id, limit=20)
@@ -2697,6 +2934,12 @@ class RuntimeService:
         session = self._session_for(task)
         if session is None:
             return
+        if task.automation_name:
+            if record_history:
+                await session.append_assistant(task.thread_id, text[:4000], "runtime")
+            if terminal:
+                await self._send_automation_terminal_message(task, text)
+            return
         current = await self._store.get_runtime_task(task.id)
         status_message_id = current.status_message_id if current else task.status_message_id
         body = self._format_status_message(text)
@@ -2712,6 +2955,22 @@ class RuntimeService:
             await session.append_assistant(task.thread_id, text[:4000], "runtime")
         if terminal:
             await session.channel.send(task.thread_id, self._format_terminal_message(text)[:1900])
+
+    async def _send_automation_terminal_message(self, task: RuntimeTask, text: str) -> None:
+        session = self._session_for(task)
+        if session is None:
+            return
+        agent_name = await self._resolve_last_agent_name(task)
+        attribution = f"-# automation `{task.automation_name}` · run `{task.id}` · via **{agent_name}**"
+        first_chunk_budget = max(1, 2000 - len(attribution) - 1)
+        chunks = chunk_message(text, max_size=first_chunk_budget)
+        if not chunks:
+            await session.channel.send(task.thread_id, f"{attribution}\n*(empty automation output)*")
+            return
+        await session.channel.send(task.thread_id, f"{attribution}\n{chunks[0]}")
+        remainder = text[len(chunks[0]):].lstrip()
+        for chunk in chunk_message(remainder) if remainder else []:
+            await session.channel.send(task.thread_id, chunk)
 
     async def _signal_status_by_id(self, task: RuntimeTask, status: str) -> None:
         emoji = self._emoji_for_status(status)

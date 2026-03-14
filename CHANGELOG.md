@@ -11,11 +11,19 @@ The format is intentionally lightweight and release-oriented rather than exhaust
 - File-driven automation scheduling under `~/.oh-my-agent/automations/*.yaml`
 - Polling-based automation hot reload for file add/update/delete and per-file `enabled` toggles
 - Cron-based automation schedules with `interval_seconds` retained for high-frequency local testing
+- Discord operator automation commands: `/automation_status`, `/automation_reload`, `/automation_enable`, `/automation_disable`
+- Temporary `docs/archive/next_up.md` note for near-term execution focus
 
 ### Changed
 
 - `config.yaml` no longer embeds `automations.jobs`; automation config now only carries global scheduler settings
 - Scheduler startup now watches the automation storage directory even when it initially contains 0 jobs
+- Scheduler now keeps a visible in-memory snapshot of valid active + disabled automations for operator commands, while invalid/conflicting files remain log-only
+- Scheduler-triggered automations now use reply/artifact runtime tasks with a single-step `true` validation path instead of repo-change loops
+- Duplicate fires of the same automation name are now skipped while an earlier run is still in flight
+- Automation runs now post the final artifact/result directly in Discord instead of runtime task status/update spam
+- Requeued in-flight runtime tasks now roll back one step before retry, avoiding immediate `TIMEOUT max_steps=1` failures after restart for single-step automation runs
+- Runtime cleanup now uses a 7-day default retention window and prunes stale agent logs along with old task workspaces
 - README and Chinese README now document the external automation directory, hot-reload semantics, and current in-memory-only runtime state behavior
 
 ## v0.7.1 - 2026-03-08

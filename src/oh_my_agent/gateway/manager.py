@@ -413,6 +413,9 @@ class GatewayManager:
             if hasattr(channel, "set_runtime_service") and self._runtime_service:
                 channel.set_runtime_service(self._runtime_service)
 
+            if hasattr(channel, "set_scheduler") and self._scheduler:
+                channel.set_scheduler(self._scheduler)
+
             if hasattr(channel, "set_skill_evaluation_config"):
                 channel.set_skill_evaluation_config(
                     {
@@ -508,6 +511,7 @@ class GatewayManager:
                 session=session,
                 registry=session.registry,
                 thread_id=thread_id,
+                automation_name=job.name,
                 prompt=job.prompt,
                 author=job.author,
                 preferred_agent=job.agent,

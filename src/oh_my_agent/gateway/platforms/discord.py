@@ -85,6 +85,7 @@ class DiscordChannel(BaseChannel):
         self._workspace_skills_dirs = None  # list[Path] | None
         self._runtime_service = None  # RuntimeService
         self._adaptive_memory_store = None  # AdaptiveMemoryStore
+        self._scheduler = None  # Scheduler
         self._skill_eval_enabled = True
         self._skill_stats_recent_days = 7
         self._skill_feedback_emojis = {"👍", "👎"}
@@ -111,6 +112,10 @@ class DiscordChannel(BaseChannel):
     def set_runtime_service(self, runtime_service) -> None:
         """Inject runtime service for /task_* commands and decision buttons."""
         self._runtime_service = runtime_service
+
+    def set_scheduler(self, scheduler) -> None:
+        """Inject scheduler for /automation_* commands."""
+        self._scheduler = scheduler
 
     def set_adaptive_memory_store(self, store) -> None:
         """Inject adaptive memory store for /memories and /forget commands."""
@@ -155,6 +160,18 @@ class DiscordChannel(BaseChannel):
                     f"- `{item['evaluation_type']}` [{item['status']}] {item['summary']}"
                 )
             return lines
+
+        def _format_automation_schedule(record) -> str:
+            if record.cron:
+                return f"cron `{record.cron}`"
+            return f"interval `{record.interval_seconds}s`"
+
+        def _format_automation_target(record) -> str:
+            if record.delivery == "dm":
+                return f"dm user `{record.target_user_id or '?'}` via channel `{record.channel_id}`"
+            if record.thread_id:
+                return f"channel `{record.channel_id}` thread `{record.thread_id}`"
+            return f"channel `{record.channel_id}`"
 
         async def _sync_skill_feedback_from_payload(payload: discord.RawReactionActionEvent) -> None:
             if not self._skill_eval_enabled or not self._memory_store:
@@ -468,6 +485,149 @@ class DiscordChannel(BaseChannel):
                 await interaction.followup.send("\n".join(summary)[:2000])
             except Exception as exc:
                 await interaction.followup.send(f"Skill reload failed: {exc}")
+
+        @tree.command(name="automation_status", description="Show automation status")
+        @app_commands.describe(name="Optional automation name")
+        async def slash_automation_status(
+            interaction: discord.Interaction,
+            name: str | None = None,
+        ):
+            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
+                await interaction.response.send_message(
+                    "This command is restricted to the configured owner.",
+                    ephemeral=True,
+                )
+                return
+            if not self._scheduler:
+                await interaction.response.send_message(
+                    "Automation scheduler is not enabled.",
+                    ephemeral=True,
+                )
+                return
+
+            if name:
+                record = self._scheduler.get_automation(name.strip())
+                if not record:
+                    await interaction.response.send_message(
+                        f"Automation `{name}` not found.",
+                        ephemeral=True,
+                    )
+                    return
+                state = "enabled" if record.enabled else "disabled"
+                lines = [
+                    f"**Automation** `{record.name}`",
+                    f"- State: `{state}`",
+                    f"- Schedule: {_format_automation_schedule(record)}",
+                    f"- Delivery: `{record.delivery}`",
+                    f"- Target: {_format_automation_target(record)}",
+                    f"- Agent: `{record.agent or 'fallback'}`",
+                    f"- Author: `{record.author}`",
+                    f"- Source: `{record.source_path}`",
+                ]
+                await interaction.response.send_message("\n".join(lines)[:1900], ephemeral=True)
+                return
+
+            records = self._scheduler.list_automations()
+            if not records:
+                await interaction.response.send_message(
+                    "No visible automations found. Invalid or conflicting files are log-only for now.",
+                    ephemeral=True,
+                )
+                return
+
+            enabled_records = [record for record in records if record.enabled]
+            disabled_records = [record for record in records if not record.enabled]
+            lines = [
+                f"**Automations** — {len(enabled_records)} enabled, {len(disabled_records)} disabled",
+            ]
+            if enabled_records:
+                lines.append("**Enabled**")
+                for record in enabled_records[:12]:
+                    lines.append(
+                        f"- `{record.name}` · {_format_automation_schedule(record)} · {_format_automation_target(record)}"
+                    )
+            if disabled_records:
+                lines.append("**Disabled**")
+                for record in disabled_records[:12]:
+                    lines.append(
+                        f"- `{record.name}` · {_format_automation_schedule(record)} · {_format_automation_target(record)}"
+                    )
+            if len(records) > 24:
+                lines.append(f"_…and {len(records) - 24} more_")
+            lines.append("_Invalid or conflicting automation files remain log-visible only._")
+            await interaction.response.send_message("\n".join(lines)[:1900], ephemeral=True)
+
+        @tree.command(name="automation_reload", description="Force an automation directory reload")
+        async def slash_automation_reload(interaction: discord.Interaction):
+            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
+                await interaction.response.send_message(
+                    "This command is restricted to the configured owner.",
+                    ephemeral=True,
+                )
+                return
+            if not self._scheduler:
+                await interaction.response.send_message(
+                    "Automation scheduler is not enabled.",
+                    ephemeral=True,
+                )
+                return
+
+            await interaction.response.defer(ephemeral=True)
+            summary = await self._scheduler.reload_now()
+            await interaction.followup.send(
+                (
+                    "**Automation reload complete**\n"
+                    f"- Visible: {summary['visible']}\n"
+                    f"- Active: {summary['active']}\n"
+                    f"- Added: {summary['added']}\n"
+                    f"- Updated: {summary['updated']}\n"
+                    f"- Removed: {summary['removed']}\n"
+                    "_Invalid or conflicting automation files remain log-visible only._"
+                )[:1900],
+                ephemeral=True,
+            )
+
+        async def _set_automation_enabled(interaction: discord.Interaction, *, name: str, enabled: bool):
+            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
+                await interaction.response.send_message(
+                    "This command is restricted to the configured owner.",
+                    ephemeral=True,
+                )
+                return
+            if not self._scheduler:
+                await interaction.response.send_message(
+                    "Automation scheduler is not enabled.",
+                    ephemeral=True,
+                )
+                return
+
+            await interaction.response.defer(ephemeral=True)
+            try:
+                record = await self._scheduler.set_automation_enabled(name.strip(), enabled=enabled)
+            except ValueError as exc:
+                await interaction.followup.send(str(exc)[:1900], ephemeral=True)
+                return
+
+            action = "enabled" if enabled else "disabled"
+            await interaction.followup.send(
+                (
+                    f"Automation `{record.name}` {action}.\n"
+                    f"- Schedule: {_format_automation_schedule(record)}\n"
+                    f"- Target: {_format_automation_target(record)}\n"
+                    f"- Source: `{record.source_path}`"
+                )[:1900],
+                ephemeral=True,
+            )
+
+        @tree.command(name="automation_enable", description="Enable an automation by name")
+        @app_commands.describe(name="Automation name")
+        async def slash_automation_enable(interaction: discord.Interaction, name: str):
+            await _set_automation_enabled(interaction, name=name, enabled=True)
+
+        @tree.command(name="automation_disable", description="Disable an automation by name")
+        @app_commands.describe(name="Automation name")
+        async def slash_automation_disable(interaction: discord.Interaction, name: str):
+            await _set_automation_enabled(interaction, name=name, enabled=False)
 
         @tree.command(name="skill_stats", description="Show skill health and evaluation stats")
         @app_commands.describe(skill="Optional skill name")

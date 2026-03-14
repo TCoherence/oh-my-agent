@@ -424,6 +424,7 @@ CREATE TABLE IF NOT EXISTS runtime_tasks (
     completion_mode     TEXT NOT NULL DEFAULT 'merge',
     output_summary      TEXT,
     artifact_manifest   TEXT,
+    automation_name     TEXT,
     workspace_cleaned_at TIMESTAMP,
     task_type           TEXT NOT NULL DEFAULT 'repo_change',
     skill_name          TEXT,
@@ -683,6 +684,7 @@ class SQLiteMemoryStore(MemoryStore):
         await self._ensure_column("runtime_tasks", "completion_mode", "TEXT NOT NULL DEFAULT 'merge'")
         await self._ensure_column("runtime_tasks", "output_summary", "TEXT")
         await self._ensure_column("runtime_tasks", "artifact_manifest", "TEXT")
+        await self._ensure_column("runtime_tasks", "automation_name", "TEXT")
         await self._ensure_column("runtime_tasks", "workspace_cleaned_at", "TIMESTAMP")
         await self._ensure_column("runtime_tasks", "task_type", "TEXT NOT NULL DEFAULT 'repo_change'")
         await self._ensure_column("runtime_tasks", "skill_name", "TEXT")
@@ -889,8 +891,8 @@ class SQLiteMemoryStore(MemoryStore):
             await db.execute(
                 "INSERT INTO runtime_tasks "
                 "(id, platform, channel_id, thread_id, created_by, goal, original_request, preferred_agent, "
-                " status, max_steps, max_minutes, test_command, completion_mode, output_summary, artifact_manifest, task_type, skill_name) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " status, max_steps, max_minutes, test_command, completion_mode, output_summary, artifact_manifest, automation_name, task_type, skill_name) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     kwargs["task_id"],
                     kwargs["platform"],
@@ -909,6 +911,7 @@ class SQLiteMemoryStore(MemoryStore):
                     json.dumps(kwargs.get("artifact_manifest"), ensure_ascii=False)
                     if kwargs.get("artifact_manifest") is not None
                     else None,
+                    kwargs.get("automation_name"),
                     kwargs.get("task_type", "repo_change"),
                     kwargs.get("skill_name"),
                 ),
@@ -1063,7 +1066,10 @@ class SQLiteMemoryStore(MemoryStore):
         async with self._runtime_write_lock:
             db = await self._conn()
             cursor = await db.execute(
-                "UPDATE runtime_tasks SET status='PENDING', updated_at=CURRENT_TIMESTAMP "
+                "UPDATE runtime_tasks "
+                "SET status='PENDING', "
+                "    step_no=CASE WHEN step_no > 0 THEN step_no - 1 ELSE 0 END, "
+                "    updated_at=CURRENT_TIMESTAMP "
                 "WHERE status IN ('RUNNING', 'VALIDATING')"
             )
             await db.commit()

@@ -138,7 +138,7 @@ Upgrade adaptive memory from flat YAML to a date-organized, two-tier architectur
 - [x] Codex / Gemini CLI session resume
 - [ ] Skill feedback UX follow-up: allow reactions on any chunk of a multi-message skill result, and optionally emit a dedicated feedback prompt/message after a completed skill result; keep feedback scoped to completed skill outputs only, not auth/system/general chat messages
 - [ ] Persist automation runtime state (`last_run`, `next_run`, `last_error`) instead of recomputing everything after restart
-- [ ] Add operator automation controls such as `/automation_status`, `/automation_reload`, `/automation_enable`, and `/automation_disable`
+- [x] Add operator automation controls such as `/automation_status`, `/automation_reload`, `/automation_enable`, and `/automation_disable` (Discord-only, owner-only, ephemeral MVP)
 - [ ] Define missed-job behavior for downtime and restarts (skip, replay, or bounded catch-up)
 - [ ] Revisit automation scheduling model beyond v1 cron + interval fallback (for example RRULE or richer cron semantics)
 - [ ] Add an operator-facing automation observability surface for active jobs, recent fires, and last failures

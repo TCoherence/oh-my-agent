@@ -152,7 +152,7 @@ runtime:
   cleanup:
     enabled: true
     interval_minutes: 60
-    retention_hours: 72
+    retention_hours: 168
     prune_git_worktrees: true
     merged_immediate: true
 
@@ -168,6 +168,8 @@ auth:
 ```
 
 Secrets should live in `.env`; `${VAR}` placeholders are substituted automatically.
+
+Runtime cleanup removes old task workspaces and agent log files after the retention window. The default window is 7 days (`168` hours).
 
 Runtime artifacts default to `~/.oh-my-agent/runtime/` (memory DB, logs, task worktrees). Legacy `.workspace/` is migrated automatically on startup.
 Automation definitions now live under `~/.oh-my-agent/automations/*.yaml`; edits there are picked up automatically without restarting the process.
@@ -320,6 +322,10 @@ Rebuild the image only when you change container-layer concerns such as `Dockerf
 - `/auth_login [provider]`
 - `/auth_status [provider]`
 - `/auth_clear [provider]`
+- `/automation_status [name]`
+- `/automation_reload`
+- `/automation_enable <name>`
+- `/automation_disable <name>`
 
 ### Automations
 
@@ -330,6 +336,14 @@ Rebuild the image only when you change container-layer concerns such as `Dockerf
   - `interval_seconds` for high-frequency local testing
 - `cron` and `interval_seconds` are mutually exclusive.
 - `initial_delay_seconds` is supported only with `interval_seconds`.
+- Discord operator commands:
+  - `/automation_status [name]` shows valid active + disabled automations
+  - `/automation_reload` forces an immediate rescan instead of waiting for the polling interval
+  - `/automation_enable <name>` and `/automation_disable <name>` update the YAML source file and reload scheduler state immediately
+- Scheduler-fired automations now use the reply/artifact runtime path (`test_command=true`, single-step budget) instead of repo-change validation loops.
+- If an automation is still running, the next fire for the same automation name is skipped instead of queueing overlapping runs.
+- Completed automation messages now post the final result directly in Discord with the automation name, run ID, and an `_artifacts/<task_id>` locator for the generated files.
+- Invalid or conflicting automation files remain log-visible for now; they are intentionally excluded from `/automation_status`.
 - Runtime state is intentionally in-memory only for now:
   - restart recomputes the next fire time
   - there is no persisted `last_run` / `next_run` / `last_error`

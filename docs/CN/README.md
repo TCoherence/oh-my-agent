@@ -147,7 +147,7 @@ runtime:
   cleanup:
     enabled: true
     interval_minutes: 60
-    retention_hours: 72
+    retention_hours: 168
     prune_git_worktrees: true
     merged_immediate: true
 
@@ -163,6 +163,8 @@ auth:
 ```
 
 敏感信息放在 `.env` 文件中，`config.yaml` 里的 `${VAR}` 会自动替换。
+
+Runtime 清理器会在保留窗口后删除旧的 task workspace 和 agent log 文件。默认保留 7 天（`168` 小时）。
 
 Runtime 产物默认放在 `~/.oh-my-agent/runtime/`（包括 memory DB、日志、task worktree）。旧版 `.workspace/` 会在启动时自动迁移。
 Automation 定义文件现在放在 `~/.oh-my-agent/automations/*.yaml`，修改这些文件不需要重启进程。
@@ -314,6 +316,10 @@ OMA_WORKDIR_IN_CONTAINER=/repo ./scripts/docker-run.sh
 - `/auth_login [provider]`
 - `/auth_status [provider]`
 - `/auth_clear [provider]`
+- `/automation_status [name]`
+- `/automation_reload`
+- `/automation_enable <name>`
+- `/automation_disable <name>`
 
 ### Automation
 
@@ -324,6 +330,14 @@ OMA_WORKDIR_IN_CONTAINER=/repo ./scripts/docker-run.sh
   - `interval_seconds`：高频本地测试
 - `cron` 和 `interval_seconds` 互斥。
 - `initial_delay_seconds` 只支持和 `interval_seconds` 一起使用。
+- Discord operator 命令：
+  - `/automation_status [name]`：展示有效 automation 中的 active + disabled 项
+  - `/automation_reload`：立刻触发一次目录重扫，而不是等待下一次轮询
+  - `/automation_enable <name>` 和 `/automation_disable <name>`：直接修改 YAML 源文件里的 `enabled`，并立刻 reload scheduler 状态
+- Scheduler 触发的 automation 现在走 reply/artifact 风格的 runtime 路径（`test_command=true`、单步预算），不再误用 repo-change 验证循环。
+- 如果同一个 automation 还在运行，下一个同名触发会直接跳过，而不是继续堆叠排队。
+- automation 完成消息现在会直接把最终结果发到 Discord，并附带 automation 名称、run ID，以及生成文件对应的 `_artifacts/<task_id>` 定位信息。
+- 无效或冲突的 automation 文件暂时仍然只通过日志暴露，不进入 `/automation_status`。
 - 第一版运行时状态只保存在内存：
   - 重启后重新计算下一次触发时间
   - 不持久化 `last_run` / `next_run` / `last_error`

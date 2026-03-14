@@ -63,8 +63,47 @@ class ScheduledJob:
 
 
 @dataclass(frozen=True)
+class AutomationRecord:
+    name: str
+    platform: str
+    channel_id: str
+    prompt: str
+    enabled: bool
+    delivery: str = "channel"
+    thread_id: str | None = None
+    target_user_id: str | None = None
+    agent: str | None = None
+    author: str = "scheduler"
+    cron: str | None = None
+    interval_seconds: int | None = None
+    initial_delay_seconds: int = 0
+    source_path: Path | None = None
+
+    @property
+    def schedule_kind(self) -> str:
+        return "cron" if self.cron else "interval"
+
+    def to_job(self) -> ScheduledJob:
+        return ScheduledJob(
+            name=self.name,
+            platform=self.platform,
+            channel_id=self.channel_id,
+            prompt=self.prompt,
+            delivery=self.delivery,
+            thread_id=self.thread_id,
+            target_user_id=self.target_user_id,
+            agent=self.agent,
+            author=self.author,
+            cron=self.cron,
+            interval_seconds=self.interval_seconds,
+            initial_delay_seconds=self.initial_delay_seconds,
+            source_path=self.source_path,
+        )
+
+
+@dataclass(frozen=True)
 class _ParsedAutomation:
-    job: ScheduledJob
+    record: AutomationRecord
     enabled: bool
 
 
@@ -95,20 +134,74 @@ class Scheduler:
         self._reload_interval_seconds = float(reload_interval_seconds)
         self._default_target_user_id = default_target_user_id
         self._timezone = timezone or datetime.now().astimezone().tzinfo
+        self._records_by_name: dict[str, AutomationRecord] = {}
         self._jobs_by_name: dict[str, ScheduledJob] = {}
+        self._duplicate_paths_by_name: dict[str, tuple[Path, ...]] = {}
         self._job_tasks: dict[str, asyncio.Task] = {}
         self._snapshot: dict[Path, tuple[int, int]] = {}
+        self._reload_lock = asyncio.Lock()
+        self._on_fire: Callable[[ScheduledJob], Awaitable[None]] | None = None
         self._load_from_disk(initial=True)
 
     @property
     def jobs(self) -> list[ScheduledJob]:
         return [self._jobs_by_name[name] for name in sorted(self._jobs_by_name)]
 
+    @property
+    def storage_dir(self) -> Path:
+        return self._storage_dir
+
+    def list_automations(self) -> list[AutomationRecord]:
+        return [self._records_by_name[name] for name in sorted(self._records_by_name)]
+
+    def get_automation(self, name: str) -> AutomationRecord | None:
+        return self._records_by_name.get(name)
+
+    async def reload_now(self) -> dict[str, int]:
+        async with self._reload_lock:
+            return await self._reload_now_locked()
+
+    async def set_automation_enabled(self, name: str, *, enabled: bool) -> AutomationRecord:
+        async with self._reload_lock:
+            await self._reload_now_locked()
+            if name in self._duplicate_paths_by_name:
+                conflict_paths = ", ".join(str(path) for path in self._duplicate_paths_by_name[name])
+                raise ValueError(
+                    f"automation name conflict for {name!r}; resolve duplicate files first: {conflict_paths}"
+                )
+
+            record = self._records_by_name.get(name)
+            if record is None or record.source_path is None:
+                raise ValueError(f"automation {name!r} not found")
+
+            source_path = record.source_path
+            try:
+                raw = yaml.safe_load(source_path.read_text(encoding="utf-8"))
+            except Exception as exc:
+                raise ValueError(f"failed to read automation file {source_path}: {exc}") from exc
+
+            if not isinstance(raw, dict):
+                raise ValueError(f"automation file {source_path} must contain a YAML mapping")
+
+            if bool(raw.get("enabled", True)) != enabled:
+                raw["enabled"] = enabled
+                source_path.write_text(
+                    yaml.safe_dump(raw, sort_keys=False, allow_unicode=False),
+                    encoding="utf-8",
+                )
+
+            await self._reload_now_locked()
+            updated = self._records_by_name.get(name)
+            if updated is None:
+                raise ValueError(f"automation {name!r} is no longer visible after reload")
+            return updated
+
     async def run(
         self,
         on_fire: Callable[[ScheduledJob], Awaitable[None]],
     ) -> None:
         """Run active jobs and poll for filesystem changes until cancelled."""
+        self._on_fire = on_fire
         for job in self.jobs:
             self._start_job(job, on_fire)
 
@@ -135,11 +228,11 @@ class Scheduler:
         while True:
             try:
                 await asyncio.sleep(self._reload_interval_seconds)
-                snapshot = self._scan_snapshot()
-                if snapshot == self._snapshot:
-                    continue
-                self._load_from_disk(snapshot=snapshot)
-                await self._reconcile_running_jobs(on_fire)
+                async with self._reload_lock:
+                    snapshot = self._scan_snapshot()
+                    if snapshot == self._snapshot:
+                        continue
+                    await self._apply_snapshot(snapshot)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -161,7 +254,7 @@ class Scheduler:
 
         duplicates: dict[str, list[Path]] = {}
         for item in parsed:
-            duplicates.setdefault(item.job.name, []).append(item.job.source_path or Path("<unknown>"))
+            duplicates.setdefault(item.record.name, []).append(item.record.source_path or Path("<unknown>"))
 
         duplicate_names = {name for name, paths in duplicates.items() if len(paths) > 1}
         for name in sorted(duplicate_names):
@@ -172,17 +265,28 @@ class Scheduler:
                 paths,
             )
 
+        records_by_name: dict[str, AutomationRecord] = {}
         jobs_by_name: dict[str, ScheduledJob] = {}
         for item in parsed:
-            if item.job.name in duplicate_names:
+            if item.record.name in duplicate_names:
                 continue
+            records_by_name[item.record.name] = item.record
             if item.enabled:
-                jobs_by_name[item.job.name] = item.job
+                jobs_by_name[item.record.name] = item.record.to_job()
 
+        self._records_by_name = records_by_name
         self._jobs_by_name = jobs_by_name
+        self._duplicate_paths_by_name = {
+            name: tuple(paths) for name, paths in duplicates.items() if name in duplicate_names
+        }
         self._snapshot = snapshot
         if initial:
-            logger.info("Loaded %d active automation job(s) from %s", len(jobs_by_name), self._storage_dir)
+            logger.info(
+                "Loaded %d visible automation(s), %d active job(s) from %s",
+                len(records_by_name),
+                len(jobs_by_name),
+                self._storage_dir,
+            )
 
     def _scan_snapshot(self) -> dict[Path, tuple[int, int]]:
         snapshot: dict[Path, tuple[int, int]] = {}
@@ -275,12 +379,12 @@ class Scheduler:
             if initial_delay_seconds < 0:
                 raise ValueError("initial_delay_seconds must be >= 0")
 
-        return _ParsedAutomation(
-            job=ScheduledJob(
+        record = AutomationRecord(
                 name=name,
                 platform=platform,
                 channel_id=channel_id,
                 prompt=prompt,
+                enabled=enabled,
                 delivery=delivery,
                 thread_id=(str(raw["thread_id"]) if raw.get("thread_id") is not None else None),
                 target_user_id=target_user_id,
@@ -290,9 +394,52 @@ class Scheduler:
                 interval_seconds=interval_value,
                 initial_delay_seconds=initial_delay_seconds,
                 source_path=source_path,
-            ),
+            )
+        return _ParsedAutomation(
+            record=record,
             enabled=enabled,
         )
+
+    async def _reload_now_locked(self) -> dict[str, int]:
+        snapshot = self._scan_snapshot()
+        return await self._apply_snapshot(snapshot)
+
+    async def _apply_snapshot(self, snapshot: dict[Path, tuple[int, int]]) -> dict[str, int]:
+        old_jobs = dict(self._jobs_by_name)
+        self._load_from_disk(snapshot=snapshot)
+
+        added = {
+            name for name in self._jobs_by_name.keys() - old_jobs.keys()
+        }
+        removed = {
+            name for name in old_jobs.keys() - self._jobs_by_name.keys()
+        }
+        updated = {
+            name
+            for name in (old_jobs.keys() & self._jobs_by_name.keys())
+            if old_jobs[name] != self._jobs_by_name[name]
+        }
+
+        if self._on_fire is not None:
+            await self._reconcile_running_jobs(self._on_fire)
+
+        if added or updated or removed:
+            logger.info(
+                "Scheduler reloaded visible=%d active=%d added=%d updated=%d removed=%d",
+                len(self._records_by_name),
+                len(self._jobs_by_name),
+                len(added),
+                len(updated),
+                len(removed),
+            )
+
+        return {
+            "visible": len(self._records_by_name),
+            "active": len(self._jobs_by_name),
+            "added": len(added),
+            "updated": len(updated),
+            "removed": len(removed),
+        }
 
     async def _reconcile_running_jobs(
         self,
@@ -313,15 +460,6 @@ class Scheduler:
             await self._stop_job(name)
         for name in sorted(added | updated):
             self._start_job(self._jobs_by_name[name], on_fire)
-
-        if removed or added or updated:
-            logger.info(
-                "Scheduler reloaded active jobs=%d added=%d updated=%d removed=%d",
-                len(self._jobs_by_name),
-                len(added),
-                len(updated),
-                len(removed),
-            )
 
     def _task_job(self, name: str) -> ScheduledJob | None:
         task = self._job_tasks.get(name)

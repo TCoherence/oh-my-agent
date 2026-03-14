@@ -752,6 +752,38 @@ async def test_scheduler_dispatch_dm_skips_when_channel_unsupported():
 
 
 @pytest.mark.asyncio
+async def test_scheduler_dispatch_runtime_passes_automation_name():
+    channel = MagicMock()
+    channel.platform = "discord"
+    channel.channel_id = "100"
+    channel.send = AsyncMock()
+
+    registry = MagicMock(spec=AgentRegistry)
+    session = _make_session(channel=channel, registry=registry)
+
+    runtime = MagicMock()
+    runtime.enabled = True
+    runtime.enqueue_scheduler_task = AsyncMock()
+
+    gm = GatewayManager([], runtime_service=runtime)
+    gm._sessions["discord:100"] = session
+
+    job = ScheduledJob(
+        name="hello-from-codex",
+        platform="discord",
+        channel_id="100",
+        prompt="run",
+        interval_seconds=60,
+    )
+    await gm._dispatch_scheduled_job(job)
+
+    runtime.enqueue_scheduler_task.assert_called_once()
+    kwargs = runtime.enqueue_scheduler_task.call_args.kwargs
+    assert kwargs["automation_name"] == "hello-from-codex"
+    assert kwargs["thread_id"] == "100"
+
+
+@pytest.mark.asyncio
 async def test_handle_message_uses_short_workspace_override(tmp_path):
     base = tmp_path / "base-workspace"
     base.mkdir(parents=True, exist_ok=True)

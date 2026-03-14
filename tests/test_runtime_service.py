@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -338,6 +339,33 @@ class _ArtifactAgent(BaseAgent):
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text("# Daily News\n\n- item 1\n", encoding="utf-8")
         return AgentResponse(text="artifact ready\nTASK_STATE: DONE")
+
+
+class _AutomationNarrativeAgent(BaseAgent):
+    @property
+    def name(self) -> str:
+        return "automation-narrative"
+
+    async def run(
+        self,
+        prompt: str,
+        history: list[dict] | None = None,
+        *,
+        thread_id: str | None = None,
+        workspace_override: Path | None = None,
+    ) -> AgentResponse:
+        del prompt, history, thread_id
+        assert workspace_override is not None
+        out = workspace_override / "response.txt"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        text = (
+            "I'll fetch the current local time from the shell and then provide the requested message.\n\n"
+            "Hello! This is an automation smoke test, and the current local time is 2026-03-14 05:09:33 UTC.\n\n"
+            "Implemented in `response.txt`.\n\n"
+            "TASK_STATE: DONE"
+        )
+        out.write_text(text, encoding="utf-8")
+        return AgentResponse(text=text)
 
 
 class _SandboxBlockedAgent(BaseAgent):
@@ -699,6 +727,160 @@ async def test_artifact_task_completes_without_merge(runtime_env):
     assert "waiting merge" not in (completed.summary or "").lower()
     logs = await runtime.get_task_logs(task.id)
     assert "Artifacts:" in logs
+
+
+@pytest.mark.asyncio
+async def test_enqueue_scheduler_task_uses_reply_artifact_shape(runtime_env):
+    runtime: RuntimeService = runtime_env["runtime"]
+    channel: _FakeChannel = runtime_env["channel"]
+    store: SQLiteMemoryStore = runtime_env["store"]
+    registry = AgentRegistry([_ArtifactAgent()])
+    session = ChannelSession(
+        platform="discord",
+        channel_id="100",
+        channel=channel,
+        registry=registry,
+    )
+    runtime.register_session(session, registry)
+
+    task = await runtime.enqueue_scheduler_task(
+        session=session,
+        registry=registry,
+        thread_id="thread-scheduler",
+        automation_name="daily-news",
+        prompt="Generate a markdown daily news brief",
+        author="scheduler",
+        preferred_agent="artifact-agent",
+    )
+    assert task is not None
+    stored = await store.get_runtime_task(task.id)
+    assert stored is not None
+    assert stored.task_type == "artifact"
+    assert stored.completion_mode == "reply"
+    assert stored.test_command == "true"
+    assert stored.max_steps == 1
+    assert stored.max_minutes == 10
+    assert stored.automation_name == "daily-news"
+
+
+@pytest.mark.asyncio
+async def test_enqueue_scheduler_task_skips_when_same_automation_is_inflight(runtime_env):
+    runtime: RuntimeService = runtime_env["runtime"]
+    channel: _FakeChannel = runtime_env["channel"]
+    store: SQLiteMemoryStore = runtime_env["store"]
+    registry = AgentRegistry([_ArtifactAgent()])
+    session = ChannelSession(
+        platform="discord",
+        channel_id="100",
+        channel=channel,
+        registry=registry,
+    )
+    runtime.register_session(session, registry)
+
+    first = await runtime.enqueue_scheduler_task(
+        session=session,
+        registry=registry,
+        thread_id="thread-scheduler",
+        automation_name="daily-news",
+        prompt="Generate a markdown daily news brief",
+        author="scheduler",
+        preferred_agent="artifact-agent",
+    )
+    assert first is not None
+
+    second = await runtime.enqueue_scheduler_task(
+        session=session,
+        registry=registry,
+        thread_id="thread-scheduler",
+        automation_name="daily-news",
+        prompt="Generate a markdown daily news brief",
+        author="scheduler",
+        preferred_agent="artifact-agent",
+    )
+    assert second is None
+
+    tasks = await store.list_runtime_tasks(platform="discord", channel_id="100", limit=20)
+    same_name = [task for task in tasks if task.automation_name == "daily-news"]
+    assert len(same_name) == 1
+
+
+@pytest.mark.asyncio
+async def test_scheduler_automation_posts_direct_result_without_status_spam(runtime_env):
+    store: SQLiteMemoryStore = runtime_env["store"]
+    runtime: RuntimeService = runtime_env["runtime"]
+    channel: _FakeChannel = runtime_env["channel"]
+    registry = AgentRegistry([_ArtifactAgent()])
+    session = ChannelSession(
+        platform="discord",
+        channel_id="100",
+        channel=channel,
+        registry=registry,
+    )
+    runtime.register_session(session, registry)
+    await runtime.start()
+
+    task = await runtime.enqueue_scheduler_task(
+        session=session,
+        registry=registry,
+        thread_id="thread-automation",
+        automation_name="daily-news",
+        prompt="Generate a markdown daily news brief",
+        author="scheduler",
+        preferred_agent="artifact-agent",
+    )
+    assert task is not None
+
+    completed = await _wait_for_status(store, task.id, {TASK_STATUS_COMPLETED})
+    assert completed.status == TASK_STATUS_COMPLETED
+    assert completed.artifact_manifest == ["reports/daily-news.md"]
+    assert channel.status_messages == {}
+    assert channel.signals == []
+    assert any(
+        f"automation `daily-news` · run `{task.id}` · via **artifact-agent**" in text and "# Daily News" in text
+        for _, text in channel.sent
+    )
+    assert any(f"-# run dir: `_artifacts/{task.id}`" in text for _, text in channel.sent)
+    assert not any(text.startswith("**Task Status**") for _, text in channel.sent)
+    assert not any(text.startswith("**Task Update**") for _, text in channel.sent)
+
+
+@pytest.mark.asyncio
+async def test_scheduler_automation_formats_body_notes_and_done_footer(runtime_env):
+    store: SQLiteMemoryStore = runtime_env["store"]
+    runtime: RuntimeService = runtime_env["runtime"]
+    channel: _FakeChannel = runtime_env["channel"]
+    registry = AgentRegistry([_AutomationNarrativeAgent()])
+    session = ChannelSession(
+        platform="discord",
+        channel_id="100",
+        channel=channel,
+        registry=registry,
+    )
+    runtime.register_session(session, registry)
+    await runtime.start()
+
+    task = await runtime.enqueue_scheduler_task(
+        session=session,
+        registry=registry,
+        thread_id="thread-automation-format",
+        automation_name="hello-from-codex",
+        prompt="Say hello with the current time.",
+        author="scheduler",
+        preferred_agent="automation-narrative",
+    )
+    assert task is not None
+
+    completed = await _wait_for_status(store, task.id, {TASK_STATUS_COMPLETED})
+    assert completed.status == TASK_STATUS_COMPLETED
+    sent_texts = [text for _, text in channel.sent]
+    assert any("**Output**" in text for text in sent_texts)
+    assert any("Hello! This is an automation smoke test" in text for text in sent_texts)
+    assert any("-# I'll fetch the current local time" in text for text in sent_texts)
+    assert any("-# artifact: `response.txt`" in text for text in sent_texts)
+    assert any(f"-# run dir: `_artifacts/{task.id}`" in text for text in sent_texts)
+    assert any(f"automation `hello-from-codex` · run `{task.id}` · via **automation-narrative**" in text for text in sent_texts)
+    assert any("-# ✅ automation run complete" in text for text in sent_texts)
+    assert not any("TASK_STATE: DONE" in text for text in sent_texts)
 
 
 @pytest.mark.asyncio
@@ -1089,6 +1271,48 @@ async def test_runtime_start_cleans_stale_merged_workspace(tmp_path):
     assert cleaned.workspace_path is None
     assert cleaned.workspace_cleaned_at is not None
     assert not stale_workspace.exists()
+
+    await runtime.stop()
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_runtime_start_prunes_stale_agent_logs(tmp_path, caplog):
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    worktree_root = tmp_path / "worktrees"
+    store = SQLiteMemoryStore(tmp_path / "cleanup-logs.db")
+    await store.init()
+
+    runtime = RuntimeService(
+        store,
+        config={
+            "enabled": True,
+            "worker_concurrency": 1,
+            "worktree_root": str(worktree_root),
+            "default_agent": "done-agent",
+            "default_test_command": "true",
+            "cleanup": {
+                "enabled": True,
+                "interval_minutes": 60,
+                "retention_hours": 0,
+                "prune_git_worktrees": True,
+                "merged_immediate": True,
+            },
+        },
+        owner_user_ids={"owner-1"},
+        repo_root=repo,
+    )
+
+    stale_log = runtime._agent_logs_root / "old-step1-done-agent.log"  # noqa: SLF001
+    stale_log.parent.mkdir(parents=True, exist_ok=True)
+    stale_log.write_text("old log", encoding="utf-8")
+    os.utime(stale_log, (1, 1))
+
+    caplog.set_level("INFO")
+    await runtime.start()
+    assert not stale_log.exists()
+    assert "pruned 1 stale agent log(s) on start" in caplog.text
 
     await runtime.stop()
     await store.close()

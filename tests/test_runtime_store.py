@@ -82,6 +82,7 @@ async def test_runtime_claim_requeue_and_checkpoint(store):
     again = await store.get_runtime_task("task-2")
     assert again is not None
     assert again.status == TASK_STATUS_PENDING
+    assert again.step_no == 0
 
     await store.add_runtime_checkpoint(
         task_id="task-2",
@@ -96,6 +97,31 @@ async def test_runtime_claim_requeue_and_checkpoint(store):
     assert ckpt is not None
     assert ckpt["step_no"] == 1
     assert "failing test" in ckpt["test_result"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_requeue_rolls_back_step_for_validating_task(store):
+    await store.create_runtime_task(
+        task_id="task-2b",
+        platform="discord",
+        channel_id="100",
+        thread_id="100",
+        created_by="u1",
+        goal="generate automation output",
+        preferred_agent="codex",
+        status=TASK_STATUS_RUNNING,
+        max_steps=1,
+        max_minutes=10,
+        test_command="true",
+    )
+    await store.update_runtime_task("task-2b", status="VALIDATING", step_no=1)
+
+    changed = await store.requeue_inflight_runtime_tasks()
+    assert changed >= 1
+    again = await store.get_runtime_task("task-2b")
+    assert again is not None
+    assert again.status == TASK_STATUS_PENDING
+    assert again.step_no == 0
 
 
 @pytest.mark.asyncio

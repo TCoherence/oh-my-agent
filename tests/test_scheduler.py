@@ -75,6 +75,39 @@ def test_build_scheduler_uses_storage_dir_and_parses_interval_job(tmp_path):
     assert job.cron is None
 
 
+def test_build_scheduler_includes_disabled_automation_in_operator_snapshot(tmp_path):
+    storage_dir = tmp_path / "automations"
+    storage_dir.mkdir()
+    _write_yaml(
+        storage_dir / "disabled.yaml",
+        """
+        name: disabled-report
+        enabled: false
+        platform: discord
+        channel_id: "123"
+        delivery: channel
+        prompt: summarize
+        interval_seconds: 60
+        """,
+    )
+    scheduler = build_scheduler_from_config(
+        {
+            "automations": {
+                "enabled": True,
+                "storage_dir": str(storage_dir),
+                "reload_interval_seconds": 5,
+            }
+        },
+        project_root=tmp_path,
+    )
+    assert scheduler is not None
+    assert scheduler.jobs == []
+    records = scheduler.list_automations()
+    assert len(records) == 1
+    assert records[0].name == "disabled-report"
+    assert records[0].enabled is False
+
+
 def test_build_scheduler_resolves_relative_storage_dir(tmp_path):
     storage_dir = tmp_path / "relative-automations"
     storage_dir.mkdir()
@@ -344,6 +377,180 @@ async def test_scheduler_hot_reloads_add_modify_delete(tmp_path):
         await asyncio.sleep(0.2)
         assert scheduler.jobs == []
         assert seen == ["first", "second"]
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_scheduler_reload_now_updates_visible_and_active_state(tmp_path):
+    storage_dir = tmp_path / "automations"
+    scheduler = Scheduler(
+        storage_dir=storage_dir,
+        reload_interval_seconds=60,
+    )
+
+    assert scheduler.list_automations() == []
+
+    _write_yaml(
+        storage_dir / "hello.yaml",
+        """
+        name: hello
+        enabled: true
+        platform: discord
+        channel_id: "123"
+        prompt: first
+        interval_seconds: 3600
+        """,
+    )
+    summary = await scheduler.reload_now()
+    assert summary == {
+        "visible": 1,
+        "active": 1,
+        "added": 1,
+        "updated": 0,
+        "removed": 0,
+    }
+    assert scheduler.get_automation("hello") is not None
+    assert scheduler.jobs[0].prompt == "first"
+
+    _write_yaml(
+        storage_dir / "hello.yaml",
+        """
+        name: hello
+        enabled: false
+        platform: discord
+        channel_id: "123"
+        prompt: second
+        interval_seconds: 3600
+        """,
+    )
+    summary = await scheduler.reload_now()
+    assert summary == {
+        "visible": 1,
+        "active": 0,
+        "added": 0,
+        "updated": 0,
+        "removed": 1,
+    }
+    assert scheduler.get_automation("hello") is not None
+    assert scheduler.get_automation("hello").enabled is False
+    assert scheduler.jobs == []
+
+    (storage_dir / "hello.yaml").unlink()
+    summary = await scheduler.reload_now()
+    assert summary == {
+        "visible": 0,
+        "active": 0,
+        "added": 0,
+        "updated": 0,
+        "removed": 0,
+    }
+    assert scheduler.list_automations() == []
+
+
+@pytest.mark.asyncio
+async def test_scheduler_set_enabled_rewrites_file_and_updates_snapshot(tmp_path):
+    storage_dir = tmp_path / "automations"
+    storage_dir.mkdir()
+    _write_yaml(
+        storage_dir / "toggle.yaml",
+        """
+        name: toggle-me
+        enabled: false
+        platform: discord
+        channel_id: "123"
+        prompt: summarize
+        interval_seconds: 60
+        """,
+    )
+    scheduler = Scheduler(
+        storage_dir=storage_dir,
+        reload_interval_seconds=60,
+    )
+
+    updated = await scheduler.set_automation_enabled("toggle-me", enabled=True)
+    assert updated.enabled is True
+    assert scheduler.jobs[0].name == "toggle-me"
+    assert "enabled: true" in (storage_dir / "toggle.yaml").read_text(encoding="utf-8")
+
+    updated = await scheduler.set_automation_enabled("toggle-me", enabled=False)
+    assert updated.enabled is False
+    assert scheduler.jobs == []
+    assert "enabled: false" in (storage_dir / "toggle.yaml").read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_scheduler_set_enabled_rejects_duplicate_name(tmp_path):
+    storage_dir = tmp_path / "automations"
+    storage_dir.mkdir()
+    _write_yaml(
+        storage_dir / "a.yaml",
+        """
+        name: dup
+        enabled: true
+        platform: discord
+        channel_id: "123"
+        prompt: first
+        interval_seconds: 60
+        """,
+    )
+    _write_yaml(
+        storage_dir / "b.yaml",
+        """
+        name: dup
+        enabled: false
+        platform: discord
+        channel_id: "123"
+        prompt: second
+        interval_seconds: 60
+        """,
+    )
+    scheduler = Scheduler(
+        storage_dir=storage_dir,
+        reload_interval_seconds=60,
+    )
+
+    with pytest.raises(ValueError, match="name conflict"):
+        await scheduler.set_automation_enabled("dup", enabled=True)
+
+
+@pytest.mark.asyncio
+async def test_scheduler_set_enabled_reconciles_running_jobs(tmp_path):
+    storage_dir = tmp_path / "automations"
+    storage_dir.mkdir()
+    _write_yaml(
+        storage_dir / "toggle.yaml",
+        """
+        name: live-toggle
+        enabled: false
+        platform: discord
+        channel_id: "123"
+        prompt: summarize
+        interval_seconds: 3600
+        """,
+    )
+    scheduler = Scheduler(
+        storage_dir=storage_dir,
+        reload_interval_seconds=60,
+    )
+    fired: list[str] = []
+
+    async def on_fire(job: ScheduledJob) -> None:
+        fired.append(job.name)
+
+    task = asyncio.create_task(scheduler.run(on_fire))
+    try:
+        await asyncio.sleep(0.05)
+        assert "live-toggle" not in scheduler._job_tasks
+
+        await scheduler.set_automation_enabled("live-toggle", enabled=True)
+        await asyncio.sleep(0.05)
+        assert "live-toggle" in scheduler._job_tasks
+
+        await scheduler.set_automation_enabled("live-toggle", enabled=False)
+        await asyncio.sleep(0.05)
+        assert "live-toggle" not in scheduler._job_tasks
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)

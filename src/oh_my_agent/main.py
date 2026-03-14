@@ -243,7 +243,7 @@ def _apply_v052_defaults(config: dict) -> None:
     cleanup_cfg = runtime_cfg.setdefault("cleanup", {})
     cleanup_cfg.setdefault("enabled", True)
     cleanup_cfg.setdefault("interval_minutes", 60)
-    cleanup_cfg.setdefault("retention_hours", 72)
+    cleanup_cfg.setdefault("retention_hours", 168)
     cleanup_cfg.setdefault("prune_git_worktrees", True)
     cleanup_cfg.setdefault("merged_immediate", True)
 
