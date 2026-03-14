@@ -136,6 +136,7 @@ Upgrade adaptive memory from flat YAML to a date-organized, two-tier architectur
 - [ ] Revisit whether generated workspace `AGENTS.md` is still needed at all once the `.agents/skills/` migration settles
 - [ ] Revisit agent turn-budget semantics: decide whether `max_turns` should remain exposed, clarify its boundary against `timeout` and runtime `max_steps`, and remove or document provider-specific gaps where the setting is not uniformly enforced
 - [x] Codex / Gemini CLI session resume
+- [ ] Add internal CLI agent lifecycle hooks (`pre-run`, `post-run`, `failure`, `resume`) for system-owned follow-up work such as reverse sync, artifact post-processing, and observability; keep this as an internal mechanism rather than a user-facing feature surface
 - [ ] Skill feedback UX follow-up: allow reactions on any chunk of a multi-message skill result, and optionally emit a dedicated feedback prompt/message after a completed skill result; keep feedback scoped to completed skill outputs only, not auth/system/general chat messages
 - [ ] Persist automation runtime state (`last_run`, `next_run`, `last_error`) instead of recomputing everything after restart
 - [x] Add operator automation controls such as `/automation_status`, `/automation_reload`, `/automation_enable`, and `/automation_disable` (Discord-only, owner-only, ephemeral MVP)
