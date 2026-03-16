@@ -13,6 +13,7 @@ The format is intentionally lightweight and release-oriented rather than exhaust
 - Cron-based automation schedules with `interval_seconds` retained for high-frequency local testing
 - Discord operator automation commands: `/automation_status`, `/automation_reload`, `/automation_enable`, `/automation_disable`
 - Temporary `docs/archive/next_up.md` note for near-term execution focus
+- Long-running Docker helper scripts: `docker-start.sh`, `docker-logs.sh`, `docker-stop.sh`, `docker-status.sh`
 
 ### Changed
 
@@ -25,6 +26,7 @@ The format is intentionally lightweight and release-oriented rather than exhaust
 - Requeued in-flight runtime tasks now roll back one step before retry, avoiding immediate `TIMEOUT max_steps=1` failures after restart for single-step automation runs
 - Runtime cleanup now uses a 7-day default retention window and prunes stale agent logs along with old task workspaces
 - README and Chinese README now document the external automation directory, hot-reload semantics, and current in-memory-only runtime state behavior
+- Docker docs now distinguish attached development runs from detached long-running service runs, including postmortem debugging expectations around `docker logs` and persistent application log files
 
 ## v0.7.1 - 2026-03-08
 

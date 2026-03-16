@@ -10,19 +10,18 @@ oma_docker_remove_existing_container
 oma_docker_build_common_run_args
 
 CMD=(
-  docker run --rm
+  docker run -d
+  --restart unless-stopped
   "${OMA_DOCKER_RUN_COMMON_ARGS[@]}"
   "${IMAGE_TAG}"
 )
-
-if [[ -t 0 && -t 1 ]]; then
-  CMD=(docker run --rm -it "${OMA_DOCKER_RUN_COMMON_ARGS[@]}" "${IMAGE_TAG}")
-fi
 
 if [[ $# -gt 0 ]]; then
   CMD+=("$@")
 fi
 
-oma_docker_print_banner "attached-dev"
-
-exec "${CMD[@]}"
+oma_docker_print_banner "detached-service"
+container_id="$("${CMD[@]}")"
+echo "[oma] container id: ${container_id}"
+echo "[oma] use ./scripts/docker-logs.sh to follow container stdout/stderr"
+echo "[oma] app log file: $(oma_docker_app_log_path)"

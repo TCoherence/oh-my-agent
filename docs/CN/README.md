@@ -193,10 +193,24 @@ Automation 定义文件现在放在 `~/.oh-my-agent/automations/*.yaml`，修改
 ./scripts/docker-build.sh
 ```
 
-启动容器（默认状态挂载：`${HOME}/oh-my-agent-docker-mount`，默认仓库挂载：当前 repo）：
+开发 / 前台模式（attached、`--rm`，适合交互式调试）：
 
 ```bash
 ./scripts/docker-run.sh
+```
+
+长期托管 / 后台模式（detached、`--restart unless-stopped`，并保留容器对象供 `docker logs` / `docker inspect` 使用）：
+
+```bash
+./scripts/docker-start.sh
+```
+
+查看和管理长期托管容器：
+
+```bash
+./scripts/docker-status.sh
+./scripts/docker-logs.sh
+./scripts/docker-stop.sh
 ```
 
 默认配置来源是 `/repo/config.yaml`（`OMA_CONFIG_PATH`）。
@@ -214,6 +228,14 @@ Automation 定义文件现在放在 `~/.oh-my-agent/automations/*.yaml`，修改
 ```bash
 OMA_DOCKER_MOUNT=/path/to/your/mount ./scripts/docker-run.sh
 OMA_DOCKER_REPO=/path/to/repo ./scripts/docker-run.sh
+```
+
+这些环境变量同样适用于 `docker-start.sh`、`docker-logs.sh`、`docker-stop.sh` 和 `docker-status.sh`。
+这些辅助脚本会按精确容器名定位，而不是在多个容器里做模糊猜测。默认容器名是 `oh-my-agent`；如果你同时跑多套实例，可以用 `OMA_CONTAINER_NAME` 区分：
+
+```bash
+OMA_CONTAINER_NAME=oma-prod ./scripts/docker-start.sh
+OMA_CONTAINER_NAME=oma-prod ./scripts/docker-logs.sh
 ```
 
 如果你想临时收紧 Docker 内的权限，也可以覆盖这些环境变量：
@@ -248,6 +270,8 @@ OMA_WORKDIR_IN_CONTAINER=/repo ./scripts/docker-run.sh
 ```bash
 ./scripts/docker-run.sh oh-my-agent --version
 ```
+
+如果走长期托管模式，应用日志仍会持久化到挂载的 runtime 路径；`docker-logs.sh` 提供的是容器 stdout/stderr。后台模式刻意不再使用 `--rm`，这样出问题后还可以继续做 `docker logs` 和 `docker inspect` 排查。
 
 只有在修改容器层内容时才需要重新 build 镜像，例如 `Dockerfile`、`docker/entrypoint.sh`、Python/Node/system 依赖。单纯修改 `/repo/src` 下源码，一般只需要重启容器。
 

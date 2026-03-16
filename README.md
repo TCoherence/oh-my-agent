@@ -204,10 +204,24 @@ Build image:
 ./scripts/docker-build.sh
 ```
 
-Start container (default state mount: `${HOME}/oh-my-agent-docker-mount`, default repo mount: current repo):
+Development / foreground mode (attached, `--rm`, good for interactive debugging):
 
 ```bash
 ./scripts/docker-run.sh
+```
+
+Long-running / managed mode (detached, `--restart unless-stopped`, keeps the container for `docker logs` / `docker inspect`):
+
+```bash
+./scripts/docker-start.sh
+```
+
+Inspect and manage the long-running container:
+
+```bash
+./scripts/docker-status.sh
+./scripts/docker-logs.sh
+./scripts/docker-stop.sh
 ```
 
 Default config source is `/repo/config.yaml` (`OMA_CONFIG_PATH`).
@@ -225,6 +239,14 @@ Override mount paths when needed:
 ```bash
 OMA_DOCKER_MOUNT=/path/to/your/mount ./scripts/docker-run.sh
 OMA_DOCKER_REPO=/path/to/repo ./scripts/docker-run.sh
+```
+
+The same environment overrides also apply to `docker-start.sh`, `docker-logs.sh`, `docker-stop.sh`, and `docker-status.sh`.
+These helper scripts target the container by exact name, not by fuzzy search. The default name is `oh-my-agent`, and you can override it with `OMA_CONTAINER_NAME` when running multiple copies:
+
+```bash
+OMA_CONTAINER_NAME=oma-prod ./scripts/docker-start.sh
+OMA_CONTAINER_NAME=oma-prod ./scripts/docker-logs.sh
 ```
 
 Override the Docker-only permission behavior when needed:
@@ -259,6 +281,8 @@ Run one-off commands in the same image:
 ```bash
 ./scripts/docker-run.sh oh-my-agent --version
 ```
+
+For long-running mode, application logs still persist under the mounted runtime path, while `docker-logs.sh` gives you the container stdout/stderr stream. Keeping detached mode non-`--rm` is intentional so `docker logs` and `docker inspect` remain available for postmortem debugging.
 
 Rebuild the image only when you change container-layer concerns such as `Dockerfile`, `docker/entrypoint.sh`, or Python/Node/system dependencies. Pure source edits under `/repo/src` normally only need a restart.
 
