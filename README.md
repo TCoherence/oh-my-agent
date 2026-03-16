@@ -51,6 +51,11 @@ Key layers:
 - Memory: SQLite + FTS5 persistent conversation history
 - Skills: sync between `skills/` and CLI-native directories
 
+For a fuller architecture walkthrough, see:
+
+- [docs/EN/architecture.md](docs/EN/architecture.md)
+- [docs/CN/architecture.md](docs/CN/architecture.md)
+
 ## Setup
 
 ### Prerequisites

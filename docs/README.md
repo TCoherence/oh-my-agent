@@ -6,6 +6,8 @@ This directory holds planning notes, development logs, and language-specific pro
 
 - English overview: [../README.md](../README.md)
 - Chinese overview: [CN/README.md](CN/README.md)
+- English architecture: [EN/architecture.md](EN/architecture.md)
+- Chinese architecture: [CN/architecture.md](CN/architecture.md)
 - Changelog: [../CHANGELOG.md](../CHANGELOG.md)
 
 ## Roadmaps

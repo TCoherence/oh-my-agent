@@ -51,6 +51,11 @@ User (Discord / Slack / ...)
 - Skills：`skills/` 与 CLI 原生技能目录之间的同步
 - Runtime：自主任务编排，支持 merge gate 和中断恢复
 
+更完整的架构说明见：
+
+- [../EN/architecture.md](../EN/architecture.md)
+- [architecture.md](architecture.md)
+
 ## 安装与配置
 
 ### 前置条件
