@@ -1,6 +1,6 @@
 # Architecture
 
-This document describes the current architecture of `oh-my-agent` as of `v0.7.1`.
+This document describes the current architecture of `oh-my-agent` as of `v0.7.2`.
 
 It focuses on the code that actually exists today, not an idealized future design.
 

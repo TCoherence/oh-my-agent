@@ -4,13 +4,13 @@ Multi-platform bot that routes messages to CLI-based AI agents (Claude, Gemini, 
 
 Inspired by [OpenClaw](https://openclaw.dev).
 
-## Status Snapshot (2026-03-08)
+## Status Snapshot (2026-03-16)
 
 - `/search` is implemented with SQLite FTS5 across all threads.
 - `SkillSync` reverse sync is implemented and runs on startup.
 - v0.5 is runtime-first: durable autonomous task loops (`DRAFT -> RUNNING -> WAITING_MERGE -> MERGED/...`).
 - v0.6 skill-first autonomy + adaptive memory is complete.
-- v0.7.1 extends the v0.7 line with auth-first runtime pause/resume, Docker isolation workflow, and transcript-first YouTube/Bilibili skills.
+- v0.7.2 extends the v0.7 line with auth-first runtime pause/resume, file-driven automations, generic Discord-first `ask_user` HITL, market-intel reporting, and skill-specific timeout overrides for slow direct skill invocations.
 - Discord approvals use buttons first, slash fallback, reactions as status-only signals.
 - Optional LLM routing is implemented: incoming messages can be classified as `reply_once`, `invoke_existing_skill`, `propose_artifact_task`, `propose_repo_task`, or `create_skill`.
 - Runtime observability is implemented: `/task_logs`, sampled progress events in SQLite, and a single updatable Discord status message.
@@ -509,7 +509,7 @@ author: scheduler
 
 - v0.5 establishes the runtime-first baseline: durable task execution, merge gating, and recovery.
 - v0.6 focuses on skill-first autonomy + adaptive memory: skill creation, skill routing, skill validation, reusable capability growth, and cross-session user knowledge.
-- v0.7 delivers date-based memory; v0.7.1 closes the current auth/runtime/video integration pass on top of it.
+- v0.7 delivers date-based memory; v0.7.2 closes the current auth/runtime/video/automation/HITL pass on top of it.
 - v0.8+ adds semantic memory retrieval (vector search) and broader hybrid autonomy.
 - Source-code self-modification may exist as a high-risk, strongly gated capability, but it is not the default autonomy path.
 

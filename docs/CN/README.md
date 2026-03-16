@@ -4,13 +4,13 @@
 
 灵感来自 [OpenClaw](https://openclaw.dev)。
 
-## 当前状态（2026-03-08）
+## 当前状态（2026-03-16）
 
 - `/search` 已通过 SQLite FTS5 实现跨线程检索。
 - `SkillSync` reverse sync 已实现，并在启动时执行。
 - v0.5 runtime-first 已完成（包括 runtime hardening pass）。
 - v0.6 主线是 skill-first autonomy + adaptive memory；全部已完成。
-- v0.7.1 在 v0.7 基线上补齐了 auth-first 暂停/恢复、Docker 隔离运行链路，以及 transcript-first 的 YouTube/Bilibili 视频 skill。
+- v0.7.2 在 v0.7 基线上补齐了 auth-first 暂停/恢复、文件驱动 automation、通用 Discord `ask_user` HITL、market-intel 报告能力，以及慢速 direct skill 调用的 skill-specific timeout override。
 - 后续版本继续推进语义记忆检索（向量搜索）和 hybrid autonomy。
 - Discord 审批交互采用按钮优先、slash 兜底，reaction 只做状态信号。
 - 可选的 LLM 路由已实现：消息可被分类为 `reply_once`、`invoke_existing_skill`、`propose_artifact_task`、`propose_repo_task` 或 `create_skill`。
@@ -488,7 +488,7 @@ author: scheduler
 - v0.5 建立 runtime-first 基线：长任务执行、恢复、审批和合并闭环（已完成）。
 - v0.6 聚焦 skill-first autonomy + adaptive memory：skill 创建路由验证、跨 session 用户记忆（已完成）。
 - v0.7 建立日期驱动记忆系统基线（已完成）。
-- v0.7.1 补齐 auth-first runtime、Docker 隔离运行和 transcript-first 视频 skill（已完成）。
+- v0.7.2 补齐 auth-first runtime、Docker 隔离运行、文件驱动 automation、通用 HITL 和 transcript/reporting skill（已完成）。
 - 后续版本继续推进语义记忆检索和 hybrid autonomy。
 - 源代码自我更迭可以作为高风险、强审批的特殊能力存在，但不是默认自主性主线。
 

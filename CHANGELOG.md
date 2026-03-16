@@ -6,6 +6,8 @@ The format is intentionally lightweight and release-oriented rather than exhaust
 
 ## Unreleased
 
+## v0.7.2 - 2026-03-16
+
 ### Added
 
 - File-driven automation scheduling under `~/.oh-my-agent/automations/*.yaml`
