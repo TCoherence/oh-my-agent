@@ -58,6 +58,9 @@ TaskCompletionMode = Literal["reply", "artifact", "merge"]
 SuspendedAgentRunStatus = Literal["waiting_auth", "resuming", "completed", "cancelled", "failed"]
 HitlPromptStatus = Literal["waiting", "resolving", "completed", "cancelled", "failed"]
 HitlPromptTargetKind = Literal["thread", "task"]
+NotificationKind = Literal["auth_required", "ask_user", "task_draft", "task_waiting_merge"]
+NotificationSeverity = Literal["action_required"]
+NotificationStatus = Literal["active", "resolved", "failed", "cancelled"]
 
 DecisionAction = Literal[
     "approve",
@@ -297,4 +300,72 @@ class HitlPrompt:
             created_at=row.get("created_at"),
             updated_at=row.get("updated_at"),
             completed_at=row.get("completed_at"),
+        )
+
+
+@dataclass(frozen=True)
+class NotificationEvent:
+    kind: NotificationKind
+    platform: str
+    channel_id: str
+    thread_id: str
+    title: str
+    body: str
+    dedupe_key: str
+    severity: NotificationSeverity = "action_required"
+    task_id: str | None = None
+    payload: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class NotificationRecord:
+    id: str
+    kind: NotificationKind
+    status: NotificationStatus
+    platform: str
+    channel_id: str
+    thread_id: str
+    task_id: str | None
+    owner_user_id: str
+    dedupe_key: str
+    title: str
+    body: str
+    payload: dict[str, Any]
+    thread_message_id: str | None
+    dm_message_id: str | None
+    created_at: str | None = None
+    updated_at: str | None = None
+    resolved_at: str | None = None
+
+    @classmethod
+    def from_row(cls, row: dict[str, Any]) -> "NotificationRecord":
+        raw_payload = row.get("payload_json")
+        payload: dict[str, Any] = {}
+        if isinstance(raw_payload, str) and raw_payload:
+            try:
+                parsed = json.loads(raw_payload)
+                if isinstance(parsed, dict):
+                    payload = parsed
+            except Exception:
+                payload = {}
+        elif isinstance(raw_payload, dict):
+            payload = raw_payload
+        return cls(
+            id=str(row["id"]),
+            kind=str(row["kind"]),
+            status=str(row["status"]),
+            platform=str(row["platform"]),
+            channel_id=str(row["channel_id"]),
+            thread_id=str(row["thread_id"]),
+            task_id=row.get("task_id"),
+            owner_user_id=str(row["owner_user_id"]),
+            dedupe_key=str(row["dedupe_key"]),
+            title=str(row["title"]),
+            body=str(row["body"]),
+            payload=payload,
+            thread_message_id=row.get("thread_message_id"),
+            dm_message_id=row.get("dm_message_id"),
+            created_at=row.get("created_at"),
+            updated_at=row.get("updated_at"),
+            resolved_at=row.get("resolved_at"),
         )

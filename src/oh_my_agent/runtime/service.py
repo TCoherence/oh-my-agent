@@ -28,6 +28,7 @@ from oh_my_agent.control.protocol import (
 )
 from oh_my_agent.gateway.base import IncomingMessage
 from oh_my_agent.gateway.session import ChannelSession
+from oh_my_agent.runtime.notifications import NotificationManager
 from oh_my_agent.runtime.policy import (
     is_artifact_intent,
     build_skill_prompt,
@@ -64,6 +65,7 @@ from oh_my_agent.runtime.types import (
     TASK_STATUS_WAITING_USER_INPUT,
     TASK_STATUS_WAITING_MERGE,
     HitlPrompt,
+    NotificationEvent,
     RuntimeTask,
     SuspendedAgentRun,
     TaskDecisionEvent,
@@ -183,6 +185,11 @@ class RuntimeService:
 
         self._sessions: dict[str, ChannelSession] = {}
         self._registries: dict[str, AgentRegistry] = {}
+        self._notifications = NotificationManager(
+            store=self._store,
+            owner_user_ids=self._owner_user_ids,
+            session_lookup=lambda platform, channel_id: self._sessions.get(self._key(platform, channel_id)),
+        )
         self._running_tasks: dict[str, asyncio.Task] = {}
         self._live_agent_logs: dict[str, Path] = {}
         self._workers: list[asyncio.Task] = []
@@ -822,6 +829,7 @@ class RuntimeService:
                 record_history=True,
             )
             await self._signal_status_by_id(task, TASK_STATUS_DRAFT)
+            await self._notify_task_draft_required(task)
         else:
             await self._notify(
                 task,
@@ -1220,6 +1228,7 @@ class RuntimeService:
                 f"Task `{task.id}` is waiting for `{provider}` login, "
                 f"but QR delivery failed in thread `{task.thread_id}`: {exc}"
             )
+        await self._notify_task_auth_required(task, provider=provider)
         if updated is not None:
             await self._signal_status_by_id(updated, TASK_STATUS_WAITING_USER_INPUT)
         return f"Task `{task.id}` is waiting for `{provider}` login."
@@ -1331,6 +1340,12 @@ class RuntimeService:
                 f"Thread `{thread_id}` is waiting for `{provider}` login, "
                 f"but QR delivery failed: {exc}"
             )
+        await self._notify_thread_auth_required(
+            platform=platform,
+            channel_id=channel_id,
+            thread_id=thread_id,
+            provider=provider,
+        )
         return f"Thread `{thread_id}` is waiting for `{provider}` login."
 
     async def get_hitl_prompt(self, prompt_id: str) -> HitlPrompt | None:
@@ -1413,6 +1428,12 @@ class RuntimeService:
                 "button-based responses yet."
             )
         await self._store.update_hitl_prompt(prompt.id, prompt_message_id=message_id)
+        await self._notify_thread_ask_user_required(
+            platform=platform,
+            channel_id=channel_id,
+            thread_id=thread_id,
+            question=question,
+        )
         return f"Thread `{thread_id}` is waiting for input."
 
     async def mark_task_ask_user_required(
@@ -1499,6 +1520,7 @@ class RuntimeService:
                 "button-based responses yet."
             )
         await self._store.update_hitl_prompt(prompt.id, prompt_message_id=message_id)
+        await self._notify_task_ask_user_required(task, question=question)
         return f"Task `{task.id}` is waiting for owner input."
 
     async def answer_hitl_prompt(
@@ -1561,8 +1583,10 @@ class RuntimeService:
                 )
                 await self._send_hitl_cancel_record(prompt)
                 await self._signal_status_by_id(task, TASK_STATUS_BLOCKED)
+                await self._resolve_notification("ask_user", task_id=task.id, status="cancelled")
         else:
             await self._send_hitl_cancel_record(prompt)
+            await self._resolve_notification("ask_user", thread_id=prompt.thread_id, status="cancelled")
 
         await self._store.update_hitl_prompt(
             prompt.id,
@@ -1918,6 +1942,7 @@ class RuntimeService:
             )
             await self._notify(task, f"Task `{task.id}` approved and queued.")
             await self._signal_status_by_id(task, TASK_STATUS_PENDING)
+            await self._resolve_notification("task_draft", task_id=task.id)
             return f"Task `{task.id}` approved."
 
         if event.action == "reject":
@@ -1934,6 +1959,7 @@ class RuntimeService:
             )
             await self._notify(task, f"Task `{task.id}` rejected.")
             await self._signal_status_by_id(task, TASK_STATUS_REJECTED)
+            await self._resolve_notification("task_draft", task_id=task.id)
             return f"Task `{task.id}` rejected."
 
         if event.action == "suggest":
@@ -1986,6 +2012,7 @@ class RuntimeService:
             )
             await self._notify(task, f"Task `{task.id}` discarded.")
             await self._signal_status_by_id(task, TASK_STATUS_DISCARDED)
+            await self._resolve_notification("task_waiting_merge", task_id=task.id)
             return f"Task `{task.id}` discarded."
 
         # request_changes: move back to BLOCKED and keep suggestion as resume hint.
@@ -2010,6 +2037,7 @@ class RuntimeService:
             ),
         )
         await self._signal_status_by_id(task, TASK_STATUS_BLOCKED)
+        await self._resolve_notification("task_waiting_merge", task_id=task.id)
         return f"Task `{task.id}` moved to BLOCKED."
 
     async def build_slash_decision_event(
@@ -2572,6 +2600,7 @@ class RuntimeService:
                         terminal=True,
                     )
                     await self._signal_status_by_id(task, TASK_STATUS_WAITING_MERGE)
+                    await self._notify_task_waiting_merge_required(merge_task)
                     logger.info("Runtime task=%s WAITING_MERGE step=%d", task.id, step)
                     return
 
@@ -2784,6 +2813,7 @@ class RuntimeService:
                 )
             await self._notify(task, merged_note, record_history=True, terminal=True)
             await self._signal_status_by_id(task, TASK_STATUS_MERGED)
+            await self._resolve_notification("task_waiting_merge", task_id=task.id)
             return merged_note
         except WorktreeError as exc:
             return await self._mark_merge_blocked(task, str(exc))
@@ -3651,6 +3681,7 @@ class RuntimeService:
         )
         await self._send_hitl_answer_record(prompt)
         await self._store.update_hitl_prompt(prompt.id, status="completed", completed_at_now=True)
+        await self._resolve_notification("ask_user", task_id=task.id)
         updated = await self._store.get_runtime_task(task.id)
         if updated is not None:
             await self._signal_status_by_id(updated, TASK_STATUS_PENDING)
@@ -3738,6 +3769,7 @@ class RuntimeService:
                 usage=response.usage,
             )
             await self._store.update_hitl_prompt(prompt.id, status="completed", completed_at_now=True)
+            await self._resolve_notification("ask_user", thread_id=prompt.thread_id)
             return await self.mark_thread_auth_required(
                 platform=prompt.platform,
                 channel_id=prompt.channel_id,
@@ -3766,6 +3798,7 @@ class RuntimeService:
                     usage=response.usage,
                 )
             await self._store.update_hitl_prompt(prompt.id, status="completed", completed_at_now=True)
+            await self._resolve_notification("ask_user", thread_id=prompt.thread_id)
             return await self.mark_thread_ask_user_required(
                 platform=prompt.platform,
                 channel_id=prompt.channel_id,
@@ -3800,6 +3833,7 @@ class RuntimeService:
             usage=response.usage,
         )
         await self._store.update_hitl_prompt(prompt.id, status="completed", completed_at_now=True)
+        await self._resolve_notification("ask_user", thread_id=prompt.thread_id)
         return f"Interactive prompt `{prompt.id}` answered and resumed successfully."
 
     @staticmethod
@@ -3839,6 +3873,148 @@ class RuntimeService:
         if not self._owner_user_ids:
             return True
         return actor_id in self._owner_user_ids
+
+    @staticmethod
+    def _notification_dedupe_key(
+        kind: str,
+        *,
+        thread_id: str | None = None,
+        task_id: str | None = None,
+    ) -> str:
+        if task_id:
+            suffix = "draft" if kind == "task_draft" else "waiting_merge" if kind == "task_waiting_merge" else kind
+            return f"task:{task_id}:{suffix}"
+        if not thread_id:
+            raise ValueError("thread_id is required when task_id is not set")
+        return f"thread:{thread_id}:{kind}"
+
+    async def _emit_notification(self, event: NotificationEvent) -> None:
+        await self._notifications.emit(event)
+
+    async def _resolve_notification(
+        self,
+        kind: str,
+        *,
+        thread_id: str | None = None,
+        task_id: str | None = None,
+        status: str = "resolved",
+    ) -> int:
+        dedupe_key = self._notification_dedupe_key(kind, thread_id=thread_id, task_id=task_id)
+        return await self._notifications.resolve(dedupe_key, status=status)
+
+    async def _notify_thread_auth_required(
+        self,
+        *,
+        platform: str,
+        channel_id: str,
+        thread_id: str,
+        provider: str,
+    ) -> None:
+        await self._emit_notification(
+            NotificationEvent(
+                kind="auth_required",
+                platform=platform,
+                channel_id=channel_id,
+                thread_id=thread_id,
+                title="Action required",
+                body=(
+                    f"Provider: `{provider}`\n"
+                    "Next step: complete login in this thread."
+                ),
+                dedupe_key=self._notification_dedupe_key("auth_required", thread_id=thread_id),
+                payload={"provider": provider, "scope": "thread"},
+            )
+        )
+
+    async def _notify_task_auth_required(self, task: RuntimeTask, *, provider: str) -> None:
+        await self._emit_notification(
+            NotificationEvent(
+                kind="auth_required",
+                platform=task.platform,
+                channel_id=task.channel_id,
+                thread_id=task.thread_id,
+                task_id=task.id,
+                title="Action required",
+                body=(
+                    f"Provider: `{provider}`\n"
+                    "Next step: complete login in this thread."
+                ),
+                dedupe_key=self._notification_dedupe_key("auth_required", task_id=task.id),
+                payload={"provider": provider, "scope": "task"},
+            )
+        )
+
+    async def _notify_thread_ask_user_required(
+        self,
+        *,
+        platform: str,
+        channel_id: str,
+        thread_id: str,
+        question: str,
+    ) -> None:
+        await self._emit_notification(
+            NotificationEvent(
+                kind="ask_user",
+                platform=platform,
+                channel_id=channel_id,
+                thread_id=thread_id,
+                title="Action required",
+                body=(
+                    f"Question: {question}\n"
+                    "Next step: answer the prompt in this thread."
+                ),
+                dedupe_key=self._notification_dedupe_key("ask_user", thread_id=thread_id),
+                payload={"question": question, "scope": "thread"},
+            )
+        )
+
+    async def _notify_task_ask_user_required(self, task: RuntimeTask, *, question: str) -> None:
+        await self._emit_notification(
+            NotificationEvent(
+                kind="ask_user",
+                platform=task.platform,
+                channel_id=task.channel_id,
+                thread_id=task.thread_id,
+                task_id=task.id,
+                title="Action required",
+                body=(
+                    f"Question: {question}\n"
+                    "Next step: answer the prompt in this thread."
+                ),
+                dedupe_key=self._notification_dedupe_key("ask_user", task_id=task.id),
+                payload={"question": question, "scope": "task"},
+            )
+        )
+
+    async def _notify_task_draft_required(self, task: RuntimeTask) -> None:
+        await self._emit_notification(
+            NotificationEvent(
+                kind="task_draft",
+                platform=task.platform,
+                channel_id=task.channel_id,
+                thread_id=task.thread_id,
+                task_id=task.id,
+                title="Action required",
+                body="Next step: approve, reject, or suggest changes in this thread.",
+                dedupe_key=self._notification_dedupe_key("task_draft", task_id=task.id),
+                payload={"status": task.status},
+            )
+        )
+
+    async def _notify_task_waiting_merge_required(self, task: RuntimeTask) -> None:
+        await self._emit_notification(
+            NotificationEvent(
+                kind="task_waiting_merge",
+                platform=task.platform,
+                channel_id=task.channel_id,
+                thread_id=task.thread_id,
+                task_id=task.id,
+                title="Action required",
+                body="Next step: merge, discard, or request changes in this thread.",
+                dedupe_key=self._notification_dedupe_key("task_waiting_merge", task_id=task.id),
+                payload={"status": task.status},
+            )
+        )
 
     def _tail_text(self, text: str) -> str:
         if not text:
@@ -4234,6 +4410,8 @@ class RuntimeService:
                 provider=flow.provider,
             )
             if suspended is None:
+                if event_type in {"approved", "cancelled"}:
+                    await self._resolve_notification("auth_required", thread_id=flow.thread_id, status="cancelled" if event_type == "cancelled" else "resolved")
                 return
             if event_type == "approved":
                 updated_context = dict(suspended.resume_context or {})
@@ -4249,7 +4427,19 @@ class RuntimeService:
                     suspended.id,
                     resume_context_json=updated_context,
                 )
+                await self._resolve_notification("auth_required", thread_id=flow.thread_id)
                 asyncio.create_task(self.resume_suspended_agent_run(suspended.id))
+            elif event_type == "cancelled":
+                await self._store.update_suspended_agent_run(
+                    suspended.id,
+                    status="cancelled",
+                    resume_context_json={
+                        **suspended.resume_context,
+                        "auth_error": message or f"{flow.provider} login was cancelled.",
+                    },
+                    completed_at_now=True,
+                )
+                await self._resolve_notification("auth_required", thread_id=flow.thread_id, status="cancelled")
             elif event_type in {"expired", "failed"}:
                 await self._store.update_suspended_agent_run(
                     suspended.id,
@@ -4262,6 +4452,8 @@ class RuntimeService:
             return
         task = await self._store.get_runtime_task(flow.linked_task_id)
         if task is None:
+            if event_type in {"approved", "cancelled"}:
+                await self._resolve_notification("auth_required", task_id=flow.linked_task_id, status="cancelled" if event_type == "cancelled" else "resolved")
             return
         if event_type == "approved":
             await self._store.update_runtime_task(
@@ -4280,6 +4472,15 @@ class RuntimeService:
             updated = await self._store.get_runtime_task(task.id)
             if updated is not None:
                 await self._signal_status_by_id(updated, TASK_STATUS_PENDING)
+            await self._resolve_notification("auth_required", task_id=task.id)
+        elif event_type == "cancelled":
+            await self._store.update_runtime_task(
+                task.id,
+                status=TASK_STATUS_BLOCKED,
+                blocked_reason=message or f"{flow.provider} login was cancelled.",
+                ended_at=None,
+            )
+            await self._resolve_notification("auth_required", task_id=task.id, status="cancelled")
         elif event_type in {"expired", "failed"}:
             await self._store.update_runtime_task(
                 task.id,

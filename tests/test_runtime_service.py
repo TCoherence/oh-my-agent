@@ -35,6 +35,7 @@ class _FakeChannel:
     channel_id: str = "100"
     _next_msg_id: int = 1
     sent: list[tuple[str, str]] = field(default_factory=list)
+    dms: list[tuple[str, str]] = field(default_factory=list)
     status_messages: dict[str, tuple[str, str]] = field(default_factory=dict)
     status_history: list[tuple[str, str, str]] = field(default_factory=list)
     drafts: list[dict] = field(default_factory=list)
@@ -45,6 +46,15 @@ class _FakeChannel:
     async def send(self, thread_id: str, text: str) -> str:
         self.sent.append((thread_id, text))
         msg_id = f"m-{self._next_msg_id}"
+        self._next_msg_id += 1
+        return msg_id
+
+    def render_user_mention(self, user_id: str) -> str:
+        return f"<@{user_id}>"
+
+    async def send_dm(self, user_id: str, text: str) -> str:
+        self.dms.append((user_id, text))
+        msg_id = f"dm-{self._next_msg_id}"
         self._next_msg_id += 1
         return msg_id
 
@@ -566,6 +576,16 @@ async def test_runtime_message_intent_draft_to_merge(runtime_env):
     tasks = await store.list_runtime_tasks(platform="discord", channel_id="100")
     assert len(tasks) == 1
     assert tasks[0].status == TASK_STATUS_DRAFT
+    draft_notifications = await store.list_active_notification_events(
+        dedupe_key=f"task:{tasks[0].id}:draft",
+        limit=10,
+    )
+    assert len(draft_notifications) == 1
+    assert any(
+        text.startswith("<@owner-1> **Action required**") and "Reason: draft" in text
+        for _, text in channel.sent
+    )
+    assert any(user_id == "owner-1" and "Reason: draft" in text for user_id, text in channel.dms)
 
     approve_event = await runtime.build_slash_decision_event(
         platform="discord",
@@ -578,9 +598,18 @@ async def test_runtime_message_intent_draft_to_merge(runtime_env):
     assert approve_event is not None
     result = await runtime.handle_decision_event(approve_event)
     assert "approved" in result.lower()
+    assert await store.list_active_notification_events(
+        dedupe_key=f"task:{tasks[0].id}:draft",
+        limit=10,
+    ) == []
 
     waiting = await _wait_for_status(store, tasks[0].id, {TASK_STATUS_WAITING_MERGE})
     assert waiting.status == TASK_STATUS_WAITING_MERGE
+    merge_notifications = await store.list_active_notification_events(
+        dedupe_key=f"task:{tasks[0].id}:waiting_merge",
+        limit=10,
+    )
+    assert len(merge_notifications) == 1
     await _wait_for_draft_count(channel, 2)
     merge_draft = channel.drafts[-1]
     assert merge_draft["task_id"] == tasks[0].id
@@ -601,6 +630,10 @@ async def test_runtime_message_intent_draft_to_merge(runtime_env):
     assert merge_event is not None
     merge_result = await runtime.handle_decision_event(merge_event)
     assert "merged successfully" in merge_result.lower()
+    assert await store.list_active_notification_events(
+        dedupe_key=f"task:{tasks[0].id}:waiting_merge",
+        limit=10,
+    ) == []
 
     merged = await _wait_for_status(store, tasks[0].id, {TASK_STATUS_MERGED})
     assert merged.status == TASK_STATUS_MERGED
@@ -1309,7 +1342,7 @@ async def test_runtime_start_cleans_stale_merged_workspace(tmp_path):
                 "merged_immediate": True,
             },
         },
-        owner_user_ids={"owner-1"},
+        owner_user_ids={"owner-1", "owner-2"},
         repo_root=repo,
     )
 
@@ -1348,7 +1381,7 @@ async def test_runtime_start_prunes_stale_agent_logs(tmp_path, caplog):
                 "merged_immediate": True,
             },
         },
-        owner_user_ids={"owner-1"},
+        owner_user_ids={"owner-1", "owner-2"},
         repo_root=repo,
     )
 
@@ -1708,7 +1741,7 @@ async def test_start_auth_login_sends_qr_prompt(tmp_path):
             "cleanup": {"enabled": False},
             "merge_gate": {"enabled": True},
         },
-        owner_user_ids={"owner-1"},
+        owner_user_ids={"owner-1", "owner-2"},
         repo_root=repo,
         auth_service=auth,
     )
@@ -1752,7 +1785,7 @@ async def test_mark_task_auth_required_waits_then_resumes(tmp_path):
             "cleanup": {"enabled": False},
             "merge_gate": {"enabled": True},
         },
-        owner_user_ids={"owner-1"},
+        owner_user_ids={"owner-1", "owner-2"},
         repo_root=repo,
         auth_service=auth,
     )
@@ -1785,11 +1818,24 @@ async def test_mark_task_auth_required_waits_then_resumes(tmp_path):
     assert "waiting for `bilibili` login" in result
     assert waiting is not None
     assert waiting.status == TASK_STATUS_WAITING_USER_INPUT
+    notifications = await store.list_active_notification_events(
+        dedupe_key=f"task:{task.id}:auth_required",
+        limit=10,
+    )
+    assert len(notifications) == 2
+    assert any(
+        text.startswith("<@owner-1> <@owner-2> **Action required**") and "Reason: auth_required" in text
+        for _, text in channel.sent
+    )
 
     await auth.emit("approved", "flow-1")
     resumed = await store.get_runtime_task(task.id)
     assert resumed is not None
     assert resumed.status == "PENDING"
+    assert await store.list_active_notification_events(
+        dedupe_key=f"task:{task.id}:auth_required",
+        limit=10,
+    ) == []
 
     await runtime.stop()
     await store.close()
@@ -1850,6 +1896,15 @@ async def test_mark_thread_auth_required_waits_then_resumes(tmp_path):
     )
     assert run is not None
     assert run.status == "waiting_auth"
+    notifications = await store.list_active_notification_events(
+        dedupe_key="thread:thread-1:auth_required",
+        limit=10,
+    )
+    assert len(notifications) == 1
+    assert any(
+        text.startswith("<@owner-1> **Action required**") and "Reason: auth_required" in text
+        for _, text in channel.sent
+    )
 
     await auth.emit("approved", "flow-1")
     for _ in range(10):
@@ -1866,6 +1921,10 @@ async def test_mark_thread_auth_required_waits_then_resumes(tmp_path):
     history = await session.get_history("thread-1")
     assert history[-1]["role"] == "assistant"
     assert history[-1]["content"] == "final resumed answer"
+    assert await store.list_active_notification_events(
+        dedupe_key="thread:thread-1:auth_required",
+        limit=10,
+    ) == []
 
     await runtime.stop()
     await store.close()
@@ -1889,7 +1948,7 @@ async def test_mark_thread_ask_user_waits_then_resumes(tmp_path):
             "cleanup": {"enabled": False},
             "merge_gate": {"enabled": True},
         },
-        owner_user_ids={"owner-1"},
+        owner_user_ids={"owner-1", "owner-2"},
         repo_root=repo,
     )
     channel = _FakeChannel()
@@ -1921,6 +1980,16 @@ async def test_mark_thread_ask_user_waits_then_resumes(tmp_path):
 
     assert "waiting for input" in result
     assert channel.hitl_prompts
+    notifications = await store.list_active_notification_events(
+        dedupe_key="thread:thread-1:ask_user",
+        limit=10,
+    )
+    assert len(notifications) == 2
+    assert any(
+        text.startswith("<@owner-1> <@owner-2> **Action required**") and "Reason: ask_user" in text
+        for _, text in channel.sent
+    )
+    assert {user_id for user_id, _ in channel.dms} == {"owner-1", "owner-2"}
 
     prompt = await store.get_active_hitl_prompt_for_thread(
         platform="discord",
@@ -1937,6 +2006,10 @@ async def test_mark_thread_ask_user_waits_then_resumes(tmp_path):
     assert prompt is not None
     assert prompt.status == "completed"
     assert prompt.selected_choice_id == "finance"
+    assert await store.list_active_notification_events(
+        dedupe_key="thread:thread-1:ask_user",
+        limit=10,
+    ) == []
 
     history = await session.get_history("thread-1")
     assert history[-2]["role"] == "user"
@@ -2011,6 +2084,15 @@ async def test_mark_task_ask_user_waits_and_answer_requeues_task(tmp_path):
     prompt = await store.get_active_hitl_prompt_for_task(task.id)
     assert prompt is not None
     assert channel.hitl_prompts
+    notifications = await store.list_active_notification_events(
+        dedupe_key=f"task:{task.id}:ask_user",
+        limit=10,
+    )
+    assert len(notifications) == 1
+    assert any(
+        text.startswith("<@owner-1> **Action required**") and "Reason: ask_user" in text
+        for _, text in channel.sent
+    )
 
     resumed = await runtime.answer_hitl_prompt(prompt.id, choice_id="ai", actor_id="owner-1")
     assert "re-queued" in resumed
@@ -2025,6 +2107,10 @@ async def test_mark_task_ask_user_waits_and_answer_requeues_task(tmp_path):
     prompt_after = await store.get_hitl_prompt(prompt.id)
     assert prompt_after is not None
     assert prompt_after.status == "completed"
+    assert await store.list_active_notification_events(
+        dedupe_key=f"task:{task.id}:ask_user",
+        limit=10,
+    ) == []
 
     await runtime.stop()
     await store.close()
@@ -2095,6 +2181,10 @@ async def test_cancel_task_hitl_prompt_blocks_task(tmp_path):
     prompt_after = await store.get_hitl_prompt(prompt.id)
     assert prompt_after is not None
     assert prompt_after.status == "cancelled"
+    assert await store.list_active_notification_events(
+        dedupe_key=f"task:{task.id}:ask_user",
+        limit=10,
+    ) == []
 
     await runtime.stop()
     await store.close()

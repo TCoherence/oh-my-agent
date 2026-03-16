@@ -14,7 +14,7 @@ from typing import Any
 import aiosqlite
 
 from oh_my_agent.auth.types import AUTH_SCOPE_DEFAULT, AuthFlow, CredentialHandle
-from oh_my_agent.runtime.types import HitlPrompt, RuntimeTask, SuspendedAgentRun
+from oh_my_agent.runtime.types import HitlPrompt, NotificationRecord, RuntimeTask, SuspendedAgentRun
 
 logger = logging.getLogger(__name__)
 
@@ -296,6 +296,38 @@ class MemoryStore(ABC):
     async def update_hitl_prompt(self, prompt_id: str, **updates) -> HitlPrompt | None:
         return None
 
+    # -- notifications ---------------------------------------------------
+
+    async def create_notification_event(self, **kwargs) -> NotificationRecord:
+        raise NotImplementedError
+
+    async def get_notification_event(self, notification_id: str) -> NotificationRecord | None:
+        return None
+
+    async def list_active_notification_events(
+        self,
+        *,
+        dedupe_key: str | None = None,
+        owner_user_id: str | None = None,
+        limit: int = 100,
+    ) -> list[NotificationRecord]:
+        return []
+
+    async def update_notification_event(
+        self,
+        notification_id: str,
+        **updates,
+    ) -> NotificationRecord | None:
+        return None
+
+    async def resolve_notification_events(
+        self,
+        *,
+        dedupe_key: str,
+        status: str = "resolved",
+    ) -> int:
+        return 0
+
     # -- short-conversation ephemeral workspaces -------------------------
 
     async def upsert_ephemeral_workspace(self, workspace_key: str, workspace_path: str) -> None:
@@ -566,6 +598,33 @@ CREATE INDEX IF NOT EXISTS idx_hitl_prompts_task
     ON hitl_prompts(task_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_hitl_prompts_status
     ON hitl_prompts(status, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS notification_events (
+    id                TEXT PRIMARY KEY,
+    kind              TEXT NOT NULL,
+    status            TEXT NOT NULL,
+    platform          TEXT NOT NULL,
+    channel_id        TEXT NOT NULL,
+    thread_id         TEXT NOT NULL,
+    task_id           TEXT,
+    owner_user_id     TEXT NOT NULL,
+    dedupe_key        TEXT NOT NULL,
+    title             TEXT NOT NULL,
+    body              TEXT NOT NULL,
+    payload_json      TEXT,
+    thread_message_id TEXT,
+    dm_message_id     TEXT,
+    created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    resolved_at       TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_notification_events_dedupe_status
+    ON notification_events(dedupe_key, status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_notification_events_owner_status
+    ON notification_events(owner_user_id, status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_notification_events_task_status
+    ON notification_events(task_id, status, updated_at DESC);
 
 CREATE TABLE IF NOT EXISTS runtime_task_events (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1664,6 +1723,120 @@ class SQLiteMemoryStore(MemoryStore):
             )
             await db.commit()
         return await self.get_hitl_prompt(prompt_id)
+
+    async def create_notification_event(self, **kwargs) -> NotificationRecord:
+        async with self._runtime_write_lock:
+            db = await self._conn()
+            payload_json = kwargs.get("payload_json")
+            if payload_json is not None and not isinstance(payload_json, str):
+                payload_json = json.dumps(payload_json, ensure_ascii=False)
+            await db.execute(
+                "INSERT INTO notification_events ("
+                " id, kind, status, platform, channel_id, thread_id, task_id, owner_user_id,"
+                " dedupe_key, title, body, payload_json, thread_message_id, dm_message_id"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    kwargs["notification_id"],
+                    kwargs["kind"],
+                    kwargs["status"],
+                    kwargs["platform"],
+                    kwargs["channel_id"],
+                    kwargs["thread_id"],
+                    kwargs.get("task_id"),
+                    kwargs["owner_user_id"],
+                    kwargs["dedupe_key"],
+                    kwargs["title"],
+                    kwargs["body"],
+                    payload_json,
+                    kwargs.get("thread_message_id"),
+                    kwargs.get("dm_message_id"),
+                ),
+            )
+            await db.commit()
+        record = await self.get_notification_event(kwargs["notification_id"])
+        if record is None:
+            raise RuntimeError("Failed to create notification event")
+        return record
+
+    async def get_notification_event(self, notification_id: str) -> NotificationRecord | None:
+        db = await self._conn()
+        cursor = await db.execute("SELECT * FROM notification_events WHERE id=?", (notification_id,))
+        row = await cursor.fetchone()
+        return NotificationRecord.from_row(dict(row)) if row else None
+
+    async def list_active_notification_events(
+        self,
+        *,
+        dedupe_key: str | None = None,
+        owner_user_id: str | None = None,
+        limit: int = 100,
+    ) -> list[NotificationRecord]:
+        db = await self._conn()
+        clauses = ["status='active'"]
+        params: list[Any] = []
+        if dedupe_key is not None:
+            clauses.append("dedupe_key=?")
+            params.append(dedupe_key)
+        if owner_user_id is not None:
+            clauses.append("owner_user_id=?")
+            params.append(owner_user_id)
+        params.append(int(limit))
+        cursor = await db.execute(
+            "SELECT * FROM notification_events "
+            f"WHERE {' AND '.join(clauses)} "
+            "ORDER BY updated_at DESC, created_at DESC LIMIT ?",
+            tuple(params),
+        )
+        rows = await cursor.fetchall()
+        return [NotificationRecord.from_row(dict(row)) for row in rows]
+
+    async def update_notification_event(
+        self,
+        notification_id: str,
+        **updates,
+    ) -> NotificationRecord | None:
+        if not updates:
+            return await self.get_notification_event(notification_id)
+        async with self._runtime_write_lock:
+            db = await self._conn()
+            sets: list[str] = []
+            values: list[Any] = []
+            resolved_at_now = bool(updates.pop("resolved_at_now", False))
+            if resolved_at_now:
+                updates["resolved_at"] = "__NOW__"
+            for key, value in updates.items():
+                if key == "payload_json" and value is not None and not isinstance(value, str):
+                    value = json.dumps(value, ensure_ascii=False)
+                if value == "__NOW__":
+                    sets.append(f"{key}=CURRENT_TIMESTAMP")
+                else:
+                    sets.append(f"{key}=?")
+                    values.append(value)
+            sets.append("updated_at=CURRENT_TIMESTAMP")
+            values.append(notification_id)
+            await db.execute(
+                f"UPDATE notification_events SET {', '.join(sets)} WHERE id=?",
+                tuple(values),
+            )
+            await db.commit()
+        return await self.get_notification_event(notification_id)
+
+    async def resolve_notification_events(
+        self,
+        *,
+        dedupe_key: str,
+        status: str = "resolved",
+    ) -> int:
+        async with self._runtime_write_lock:
+            db = await self._conn()
+            cursor = await db.execute(
+                "UPDATE notification_events "
+                "SET status=?, resolved_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP "
+                "WHERE dedupe_key=? AND status='active'",
+                (status, dedupe_key),
+            )
+            await db.commit()
+        return int(cursor.rowcount or 0)
 
     async def upsert_skill_provenance(self, skill_name: str, **kwargs) -> None:
         async with self._runtime_write_lock:

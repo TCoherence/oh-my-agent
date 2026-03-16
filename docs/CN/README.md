@@ -435,10 +435,12 @@ author: scheduler
 - 当 agent 输出 `OMA_CONTROL` 的 `auth_required` challenge 时，runtime task 会进入 `WAITING_USER_INPUT`。
 - 普通聊天 / 显式 skill 路径现在也支持同样的 auth challenge：core 会挂起当前 run，扫码完成后优先恢复原 CLI session。
 - 二维码登录完成后，绑定的 task 会自动回到 `PENDING`，无需用户再手动 resume。
+- thread 或 task 进入 `auth_required` 时，Discord 现在会在**同一个 thread** 里额外发一条 owner ping 提醒，并 best-effort 给所有 configured owners 发 DM。
 - 通用 `ask_user` challenge 现在也已接通：
   - 普通聊天 / 显式 skill 调用会发出可见的单选按钮问题，owner 选择后自动恢复原 run
   - runtime task 会进入 `WAITING_USER_INPUT`，等待 owner 通过按钮回答，然后自动恢复
   - 每个 ask_user prompt 都带内建 `Cancel` 按钮
+- `ask_user`、`DRAFT`、`WAITING_MERGE` 现在也会触发同样的高信号提醒：原 thread 内单独一条 ping 消息 + best-effort owner DM。
 - active 的 ask_user prompt 会持久化到 SQLite，并在 bot 重启后重新注册 Discord persistent views，所以待回答的问题不会因为进程重启失效。
 - 在线程里回复 `retry login`、`重新登录`、`重新扫码` 可以重发二维码。
 
@@ -452,6 +454,7 @@ author: scheduler
 - `WAITING_USER_INPUT` 是 runtime 里等待 owner 交互的统一暂停态：
   - 二维码登录
   - 通用单选式 `ask_user`
+- 当前只有 `DRAFT`、`WAITING_MERGE`、`auth_required`、`ask_user` 会触发 owner 通知；普通运行进度不会刷通知。
 - `repo_change` 和 `skill_change` 在独立 git worktree 中执行：`~/.oh-my-agent/runtime/tasks/<task_id>`。
 - `MERGED` 任务在合并成功后立即清理 worktree；其他终态任务默认保留 72 小时后由 janitor 清理。
 - 消息驱动控制：在线程内发送 `stop`、`pause`、`resume` 可直接控制任务状态。

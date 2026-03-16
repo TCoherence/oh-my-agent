@@ -1646,6 +1646,13 @@ class DiscordChannel(BaseChannel):
         msg = await thread.send(text)
         return str(msg.id)
 
+    def render_user_mention(self, user_id: str) -> str:
+        return f"<@{user_id}>"
+
+    async def send_dm(self, user_id: str, text: str) -> str | None:
+        dm_channel_id = await self.ensure_dm_channel(user_id)
+        return await self.send(dm_channel_id, text)
+
     async def send_attachment(
         self,
         thread_id: str,

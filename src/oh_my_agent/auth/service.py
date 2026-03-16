@@ -134,13 +134,15 @@ class AuthService:
                 return refreshed or existing
             return existing
         if existing and force_new:
-            await self._store.update_auth_flow(
+            cancelled = await self._store.update_auth_flow(
                 existing.id,
                 status=AUTH_FLOW_STATUS_CANCELLED,
                 qr_image_path=None,
                 error="Superseded by a new QR flow.",
                 completed_at_now=True,
             )
+            if cancelled:
+                await self._emit("cancelled", cancelled, None, "Superseded by a new QR flow.")
             await self._cleanup_qr_image(existing)
 
         started = await provider_impl.start_qr_login(owner_user_id)
@@ -186,13 +188,15 @@ class AuthService:
             await self._store.delete_auth_credential(provider, owner_user_id, scope_key=AUTH_SCOPE_DEFAULT)
         flow = await self._store.get_active_auth_flow(provider, owner_user_id)
         if flow:
-            await self._store.update_auth_flow(
+            cancelled = await self._store.update_auth_flow(
                 flow.id,
                 status=AUTH_FLOW_STATUS_CANCELLED,
                 qr_image_path=None,
                 error="Cancelled by user.",
                 completed_at_now=True,
             )
+            if cancelled:
+                await self._emit("cancelled", cancelled, None, "Cancelled by user.")
             await self._cleanup_qr_image(flow)
 
     async def get_status(

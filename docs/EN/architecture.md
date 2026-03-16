@@ -337,7 +337,7 @@ Current safeguards:
     └── memory.db
 ```
 
-Within `memory.db`, runtime-owned tables now include both task state and `hitl_prompts` rows for persisted interactive owner questions.
+Within `memory.db`, runtime-owned tables now include task state, `hitl_prompts` rows for persisted interactive owner questions, and `notification_events` rows for deduped owner-action notifications (`auth_required`, `ask_user`, `DRAFT`, `WAITING_MERGE`).
 
 ## Janitors and Cleanup
 

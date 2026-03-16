@@ -143,3 +143,46 @@ async def test_rehydrate_hitl_prompt_views_restores_active_prompt():
     assert len(client.views) == 1
     _view, message_id = client.views[0]
     assert message_id == 123456789
+
+
+class _FakeDiscordDMChannel:
+    def __init__(self) -> None:
+        self.id = 555
+        self.sent: list[str] = []
+
+    async def send(self, text):
+        self.sent.append(text)
+        return SimpleNamespace(id=987)
+
+
+class _FakeDiscordUser:
+    def __init__(self) -> None:
+        self.dm_channel = None
+
+    async def create_dm(self):
+        self.dm_channel = _FakeDiscordDMChannel()
+        return self.dm_channel
+
+
+@pytest.mark.asyncio
+async def test_send_dm_uses_dm_channel(tmp_path):
+    del tmp_path
+    channel = DiscordChannel(token="x", channel_id="100")
+    fake_user = _FakeDiscordUser()
+    channel._client = SimpleNamespace(  # type: ignore[attr-defined]
+        get_user=lambda _uid: fake_user,
+        fetch_user=None,
+        get_channel=lambda _cid: fake_user.dm_channel,
+        fetch_channel=lambda _cid: fake_user.dm_channel,
+    )
+
+    msg_id = await channel.send_dm("42", "hello owner")
+
+    assert msg_id == "987"
+    assert fake_user.dm_channel is not None
+    assert fake_user.dm_channel.sent == ["hello owner"]
+
+
+def test_render_user_mention_uses_discord_syntax():
+    channel = DiscordChannel(token="x", channel_id="100")
+    assert channel.render_user_mention("42") == "<@42>"

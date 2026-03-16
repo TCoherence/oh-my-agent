@@ -337,7 +337,7 @@ flowchart TD
     └── memory.db
 ```
 
-其中 `memory.db` 里现在除了 task 状态，也包含 `hitl_prompts` 这类 owner 交互等待态记录。
+其中 `memory.db` 里现在除了 task 状态，也包含 `hitl_prompts` 这类 owner 交互等待态记录，以及 `notification_events` 这类面向 `auth_required`、`ask_user`、`DRAFT`、`WAITING_MERGE` 的去重通知记录。
 
 ## Janitor 与清理机制
 

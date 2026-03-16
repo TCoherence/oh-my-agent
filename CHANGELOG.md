@@ -6,6 +6,16 @@ The format is intentionally lightweight and release-oriented rather than exhaust
 
 ## Unreleased
 
+### Added
+
+- Discord-first owner notifications for `auth_required`, `ask_user`, `DRAFT`, and `WAITING_MERGE`, with a separate ping message in the same thread plus best-effort owner DMs
+- Persistent `notification_events` rows in SQLite for notification dedupe and future escalation/reminder support
+
+### Changed
+
+- Human-input states now fan out through an internal notification layer instead of each flow hand-rolling Discord reminders
+- `auth_required`, `ask_user`, `DRAFT`, and `WAITING_MERGE` notifications now resolve explicitly when the underlying waiting state is cleared, while routine runtime progress still stays notification-free
+
 ## v0.7.2 - 2026-03-16
 
 ### Added

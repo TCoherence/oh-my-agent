@@ -440,10 +440,12 @@ author: scheduler
 - QR PNGs under `~/.oh-my-agent/runtime/auth/qr/` are temporary and are deleted when the flow reaches a terminal state.
 - Runtime tasks can move into `WAITING_USER_INPUT` when an agent emits an `OMA_CONTROL` auth challenge; once the QR flow completes, the linked task is re-queued automatically.
 - Direct chat / explicit skill runs can also suspend on `OMA_CONTROL` auth challenges, store a resumable suspended run record, and continue the same agent session after login when possible.
+- When a thread or task enters `auth_required`, Discord now sends an extra owner-ping message in the same thread and best-effort DMs all configured owners.
 - Generic `ask_user` challenges are now supported on Discord:
   - direct chat / explicit skill runs can post a visible single-choice prompt, wait for an owner button click, and auto-resume the same run
   - runtime tasks can enter `WAITING_USER_INPUT`, post a visible single-choice prompt, and resume automatically after selection
   - each ask_user prompt always includes a built-in `Cancel` action
+- `ask_user`, `DRAFT`, and `WAITING_MERGE` now also emit high-signal owner notifications: one separate ping message in the same thread plus best-effort owner DMs.
 - Active ask_user prompts are persisted in SQLite and Discord button views are rehydrated on bot restart, so pending questions survive process restarts.
 - In a waiting thread, replying `retry login`, `重新登录`, or `重新扫码` reissues the QR flow.
 - `/memories [category]`
@@ -462,6 +464,7 @@ author: scheduler
 - `WAITING_USER_INPUT` is the runtime pause state for owner interaction:
   - QR auth challenges
   - generic single-choice `ask_user` challenges
+- `DRAFT`, `WAITING_MERGE`, `auth_required`, and `ask_user` are the only states that currently trigger owner notifications; routine runtime progress does not.
 - `repo_change` and `skill_change` execute in isolated git worktrees under `~/.oh-my-agent/runtime/tasks/<task_id>`.
 - `artifact` tasks use runtime orchestration without entering `WAITING_MERGE`; `TASK_STATE: DONE` plus successful validation leads to `COMPLETED`.
 - High-risk tasks go to `DRAFT`; low-risk `artifact` tasks can run without approval by default.

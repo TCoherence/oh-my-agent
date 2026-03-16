@@ -218,6 +218,48 @@ async def test_runtime_task_stores_artifact_fields(store):
 
 
 @pytest.mark.asyncio
+async def test_notification_event_crud_and_resolution(store):
+    created = await store.create_notification_event(
+        notification_id="notif-1",
+        kind="ask_user",
+        status="active",
+        platform="discord",
+        channel_id="100",
+        thread_id="thread-1",
+        task_id="task-1",
+        owner_user_id="owner-1",
+        dedupe_key="task:task-1:ask_user",
+        title="Action required",
+        body="Next step: answer the prompt in this thread.",
+        payload_json={"question": "Pick one"},
+        thread_message_id="m-1",
+        dm_message_id="dm-1",
+    )
+    assert created.id == "notif-1"
+    assert created.payload["question"] == "Pick one"
+
+    active = await store.list_active_notification_events(
+        dedupe_key="task:task-1:ask_user",
+        limit=10,
+    )
+    assert len(active) == 1
+    assert active[0].owner_user_id == "owner-1"
+
+    updated = await store.update_notification_event("notif-1", dm_message_id="dm-2")
+    assert updated is not None
+    assert updated.dm_message_id == "dm-2"
+
+    changed = await store.resolve_notification_events(dedupe_key="task:task-1:ask_user")
+    assert changed == 1
+
+    active_after = await store.list_active_notification_events(
+        dedupe_key="task:task-1:ask_user",
+        limit=10,
+    )
+    assert active_after == []
+
+
+@pytest.mark.asyncio
 async def test_auth_credential_and_flow_crud(store):
     credential = await store.upsert_auth_credential(
         credential_id="cred-1",

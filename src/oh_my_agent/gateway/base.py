@@ -102,6 +102,15 @@ class BaseChannel(ABC):
         """Send *text* to the given thread and optionally return message id."""
         ...
 
+    def render_user_mention(self, user_id: str) -> str:
+        """Render a user mention for the current platform."""
+        return f"`{user_id}`"
+
+    async def send_dm(self, user_id: str, text: str) -> str | None:
+        """Best-effort DM delivery. Default implementation is unsupported."""
+        del user_id, text
+        return None
+
     async def upsert_status_message(
         self,
         thread_id: str,
