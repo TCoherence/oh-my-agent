@@ -15,6 +15,7 @@ CONTROL_FRAME_RE = re.compile(
 CONTROL_PROTOCOL_VERSION = 1
 CONTROL_TYPE_CHALLENGE = "challenge"
 CHALLENGE_TYPE_AUTH_REQUIRED = "auth_required"
+CHALLENGE_TYPE_ASK_USER = "ask_user"
 
 
 class ProtocolError(ValueError):
@@ -40,6 +41,20 @@ class AuthRequiredChallenge:
     provider: str
     reason: str
     message: str | None = None
+
+
+@dataclass(frozen=True)
+class AskUserChoice:
+    id: str
+    label: str
+    description: str | None = None
+
+
+@dataclass(frozen=True)
+class AskUserChallenge:
+    question: str
+    details: str | None
+    choices: tuple[AskUserChoice, ...]
 
 
 def extract_control_frame(text: str) -> str | None:
@@ -117,6 +132,57 @@ def parse_auth_challenge(envelope: ControlEnvelope) -> AuthRequiredChallenge | N
     if message is not None:
         message = str(message)
     return AuthRequiredChallenge(provider=provider, reason=reason, message=message)
+
+
+def parse_ask_user_challenge(envelope: ControlEnvelope) -> AskUserChallenge | None:
+    challenge = parse_challenge_payload(envelope)
+    if challenge is None or challenge.challenge_type != CHALLENGE_TYPE_ASK_USER:
+        return None
+
+    question = str(challenge.payload.get("question") or "").strip()
+    if not question:
+        raise ProtocolError("ask_user challenge must include a non-empty question.")
+
+    details = challenge.payload.get("details")
+    if details is not None:
+        details = str(details).strip() or None
+
+    raw_choices = challenge.payload.get("choices")
+    if not isinstance(raw_choices, list):
+        raise ProtocolError("ask_user challenge must include a choices array.")
+    if not (1 <= len(raw_choices) <= 5):
+        raise ProtocolError("ask_user challenge choices must contain between 1 and 5 entries.")
+
+    parsed_choices: list[AskUserChoice] = []
+    seen_ids: set[str] = set()
+    for idx, item in enumerate(raw_choices, start=1):
+        if not isinstance(item, dict):
+            raise ProtocolError(f"ask_user choice #{idx} must be an object.")
+        choice_id = str(item.get("id") or "").strip()
+        label = str(item.get("label") or "").strip()
+        if not choice_id:
+            raise ProtocolError(f"ask_user choice #{idx} must include a non-empty id.")
+        if not label:
+            raise ProtocolError(f"ask_user choice #{idx} must include a non-empty label.")
+        if choice_id in seen_ids:
+            raise ProtocolError(f"ask_user choice ids must be unique; duplicate id: {choice_id!r}.")
+        seen_ids.add(choice_id)
+        description = item.get("description")
+        if description is not None:
+            description = str(description).strip() or None
+        parsed_choices.append(
+            AskUserChoice(
+                id=choice_id,
+                label=label,
+                description=description,
+            )
+        )
+
+    return AskUserChallenge(
+        question=question,
+        details=details,
+        choices=tuple(parsed_choices),
+    )
 
 
 def try_parse_auth_challenge(text: str) -> AuthRequiredChallenge | None:

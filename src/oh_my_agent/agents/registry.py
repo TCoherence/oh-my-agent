@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 import logging
 from pathlib import Path
 import re
@@ -33,6 +34,54 @@ class AgentRegistry:
         suffix = log_path.suffix or ".log"
         return log_path.with_name(f"{log_path.stem}-{safe_agent}{suffix}")
 
+    @staticmethod
+    @contextmanager
+    def _temporary_timeout(agent: BaseAgent, timeout_override_seconds: int | None):
+        if timeout_override_seconds is None or not hasattr(agent, "_timeout"):
+            yield
+            return
+        try:
+            override = int(timeout_override_seconds)
+        except (TypeError, ValueError):
+            yield
+            return
+        if override <= 0:
+            yield
+            return
+        original = getattr(agent, "_timeout")
+        setattr(agent, "_timeout", override)
+        try:
+            yield
+        finally:
+            setattr(agent, "_timeout", original)
+
+    async def _run_single_agent(
+        self,
+        agent: BaseAgent,
+        prompt: str,
+        history: list[dict] | None,
+        *,
+        thread_id: str | None,
+        workspace_override,
+        log_path,
+        image_paths: list[Path] | None,
+        timeout_override_seconds: int | None,
+    ) -> AgentResponse:
+        import inspect
+
+        sig = inspect.signature(agent.run)
+        kwargs = {}
+        if "thread_id" in sig.parameters:
+            kwargs["thread_id"] = thread_id
+        if "workspace_override" in sig.parameters:
+            kwargs["workspace_override"] = workspace_override
+        if "log_path" in sig.parameters:
+            kwargs["log_path"] = self._agent_log_path(log_path, agent.name)
+        if "image_paths" in sig.parameters:
+            kwargs["image_paths"] = image_paths
+        with self._temporary_timeout(agent, timeout_override_seconds):
+            return await agent.run(prompt, history, **kwargs)
+
     async def run(
         self,
         prompt: str,
@@ -44,6 +93,7 @@ class AgentRegistry:
         log_path=None,
         image_paths: list[Path] | None = None,
         run_label: str | None = None,
+        timeout_override_seconds: int | None = None,
     ) -> tuple[BaseAgent, AgentResponse]:
         """Try each agent in order. Return the first successful (agent, response) pair.
 
@@ -62,18 +112,16 @@ class AgentRegistry:
                     text="",
                     error=f"Agent '{force_agent}' not found. Available: {names}",
                 )
-            import inspect
-            sig = inspect.signature(agent.run)
-            kwargs = {}
-            if "thread_id" in sig.parameters:
-                kwargs["thread_id"] = thread_id
-            if "workspace_override" in sig.parameters:
-                kwargs["workspace_override"] = workspace_override
-            if "log_path" in sig.parameters:
-                kwargs["log_path"] = self._agent_log_path(log_path, agent.name)
-            if "image_paths" in sig.parameters:
-                kwargs["image_paths"] = image_paths
-            response = await agent.run(prompt, history, **kwargs)
+            response = await self._run_single_agent(
+                agent,
+                prompt,
+                history,
+                thread_id=thread_id,
+                workspace_override=workspace_override,
+                log_path=log_path,
+                image_paths=image_paths,
+                timeout_override_seconds=timeout_override_seconds,
+            )
             return agent, response
 
         last_agent = self._agents[-1]
@@ -81,19 +129,16 @@ class AgentRegistry:
 
         for agent in self._agents:
             logger.info("Trying agent '%s'%s", agent.name, label_suffix)
-            # Pass thread_id to agents that support it (e.g. ClaudeAgent)
-            import inspect
-            sig = inspect.signature(agent.run)
-            kwargs = {}
-            if "thread_id" in sig.parameters:
-                kwargs["thread_id"] = thread_id
-            if "workspace_override" in sig.parameters:
-                kwargs["workspace_override"] = workspace_override
-            if "log_path" in sig.parameters:
-                kwargs["log_path"] = self._agent_log_path(log_path, agent.name)
-            if "image_paths" in sig.parameters:
-                kwargs["image_paths"] = image_paths
-            response = await agent.run(prompt, history, **kwargs)
+            response = await self._run_single_agent(
+                agent,
+                prompt,
+                history,
+                thread_id=thread_id,
+                workspace_override=workspace_override,
+                log_path=log_path,
+                image_paths=image_paths,
+                timeout_override_seconds=timeout_override_seconds,
+            )
             if not response.error:
                 return agent, response
             logger.warning(

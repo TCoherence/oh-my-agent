@@ -140,6 +140,7 @@
 - [ ] Skill feedback UX 后续优化：支持对同一次 skill 结果的任意消息分块做 reaction 反馈，并可选在 skill 完成后单独发一条 feedback prompt/message；反馈范围只针对已完成的 skill 输出，不覆盖 auth/system/普通聊天消息
 - [ ] 持久化 automation 运行时状态（`last_run`、`next_run`、`last_error`），而不是每次重启后全部重算
 - [x] 增加 automation 的 operator 控制面，例如 `/automation_status`、`/automation_reload`、`/automation_enable`、`/automation_disable`（当前是 Discord-only、owner-only、ephemeral 的 MVP）
+- [ ] PRIORITY：把 skill 级别的 `metadata.timeout_seconds` 继续传递到 runtime task / automation 执行链路里，让长耗时的 automation-backed skill 也能继承和直接 skill 调用一致的 timeout override
 - [ ] 明确停机和重启期间 missed jobs 的处理策略（跳过、补跑，或有限追赶）
 - [ ] 重新评估 v1 之后的 automation 调度模型（例如 RRULE 或更完整的 cron 语义）
 - [ ] 增加面向 operator 的 automation 可观测性界面，展示 active jobs、最近触发和最近失败

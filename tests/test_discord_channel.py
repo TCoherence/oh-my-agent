@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from oh_my_agent.runtime.types import HitlPrompt
 from oh_my_agent.gateway.base import OutgoingAttachment
 from oh_my_agent.gateway.platforms.discord import DiscordChannel
 
@@ -90,3 +91,55 @@ async def test_send_attachment_uploads_png(tmp_path):
     assert msg_id == "123"
     assert thread.calls
     assert thread.calls[0]["content"] == "QR"
+
+
+class _FakeDiscordClient:
+    def __init__(self) -> None:
+        self.views: list[tuple[object, int | None]] = []
+
+    def add_view(self, view, *, message_id=None) -> None:
+        self.views.append((view, message_id))
+
+
+class _FakeRuntimeService:
+    async def list_active_hitl_prompts(self, *, platform=None, channel_id=None, limit=100):
+        del platform, channel_id, limit
+        return [
+            HitlPrompt(
+                id="hitl-1",
+                target_kind="thread",
+                platform="discord",
+                channel_id="100",
+                thread_id="200",
+                task_id=None,
+                agent_name="codex",
+                status="waiting",
+                question="Pick one",
+                details="Single choice.",
+                choices=(
+                    {"id": "politics", "label": "Politics daily", "description": "Geopolitics"},
+                    {"id": "finance", "label": "Finance daily", "description": None},
+                ),
+                selected_choice_id=None,
+                selected_choice_label=None,
+                selected_choice_description=None,
+                control_envelope_json="{}",
+                resume_context={},
+                session_id_snapshot="sess-1",
+                prompt_message_id="123456789",
+                created_by="owner-1",
+            )
+        ]
+
+
+@pytest.mark.asyncio
+async def test_rehydrate_hitl_prompt_views_restores_active_prompt():
+    channel = DiscordChannel(token="x", channel_id="100", owner_user_ids={"owner-1"})
+    channel.set_runtime_service(_FakeRuntimeService())
+    client = _FakeDiscordClient()
+
+    await channel._rehydrate_hitl_prompt_views(client)  # type: ignore[arg-type]
+
+    assert len(client.views) == 1
+    _view, message_id = client.views[0]
+    assert message_id == 123456789

@@ -23,7 +23,7 @@ Inspired by [OpenClaw](https://openclaw.dev).
 - Adaptive memory is implemented: auto-extraction from conversations, injection into agent prompts, `/memories` and `/forget` commands.
 - CLI session resume is implemented for Claude, Codex, and Gemini, with persisted session IDs restored after restart.
 - Auth-first QR login infrastructure is implemented for Discord owner flows, with local credential persistence and runtime resume hooks.
-- Agent/control cooperation now supports `OMA_CONTROL` envelopes for auth challenges, so direct chat runs can pause for provider login and resume afterward.
+- Agent/control cooperation now supports `OMA_CONTROL` envelopes for both `auth_required` and generic `ask_user` challenges, so direct chat runs and runtime tasks can pause for owner input and then resume.
 
 ## Architecture
 
@@ -295,6 +295,7 @@ Rebuild the image only when you change container-layer concerns such as `Dockerf
 - Reply inside the thread to continue with full context.
 - Prefix with `@gemini`, `@claude`, or `@codex` to force an agent for that turn.
 - Explicit installed skill invocation such as `@claude /weather Shanghai` or `@claude /top-5-daily-news` stays in direct chat flow and does not create a runtime task.
+- A skill can optionally set `metadata.timeout_seconds` in its `SKILL.md` frontmatter to override the normal per-agent CLI timeout for that skill invocation only. This is intended for slow report/research skills, not as a global replacement for agent timeouts.
 - If an agent fails, the next one in the fallback chain takes over.
 - If `access.owner_user_ids` is configured, only those users can trigger the bot.
 
@@ -439,6 +440,11 @@ author: scheduler
 - QR PNGs under `~/.oh-my-agent/runtime/auth/qr/` are temporary and are deleted when the flow reaches a terminal state.
 - Runtime tasks can move into `WAITING_USER_INPUT` when an agent emits an `OMA_CONTROL` auth challenge; once the QR flow completes, the linked task is re-queued automatically.
 - Direct chat / explicit skill runs can also suspend on `OMA_CONTROL` auth challenges, store a resumable suspended run record, and continue the same agent session after login when possible.
+- Generic `ask_user` challenges are now supported on Discord:
+  - direct chat / explicit skill runs can post a visible single-choice prompt, wait for an owner button click, and auto-resume the same run
+  - runtime tasks can enter `WAITING_USER_INPUT`, post a visible single-choice prompt, and resume automatically after selection
+  - each ask_user prompt always includes a built-in `Cancel` action
+- Active ask_user prompts are persisted in SQLite and Discord button views are rehydrated on bot restart, so pending questions survive process restarts.
 - In a waiting thread, replying `retry login`, `重新登录`, or `重新扫码` reissues the QR flow.
 - `/memories [category]`
 - `/forget <memory_id>`
@@ -453,7 +459,9 @@ author: scheduler
   - `artifact`: long-running execution that returns a reply or generated artifact and does not use merge gate
   - `repo_change`: code/docs/test/config changes that run in worktrees and require merge
   - `skill_change`: canonical `skills/<name>` changes that validate and then require merge
-- `WAITING_USER_INPUT` is reserved for runtime tasks blocked on owner interaction such as QR auth.
+- `WAITING_USER_INPUT` is the runtime pause state for owner interaction:
+  - QR auth challenges
+  - generic single-choice `ask_user` challenges
 - `repo_change` and `skill_change` execute in isolated git worktrees under `~/.oh-my-agent/runtime/tasks/<task_id>`.
 - `artifact` tasks use runtime orchestration without entering `WAITING_MERGE`; `TASK_STATE: DONE` plus successful validation leads to `COMPLETED`.
 - High-risk tasks go to `DRAFT`; low-risk `artifact` tasks can run without approval by default.
@@ -510,7 +518,12 @@ author: scheduler
 - Artifact delivery is not finished yet: generated artifacts are tracked, but attachment-first and link-fallback delivery still needs a dedicated adapter layer.
 - Runtime observability still lacks an in-memory live excerpt layer; `/task_logs` can read live agent log tails, but Discord status cards do not yet show the latest agent activity summary.
 - There is still no operator-facing doctor/self-diagnostics entrypoint in Discord when the service crashes or fails to start; today, debugging still requires direct access to server logs.
-- Human-in-the-loop support is still narrow: `WAITING_USER_INPUT` now exists for QR auth, but broader agent-driven clarification flows are not generalized yet.
+- Human-in-the-loop v1 is now implemented for Discord buttons only:
+  - single-choice `ask_user` prompts
+  - owner-only response handling
+  - visible prompt + visible answer/cancel record
+  - auto-resume for direct chat and runtime task paths
+- Free-text HITL, multi-select prompts, non-Discord interactive UIs, and prompt expiry policies are still intentionally out of scope.
 - Codex repo/workspace skill discovery now uses official `.agents/skills/`; the generated `AGENTS.md` is no longer used to enumerate workspace skills.
 - Memory retrieval still uses Jaccard word-overlap for similarity; semantic (vector) retrieval remains a v0.8+ item.
 

@@ -33,6 +33,7 @@ flowchart TD
     RT --> AR
     RT --> DB["SQLite memory.db"]
     RT --> FS["runtime/tasks + runtime/logs"]
+    RT --> HITL["hitl_prompts"]
 
     SCH --> RT
     SCH --> AF["~/.oh-my-agent/automations/*.yaml"]
@@ -95,6 +96,7 @@ Gateway 是协调层。它本身不直接执行 agent，也不负责长生命周
 - 执行多步 task 状态迁移。
 - 区分带 merge gate 的 repo work 和一次性 artifact work。
 - 在 auth 发生时暂停任务，登录后恢复。
+- 在 owner 需要做显式选择时暂停普通聊天或 runtime task，收到答案后恢复。
 - 清理旧 runtime task workspace 和 agent logs。
 
 当前 task 家族：
@@ -263,6 +265,36 @@ sequenceDiagram
 
 这是现在真实存在的边界，不是文档上的理论问题。
 
+### 通用 HITL `ask_user` 路径
+
+```mermaid
+sequenceDiagram
+    participant Agent as CLI Agent
+    participant Core as Gateway / Runtime
+    participant DB as SQLite hitl_prompts
+    participant Discord
+    participant User as Owner
+
+    Agent-->>Core: OMA_CONTROL ask_user
+    Core->>DB: 持久化 waiting prompt
+    Core->>Discord: 可见问题 + 按钮
+    User->>Discord: 点击一个选项
+    Discord->>Core: 结构化选择结果
+    Core->>DB: 标记 resolving/completed
+    Core->>Agent: 用结构化 HITL answer 恢复原 run/task
+    Agent-->>Core: 继续输出
+    Core->>Discord: 最终结果或下一步控制流程
+```
+
+当前 v1 边界：
+
+- 只支持 Discord
+- 只支持单选按钮
+- 只允许 owner 回答
+- prompt 默认不过期，直到 answered 或 cancelled
+- 进程重启后会重新注册 active button views
+- auth 仍然保持专用链路，不和 ask_user 共用一套存储模型
+
 ### Automation 路径
 
 ```mermaid
@@ -304,6 +336,8 @@ flowchart TD
     │   └── <repo-change-task-id>/
     └── memory.db
 ```
+
+其中 `memory.db` 里现在除了 task 状态，也包含 `hitl_prompts` 这类 owner 交互等待态记录。
 
 ## Janitor 与清理机制
 
@@ -418,6 +452,8 @@ flowchart TD
 - resumed CLI session 不一定能立刻认出刚新增的 skill
 - automation operator UI 目前只展示 valid 且 visible 的 automations，不展示 invalid/conflicting 条目
 - automation runtime state（`last_run`、`next_run`、`last_error`）还没有持久化
+- 通用 HITL v1 目前只覆盖 Discord 单选按钮，还没有自由文本和多选
+- auth 仍然沿用专门的 suspended-run 路径，而不是直接并入 `hitl_prompts`
 - 停机期间 missed jobs 的处理策略还没定死
 - agent run 周围的 lifecycle hooks 目前还只是 backlog，还不是系统能力
 

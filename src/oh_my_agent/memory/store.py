@@ -14,7 +14,7 @@ from typing import Any
 import aiosqlite
 
 from oh_my_agent.auth.types import AUTH_SCOPE_DEFAULT, AuthFlow, CredentialHandle
-from oh_my_agent.runtime.types import RuntimeTask, SuspendedAgentRun
+from oh_my_agent.runtime.types import HitlPrompt, RuntimeTask, SuspendedAgentRun
 
 logger = logging.getLogger(__name__)
 
@@ -264,6 +264,38 @@ class MemoryStore(ABC):
     async def update_suspended_agent_run(self, run_id: str, **updates) -> SuspendedAgentRun | None:
         return None
 
+    # -- HITL prompts ----------------------------------------------------
+
+    async def create_hitl_prompt(self, **kwargs) -> HitlPrompt:
+        raise NotImplementedError
+
+    async def get_hitl_prompt(self, prompt_id: str) -> HitlPrompt | None:
+        return None
+
+    async def get_active_hitl_prompt_for_thread(
+        self,
+        *,
+        platform: str,
+        channel_id: str,
+        thread_id: str,
+    ) -> HitlPrompt | None:
+        return None
+
+    async def get_active_hitl_prompt_for_task(self, task_id: str) -> HitlPrompt | None:
+        return None
+
+    async def list_active_hitl_prompts(
+        self,
+        *,
+        platform: str | None = None,
+        channel_id: str | None = None,
+        limit: int = 100,
+    ) -> list[HitlPrompt]:
+        return []
+
+    async def update_hitl_prompt(self, prompt_id: str, **updates) -> HitlPrompt | None:
+        return None
+
     # -- short-conversation ephemeral workspaces -------------------------
 
     async def upsert_ephemeral_workspace(self, workspace_key: str, workspace_path: str) -> None:
@@ -502,6 +534,38 @@ CREATE INDEX IF NOT EXISTS idx_suspended_agent_runs_thread
     ON suspended_agent_runs(platform, channel_id, thread_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_suspended_agent_runs_status
     ON suspended_agent_runs(status, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS hitl_prompts (
+    id                          TEXT PRIMARY KEY,
+    target_kind                 TEXT NOT NULL,
+    platform                    TEXT NOT NULL,
+    channel_id                  TEXT NOT NULL,
+    thread_id                   TEXT NOT NULL,
+    task_id                     TEXT,
+    agent_name                  TEXT NOT NULL,
+    status                      TEXT NOT NULL,
+    question                    TEXT NOT NULL,
+    details                     TEXT,
+    choices_json                TEXT NOT NULL,
+    selected_choice_id          TEXT,
+    selected_choice_label       TEXT,
+    selected_choice_description TEXT,
+    control_envelope_json       TEXT NOT NULL,
+    resume_context_json         TEXT,
+    session_id_snapshot         TEXT,
+    prompt_message_id           TEXT,
+    created_by                  TEXT NOT NULL,
+    created_at                  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at                  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    completed_at                TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_hitl_prompts_thread
+    ON hitl_prompts(platform, channel_id, thread_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_hitl_prompts_task
+    ON hitl_prompts(task_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_hitl_prompts_status
+    ON hitl_prompts(status, updated_at DESC);
 
 CREATE TABLE IF NOT EXISTS runtime_task_events (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1468,6 +1532,138 @@ class SQLiteMemoryStore(MemoryStore):
             )
             await db.commit()
         return await self.get_suspended_agent_run(run_id)
+
+    async def create_hitl_prompt(self, **kwargs) -> HitlPrompt:
+        async with self._runtime_write_lock:
+            db = await self._conn()
+            choices_json = kwargs.get("choices_json")
+            if choices_json is not None and not isinstance(choices_json, str):
+                choices_json = json.dumps(choices_json, ensure_ascii=False)
+            resume_context_json = kwargs.get("resume_context_json")
+            if resume_context_json is not None and not isinstance(resume_context_json, str):
+                resume_context_json = json.dumps(resume_context_json, ensure_ascii=False)
+            await db.execute(
+                "INSERT INTO hitl_prompts ("
+                " id, target_kind, platform, channel_id, thread_id, task_id, agent_name, status,"
+                " question, details, choices_json, selected_choice_id, selected_choice_label,"
+                " selected_choice_description, control_envelope_json, resume_context_json,"
+                " session_id_snapshot, prompt_message_id, created_by"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    kwargs["prompt_id"],
+                    kwargs["target_kind"],
+                    kwargs["platform"],
+                    kwargs["channel_id"],
+                    kwargs["thread_id"],
+                    kwargs.get("task_id"),
+                    kwargs["agent_name"],
+                    kwargs["status"],
+                    kwargs["question"],
+                    kwargs.get("details"),
+                    choices_json,
+                    kwargs.get("selected_choice_id"),
+                    kwargs.get("selected_choice_label"),
+                    kwargs.get("selected_choice_description"),
+                    kwargs["control_envelope_json"],
+                    resume_context_json,
+                    kwargs.get("session_id_snapshot"),
+                    kwargs.get("prompt_message_id"),
+                    kwargs["created_by"],
+                ),
+            )
+            await db.commit()
+        prompt = await self.get_hitl_prompt(kwargs["prompt_id"])
+        if prompt is None:
+            raise RuntimeError("Failed to create HITL prompt")
+        return prompt
+
+    async def get_hitl_prompt(self, prompt_id: str) -> HitlPrompt | None:
+        db = await self._conn()
+        cursor = await db.execute("SELECT * FROM hitl_prompts WHERE id=?", (prompt_id,))
+        row = await cursor.fetchone()
+        return HitlPrompt.from_row(dict(row)) if row else None
+
+    async def get_active_hitl_prompt_for_thread(
+        self,
+        *,
+        platform: str,
+        channel_id: str,
+        thread_id: str,
+    ) -> HitlPrompt | None:
+        db = await self._conn()
+        cursor = await db.execute(
+            "SELECT * FROM hitl_prompts "
+            "WHERE platform=? AND channel_id=? AND thread_id=? "
+            "AND status IN ('waiting', 'resolving') "
+            "ORDER BY updated_at DESC, created_at DESC LIMIT 1",
+            (platform, channel_id, thread_id),
+        )
+        row = await cursor.fetchone()
+        return HitlPrompt.from_row(dict(row)) if row else None
+
+    async def get_active_hitl_prompt_for_task(self, task_id: str) -> HitlPrompt | None:
+        db = await self._conn()
+        cursor = await db.execute(
+            "SELECT * FROM hitl_prompts "
+            "WHERE task_id=? AND status IN ('waiting', 'resolving') "
+            "ORDER BY updated_at DESC, created_at DESC LIMIT 1",
+            (task_id,),
+        )
+        row = await cursor.fetchone()
+        return HitlPrompt.from_row(dict(row)) if row else None
+
+    async def list_active_hitl_prompts(
+        self,
+        *,
+        platform: str | None = None,
+        channel_id: str | None = None,
+        limit: int = 100,
+    ) -> list[HitlPrompt]:
+        db = await self._conn()
+        clauses = ["status IN ('waiting', 'resolving')"]
+        params: list[Any] = []
+        if platform is not None:
+            clauses.append("platform=?")
+            params.append(platform)
+        if channel_id is not None:
+            clauses.append("channel_id=?")
+            params.append(channel_id)
+        params.append(int(limit))
+        cursor = await db.execute(
+            "SELECT * FROM hitl_prompts "
+            f"WHERE {' AND '.join(clauses)} "
+            "ORDER BY updated_at ASC, created_at ASC LIMIT ?",
+            tuple(params),
+        )
+        rows = await cursor.fetchall()
+        return [HitlPrompt.from_row(dict(row)) for row in rows]
+
+    async def update_hitl_prompt(self, prompt_id: str, **updates) -> HitlPrompt | None:
+        if not updates:
+            return await self.get_hitl_prompt(prompt_id)
+        async with self._runtime_write_lock:
+            db = await self._conn()
+            sets: list[str] = []
+            values: list[Any] = []
+            completed_at_now = bool(updates.pop("completed_at_now", False))
+            if completed_at_now:
+                updates["completed_at"] = "__NOW__"
+            for key, value in updates.items():
+                if key in {"choices_json", "resume_context_json"} and value is not None and not isinstance(value, str):
+                    value = json.dumps(value, ensure_ascii=False)
+                if value == "__NOW__":
+                    sets.append(f"{key}=CURRENT_TIMESTAMP")
+                else:
+                    sets.append(f"{key}=?")
+                    values.append(value)
+            sets.append("updated_at=CURRENT_TIMESTAMP")
+            values.append(prompt_id)
+            await db.execute(
+                f"UPDATE hitl_prompts SET {', '.join(sets)} WHERE id=?",
+                tuple(values),
+            )
+            await db.commit()
+        return await self.get_hitl_prompt(prompt_id)
 
     async def upsert_skill_provenance(self, skill_name: str, **kwargs) -> None:
         async with self._runtime_write_lock:

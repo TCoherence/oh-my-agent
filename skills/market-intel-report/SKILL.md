@@ -1,6 +1,8 @@
 ---
 name: market-intel-report
 description: Produce Chinese-first politics, finance, and AI market-intel reports with persisted Markdown and JSON outputs under ~/.oh-my-agent/reports/market-intel/. Use this skill for bounded historical bootstrap dossiers, domain daily digests, and cross-domain weekly synthesis that should reuse prior stored reports rather than relying on Discord history.
+metadata:
+  timeout_seconds: 900
 ---
 
 # Market-Intel Report

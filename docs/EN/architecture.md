@@ -33,6 +33,7 @@ flowchart TD
     RT --> AR
     RT --> DB["SQLite memory.db"]
     RT --> FS["runtime/tasks + runtime/logs"]
+    RT --> HITL["hitl_prompts"]
 
     SCH --> RT
     SCH --> AF["~/.oh-my-agent/automations/*.yaml"]
@@ -95,6 +96,7 @@ Responsibilities:
 - Execute multi-step task state transitions.
 - Handle merge-gated repo work separately from one-shot artifact tasks.
 - Pause tasks for auth, resume them later, and emit terminal summaries.
+- Pause direct-chat runs or runtime tasks on owner-facing HITL questions and resume them later.
 - Clean old runtime task workspaces and agent logs.
 
 Current task families:
@@ -263,6 +265,36 @@ Important current behavior:
 
 That is a real current limitation and is documented elsewhere in the repo.
 
+### Generic HITL `ask_user` Path
+
+```mermaid
+sequenceDiagram
+    participant Agent as CLI Agent
+    participant Core as Gateway / Runtime
+    participant DB as SQLite hitl_prompts
+    participant Discord
+    participant User as Owner
+
+    Agent-->>Core: OMA_CONTROL ask_user
+    Core->>DB: persist waiting prompt
+    Core->>Discord: visible question + buttons
+    User->>Discord: click one choice
+    Discord->>Core: structured selection
+    Core->>DB: mark resolving/completed
+    Core->>Agent: resume same run/task with structured HITL answer
+    Agent-->>Core: continued output
+    Core->>Discord: final result or next control step
+```
+
+Current v1 scope:
+
+- Discord only
+- single-choice buttons only
+- owner-only responder
+- prompt persists until answered or cancelled
+- active button views are rehydrated on restart
+- auth remains a separate specialized path
+
 ### Automation Path
 
 ```mermaid
@@ -304,6 +336,8 @@ Current safeguards:
     │   └── <repo-change-task-id>/
     └── memory.db
 ```
+
+Within `memory.db`, runtime-owned tables now include both task state and `hitl_prompts` rows for persisted interactive owner questions.
 
 ## Janitors and Cleanup
 
@@ -418,6 +452,8 @@ Tradeoff:
 - resumed CLI sessions do not always immediately recognize newly added skills
 - automation operator UI only shows valid visible automations, not invalid/conflicting ones
 - automation runtime state (`last_run`, `next_run`, `last_error`) is not yet persisted
+- generic HITL v1 is Discord-only and choice-only; there is no free-text or multi-select path yet
+- auth still uses its own dedicated suspended-run flow rather than the generic `hitl_prompts` path
 - missed-job behavior across downtime is not yet finalized
 - lifecycle hooks around agent runs are still only a backlog item, not a system feature yet
 

@@ -40,6 +40,7 @@ class _FakeChannel:
     drafts: list[dict] = field(default_factory=list)
     signals: list[tuple[str, str | None, str]] = field(default_factory=list)
     attachments: list[tuple[str, str, Path, str | None]] = field(default_factory=list)
+    hitl_prompts: list[dict] = field(default_factory=list)
 
     async def send(self, thread_id: str, text: str) -> str:
         self.sent.append((thread_id, text))
@@ -94,6 +95,19 @@ class _FakeChannel:
             (thread_id, attachment.filename, attachment.local_path, attachment.caption)
         )
         msg_id = f"a-{self._next_msg_id}"
+        self._next_msg_id += 1
+        return msg_id
+
+    async def send_hitl_prompt(self, *, thread_id: str, prompt) -> str:
+        self.hitl_prompts.append(
+            {
+                "thread_id": thread_id,
+                "prompt_id": prompt.id,
+                "question": prompt.question,
+                "choices": list(prompt.choices),
+            }
+        )
+        msg_id = f"h-{self._next_msg_id}"
         self._next_msg_id += 1
         return msg_id
 
@@ -231,6 +245,40 @@ class _ResumableAuthAgent(BaseAgent):
         if thread_id and thread_id not in self._session_ids:
             self._session_ids[thread_id] = "sess-restored"
         return AgentResponse(text="final resumed answer")
+
+
+class _ResumableAskUserAgent(BaseAgent):
+    def __init__(self) -> None:
+        self._session_ids: dict[str, str] = {}
+        self.prompts: list[str] = []
+
+    @property
+    def name(self) -> str:
+        return "ask-user-agent"
+
+    def get_session_id(self, thread_id: str) -> str | None:
+        return self._session_ids.get(thread_id)
+
+    def set_session_id(self, thread_id: str, session_id: str) -> None:
+        self._session_ids[thread_id] = session_id
+
+    def clear_session(self, thread_id: str) -> None:
+        self._session_ids.pop(thread_id, None)
+
+    async def run(
+        self,
+        prompt: str,
+        history: list[dict] | None = None,
+        *,
+        thread_id: str | None = None,
+        workspace_override: Path | None = None,
+        log_path: Path | None = None,
+    ) -> AgentResponse:
+        del history, workspace_override, log_path
+        self.prompts.append(prompt)
+        if thread_id:
+            self._session_ids.setdefault(thread_id, "sess-hitl")
+        return AgentResponse(text="根据你的选择，我继续完成这次分析。")
 
 
 class _RootReadmeAgent(BaseAgent):
@@ -1818,6 +1866,235 @@ async def test_mark_thread_auth_required_waits_then_resumes(tmp_path):
     history = await session.get_history("thread-1")
     assert history[-1]["role"] == "assistant"
     assert history[-1]["content"] == "final resumed answer"
+
+    await runtime.stop()
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_mark_thread_ask_user_waits_then_resumes(tmp_path):
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    store = SQLiteMemoryStore(tmp_path / "hitl-thread.db")
+    await store.init()
+    runtime = RuntimeService(
+        store,
+        config={
+            "enabled": True,
+            "worker_concurrency": 1,
+            "worktree_root": str(tmp_path / "worktrees"),
+            "default_agent": "ask-user-agent",
+            "default_test_command": "true",
+            "risk_profile": "strict",
+            "cleanup": {"enabled": False},
+            "merge_gate": {"enabled": True},
+        },
+        owner_user_ids={"owner-1"},
+        repo_root=repo,
+    )
+    channel = _FakeChannel()
+    agent = _ResumableAskUserAgent()
+    registry = AgentRegistry([agent])
+    session = ChannelSession(platform="discord", channel_id="100", channel=channel, registry=registry)
+    session.memory_store = store
+    await session.append_user("thread-1", "帮我继续这个分析", "alice")
+    runtime.register_session(session, registry)
+
+    result = await runtime.mark_thread_ask_user_required(
+        platform="discord",
+        channel_id="100",
+        thread_id="thread-1",
+        actor_id="owner-1",
+        agent_name="ask-user-agent",
+        question="今天先看哪一条线？",
+        details="只能单选。",
+        choices=(
+            {"id": "politics", "label": "Politics daily", "description": "关注地缘政治"},
+            {"id": "finance", "label": "Finance daily", "description": "关注财报"},
+        ),
+        control_envelope_json=(
+            '{"version":1,"type":"challenge","data":{"challenge_type":"ask_user","question":"今天先看哪一条线？","details":"只能单选。","choices":[{"id":"politics","label":"Politics daily","description":"关注地缘政治"},{"id":"finance","label":"Finance daily","description":"关注财报"}]}}'
+        ),
+        session_id_snapshot="sess-hitl",
+        resume_context={"agent_prompt": "继续完成分析", "original_user_content": "帮我继续这个分析"},
+    )
+
+    assert "waiting for input" in result
+    assert channel.hitl_prompts
+
+    prompt = await store.get_active_hitl_prompt_for_thread(
+        platform="discord",
+        channel_id="100",
+        thread_id="thread-1",
+    )
+    assert prompt is not None
+    assert prompt.status == "waiting"
+
+    resolved = await runtime.answer_hitl_prompt(prompt.id, choice_id="finance", actor_id="owner-1")
+    assert "resumed successfully" in resolved
+
+    prompt = await store.get_hitl_prompt(prompt.id)
+    assert prompt is not None
+    assert prompt.status == "completed"
+    assert prompt.selected_choice_id == "finance"
+
+    history = await session.get_history("thread-1")
+    assert history[-2]["role"] == "user"
+    assert history[-2]["content"].startswith("[HITL Answer]")
+    assert "Selected choice id: finance" in history[-2]["content"]
+    assert history[-1]["role"] == "assistant"
+    assert history[-1]["content"] == "根据你的选择，我继续完成这次分析。"
+    assert any("The previous run paused because it required a single explicit user choice." in prompt for prompt in agent.prompts)
+
+    await runtime.stop()
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_mark_task_ask_user_waits_and_answer_requeues_task(tmp_path):
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    store = SQLiteMemoryStore(tmp_path / "hitl-task.db")
+    await store.init()
+    runtime = RuntimeService(
+        store,
+        config={
+            "enabled": True,
+            "worker_concurrency": 1,
+            "worktree_root": str(tmp_path / "worktrees"),
+            "default_agent": "done-agent",
+            "default_test_command": "true",
+            "risk_profile": "strict",
+            "cleanup": {"enabled": False},
+            "merge_gate": {"enabled": True},
+        },
+        owner_user_ids={"owner-1"},
+        repo_root=repo,
+    )
+    channel = _FakeChannel()
+    registry = AgentRegistry([_DoneAgent()])
+    session = ChannelSession(platform="discord", channel_id="100", channel=channel, registry=registry)
+    runtime.register_session(session, registry)
+
+    task = await store.create_runtime_task(
+        task_id="task-hitl-1",
+        platform="discord",
+        channel_id="100",
+        thread_id="thread-1",
+        created_by="owner-1",
+        goal="wait for input",
+        preferred_agent="done-agent",
+        status="RUNNING",
+        max_steps=2,
+        max_minutes=5,
+        test_command="true",
+    )
+
+    result = await runtime.mark_task_ask_user_required(
+        task.id,
+        question="今天先跑哪份报告？",
+        details="单选。",
+        choices=(
+            {"id": "politics", "label": "Politics daily", "description": "关注政策"},
+            {"id": "ai", "label": "AI daily", "description": "关注五层结构"},
+        ),
+        control_envelope_json=(
+            '{"version":1,"type":"challenge","data":{"challenge_type":"ask_user","question":"今天先跑哪份报告？","details":"单选。","choices":[{"id":"politics","label":"Politics daily","description":"关注政策"},{"id":"ai","label":"AI daily","description":"关注五层结构"}]}}'
+        ),
+    )
+    assert "waiting for owner input" in result
+
+    waiting = await store.get_runtime_task(task.id)
+    assert waiting is not None
+    assert waiting.status == TASK_STATUS_WAITING_USER_INPUT
+    assert waiting.blocked_reason.startswith("Awaiting user choice:")
+    prompt = await store.get_active_hitl_prompt_for_task(task.id)
+    assert prompt is not None
+    assert channel.hitl_prompts
+
+    resumed = await runtime.answer_hitl_prompt(prompt.id, choice_id="ai", actor_id="owner-1")
+    assert "re-queued" in resumed
+
+    task_after = await store.get_runtime_task(task.id)
+    assert task_after is not None
+    assert task_after.status == "PENDING"
+    assert task_after.resume_instruction is not None
+    assert task_after.resume_instruction.startswith("[HITL Answer]")
+    assert "Selected choice id: ai" in task_after.resume_instruction
+
+    prompt_after = await store.get_hitl_prompt(prompt.id)
+    assert prompt_after is not None
+    assert prompt_after.status == "completed"
+
+    await runtime.stop()
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_cancel_task_hitl_prompt_blocks_task(tmp_path):
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    store = SQLiteMemoryStore(tmp_path / "hitl-task-cancel.db")
+    await store.init()
+    runtime = RuntimeService(
+        store,
+        config={
+            "enabled": True,
+            "worker_concurrency": 1,
+            "worktree_root": str(tmp_path / "worktrees"),
+            "default_agent": "done-agent",
+            "default_test_command": "true",
+            "risk_profile": "strict",
+            "cleanup": {"enabled": False},
+            "merge_gate": {"enabled": True},
+        },
+        owner_user_ids={"owner-1"},
+        repo_root=repo,
+    )
+    channel = _FakeChannel()
+    registry = AgentRegistry([_DoneAgent()])
+    session = ChannelSession(platform="discord", channel_id="100", channel=channel, registry=registry)
+    runtime.register_session(session, registry)
+
+    task = await store.create_runtime_task(
+        task_id="task-hitl-cancel-1",
+        platform="discord",
+        channel_id="100",
+        thread_id="thread-1",
+        created_by="owner-1",
+        goal="wait for input",
+        preferred_agent="done-agent",
+        status="RUNNING",
+        max_steps=2,
+        max_minutes=5,
+        test_command="true",
+    )
+
+    await runtime.mark_task_ask_user_required(
+        task.id,
+        question="今天先跑哪份报告？",
+        details=None,
+        choices=(
+            {"id": "politics", "label": "Politics daily", "description": None},
+        ),
+        control_envelope_json=(
+            '{"version":1,"type":"challenge","data":{"challenge_type":"ask_user","question":"今天先跑哪份报告？","choices":[{"id":"politics","label":"Politics daily"}]}}'
+        ),
+    )
+    prompt = await store.get_active_hitl_prompt_for_task(task.id)
+    assert prompt is not None
+
+    cancelled = await runtime.cancel_hitl_prompt(prompt.id, actor_id="owner-1")
+    assert "cancelled" in cancelled
+
+    task_after = await store.get_runtime_task(task.id)
+    assert task_after is not None
+    assert task_after.status == TASK_STATUS_BLOCKED
+    assert task_after.blocked_reason == "User cancelled HITL prompt."
+
+    prompt_after = await store.get_hitl_prompt(prompt.id)
+    assert prompt_after is not None
+    assert prompt_after.status == "cancelled"
 
     await runtime.stop()
     await store.close()

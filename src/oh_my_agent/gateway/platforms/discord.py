@@ -17,7 +17,7 @@ from oh_my_agent.gateway.base import (
     MessageHandler,
     OutgoingAttachment,
 )
-from oh_my_agent.runtime.types import TaskDecisionEvent
+from oh_my_agent.runtime.types import HitlPrompt, TaskDecisionEvent
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +25,62 @@ THREAD_ARCHIVE_MINUTES = 60
 STATUS_MESSAGE_PREFIX = "**Task Status**"
 _MAX_IMAGE_BYTES = 10 * 1024 * 1024  # 10 MB
 _ATTACHMENT_DIR = Path(tempfile.gettempdir()) / "oh-my-agent" / "attachments"
+
+
+class _HitlPromptView(discord.ui.View):
+    def __init__(self, channel_adapter: "DiscordChannel", prompt: HitlPrompt, *, disabled: bool = False) -> None:
+        super().__init__(timeout=None)
+        self._channel_adapter = channel_adapter
+        self._prompt = prompt
+        self._disabled = disabled
+
+        for choice in prompt.choices:
+            button = discord.ui.Button(
+                label=str(choice.get("label") or "")[:80] or str(choice.get("id") or "")[:80] or "Choice",
+                style=discord.ButtonStyle.primary,
+                custom_id=f"hitl:{prompt.id}:choose:{choice.get('id')}",
+                disabled=disabled,
+                row=0,
+            )
+
+            async def _callback(
+                interaction: discord.Interaction,
+                *,
+                action_prompt_id: str = prompt.id,
+                action_choice_id: str = str(choice.get("id") or ""),
+            ) -> None:
+                await self._channel_adapter._handle_hitl_interaction(
+                    interaction,
+                    prompt_id=action_prompt_id,
+                    choice_id=action_choice_id,
+                    cancel=False,
+                )
+
+            button.callback = _callback
+            self.add_item(button)
+
+        cancel_button = discord.ui.Button(
+            label="Cancel",
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"hitl:{prompt.id}:cancel",
+            disabled=disabled,
+            row=1,
+        )
+
+        async def _cancel_callback(
+            interaction: discord.Interaction,
+            *,
+            action_prompt_id: str = prompt.id,
+        ) -> None:
+            await self._channel_adapter._handle_hitl_interaction(
+                interaction,
+                prompt_id=action_prompt_id,
+                choice_id=None,
+                cancel=True,
+            )
+
+        cancel_button.callback = _cancel_callback
+        self.add_item(cancel_button)
 
 
 async def _download_discord_attachments(
@@ -112,6 +168,132 @@ class DiscordChannel(BaseChannel):
     def set_runtime_service(self, runtime_service) -> None:
         """Inject runtime service for /task_* commands and decision buttons."""
         self._runtime_service = runtime_service
+
+    def _render_hitl_prompt_message(self, prompt: HitlPrompt) -> str:
+        if prompt.status == "completed":
+            selected = prompt.selected_choice_label or prompt.selected_choice_id or "unknown"
+            lines = [
+                "**Input resolved**",
+                f"Prompt: `{prompt.id}`",
+                f"Question: {prompt.question}",
+                f"Selected: **{selected}** (`{prompt.selected_choice_id or ''}`)",
+            ]
+            if prompt.selected_choice_description:
+                lines.append(f"Details: {prompt.selected_choice_description}")
+            return "\n".join(lines)[:1900]
+        if prompt.status == "cancelled":
+            return (
+                f"**Input cancelled**\n"
+                f"Prompt: `{prompt.id}`\n"
+                f"Question: {prompt.question}"
+            )[:1900]
+        if prompt.status == "failed":
+            return (
+                f"**Input unavailable**\n"
+                f"Prompt: `{prompt.id}`\n"
+                f"Question: {prompt.question}"
+            )[:1900]
+
+        lines = [
+            "**Input required**",
+            f"Prompt: `{prompt.id}`",
+            f"Question: {prompt.question}",
+        ]
+        if prompt.details:
+            lines.append(f"Details: {prompt.details}")
+        lines.append("")
+        lines.append("Choices:")
+        for idx, choice in enumerate(prompt.choices, start=1):
+            label = str(choice.get("label") or choice.get("id") or "")
+            description = choice.get("description")
+            if description:
+                lines.append(f"{idx}. **{label}** — {description}")
+            else:
+                lines.append(f"{idx}. **{label}**")
+        lines.extend(
+            [
+                "",
+                "Only the configured owner can answer this prompt.",
+            ]
+        )
+        return "\n".join(lines)[:1900]
+
+    async def send_hitl_prompt(self, *, thread_id: str, prompt: HitlPrompt) -> str | None:
+        thread = await self._resolve_channel(thread_id)
+        msg = await thread.send(
+            self._render_hitl_prompt_message(prompt),
+            view=_HitlPromptView(self, prompt),
+        )
+        return str(msg.id)
+
+    async def _rehydrate_hitl_prompt_views(self, client: discord.Client) -> None:
+        if not self._runtime_service:
+            return
+        prompts = await self._runtime_service.list_active_hitl_prompts(
+            platform=self.platform,
+            channel_id=self._channel_id,
+            limit=200,
+        )
+        restored = 0
+        for prompt in prompts:
+            if not prompt.prompt_message_id:
+                continue
+            try:
+                message_id = int(prompt.prompt_message_id)
+            except (TypeError, ValueError):
+                logger.warning("Skipping HITL prompt view restore for non-numeric message id %r", prompt.prompt_message_id)
+                continue
+            client.add_view(_HitlPromptView(self, prompt), message_id=message_id)
+            restored += 1
+        if restored:
+            logger.info("[discord] Restored %d active HITL prompt view(s)", restored)
+
+    async def _handle_hitl_interaction(
+        self,
+        interaction: discord.Interaction,
+        *,
+        prompt_id: str,
+        choice_id: str | None,
+        cancel: bool,
+    ) -> None:
+        if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
+            await interaction.response.send_message(
+                "This interactive prompt is restricted to the configured owner.",
+                ephemeral=True,
+            )
+            return
+        if not self._runtime_service:
+            await interaction.response.send_message(
+                "Runtime service is not enabled.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        if cancel:
+            result = await self._runtime_service.cancel_hitl_prompt(
+                prompt_id,
+                actor_id=str(interaction.user.id),
+            )
+        else:
+            result = await self._runtime_service.answer_hitl_prompt(
+                prompt_id,
+                choice_id=str(choice_id or ""),
+                actor_id=str(interaction.user.id),
+            )
+
+        prompt = await self._runtime_service.get_hitl_prompt(prompt_id)
+        if prompt is not None and interaction.message is not None:
+            disabled = prompt.status in {"completed", "cancelled", "failed"}
+            try:
+                await interaction.message.edit(
+                    content=self._render_hitl_prompt_message(prompt),
+                    view=_HitlPromptView(self, prompt, disabled=disabled),
+                )
+            except Exception:
+                logger.debug("Failed to update HITL prompt message %s", prompt_id, exc_info=True)
+
+        await interaction.followup.send(result[:1900], ephemeral=True)
 
     def set_scheduler(self, scheduler) -> None:
         """Inject scheduler for /automation_* commands."""
@@ -1243,6 +1425,7 @@ class DiscordChannel(BaseChannel):
         @client.event
         async def on_ready() -> None:
             scope = await self._sync_command_tree(tree, target_id)
+            await self._rehydrate_hitl_prompt_views(client)
             logger.info(
                 "[discord] Online as %s, listening on channel %s, slash commands synced (%s)",
                 client.user,

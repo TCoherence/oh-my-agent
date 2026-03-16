@@ -311,6 +311,57 @@ async def test_handle_message_intercepts_auth_control_frame():
 
 
 @pytest.mark.asyncio
+async def test_handle_message_intercepts_ask_user_control_frame():
+    channel = MagicMock()
+    channel.platform = "discord"
+    channel.channel_id = "100"
+    channel.create_thread = AsyncMock()
+    channel.send = AsyncMock()
+    channel.typing = MagicMock()
+    channel.typing.return_value.__aenter__ = AsyncMock(return_value=None)
+    channel.typing.return_value.__aexit__ = AsyncMock(return_value=False)
+
+    mock_agent = MagicMock()
+    mock_agent.name = "codex"
+    mock_agent.get_session_id.return_value = "sess-123"
+    registry = MagicMock(spec=AgentRegistry)
+    registry.agents = [mock_agent]
+    registry.run = AsyncMock(
+        return_value=(
+            mock_agent,
+            AgentResponse(
+                text=(
+                    "我需要你先决定今天要看哪一条线。\n\n"
+                    '<OMA_CONTROL>{"version":1,"type":"challenge","data":{"challenge_type":"ask_user",'
+                    '"question":"今天先跑哪份报告？","details":"单选即可。","choices":['
+                    '{"id":"politics","label":"Politics daily","description":"关注地缘政治"},'
+                    '{"id":"finance","label":"Finance daily","description":"关注财报和政策"}'
+                    ']}}</OMA_CONTROL>'
+                )
+            ),
+        )
+    )
+
+    runtime = MagicMock()
+    runtime.maybe_handle_thread_context = AsyncMock(return_value=False)
+    runtime.maybe_handle_incoming = AsyncMock(return_value=False)
+    runtime.mark_thread_ask_user_required = AsyncMock(return_value="Thread `thread-1` is waiting for input.")
+
+    session = _make_session(channel=channel, registry=registry)
+    gm = GatewayManager([], runtime_service=runtime)
+
+    await gm.handle_message(session, registry, _make_msg(thread_id="thread-1", content="follow up", author_id="owner-1"))
+
+    runtime.mark_thread_ask_user_required.assert_awaited_once()
+    assert channel.send.await_count == 1
+    first_message = channel.send.await_args_list[0].args[1]
+    assert first_message.startswith("-# via **codex**\n我需要你先决定今天要看哪一条线。")
+    history = await session.get_history("thread-1")
+    assert [turn["role"] for turn in history] == ["user", "assistant"]
+    assert history[-1]["content"] == "我需要你先决定今天要看哪一条线。"
+
+
+@pytest.mark.asyncio
 async def test_handle_message_logs_error_purpose(caplog):
     channel = MagicMock()
     channel.platform = "discord"
@@ -1092,6 +1143,57 @@ async def test_explicit_skill_invocation_bypasses_router_and_runtime(tmp_path):
     assert registry.run.call_args.args[0] == "/top-5-daily-news"
     assert registry.run.call_args.kwargs["force_agent"] == "claude"
     assert channel.send.await_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_explicit_skill_invocation_passes_skill_timeout_override(tmp_path):
+    channel = MagicMock()
+    channel.platform = "discord"
+    channel.channel_id = "100"
+    channel.create_thread = AsyncMock(return_value="t1")
+    channel.send = AsyncMock()
+    channel.typing = MagicMock()
+    channel.typing.return_value.__aenter__ = AsyncMock(return_value=None)
+    channel.typing.return_value.__aexit__ = AsyncMock(return_value=False)
+
+    mock_agent = MagicMock()
+    mock_agent.name = "gemini"
+    registry = MagicMock(spec=AgentRegistry)
+    registry.run = AsyncMock(return_value=(mock_agent, AgentResponse(text="report")))
+
+    runtime = MagicMock()
+    runtime.maybe_handle_thread_context = AsyncMock(return_value=False)
+    runtime.maybe_handle_incoming = AsyncMock(return_value=False)
+    runtime.create_task = AsyncMock()
+    runtime.create_skill_task = AsyncMock()
+
+    router = MagicMock()
+    router.confidence_threshold = 0.55
+    router.route = AsyncMock()
+
+    skills_root = tmp_path / "skills"
+    skill_dir = skills_root / "market-intel-report"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: market-intel-report\ndescription: long report\nmetadata:\n  timeout_seconds: 900\n---\n",
+        encoding="utf-8",
+    )
+    syncer = MagicMock()
+    syncer._skills_path = skills_root  # noqa: SLF001
+
+    session = _make_session(channel=channel, registry=registry)
+    gm = GatewayManager(
+        [],
+        runtime_service=runtime,
+        intent_router=router,
+        skill_syncer=syncer,
+    )
+
+    msg = _make_msg(thread_id="thread-1", content="/market-intel-report")
+    await gm.handle_message(session, registry, msg)
+
+    registry.run.assert_awaited_once()
+    assert registry.run.call_args.kwargs["timeout_override_seconds"] == 900
 
 
 @pytest.mark.asyncio

@@ -6,6 +6,7 @@ from oh_my_agent.control.protocol import (
     ProtocolError,
     extract_control_frame,
     parse_auth_challenge,
+    parse_ask_user_challenge,
     parse_control_envelope,
     strip_control_frame_text,
 )
@@ -52,3 +53,40 @@ def test_parse_auth_challenge_rejects_unknown_provider():
     )
     with pytest.raises(ProtocolError):
         parse_auth_challenge(envelope)
+
+
+def test_parse_ask_user_challenge_accepts_valid_choices():
+    envelope = parse_control_envelope(
+        '<OMA_CONTROL>{"version":1,"type":"challenge","data":{"challenge_type":"ask_user","question":"Pick one","details":"Need your choice","choices":[{"id":"politics","label":"Politics daily","description":"Focus on geopolitics"},{"id":"finance","label":"Finance daily"}]}}</OMA_CONTROL>'
+    )
+    challenge = parse_ask_user_challenge(envelope)
+    assert challenge is not None
+    assert challenge.question == "Pick one"
+    assert challenge.details == "Need your choice"
+    assert len(challenge.choices) == 2
+    assert challenge.choices[0].id == "politics"
+    assert challenge.choices[0].label == "Politics daily"
+
+
+def test_parse_ask_user_challenge_rejects_missing_question():
+    envelope = parse_control_envelope(
+        '<OMA_CONTROL>{"version":1,"type":"challenge","data":{"challenge_type":"ask_user","choices":[{"id":"politics","label":"Politics daily"}]}}</OMA_CONTROL>'
+    )
+    with pytest.raises(ProtocolError):
+        parse_ask_user_challenge(envelope)
+
+
+def test_parse_ask_user_challenge_rejects_too_many_choices():
+    envelope = parse_control_envelope(
+        '<OMA_CONTROL>{"version":1,"type":"challenge","data":{"challenge_type":"ask_user","question":"Pick one","choices":[{"id":"a","label":"A"},{"id":"b","label":"B"},{"id":"c","label":"C"},{"id":"d","label":"D"},{"id":"e","label":"E"},{"id":"f","label":"F"}]}}</OMA_CONTROL>'
+    )
+    with pytest.raises(ProtocolError):
+        parse_ask_user_challenge(envelope)
+
+
+def test_parse_ask_user_challenge_rejects_duplicate_choice_ids():
+    envelope = parse_control_envelope(
+        '<OMA_CONTROL>{"version":1,"type":"challenge","data":{"challenge_type":"ask_user","question":"Pick one","choices":[{"id":"finance","label":"Finance daily"},{"id":"finance","label":"Finance weekly"}]}}</OMA_CONTROL>'
+    )
+    with pytest.raises(ProtocolError):
+        parse_ask_user_challenge(envelope)

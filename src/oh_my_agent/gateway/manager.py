@@ -18,6 +18,7 @@ from oh_my_agent.control.protocol import (
     ProtocolError,
     extract_control_frame,
     parse_auth_challenge,
+    parse_ask_user_challenge,
     parse_control_envelope,
     strip_control_frame_text,
 )
@@ -279,14 +280,64 @@ class GatewayManager:
         try:
             envelope = parse_control_envelope(response.text)
             auth_challenge = parse_auth_challenge(envelope)
+            ask_user_challenge = parse_ask_user_challenge(envelope)
         except ProtocolError as exc:
             logger.warning("[%s] CONTROL_FRAME_PARSE_FAILED thread=%s error=%s", req_id, thread_id, exc)
             return False
-        if auth_challenge is None:
+        if auth_challenge is None and ask_user_challenge is None:
             await session.channel.send(
                 thread_id,
                 "The agent requested an unsupported interactive step. This challenge type is not implemented yet.",
             )
+            return True
+        if ask_user_challenge is not None:
+            if not self._runtime_service or not hasattr(self._runtime_service, "mark_thread_ask_user_required"):
+                await session.channel.send(
+                    thread_id,
+                    "The agent requested an interactive choice, but runtime HITL handling is unavailable.",
+                )
+                return True
+            visible_text = strip_control_frame_text(response.text)
+            if visible_text:
+                await session.append_assistant(thread_id, visible_text, agent_used.name)
+                await self._send_agent_response(
+                    session.channel,
+                    thread_id,
+                    agent_name=agent_used.name,
+                    text=visible_text,
+                    usage=response.usage,
+                )
+            session_snapshot = None
+            if hasattr(agent_used, "get_session_id"):
+                session_snapshot = agent_used.get_session_id(thread_id)
+            result = await self._runtime_service.mark_thread_ask_user_required(
+                platform=session.platform,
+                channel_id=session.channel_id,
+                thread_id=thread_id,
+                actor_id=msg.author_id or msg.author,
+                agent_name=agent_used.name,
+                question=ask_user_challenge.question,
+                details=ask_user_challenge.details,
+                choices=ask_user_challenge.choices,
+                control_envelope_json=envelope.raw_json,
+                session_id_snapshot=session_snapshot,
+                resume_context={
+                    "agent_prompt": agent_prompt,
+                    "original_user_content": msg.content,
+                    "skill_name": explicit_skill or routed_skill,
+                    "preferred_agent": msg.preferred_agent,
+                },
+            )
+            logger.info(
+                "[%s] CONTROL_FRAME_ASK_USER agent=%s thread=%s question=%r choices=%d",
+                req_id,
+                agent_used.name,
+                thread_id,
+                ask_user_challenge.question,
+                len(ask_user_challenge.choices),
+            )
+            if result != f"Thread `{thread_id}` is waiting for input.":
+                await session.channel.send(thread_id, result)
             return True
         if not self._runtime_service or not hasattr(self._runtime_service, "mark_thread_auth_required"):
             await session.channel.send(
@@ -825,6 +876,8 @@ class GatewayManager:
             router_threshold=(self._intent_router.confidence_threshold if self._intent_router else None),
             history=history,
         )
+        tracked_skill = explicit_skill or routed_skill
+        skill_timeout_override = self._skill_timeout_seconds_by_name(tracked_skill)
         agent_purpose = self._agent_run_purpose(
             explicit_skill=explicit_skill or routed_skill,
             router_decision=router_decision,
@@ -832,10 +885,11 @@ class GatewayManager:
         )
 
         logger.info(
-            "[%s] AGENT starting purpose=%s preferred_agent=%r registry=%s history_turns=%d",
+            "[%s] AGENT starting purpose=%s preferred_agent=%r skill_timeout_override=%r registry=%s history_turns=%d",
             req_id,
             agent_purpose,
             msg.preferred_agent,
+            skill_timeout_override,
             [a.name for a in registry.agents],
             len(prior_history),
         )
@@ -888,10 +942,10 @@ class GatewayManager:
                 workspace_override=workspace_override,
                 log_path=log_path,
                 image_paths=image_paths,
+                timeout_override_seconds=skill_timeout_override,
             )
         elapsed_agent = time.perf_counter() - t_agent
         await self._sync_registry_sessions(session, thread_id, registry)
-        tracked_skill = explicit_skill or routed_skill
         route_source = "explicit" if explicit_skill else "router" if routed_skill else None
         invocation_id = None
         if tracked_skill and route_source:
@@ -1354,23 +1408,28 @@ class GatewayManager:
         return entries
 
     @staticmethod
-    def _read_skill_description(skill_md: Path) -> str:
+    def _read_skill_frontmatter(skill_md: Path) -> dict:
         try:
             content = skill_md.read_text(encoding="utf-8")
         except OSError:
-            return ""
+            return {}
         if not content.startswith("---\n"):
-            return ""
+            return {}
         _, _, rest = content.partition("---\n")
         frontmatter, sep, _ = rest.partition("\n---")
         if not sep:
-            return ""
+            return {}
         try:
             meta = yaml.safe_load(frontmatter)
         except yaml.YAMLError:
-            return ""
+            return {}
         if not isinstance(meta, dict):
-            return ""
+            return {}
+        return meta
+
+    @classmethod
+    def _read_skill_description(cls, skill_md: Path) -> str:
+        meta = cls._read_skill_frontmatter(skill_md)
         description = meta.get("description", "")
         if not isinstance(description, str):
             return ""
@@ -1398,16 +1457,39 @@ class GatewayManager:
     ) -> str | None:
         return self._recent_thread_skills.get(self._thread_skill_key(platform, channel_id, thread_id))
 
-    def _skill_description_by_name(self, skill_name: str | None) -> str:
+    def _skill_frontmatter_by_name(self, skill_name: str | None) -> dict:
         if not skill_name or not self._skill_syncer:
-            return ""
+            return {}
         skills_path = getattr(self._skill_syncer, "_skills_path", None)
         if not isinstance(skills_path, Path) or not skills_path.is_dir():
-            return ""
+            return {}
         skill_md = skills_path / skill_name / "SKILL.md"
         if not skill_md.exists():
+            return {}
+        return self._read_skill_frontmatter(skill_md)
+
+    def _skill_description_by_name(self, skill_name: str | None) -> str:
+        meta = self._skill_frontmatter_by_name(skill_name)
+        description = meta.get("description", "")
+        if not isinstance(description, str):
             return ""
-        return self._read_skill_description(skill_md)
+        return description.strip().replace("\n", " ")
+
+    def _skill_timeout_seconds_by_name(self, skill_name: str | None) -> int | None:
+        meta = self._skill_frontmatter_by_name(skill_name)
+        metadata = meta.get("metadata")
+        value = None
+        if isinstance(metadata, dict):
+            value = metadata.get("timeout_seconds")
+        if value is None:
+            value = meta.get("timeout_seconds")
+        if value is None:
+            return None
+        try:
+            timeout = int(value)
+        except (TypeError, ValueError):
+            return None
+        return timeout if timeout > 0 else None
 
     async def _append_user_turn_if_needed(
         self,

@@ -61,6 +61,21 @@ class _LogAgent(BaseAgent):
         return AgentResponse(text="ok")
 
 
+class _TimedAgent(BaseAgent):
+    def __init__(self, name: str, timeout: int):
+        self._name = name
+        self._timeout = timeout
+        self.seen_timeouts: list[int] = []
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    async def run(self, prompt, history=None):
+        self.seen_timeouts.append(self._timeout)
+        return AgentResponse(text="ok")
+
+
 def test_registry_requires_at_least_one_agent():
     with pytest.raises(ValueError):
         AgentRegistry([])
@@ -137,7 +152,7 @@ async def test_log_path_passed_when_agent_supports_it(tmp_path):
     log_path = tmp_path / "runtime" / "logs" / "agent.log"
     await registry.run("q", log_path=log_path)
     assert len(agent.calls) == 1
-    assert agent.calls[0][2] == log_path
+    assert agent.calls[0][2] == log_path.with_name("agent-loggy.log")
 
 
 @pytest.mark.asyncio
@@ -149,3 +164,14 @@ async def test_run_label_appears_in_registry_logs(caplog):
         await registry.run("q", run_label="memory_extract thread=t1")
 
     assert "Trying agent 'solo' [memory_extract thread=t1]" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_timeout_override_applies_only_for_single_run():
+    agent = _TimedAgent("slow", timeout=300)
+    registry = AgentRegistry([agent])
+
+    await registry.run("q", timeout_override_seconds=900)
+
+    assert agent.seen_timeouts == [900]
+    assert agent._timeout == 300

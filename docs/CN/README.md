@@ -22,7 +22,7 @@
 - Adaptive Memory 已实现：对话中自动提取记忆、注入 agent prompt、`/memories` 和 `/forget` 命令。
 - Claude / Codex / Gemini 的 CLI session resume 已实现，线程级 session ID 会持久化并在重启后恢复。
 - Auth-first 二维码登录基础设施已实现：Discord owner 可手动发起登录，登录态会本地持久化，并可恢复等待中的 runtime task。
-- Agent 与 core 之间现已支持 `OMA_CONTROL` 控制帧：普通聊天或显式 skill 调用遇到登录态 challenge 时也能暂停、扫码后恢复。
+- Agent 与 core 之间现已支持 `OMA_CONTROL` 控制帧：除了 `auth_required` 之外，也支持通用单选式 `ask_user`，普通聊天和 runtime task 都能暂停、等待 owner 选择后恢复。
 
 ## 架构
 
@@ -284,6 +284,7 @@ OMA_WORKDIR_IN_CONTAINER=/repo ./scripts/docker-run.sh
 - 在线程内继续回复，bot 会带着完整上下文继续回答。
 - 使用 `@gemini`、`@claude`、`@codex` 前缀可强制本轮指定 agent。
 - 显式调用已安装 skill（例如 `@claude /weather Shanghai`）会直接走普通聊天流，不会创建 runtime task。
+- skill 可以在 `SKILL.md` frontmatter 的 `metadata.timeout_seconds` 里可选声明更长 timeout，仅覆盖该 skill 调用时的 CLI timeout。这个能力适合慢速报告/研究类 skill，不建议拿来替代全局 agent timeout。
 - 如果当前 agent 失败，会自动切换到 fallback 链中的下一个 agent。
 - 如果配置了 `access.owner_user_ids`，只有白名单用户可以触发 bot。
 
@@ -434,6 +435,11 @@ author: scheduler
 - 当 agent 输出 `OMA_CONTROL` 的 `auth_required` challenge 时，runtime task 会进入 `WAITING_USER_INPUT`。
 - 普通聊天 / 显式 skill 路径现在也支持同样的 auth challenge：core 会挂起当前 run，扫码完成后优先恢复原 CLI session。
 - 二维码登录完成后，绑定的 task 会自动回到 `PENDING`，无需用户再手动 resume。
+- 通用 `ask_user` challenge 现在也已接通：
+  - 普通聊天 / 显式 skill 调用会发出可见的单选按钮问题，owner 选择后自动恢复原 run
+  - runtime task 会进入 `WAITING_USER_INPUT`，等待 owner 通过按钮回答，然后自动恢复
+  - 每个 ask_user prompt 都带内建 `Cancel` 按钮
+- active 的 ask_user prompt 会持久化到 SQLite，并在 bot 重启后重新注册 Discord persistent views，所以待回答的问题不会因为进程重启失效。
 - 在线程里回复 `retry login`、`重新登录`、`重新扫码` 可以重发二维码。
 
 ## 自主任务 Runtime
@@ -443,7 +449,9 @@ author: scheduler
   - `artifact`：长执行但只返回回复或产物，不进入 merge gate
   - `repo_change`：修改 repo 中代码/文档/测试/配置，最终需要 merge
   - `skill_change`：修改 canonical `skills/<name>`，验证后需要 merge
-- `WAITING_USER_INPUT` 专门用于等待 owner 交互，例如二维码登录。
+- `WAITING_USER_INPUT` 是 runtime 里等待 owner 交互的统一暂停态：
+  - 二维码登录
+  - 通用单选式 `ask_user`
 - `repo_change` 和 `skill_change` 在独立 git worktree 中执行：`~/.oh-my-agent/runtime/tasks/<task_id>`。
 - `MERGED` 任务在合并成功后立即清理 worktree；其他终态任务默认保留 72 小时后由 janitor 清理。
 - 消息驱动控制：在线程内发送 `stop`、`pause`、`resume` 可直接控制任务状态。
@@ -489,7 +497,11 @@ author: scheduler
 - Artifact delivery 还没完全做完：附件优先、链接兜底的交付适配层还需要补齐。
 - Runtime 可观测性还缺少内存级 live excerpt；`/task_logs` 可读 live agent log tail，但 Discord 状态卡不会直接展示"最近在做什么"的摘要。
 - 服务挂掉或启动失败时，Discord 侧还没有面向 operator 的 doctor / 自诊断入口；当前排查仍然需要直接去服务器上看日志。
-- Runtime 现在已经有一等的 `WAITING_USER_INPUT` 状态，但当前主要先用于二维码登录；更通用的 agent 主动追问流程还没有完全抽象出来。
+- 通用 HITL v1 目前只做到了 Discord 单选按钮：
+  - owner-only
+  - 可见 prompt + 可见答案/取消记录
+  - direct chat / runtime task / automation 都能暂停后继续
+- 自由文本 HITL、多选、非 Discord 平台交互、prompt 过期策略仍然故意留在后续版本。
 - Codex repo/workspace skill 发现现在已经走官方 `.agents/skills/`；生成的 `AGENTS.md` 不再承担 workspace skill 列举逻辑。
 - 记忆检索目前仍使用 Jaccard 词重叠做相似度；语义检索（向量搜索）仍是 v0.8+ 项目。
 

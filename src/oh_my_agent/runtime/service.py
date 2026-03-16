@@ -18,9 +18,11 @@ from oh_my_agent.auth.types import AuthFlow, CredentialHandle
 from oh_my_agent.agents.base import AgentResponse
 from oh_my_agent.agents.registry import AgentRegistry
 from oh_my_agent.control.protocol import (
+    AskUserChoice,
     ProtocolError,
     extract_control_frame,
     parse_auth_challenge,
+    parse_ask_user_challenge,
     parse_control_envelope,
     strip_control_frame_text,
 )
@@ -61,6 +63,7 @@ from oh_my_agent.runtime.types import (
     TASK_STATUS_VALIDATING,
     TASK_STATUS_WAITING_USER_INPUT,
     TASK_STATUS_WAITING_MERGE,
+    HitlPrompt,
     RuntimeTask,
     SuspendedAgentRun,
     TaskDecisionEvent,
@@ -658,6 +661,17 @@ class RuntimeService:
                 )
                 await session.channel.send(thread_id, result)
                 return True
+            active_prompt = await self._store.get_active_hitl_prompt_for_thread(
+                platform=session.platform,
+                channel_id=session.channel_id,
+                thread_id=thread_id,
+            )
+            if active_prompt is not None:
+                await session.channel.send(
+                    thread_id,
+                    "This thread is waiting for an owner selection. Use the buttons on the active input prompt to answer or cancel it.",
+                )
+                return True
             return False
 
         # 1. Try control command first (stop/pause/resume)
@@ -680,6 +694,15 @@ class RuntimeService:
                 result = "Unknown control action."
             await session.channel.send(thread_id, result)
             return True
+
+        if active.status == TASK_STATUS_WAITING_USER_INPUT:
+            active_prompt = await self._store.get_active_hitl_prompt_for_task(active.id)
+            if active_prompt is not None:
+                await session.channel.send(
+                    thread_id,
+                    "This task is waiting for an owner selection. Use the buttons on the active input prompt to answer or cancel it.",
+                )
+                return True
 
         if active.status == TASK_STATUS_WAITING_USER_INPUT and self._is_auth_retry_intent(msg.content):
             result = await self.start_auth_login(
@@ -1309,6 +1332,244 @@ class RuntimeService:
                 f"but QR delivery failed: {exc}"
             )
         return f"Thread `{thread_id}` is waiting for `{provider}` login."
+
+    async def get_hitl_prompt(self, prompt_id: str) -> HitlPrompt | None:
+        return await self._store.get_hitl_prompt(prompt_id)
+
+    async def list_active_hitl_prompts(
+        self,
+        *,
+        platform: str | None = None,
+        channel_id: str | None = None,
+        limit: int = 100,
+    ) -> list[HitlPrompt]:
+        return await self._store.list_active_hitl_prompts(
+            platform=platform,
+            channel_id=channel_id,
+            limit=limit,
+        )
+
+    async def mark_thread_ask_user_required(
+        self,
+        *,
+        platform: str,
+        channel_id: str,
+        thread_id: str,
+        actor_id: str,
+        agent_name: str,
+        question: str,
+        details: str | None,
+        choices: tuple[AskUserChoice, ...],
+        control_envelope_json: str,
+        resume_context: dict[str, Any] | None = None,
+        session_id_snapshot: str | None = None,
+    ) -> str:
+        if not self._owner_user_ids:
+            return "Interactive ask_user prompts are disabled because no owner_user_ids are configured."
+        if not self._is_authorized(actor_id):
+            return "This action is restricted to the configured owner."
+        session = self._sessions.get(self._key(platform, channel_id))
+        if session is None:
+            return f"Thread `{thread_id}` has no live session bound to its channel."
+
+        existing = await self._store.get_active_hitl_prompt_for_thread(
+            platform=platform,
+            channel_id=channel_id,
+            thread_id=thread_id,
+        )
+        if existing is not None:
+            return f"Thread `{thread_id}` is already waiting for input."
+
+        prompt = await self._store.create_hitl_prompt(
+            prompt_id=uuid.uuid4().hex[:12],
+            target_kind="thread",
+            platform=platform,
+            channel_id=channel_id,
+            thread_id=thread_id,
+            task_id=None,
+            agent_name=agent_name,
+            status="waiting",
+            question=question,
+            details=details,
+            choices_json=[self._choice_to_dict(choice) for choice in choices],
+            selected_choice_id=None,
+            selected_choice_label=None,
+            selected_choice_description=None,
+            control_envelope_json=control_envelope_json,
+            resume_context_json=resume_context or {},
+            session_id_snapshot=session_id_snapshot,
+            prompt_message_id=None,
+            created_by=actor_id,
+        )
+        message_id = await self._send_hitl_prompt(session.channel, prompt)
+        if message_id is None:
+            await self._store.update_hitl_prompt(
+                prompt.id,
+                status="failed",
+                completed_at_now=True,
+            )
+            return (
+                "The agent requested an interactive choice, but this channel does not support "
+                "button-based responses yet."
+            )
+        await self._store.update_hitl_prompt(prompt.id, prompt_message_id=message_id)
+        return f"Thread `{thread_id}` is waiting for input."
+
+    async def mark_task_ask_user_required(
+        self,
+        task_id: str,
+        *,
+        question: str,
+        details: str | None,
+        choices: tuple[AskUserChoice, ...],
+        control_envelope_json: str,
+    ) -> str:
+        task = await self._store.get_runtime_task(task_id)
+        if task is None:
+            return f"Task `{task_id}` not found."
+        if not self._owner_user_ids:
+            return "Interactive ask_user prompts are disabled because no owner_user_ids are configured."
+        if not self._is_authorized(task.created_by):
+            return f"Task `{task.id}` was not created by an authorized owner."
+        session = self._session_for(task)
+        if session is None:
+            return f"Task `{task.id}` has no live session bound to its channel."
+
+        existing = await self._store.get_active_hitl_prompt_for_task(task.id)
+        if existing is not None:
+            return f"Task `{task.id}` is already waiting for input."
+
+        prompt = await self._store.create_hitl_prompt(
+            prompt_id=uuid.uuid4().hex[:12],
+            target_kind="task",
+            platform=task.platform,
+            channel_id=task.channel_id,
+            thread_id=task.thread_id,
+            task_id=task.id,
+            agent_name=task.preferred_agent or self._default_agent,
+            status="waiting",
+            question=question,
+            details=details,
+            choices_json=[self._choice_to_dict(choice) for choice in choices],
+            selected_choice_id=None,
+            selected_choice_label=None,
+            selected_choice_description=None,
+            control_envelope_json=control_envelope_json,
+            resume_context_json={},
+            session_id_snapshot=None,
+            prompt_message_id=None,
+            created_by=task.created_by,
+        )
+        await self._store.update_runtime_task(
+            task.id,
+            status=TASK_STATUS_WAITING_USER_INPUT,
+            blocked_reason=self._summarize_hitl_question(question),
+            resume_instruction=None,
+            ended_at=None,
+        )
+        await self._store.add_runtime_event(
+            task.id,
+            "task.ask_user",
+            {
+                "prompt_id": prompt.id,
+                "question": question,
+                "choices": [self._choice_to_dict(choice) for choice in choices],
+            },
+        )
+        message_id = await self._send_hitl_prompt(session.channel, prompt)
+        if message_id is None:
+            await self._store.update_hitl_prompt(
+                prompt.id,
+                status="failed",
+                completed_at_now=True,
+            )
+            await self._store.update_runtime_task(
+                task.id,
+                status=TASK_STATUS_BLOCKED,
+                blocked_reason="Interactive user choice is not supported on this channel.",
+                ended_at=None,
+            )
+            await self._notify(
+                task,
+                "The task requested an interactive choice, but this channel does not support button-based responses yet.",
+                terminal=bool(task.automation_name),
+            )
+            return (
+                "The task requested an interactive choice, but this channel does not support "
+                "button-based responses yet."
+            )
+        await self._store.update_hitl_prompt(prompt.id, prompt_message_id=message_id)
+        return f"Task `{task.id}` is waiting for owner input."
+
+    async def answer_hitl_prompt(
+        self,
+        prompt_id: str,
+        *,
+        choice_id: str,
+        actor_id: str,
+    ) -> str:
+        if not self._is_authorized(actor_id):
+            return "Only configured owners can answer interactive prompts."
+        prompt = await self._store.get_hitl_prompt(prompt_id)
+        if prompt is None:
+            return f"Interactive prompt `{prompt_id}` not found."
+        if prompt.status not in {"waiting", "resolving"}:
+            return f"Interactive prompt `{prompt.id}` is already `{prompt.status}`."
+
+        choice = self._find_hitl_choice(prompt, choice_id)
+        if choice is None:
+            return f"Choice `{choice_id}` is not valid for prompt `{prompt.id}`."
+
+        await self._store.update_hitl_prompt(
+            prompt.id,
+            status="resolving",
+            selected_choice_id=choice["id"],
+            selected_choice_label=choice["label"],
+            selected_choice_description=choice.get("description"),
+        )
+        prompt = await self._store.get_hitl_prompt(prompt.id) or prompt
+
+        if prompt.target_kind == "task":
+            result = await self._answer_task_hitl_prompt(prompt)
+        else:
+            result = await self._answer_thread_hitl_prompt(prompt)
+        return result
+
+    async def cancel_hitl_prompt(self, prompt_id: str, *, actor_id: str) -> str:
+        if not self._is_authorized(actor_id):
+            return "Only configured owners can cancel interactive prompts."
+        prompt = await self._store.get_hitl_prompt(prompt_id)
+        if prompt is None:
+            return f"Interactive prompt `{prompt_id}` not found."
+        if prompt.status not in {"waiting", "resolving"}:
+            return f"Interactive prompt `{prompt.id}` is already `{prompt.status}`."
+
+        if prompt.target_kind == "task" and prompt.task_id:
+            task = await self._store.get_runtime_task(prompt.task_id)
+            if task is not None:
+                await self._store.update_runtime_task(
+                    task.id,
+                    status=TASK_STATUS_BLOCKED,
+                    blocked_reason="User cancelled HITL prompt.",
+                    resume_instruction=None,
+                    ended_at=None,
+                )
+                await self._store.add_runtime_event(
+                    task.id,
+                    "task.ask_user_cancelled",
+                    {"prompt_id": prompt.id, "actor_id": actor_id},
+                )
+                await self._send_hitl_cancel_record(prompt)
+                await self._signal_status_by_id(task, TASK_STATUS_BLOCKED)
+        else:
+            await self._send_hitl_cancel_record(prompt)
+
+        await self._store.update_hitl_prompt(
+            prompt.id,
+            status="cancelled",
+            completed_at_now=True,
+        )
+        return f"Interactive prompt `{prompt.id}` cancelled."
 
     async def resume_suspended_agent_run(self, run_id: str) -> str:
         run = await self._store.get_suspended_agent_run(run_id)
@@ -1944,10 +2205,12 @@ class RuntimeService:
 
             envelope = None
             auth_challenge = None
+            ask_user_challenge = None
             if extract_control_frame(response.text) is not None:
                 try:
                     envelope = parse_control_envelope(response.text)
                     auth_challenge = parse_auth_challenge(envelope)
+                    ask_user_challenge = parse_ask_user_challenge(envelope)
                 except ProtocolError as exc:
                     logger.warning(
                         "Runtime task=%s step=%d control frame parse failed: %s",
@@ -1963,7 +2226,7 @@ class RuntimeService:
                     text=response.text,
                     provider=auth_challenge.provider,
                     skill_name=task.skill_name,
-                    original_user_content=task.raw_request,
+                    original_user_content=task.original_request,
                     usage=response.usage,
                 )
                 await self._store.add_runtime_event(
@@ -1979,6 +2242,32 @@ class RuntimeService:
                     task.id,
                     provider=auth_challenge.provider,
                     reason=auth_challenge.reason,
+                )
+                return
+            if ask_user_challenge is not None:
+                visible_text = strip_control_frame_text(response.text)
+                if visible_text:
+                    await self._send_runtime_ask_user_progress(
+                        task=task,
+                        agent_name=agent_name,
+                        text=visible_text,
+                        usage=response.usage,
+                    )
+                await self._store.add_runtime_event(
+                    task.id,
+                    "task.ask_user_challenge",
+                    {
+                        "question": ask_user_challenge.question,
+                        "choice_ids": [choice.id for choice in ask_user_challenge.choices],
+                        "control_envelope": envelope.raw_json if envelope else None,
+                    },
+                )
+                await self.mark_task_ask_user_required(
+                    task.id,
+                    question=ask_user_challenge.question,
+                    details=ask_user_challenge.details,
+                    choices=ask_user_challenge.choices,
+                    control_envelope_json=envelope.raw_json if envelope else "",
                 )
                 return
 
@@ -3179,6 +3468,339 @@ class RuntimeService:
             text=visible_text,
             usage=usage,
         )
+
+    async def _send_runtime_ask_user_progress(
+        self,
+        *,
+        task: RuntimeTask,
+        agent_name: str,
+        text: str,
+        usage: dict[str, Any] | None,
+    ) -> None:
+        session = self._session_for(task)
+        if session is None:
+            return
+        cleaned = self._clean_hitl_visible_text(text)
+        if not cleaned:
+            return
+        await session.append_assistant(task.thread_id, cleaned, agent_name)
+        if task.automation_name:
+            await self._send_automation_terminal_message(task, cleaned)
+            return
+        await self._send_thread_agent_response(
+            session=session,
+            thread_id=task.thread_id,
+            agent_name=agent_name,
+            text=cleaned,
+            usage=usage,
+        )
+
+    @staticmethod
+    def _choice_to_dict(choice: AskUserChoice | dict[str, Any]) -> dict[str, Any]:
+        if isinstance(choice, AskUserChoice):
+            return {
+                "id": choice.id,
+                "label": choice.label,
+                "description": choice.description,
+            }
+        return {
+            "id": str(choice.get("id") or ""),
+            "label": str(choice.get("label") or ""),
+            "description": (
+                str(choice.get("description")).strip()
+                if choice.get("description") is not None
+                else None
+            ),
+        }
+
+    @staticmethod
+    def _find_hitl_choice(prompt: HitlPrompt, choice_id: str) -> dict[str, Any] | None:
+        for choice in prompt.choices:
+            if str(choice.get("id") or "") == choice_id:
+                return {
+                    "id": str(choice.get("id") or ""),
+                    "label": str(choice.get("label") or ""),
+                    "description": (
+                        str(choice.get("description")).strip()
+                        if choice.get("description") is not None
+                        else None
+                    ),
+                }
+        return None
+
+    @staticmethod
+    def _summarize_hitl_question(question: str) -> str:
+        compact = " ".join((question or "").split()).strip()
+        if len(compact) > 160:
+            compact = compact[:157].rstrip() + "..."
+        return f"Awaiting user choice: {compact}" if compact else "Awaiting user choice."
+
+    @staticmethod
+    def _clean_hitl_visible_text(text: str) -> str:
+        stripped = _TASK_STATE_LINE_RE.sub("", text or "")
+        stripped = _BLOCK_REASON_LINE_RE.sub("", stripped)
+        stripped = re.sub(r"\n{3,}", "\n\n", stripped).strip()
+        return stripped
+
+    @classmethod
+    def _build_hitl_answer_block(cls, prompt: HitlPrompt) -> str:
+        description = prompt.selected_choice_description or ""
+        lines = [
+            "[HITL Answer]",
+            f"Question: {prompt.question}",
+            f"Selected choice id: {prompt.selected_choice_id or ''}",
+            f"Selected choice label: {prompt.selected_choice_label or ''}",
+            f"Selected choice description: {description}",
+        ]
+        return "\n".join(lines)
+
+    @classmethod
+    def _build_hitl_resume_prompt(cls, prompt: HitlPrompt, *, include_original_request: bool = False) -> str:
+        context = prompt.resume_context or {}
+        lines = [
+            "[System Resume Context]",
+            "- The previous run paused because it required a single explicit user choice.",
+            "- The user has now answered that question.",
+            "- Continue from where you left off.",
+            "- Do not ask the same question again unless a new, necessary ambiguity remains.",
+            "",
+            "Resolved user choice:",
+            cls._build_hitl_answer_block(prompt),
+        ]
+        if context.get("skill_name"):
+            lines.append(f"- Continue using skill `{context['skill_name']}` if still relevant.")
+        if context.get("original_user_content"):
+            lines.append(f"- Original user request: {context['original_user_content']}")
+        if include_original_request and context.get("agent_prompt"):
+            lines.extend(["", "Original request context:", str(context["agent_prompt"])])
+        return "\n".join(lines)
+
+    async def _send_hitl_prompt(self, channel, prompt: HitlPrompt) -> str | None:
+        sender = getattr(channel, "send_hitl_prompt", None)
+        if not callable(sender):
+            return None
+        try:
+            return await sender(thread_id=prompt.thread_id, prompt=prompt)
+        except Exception:
+            logger.warning(
+                "HITL prompt delivery failed prompt=%s thread=%s",
+                prompt.id,
+                prompt.thread_id,
+                exc_info=True,
+            )
+            return None
+
+    async def _send_hitl_answer_record(self, prompt: HitlPrompt) -> None:
+        session = self._sessions.get(self._key(prompt.platform, prompt.channel_id))
+        if session is None:
+            return
+        description = prompt.selected_choice_description or ""
+        lines = [
+            "**Input recorded**",
+            f"Prompt: `{prompt.id}`",
+            f"Question: {prompt.question}",
+            (
+                f"Selected: **{prompt.selected_choice_label or prompt.selected_choice_id or 'unknown'}** "
+                f"(`{prompt.selected_choice_id or ''}`)"
+            ),
+        ]
+        if description:
+            lines.append(f"Details: {description}")
+        if prompt.task_id:
+            lines.append(f"Task: `{prompt.task_id}`")
+        await session.channel.send(prompt.thread_id, "\n".join(lines)[:1900])
+
+    async def _send_hitl_cancel_record(self, prompt: HitlPrompt) -> None:
+        session = self._sessions.get(self._key(prompt.platform, prompt.channel_id))
+        if session is None:
+            return
+        lines = [
+            "**Input cancelled**",
+            f"Prompt: `{prompt.id}`",
+            f"Question: {prompt.question}",
+        ]
+        if prompt.task_id:
+            lines.append(f"Task: `{prompt.task_id}`")
+        await session.channel.send(prompt.thread_id, "\n".join(lines)[:1900])
+
+    async def _answer_task_hitl_prompt(self, prompt: HitlPrompt) -> str:
+        if not prompt.task_id:
+            await self._store.update_hitl_prompt(prompt.id, status="failed", completed_at_now=True)
+            return f"Interactive prompt `{prompt.id}` is missing a task id."
+        task = await self._store.get_runtime_task(prompt.task_id)
+        if task is None:
+            await self._store.update_hitl_prompt(prompt.id, status="failed", completed_at_now=True)
+            return f"Task `{prompt.task_id}` not found for prompt `{prompt.id}`."
+
+        answer_block = self._build_hitl_answer_block(prompt)
+        await self._store.update_runtime_task(
+            task.id,
+            status=TASK_STATUS_PENDING,
+            blocked_reason=None,
+            resume_instruction=answer_block,
+            ended_at=None,
+        )
+        await self._store.add_runtime_event(
+            task.id,
+            "task.ask_user_answered",
+            {
+                "prompt_id": prompt.id,
+                "choice_id": prompt.selected_choice_id,
+                "choice_label": prompt.selected_choice_label,
+            },
+        )
+        await self._send_hitl_answer_record(prompt)
+        await self._store.update_hitl_prompt(prompt.id, status="completed", completed_at_now=True)
+        updated = await self._store.get_runtime_task(task.id)
+        if updated is not None:
+            await self._signal_status_by_id(updated, TASK_STATUS_PENDING)
+        return f"Interactive prompt `{prompt.id}` answered; task `{task.id}` re-queued."
+
+    async def _answer_thread_hitl_prompt(self, prompt: HitlPrompt) -> str:
+        session = self._sessions.get(self._key(prompt.platform, prompt.channel_id))
+        registry = self._registries.get(self._key(prompt.platform, prompt.channel_id))
+        if session is None or registry is None:
+            await self._store.update_hitl_prompt(prompt.id, status="failed", completed_at_now=True)
+            return f"Thread `{prompt.thread_id}` has no live session/registry to resume."
+
+        await self._send_hitl_answer_record(prompt)
+        answer_block = self._build_hitl_answer_block(prompt)
+        await session.append_user(prompt.thread_id, answer_block, "HITL")
+
+        agent = registry.get_agent(prompt.agent_name)
+        if agent is None:
+            await self._store.update_hitl_prompt(prompt.id, status="failed", completed_at_now=True)
+            return f"Agent `{prompt.agent_name}` is not available for prompt `{prompt.id}`."
+
+        await self._restore_thread_agent_session(
+            session=session,
+            thread_id=prompt.thread_id,
+            agent=agent,
+            fallback_session_id=prompt.session_id_snapshot,
+        )
+        response = await self._invoke_thread_agent(
+            registry=registry,
+            session=session,
+            prompt=self._build_hitl_resume_prompt(prompt, include_original_request=True),
+            thread_id=prompt.thread_id,
+            force_agent=prompt.agent_name,
+            log_path=self.chat_agent_log_base_path(
+                thread_id=prompt.thread_id,
+                request_id=prompt.id,
+                purpose="hitl_resume",
+            ),
+        )
+        if response.error and getattr(agent, "get_session_id", None):
+            self._clear_thread_agent_session(agent, prompt.thread_id)
+            response = await self._invoke_thread_agent(
+                registry=registry,
+                session=session,
+                prompt=self._build_hitl_resume_prompt(prompt, include_original_request=True),
+                thread_id=prompt.thread_id,
+                force_agent=prompt.agent_name,
+                log_path=self.chat_agent_log_base_path(
+                    thread_id=prompt.thread_id,
+                    request_id=f"{prompt.id}-fresh",
+                    purpose="hitl_resume",
+                ),
+            )
+
+        await self._sync_thread_agent_session(session=session, thread_id=prompt.thread_id, agent=agent)
+        if response.error:
+            await self._store.update_hitl_prompt(prompt.id, status="failed", completed_at_now=True)
+            await session.channel.send(
+                prompt.thread_id,
+                f"Input recorded, but resuming `{prompt.agent_name}` failed: {response.error[:500]}",
+            )
+            return f"Interactive prompt `{prompt.id}` failed to resume."
+
+        envelope = None
+        auth_challenge = None
+        ask_user_challenge = None
+        try:
+            envelope = parse_control_envelope(response.text) if extract_control_frame(response.text) else None
+            if envelope is not None:
+                auth_challenge = parse_auth_challenge(envelope)
+                ask_user_challenge = parse_ask_user_challenge(envelope)
+        except ProtocolError as exc:
+            logger.warning("HITL prompt=%s control frame parse failed during resume: %s", prompt.id, exc)
+            envelope = None
+
+        if envelope is not None and auth_challenge is not None:
+            await self._send_auth_challenge_progress(
+                session=session,
+                thread_id=prompt.thread_id,
+                agent_name=prompt.agent_name,
+                text=response.text,
+                provider=auth_challenge.provider,
+                skill_name=str(prompt.resume_context.get("skill_name") or "") or None,
+                original_user_content=str(prompt.resume_context.get("original_user_content") or "") or None,
+                usage=response.usage,
+            )
+            await self._store.update_hitl_prompt(prompt.id, status="completed", completed_at_now=True)
+            return await self.mark_thread_auth_required(
+                platform=prompt.platform,
+                channel_id=prompt.channel_id,
+                thread_id=prompt.thread_id,
+                provider=auth_challenge.provider,
+                reason=auth_challenge.reason,
+                actor_id=prompt.created_by,
+                agent_name=prompt.agent_name,
+                control_envelope_json=envelope.raw_json,
+                resume_context={
+                    **(prompt.resume_context or {}),
+                    "last_hitl_answer": answer_block,
+                },
+                session_id_snapshot=agent.get_session_id(prompt.thread_id) if hasattr(agent, "get_session_id") else prompt.session_id_snapshot,
+            )
+
+        if envelope is not None and ask_user_challenge is not None:
+            visible_text = self._clean_hitl_visible_text(strip_control_frame_text(response.text))
+            if visible_text:
+                await session.append_assistant(prompt.thread_id, visible_text, prompt.agent_name)
+                await self._send_thread_agent_response(
+                    session=session,
+                    thread_id=prompt.thread_id,
+                    agent_name=prompt.agent_name,
+                    text=visible_text,
+                    usage=response.usage,
+                )
+            await self._store.update_hitl_prompt(prompt.id, status="completed", completed_at_now=True)
+            return await self.mark_thread_ask_user_required(
+                platform=prompt.platform,
+                channel_id=prompt.channel_id,
+                thread_id=prompt.thread_id,
+                actor_id=prompt.created_by,
+                agent_name=prompt.agent_name,
+                question=ask_user_challenge.question,
+                details=ask_user_challenge.details,
+                choices=ask_user_challenge.choices,
+                control_envelope_json=envelope.raw_json,
+                resume_context={
+                    **(prompt.resume_context or {}),
+                    "last_hitl_answer": answer_block,
+                },
+                session_id_snapshot=agent.get_session_id(prompt.thread_id) if hasattr(agent, "get_session_id") else prompt.session_id_snapshot,
+            )
+
+        if envelope is not None:
+            await self._store.update_hitl_prompt(prompt.id, status="failed", completed_at_now=True)
+            await session.channel.send(
+                prompt.thread_id,
+                "The resumed agent requested an unsupported interactive step. This challenge type is not implemented yet.",
+            )
+            return f"Interactive prompt `{prompt.id}` resumed into an unsupported challenge."
+
+        await session.append_assistant(prompt.thread_id, response.text, prompt.agent_name)
+        await self._send_thread_agent_response(
+            session=session,
+            thread_id=prompt.thread_id,
+            agent_name=prompt.agent_name,
+            text=response.text,
+            usage=response.usage,
+        )
+        await self._store.update_hitl_prompt(prompt.id, status="completed", completed_at_now=True)
+        return f"Interactive prompt `{prompt.id}` answered and resumed successfully."
 
     @staticmethod
     def _build_auth_pause_message(

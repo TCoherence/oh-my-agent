@@ -56,6 +56,8 @@ TaskStatus = Literal[
 TaskType = Literal["artifact", "repo_change", "skill_change"]
 TaskCompletionMode = Literal["reply", "artifact", "merge"]
 SuspendedAgentRunStatus = Literal["waiting_auth", "resuming", "completed", "cancelled", "failed"]
+HitlPromptStatus = Literal["waiting", "resolving", "completed", "cancelled", "failed"]
+HitlPromptTargetKind = Literal["thread", "task"]
 
 DecisionAction = Literal[
     "approve",
@@ -202,6 +204,95 @@ class SuspendedAgentRun:
             control_envelope_json=str(row["control_envelope_json"]),
             session_id_snapshot=row.get("session_id_snapshot"),
             resume_context=context,
+            created_by=str(row["created_by"]),
+            created_at=row.get("created_at"),
+            updated_at=row.get("updated_at"),
+            completed_at=row.get("completed_at"),
+        )
+
+
+@dataclass(frozen=True)
+class HitlPrompt:
+    id: str
+    target_kind: HitlPromptTargetKind
+    platform: str
+    channel_id: str
+    thread_id: str
+    task_id: str | None
+    agent_name: str
+    status: HitlPromptStatus
+    question: str
+    details: str | None
+    choices: tuple[dict[str, Any], ...]
+    selected_choice_id: str | None
+    selected_choice_label: str | None
+    selected_choice_description: str | None
+    control_envelope_json: str
+    resume_context: dict[str, Any]
+    session_id_snapshot: str | None
+    prompt_message_id: str | None
+    created_by: str
+    created_at: str | None = None
+    updated_at: str | None = None
+    completed_at: str | None = None
+
+    @classmethod
+    def from_row(cls, row: dict[str, Any]) -> "HitlPrompt":
+        raw_choices = row.get("choices_json")
+        choices: tuple[dict[str, Any], ...] = ()
+        if isinstance(raw_choices, str) and raw_choices:
+            try:
+                parsed = json.loads(raw_choices)
+                if isinstance(parsed, list):
+                    normalized: list[dict[str, Any]] = []
+                    for item in parsed:
+                        if isinstance(item, dict):
+                            normalized.append(
+                                {
+                                    "id": str(item.get("id") or ""),
+                                    "label": str(item.get("label") or ""),
+                                    "description": (
+                                        str(item.get("description")).strip()
+                                        if item.get("description") is not None
+                                        else None
+                                    ),
+                                }
+                            )
+                    choices = tuple(normalized)
+            except Exception:
+                choices = ()
+
+        raw_context = row.get("resume_context_json")
+        context: dict[str, Any] = {}
+        if isinstance(raw_context, str) and raw_context:
+            try:
+                parsed_context = json.loads(raw_context)
+                if isinstance(parsed_context, dict):
+                    context = parsed_context
+            except Exception:
+                context = {}
+        elif isinstance(raw_context, dict):
+            context = raw_context
+
+        return cls(
+            id=str(row["id"]),
+            target_kind=str(row["target_kind"]),
+            platform=str(row["platform"]),
+            channel_id=str(row["channel_id"]),
+            thread_id=str(row["thread_id"]),
+            task_id=row.get("task_id"),
+            agent_name=str(row["agent_name"]),
+            status=str(row["status"]),
+            question=str(row["question"]),
+            details=row.get("details"),
+            choices=choices,
+            selected_choice_id=row.get("selected_choice_id"),
+            selected_choice_label=row.get("selected_choice_label"),
+            selected_choice_description=row.get("selected_choice_description"),
+            control_envelope_json=str(row["control_envelope_json"]),
+            resume_context=context,
+            session_id_snapshot=row.get("session_id_snapshot"),
+            prompt_message_id=row.get("prompt_message_id"),
             created_by=str(row["created_by"]),
             created_at=row.get("created_at"),
             updated_at=row.get("updated_at"),
