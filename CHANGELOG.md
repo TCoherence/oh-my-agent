@@ -14,6 +14,8 @@ The format is intentionally lightweight and release-oriented rather than exhaust
 - Discord operator automation commands: `/automation_status`, `/automation_reload`, `/automation_enable`, `/automation_disable`
 - Temporary `docs/archive/next_up.md` note for near-term execution focus
 - Long-running Docker helper scripts: `docker-start.sh`, `docker-logs.sh`, `docker-stop.sh`, `docker-status.sh`
+- `market-intel-report` skill for persisted politics / finance / AI bootstrap, daily, and weekly reports
+- Report-store helper for canonical Markdown + JSON outputs under `~/.oh-my-agent/reports/market-intel/`
 
 ### Changed
 
@@ -27,6 +29,8 @@ The format is intentionally lightweight and release-oriented rather than exhaust
 - Runtime cleanup now uses a 7-day default retention window and prunes stale agent logs along with old task workspaces
 - README and Chinese README now document the external automation directory, hot-reload semantics, and current in-memory-only runtime state behavior
 - Docker docs now distinguish attached development runs from detached long-running service runs, including postmortem debugging expectations around `docker logs` and persistent application log files
+- Scheduler skill and validator now target file-driven automation YAML under `~/.oh-my-agent/automations/` instead of the old `config.yaml` job model
+- README and Chinese README now document the market-intel reporting skill, report storage layout, and bounded bootstrap workflow
 
 ## v0.7.1 - 2026-03-08
 

@@ -19,6 +19,7 @@ Inspired by [OpenClaw](https://openclaw.dev).
 - Multi-type runtime is implemented: only `repo_change` and `skill_change` tasks use merge gate; `artifact` tasks complete without merge.
 - Runtime hardening is complete: true subprocess interruption, message-driven control (stop/pause/resume), PAUSED state, completion summaries, metrics.
 - Automations are now file-driven under `~/.oh-my-agent/automations/`, with polling-based hot reload and per-file enable/disable.
+- `market-intel-report` adds persisted bootstrap/daily/weekly report workflows under `~/.oh-my-agent/reports/market-intel/` for politics, finance, and AI trend tracking.
 - Adaptive memory is implemented: auto-extraction from conversations, injection into agent prompts, `/memories` and `/forget` commands.
 - CLI session resume is implemented for Claude, Codex, and Gemini, with persisted session IDs restored after restart.
 - Auth-first QR login infrastructure is implemented for Discord owner flows, with local credential persistence and runtime resume hooks.
@@ -406,6 +407,28 @@ interval_seconds: 20
 initial_delay_seconds: 10
 author: scheduler
 ```
+
+### Market-Intel Reports
+
+- `market-intel-report` is one core skill for:
+  - `bootstrap_backfill`
+  - `daily_digest`
+  - `weekly_synthesis`
+- Reports are persisted under `~/.oh-my-agent/reports/market-intel/` as both Markdown and JSON:
+  - `bootstrap/<domain>/<date>.md|json`
+  - `daily/<date>/<domain>.md|json`
+  - `weekly/<iso-week>/cross-domain.md|json`
+- Domain model:
+  - daily: `politics`, `finance`, `ai`
+  - weekly: one `cross-domain` synthesis
+- Bounded bootstrap defaults:
+  - politics: 30 days
+  - finance: 30 days
+  - ai: 14 days
+- Trend continuity is expected to come from persisted report files plus current-source research, not just Discord history.
+- The bundled helper script lives at:
+  - `skills/market-intel-report/scripts/report_store.py`
+- The `scheduler` skill now validates file-driven automation YAML under `~/.oh-my-agent/automations/` instead of the old inline `config.yaml` job model.
 
 ### Auth QR Login
 
