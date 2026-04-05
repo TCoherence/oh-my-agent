@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from dataclasses import dataclass
 import hashlib
 import inspect
@@ -32,6 +33,7 @@ logger = logging.getLogger(__name__)
 
 THREAD_NAME_MAX = 90
 _EXPLICIT_SKILL_CALL_RE = re.compile(r"^/([a-zA-Z0-9][a-zA-Z0-9-_]{0,62})(?:\s|$)")
+AGENT_PROGRESS_LOG_INTERVAL_SECONDS = 20.0
 
 
 @dataclass
@@ -102,6 +104,7 @@ class GatewayManager:
         self._auto_disabled_skills: set[str] = set()
         # key: "platform:channel_id" → ChannelSession
         self._sessions: dict[str, ChannelSession] = {}
+        self._agent_progress_log_interval_seconds = AGENT_PROGRESS_LOG_INTERVAL_SECONDS
 
     def _session_key(self, platform: str, channel_id: str) -> str:
         return f"{platform}:{channel_id}"
@@ -260,6 +263,53 @@ class GatewayManager:
         if candidate is None or not isinstance(candidate, (str, Path)):
             return None
         return Path(candidate)
+
+    async def _run_registry_with_progress_logging(
+        self,
+        *,
+        req_id: str,
+        purpose: str,
+        registry: AgentRegistry,
+        prompt: str,
+        history: list[dict] | None,
+        thread_id: str,
+        force_agent: str | None,
+        workspace_override,
+        log_path: Path | None,
+        image_paths: list[Path] | None,
+        timeout_override_seconds: int | None,
+    ):
+        run_task = asyncio.create_task(
+            registry.run(
+                prompt,
+                history,
+                thread_id=thread_id,
+                force_agent=force_agent,
+                workspace_override=workspace_override,
+                log_path=log_path,
+                image_paths=image_paths,
+                timeout_override_seconds=timeout_override_seconds,
+            )
+        )
+        started_at = time.perf_counter()
+        interval = self._agent_progress_log_interval_seconds
+        try:
+            while True:
+                try:
+                    return await asyncio.wait_for(asyncio.shield(run_task), timeout=interval)
+                except asyncio.TimeoutError:
+                    elapsed = time.perf_counter() - started_at
+                    logger.info(
+                        "[%s] AGENT_RUNNING purpose=%s elapsed=%.2fs",
+                        req_id,
+                        purpose,
+                        elapsed,
+                    )
+        finally:
+            if not run_task.done():
+                run_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await run_task
 
     async def _maybe_handle_control_challenge(
         self,
@@ -934,9 +984,12 @@ class GatewayManager:
         )
         t_agent = time.perf_counter()
         async with channel.typing(thread_id):
-            agent_used, response = await registry.run(
-                agent_prompt,
-                prior_history,
+            agent_used, response = await self._run_registry_with_progress_logging(
+                req_id=req_id,
+                purpose=agent_purpose,
+                registry=registry,
+                prompt=agent_prompt,
+                history=prior_history,
                 thread_id=thread_id,
                 force_agent=msg.preferred_agent,
                 workspace_override=workspace_override,

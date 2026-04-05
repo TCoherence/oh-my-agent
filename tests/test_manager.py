@@ -1,3 +1,4 @@
+import asyncio
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from pathlib import Path
@@ -386,6 +387,40 @@ async def test_handle_message_logs_error_purpose(caplog):
 
     assert "AGENT starting purpose=direct_reply" in caplog.text
     assert "AGENT_ERROR purpose=direct_reply agent=claude" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_handle_message_logs_running_elapsed_for_slow_direct_reply(caplog):
+    channel = MagicMock()
+    channel.platform = "discord"
+    channel.channel_id = "100"
+    channel.create_thread = AsyncMock()
+    channel.send = AsyncMock()
+    channel.typing = MagicMock()
+    channel.typing.return_value.__aenter__ = AsyncMock(return_value=None)
+    channel.typing.return_value.__aexit__ = AsyncMock(return_value=False)
+
+    mock_agent = MagicMock()
+    mock_agent.name = "claude"
+    registry = MagicMock(spec=AgentRegistry)
+    registry.agents = [mock_agent]
+
+    async def _slow_run(*args, **kwargs):
+        await asyncio.sleep(0.02)
+        return mock_agent, AgentResponse(text="hi")
+
+    registry.run = AsyncMock(side_effect=_slow_run)
+
+    session = _make_session(channel=channel, registry=registry)
+    gm = GatewayManager([])
+    gm._agent_progress_log_interval_seconds = 0.005
+
+    with caplog.at_level("INFO"):
+        await gm.handle_message(session, registry, _make_msg(thread_id="existing-thread", content="follow up"))
+
+    assert "AGENT starting purpose=direct_reply" in caplog.text
+    assert "AGENT_RUNNING purpose=direct_reply elapsed=" in caplog.text
+    assert "AGENT_OK purpose=direct_reply agent=claude" in caplog.text
 
 
 @pytest.mark.asyncio
