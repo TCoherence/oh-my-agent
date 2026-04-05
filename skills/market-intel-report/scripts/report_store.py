@@ -8,11 +8,43 @@ import tempfile
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 VALID_MODES = {"bootstrap_backfill", "daily_digest", "weekly_synthesis"}
 DOMAINS = {"politics", "finance", "ai"}
 WEEKLY_DOMAIN = "cross-domain"
+
+
+def resolve_report_timezone_name() -> str | None:
+    for key in ("OMA_REPORT_TIMEZONE", "TZ"):
+        raw = os.environ.get(key)
+        if raw and raw.strip():
+            return raw.strip()
+    return None
+
+
+def resolve_report_timezone():
+    tz_name = resolve_report_timezone_name()
+    if tz_name:
+        try:
+            return ZoneInfo(tz_name)
+        except ZoneInfoNotFoundError:
+            pass
+    return datetime.now().astimezone().tzinfo or UTC
+
+
+def current_local_datetime(now: datetime | None = None) -> datetime:
+    tz = resolve_report_timezone()
+    if now is None:
+        return datetime.now(tz)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=UTC)
+    return now.astimezone(tz)
+
+
+def current_local_date(now: datetime | None = None) -> date:
+    return current_local_datetime(now).date()
 
 
 def resolve_reports_root(root: str | Path | None = None) -> Path:
@@ -46,7 +78,7 @@ def build_report_paths(
     if mode == "weekly_synthesis":
         if domain != WEEKLY_DOMAIN:
             raise ValueError("weekly_synthesis requires domain='cross-domain'")
-        week_label = iso_week or iso_week_for_date(report_date or date.today())
+        week_label = iso_week or iso_week_for_date(report_date or current_local_date())
         md_path = store_root / "weekly" / week_label / f"{WEEKLY_DOMAIN}.md"
         json_path = store_root / "weekly" / week_label / f"{WEEKLY_DOMAIN}.json"
         return md_path, json_path
@@ -54,7 +86,7 @@ def build_report_paths(
     if domain not in DOMAINS:
         raise ValueError(f"unsupported domain for {mode}: {domain}")
 
-    day = report_date or date.today()
+    day = report_date or current_local_date()
     day_label = day.isoformat()
     if mode == "bootstrap_backfill":
         md_path = store_root / "bootstrap" / domain / f"{day_label}.md"
@@ -82,8 +114,8 @@ def atomic_write_text(path: Path, content: str) -> None:
 
 
 def build_markdown_skeleton(*, mode: str, domain: str, report_date: date | None = None, iso_week: str | None = None) -> str:
-    day_label = (report_date or date.today()).isoformat()
-    week_label = iso_week or iso_week_for_date(report_date or date.today())
+    day_label = (report_date or current_local_date()).isoformat()
+    week_label = iso_week or iso_week_for_date(report_date or current_local_date())
     if mode == "bootstrap_backfill":
         if domain not in DOMAINS:
             raise ValueError(f"unsupported bootstrap domain: {domain}")
@@ -207,7 +239,7 @@ def build_json_scaffold(
     report_date: date | None = None,
     iso_week: str | None = None,
 ) -> dict[str, Any]:
-    day = report_date or date.today()
+    day = report_date or current_local_date()
     payload: dict[str, Any] = {
         "version": 1,
         "mode": mode,
@@ -299,10 +331,11 @@ def persist_report(
     normalized["mode"] = mode
     normalized["domain"] = domain
     normalized.setdefault("generated_at", datetime.now(UTC).isoformat())
+    normalized.setdefault("report_timezone", resolve_report_timezone_name() or str(resolve_report_timezone()))
     if report_date is not None:
         normalized.setdefault("report_date", report_date.isoformat())
     if mode == "weekly_synthesis":
-        normalized.setdefault("iso_week", iso_week or iso_week_for_date(report_date or date.today()))
+        normalized.setdefault("iso_week", iso_week or iso_week_for_date(report_date or current_local_date()))
     atomic_write_text(md_path, markdown)
     atomic_write_text(json_path, json.dumps(normalized, ensure_ascii=False, indent=2) + "\n")
     return md_path, json_path
@@ -353,7 +386,7 @@ def list_reports(
 
 
 def load_latest_bootstrap(domain: str, *, root: str | Path | None = None, as_of: date | None = None) -> dict[str, Any] | None:
-    as_of_label = (as_of or date.today()).isoformat()
+    as_of_label = (as_of or current_local_date()).isoformat()
     for item in list_reports(mode="bootstrap_backfill", domain=domain, root=root):
         if str(item.get("period_end", "")) <= as_of_label:
             return item
@@ -367,7 +400,7 @@ def load_recent_daily_reports(
     as_of: date | None = None,
     days: int = 7,
 ) -> list[dict[str, Any]]:
-    end = as_of or date.today()
+    end = as_of or current_local_date()
     start = end - timedelta(days=max(days - 1, 0))
     start_label = start.isoformat()
     end_label = end.isoformat()
@@ -399,7 +432,7 @@ def build_context(
     days: int = 7,
     weekly_limit: int = 4,
 ) -> dict[str, Any]:
-    day = as_of or date.today()
+    day = as_of or current_local_date()
     context: dict[str, Any] = {
         "mode": mode,
         "domain": domain,

@@ -20,6 +20,14 @@ The `source` field in reports has two semantic types. This distinction is fixed 
 
 This skill uses **web search**, not automated scraping. For each source, the agent performs targeted searches using the strategies below, evaluates results, and compiles a structured report.
 
+## Coverage floor
+
+- Daily source scans should target `12-15` verified items.
+- Do not stop below `10` unless the source genuinely lacks enough credible candidates that day.
+- When coverage is thin, keep searching adjacent queries / category pages before giving up.
+- If the final usable set is still below `10`, state that explicitly in the report instead of pretending the scan is complete.
+- For broad daily bundles, the `summary` report should call out which sources cleared the coverage floor and which did not.
+
 ## Per-source search strategies
 
 ### credit-cards (topic bucket)
@@ -103,6 +111,7 @@ This skill uses **web search**, not automated scraping. For each source, the age
 - Highly-voted community deals (many thumbs up)
 - Tech and electronics deals
 - Home, kitchen, and daily essentials
+- Apparel, outdoor, travel, auto, and other broad-category deals that materially stand out
 - Notable coupon codes or stacking opportunities
 - Price error / clearance deals
 
@@ -114,15 +123,15 @@ This skill uses **web search**, not automated scraping. For each source, the age
 - `北美省钱快报 今日折扣`
 - `dealmoon exclusive code`
 - `dealmoon 独家折扣`
-- `北美省钱快报 美妆` / `时尚` / `美食`
+- `北美省钱快报 美妆` / `电子` / `家居`
 - `dealmoon hot deals today`
 
 **What to capture:**
 - Featured/editor-picked deals of the day
 - Exclusive discount codes (Dealmoon-only)
 - Beauty and skincare deals
-- Fashion and accessories deals
-- Food, grocery, and lifestyle deals
+- Electronics and gadget deals
+- Home, kitchen, and household deals
 - Chinese community-oriented deals (Asian grocery, shipping to China, etc.)
 
 ## Deal quality evaluation criteria

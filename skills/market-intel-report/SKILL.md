@@ -30,7 +30,7 @@ The skill is report-centric. It writes durable report files under `~/.oh-my-agen
 - If the user intent spans multiple domains, prefer:
   - multiple domain daily reports, or
   - one `weekly_synthesis` cross-domain report
-- If no report date is specified, default to the current local date of the runtime environment and state it explicitly in the title and JSON metadata.
+- If no report date is specified, default to the current local date of the runtime environment (derived from `OMA_REPORT_TIMEZONE` or `TZ` when set) and state it explicitly in the title and JSON metadata.
 - Do not invent a future date unless the user explicitly requests a future-dated planning memo.
 
 ## Mode and domain model

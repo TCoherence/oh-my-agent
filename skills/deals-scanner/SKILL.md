@@ -13,6 +13,10 @@ Use this skill for recurring deal/discount intelligence across five source chann
 - `weekly_digest`
 
 The skill is report-centric. It writes durable report files under `~/.oh-my-agent/reports/deals-scanner/` so weekly digests can build on stored daily report history.
+For broad daily scans, the durable output is a bundle:
+
+- one day-level `summary.md|json`
+- five per-source reference reports under `references/`
 
 ## When to use
 
@@ -29,9 +33,9 @@ The skill is report-centric. It writes durable report files under `~/.oh-my-agen
 - Do not silently default to one source just because the user asked for a generic scan.
 - If the user intent clearly matches one source, lock that source explicitly.
 - If the user intent spans multiple sources, prefer:
-  - multiple source daily reports, or
+  - one broad daily bundle with `summary + references`, or
   - one `weekly_digest` cross-source report
-- If no report date is specified, default to the current local date and state it explicitly in the title and JSON metadata.
+- If no report date is specified, default to the current local date (derived from `OMA_REPORT_TIMEZONE` or `TZ` when set) and state it explicitly in the title and JSON metadata.
 
 ## Mode and source model
 
@@ -51,11 +55,12 @@ The skill is report-centric. It writes durable report files under `~/.oh-my-agen
 - `rakuten` — **single site**: rakuten.com
 - `slickdeals` — **single site**: slickdeals.net
 - `dealmoon` — **single site**: dealmoon.com (北美省钱快报)
+- `summary` — **internal daily aggregation target** used only when building a broad daily bundle
 - `all-sources` — used only for `weekly_digest`
 
 ### Validation rules
 
-- `daily_scan` only accepts the 5 named sources; rejects `all-sources`.
+- `daily_scan` accepts the 5 named sources plus the internal aggregation target `summary`; rejects `all-sources`.
 - `weekly_digest` only accepts `all-sources`; rejects named sources.
 - Invalid combinations raise an error.
 
@@ -102,11 +107,30 @@ For weekly digest:
 
 7. In the final answer, return the report content directly and mention where it was stored.
 
+### Broad daily bundle workflow
+
+When the user asks for a broad daily scan or leaves the source intentionally broad:
+
+1. Run five `daily_scan` source reports for:
+   - `credit-cards`
+   - `uscardforum`
+   - `rakuten`
+   - `slickdeals`
+   - `dealmoon`
+2. Persist each one under the day-level `references/` directory.
+3. Generate one additional `daily_scan` report with `source=summary`.
+4. The summary report must:
+   - rank the best deals across sources
+   - give one short readout per source
+   - include explicit links to `references/<source>.md`
+5. In the final answer, show the summary first and treat per-source files as drill-down references.
+
 ## Storage layout
 
 Canonical storage paths:
 
-- `~/.oh-my-agent/reports/deals-scanner/daily/<date>/<source>.md|json`
+- `~/.oh-my-agent/reports/deals-scanner/daily/<date>/summary.md|json`
+- `~/.oh-my-agent/reports/deals-scanner/daily/<date>/references/<source>.md|json`
 - `~/.oh-my-agent/reports/deals-scanner/weekly/<iso-week>/all-sources.md|json`
 
 Use the helper script for path generation and persistence. Do not hand-roll paths.
@@ -121,6 +145,11 @@ Read the relevant reference before drafting:
 
 ### Daily report structures
 
+- `summary` (internal daily aggregation target for broad scans)
+  - 今日总览
+  - Top deals 总榜
+  - 各渠道速览
+  - Reference 索引
 - `credit-cards`
   - 开卡奖励（Sign-up Bonuses）
   - 消费返现与积分活动
@@ -140,13 +169,13 @@ Read the relevant reference before drafting:
   - 今日热门 Frontpage 优惠
   - 电子产品与科技
   - 家居生活与日用
-  - 其他值得关注
+  - 服饰 / 户外 / 其他值得关注
 - `dealmoon`
   - 今日精选折扣
   - 独家折扣码与优惠
   - 美妆个护
-  - 时尚服饰与鞋包
-  - 美食与生活
+  - 电子数码
+  - 家居生活
 
 ### Weekly digest structure
 
@@ -228,6 +257,10 @@ Each entry in `top_deals` and `sections[].deals[]`:
 - Markdown should be readable as a finished deal report, not just raw bullets.
 - Each deal should include: deal title, value/discount amount, expiration info, link, and a brief quality assessment.
 - JSON should stay compact and structured for later machine reuse.
+- Daily source scans should aim for `12-15` verified items and should not stop below `10` unless the source genuinely lacks enough credible candidates that day.
+- If a source cannot produce at least `10` credible items, say so explicitly in the summary and in that source's `来源与说明` section.
+- Core sections should generally carry at least `2-3` items each; do not let one section absorb everything while others stay empty unless the source genuinely lacks coverage.
+- The broad daily bundle should always produce the day-level `summary.md|json` in addition to per-source references.
 - If a source has no notable deals today, say so explicitly rather than padding with filler.
 - Weekly trend claims must be grounded in stored daily report files, not vague memory.
 
@@ -239,3 +272,4 @@ This skill uses web research (search), not automated scraping. The agent searche
 
 - When the user asks for a reusable prompt, use `references/prompt_recipes.md`.
 - For automation prompts, keep the mode/source/date explicit in the prompt text.
+- For broad daily prompts, prefer the bundle workflow (`summary + references`) rather than one giant monolithic Markdown file.

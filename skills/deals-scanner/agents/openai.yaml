@@ -1,4 +1,4 @@
 interface:
   display_name: "Deals Scanner"
   short_description: "Daily deal scanning across credit cards, uscardforum, Rakuten, Slickdeals, and Dealmoon"
-  default_prompt: "Use the deals-scanner skill to scan deals with an explicit mode, source, and report date. If the scope is ambiguous, propose credit-cards / uscardforum / rakuten / slickdeals / dealmoon daily or all-sources weekly variants instead of silently defaulting to one source. Persist Markdown and JSON outputs under ~/.oh-my-agent/reports/deals-scanner/ and include inline deal links in the main body."
+  default_prompt: "Use the deals-scanner skill to scan deals with an explicit mode, source, and report date. If the scope is broad, produce a daily bundle with summary.md plus per-source references under ~/.oh-my-agent/reports/deals-scanner/daily/<date>/references/. Aim for 10+ verified items per source when feasible, keep inline source links in the body, and use Dealmoon for beauty/electronics/home while keeping Slickdeals broader."

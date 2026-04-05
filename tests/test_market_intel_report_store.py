@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import importlib.util
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
+
+import pytest
 
 
 def _load_module():
@@ -36,6 +38,15 @@ def test_build_report_paths_for_daily_and_weekly():
     )
     assert weekly_md == root / "weekly" / "2026-W11" / "cross-domain.md"
     assert weekly_json == root / "weekly" / "2026-W11" / "cross-domain.json"
+
+
+def test_current_local_date_respects_report_timezone(monkeypatch):
+    module = _load_module()
+    monkeypatch.setenv("OMA_REPORT_TIMEZONE", "America/Los_Angeles")
+    monkeypatch.delenv("TZ", raising=False)
+
+    now = datetime(2026, 4, 5, 1, 30, tzinfo=UTC)
+    assert module.current_local_date(now) == date(2026, 4, 4)
 
 
 def test_scaffold_for_daily_ai_and_weekly_has_expected_sections():

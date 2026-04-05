@@ -2,7 +2,7 @@
 
 JSON and Markdown structure definitions for deals-scanner reports.
 
-## JSON base payload (daily_scan)
+## JSON base payload (daily_scan reference report)
 
 ```json
 {
@@ -18,6 +18,23 @@ JSON and Markdown structure definitions for deals-scanner reports.
   "source_mix_note": "来源构成说明",
   "sources": [],
   "sections": []
+}
+```
+
+## Daily summary extra fields
+
+For broad daily bundles, `source` is `summary` and the JSON should also include:
+
+```json
+{
+  "reference_reports": [
+    {
+      "source": "credit-cards",
+      "label": "信用卡优惠",
+      "markdown_path": "references/credit-cards.md",
+      "json_path": "references/credit-cards.json"
+    }
+  ]
 }
 ```
 
@@ -161,7 +178,7 @@ Sections use `deals[]` arrays (not `bullets[]`). Each element follows the deal e
 ## 今日热门 Frontpage 优惠
 ## 电子产品与科技
 ## 家居生活与日用
-## 其他值得关注
+## 服饰 / 户外 / 其他值得关注
 ## 来源与说明
 ```
 
@@ -174,8 +191,25 @@ Sections use `deals[]` arrays (not `bullets[]`). Each element follows the deal e
 ## 今日精选折扣
 ## 独家折扣码与优惠
 ## 美妆个护
-## 时尚服饰与鞋包
-## 美食与生活
+## 电子数码
+## 家居生活
+## 来源与说明
+```
+
+### daily summary
+
+```
+# 优惠扫描总览｜<date>
+一句话结论：
+## 今日总览
+## Top deals 总榜
+## 各渠道速览
+## Reference 索引
+- [信用卡优惠](references/credit-cards.md)
+- [美卡论坛](references/uscardforum.md)
+- [Rakuten 返现](references/rakuten.md)
+- [Slickdeals](references/slickdeals.md)
+- [Dealmoon](references/dealmoon.md)
 ## 来源与说明
 ```
 
@@ -202,3 +236,8 @@ Deal descriptions **must** carry inline source links in the body. This is a hard
 - Style: `- Chase Sapphire 开卡奖励 80K 积分（[DoC](https://...), [Chase](https://...)）`
 - Per deal: 1-2 high-signal links, not a long chain.
 - The final `来源与说明` section serves as a compact appendix, not the only place links appear.
+
+## Coverage floor
+
+- Daily reference reports should target `12-15` verified items and should not stop below `10` unless the source genuinely lacks enough credible candidates.
+- The summary report should explicitly mention if any source failed to clear the `10` item floor.

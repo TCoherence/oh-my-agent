@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
@@ -28,8 +28,17 @@ def test_build_report_paths_for_daily_and_weekly():
         root=root,
         report_date=date(2026, 4, 4),
     )
-    assert daily_md == root / "daily" / "2026-04-04" / "credit-cards.md"
-    assert daily_json == root / "daily" / "2026-04-04" / "credit-cards.json"
+    assert daily_md == root / "daily" / "2026-04-04" / "references" / "credit-cards.md"
+    assert daily_json == root / "daily" / "2026-04-04" / "references" / "credit-cards.json"
+
+    summary_md, summary_json = module.build_report_paths(
+        mode="daily_scan",
+        source="summary",
+        root=root,
+        report_date=date(2026, 4, 4),
+    )
+    assert summary_md == root / "daily" / "2026-04-04" / "summary.md"
+    assert summary_json == root / "daily" / "2026-04-04" / "summary.json"
 
     weekly_md, weekly_json = module.build_report_paths(
         mode="weekly_digest",
@@ -41,8 +50,33 @@ def test_build_report_paths_for_daily_and_weekly():
     assert weekly_json == root / "weekly" / "2026-W14" / "all-sources.json"
 
 
+def test_current_local_date_respects_report_timezone(monkeypatch):
+    module = _load_module()
+    monkeypatch.setenv("OMA_REPORT_TIMEZONE", "America/Los_Angeles")
+    monkeypatch.delenv("TZ", raising=False)
+
+    now = datetime(2026, 4, 5, 1, 30, tzinfo=UTC)
+    assert module.current_local_date(now) == date(2026, 4, 4)
+
+
 def test_scaffold_for_all_sources_has_expected_sections():
     module = _load_module()
+
+    summary_md = module.build_markdown_skeleton(
+        mode="daily_scan", source="summary", report_date=date(2026, 4, 4),
+    )
+    assert "# 优惠扫描总览｜2026-04-04" in summary_md
+    assert "## Top deals 总榜" in summary_md
+    assert "[信用卡优惠](references/credit-cards.md)" in summary_md
+
+    summary_json = module.build_json_scaffold(
+        mode="daily_scan", source="summary", report_date=date(2026, 4, 4),
+    )
+    assert summary_json["source"] == "summary"
+    assert summary_json["reference_reports"][0]["markdown_path"] == "references/credit-cards.md"
+    assert {s["slug"] for s in summary_json["sections"]} == {
+        "overview", "top-deals", "source-snapshots", "reference-index",
+    }
 
     # credit-cards daily
     cc_md = module.build_markdown_skeleton(
@@ -87,7 +121,7 @@ def test_scaffold_for_all_sources_has_expected_sections():
         mode="daily_scan", source="slickdeals", report_date=date(2026, 4, 4),
     )
     assert {s["slug"] for s in sd_json["sections"]} == {
-        "frontpage", "tech", "home-living", "other",
+        "frontpage", "tech", "home-living", "broader-mix",
     }
 
     # dealmoon daily
@@ -95,7 +129,7 @@ def test_scaffold_for_all_sources_has_expected_sections():
         mode="daily_scan", source="dealmoon", report_date=date(2026, 4, 4),
     )
     assert {s["slug"] for s in dm_json["sections"]} == {
-        "top-picks", "exclusive-codes", "beauty", "fashion", "food-lifestyle",
+        "top-picks", "exclusive-codes", "beauty", "electronics", "home-living",
     }
 
     # weekly digest
@@ -137,8 +171,8 @@ def test_persist_report_writes_markdown_and_json_atomically(tmp_path):
         report_date=date(2026, 4, 4),
     )
 
-    assert md_path == tmp_path / "daily" / "2026-04-04" / "rakuten.md"
-    assert json_path == tmp_path / "daily" / "2026-04-04" / "rakuten.json"
+    assert md_path == tmp_path / "daily" / "2026-04-04" / "references" / "rakuten.md"
+    assert json_path == tmp_path / "daily" / "2026-04-04" / "references" / "rakuten.json"
     assert md_path.read_text(encoding="utf-8") == "# Rakuten 返现日报\n"
     data = json.loads(json_path.read_text(encoding="utf-8"))
     assert data["mode"] == "daily_scan"
@@ -169,6 +203,25 @@ def test_context_uses_recent_daily_reports_and_weekly_history(tmp_path):
                 root=tmp_path,
                 report_date=date(2026, 4, day),
             )
+
+    module.persist_report(
+        mode="daily_scan",
+        source="summary",
+        markdown="# summary 7\n",
+        payload={
+            "title": "summary day 7",
+            "period_start": "2026-04-07",
+            "period_end": "2026-04-07",
+            "summary": "bundle summary",
+            "top_deals": [],
+            "source_mix_note": "",
+            "sources": [],
+            "sections": [],
+            "reference_reports": [],
+        },
+        root=tmp_path,
+        report_date=date(2026, 4, 7),
+    )
 
     # Populate a weekly report
     module.persist_report(
@@ -211,6 +264,17 @@ def test_context_uses_recent_daily_reports_and_weekly_history(tmp_path):
     ]
     assert daily_context["recent_weekly"][0]["title"] == "week 13"
 
+    summary_context = module.build_context(
+        mode="daily_scan",
+        source="summary",
+        root=tmp_path,
+        as_of=date(2026, 4, 7),
+        days=7,
+    )
+    assert summary_context["current_references"]["credit-cards"]["title"] == "credit-cards day 7"
+    assert summary_context["current_references"]["rakuten"]["title"] == "rakuten day 7"
+    assert summary_context["recent_summary"][0]["title"] == "summary day 7"
+
     # Test weekly_digest context
     weekly_context = module.build_context(
         mode="weekly_digest",
@@ -239,6 +303,9 @@ def test_invalid_mode_source_combinations_raise_value_error():
     # daily_scan rejects unknown source
     with pytest.raises(ValueError, match="unsupported source"):
         module.build_report_paths(mode="daily_scan", source="amazon")
+
+    # daily_scan accepts summary as the internal aggregation target
+    module.build_report_paths(mode="daily_scan", source="summary")
 
     # unsupported mode
     with pytest.raises(ValueError, match="unsupported mode"):

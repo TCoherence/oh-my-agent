@@ -1,5 +1,35 @@
 #!/usr/bin/env bash
 
+oma_detect_timezone() {
+  if [[ -n "${OMA_TIMEZONE:-}" ]]; then
+    printf '%s\n' "${OMA_TIMEZONE}"
+    return
+  fi
+  if [[ -n "${TZ:-}" ]]; then
+    printf '%s\n' "${TZ}"
+    return
+  fi
+  if [[ -L /etc/localtime ]]; then
+    local tz_path
+    tz_path="$(readlink /etc/localtime 2>/dev/null || true)"
+    case "${tz_path}" in
+      */zoneinfo/*)
+        printf '%s\n' "${tz_path##*/zoneinfo/}"
+        return
+        ;;
+    esac
+  fi
+  if [[ -f /etc/timezone ]]; then
+    local tz_file
+    tz_file="$(tr -d '[:space:]' < /etc/timezone 2>/dev/null || true)"
+    if [[ -n "${tz_file}" ]]; then
+      printf '%s\n' "${tz_file}"
+      return
+    fi
+  fi
+  printf 'UTC\n'
+}
+
 oma_docker_init() {
   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -12,6 +42,7 @@ oma_docker_init() {
   WORKDIR_IN_CONTAINER="${OMA_WORKDIR_IN_CONTAINER:-${WORKSPACE_MOUNT_TARGET}}"
   CONFIG_PATH_IN_CONTAINER="${OMA_CONFIG_PATH:-${REPO_MOUNT_TARGET}/config.yaml}"
   OMA_CONTAINER_PATH="${WORKSPACE_MOUNT_TARGET}/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  OMA_REPORT_TIMEZONE_VALUE="${OMA_REPORT_TIMEZONE:-$(oma_detect_timezone)}"
 }
 
 oma_docker_ensure_ready() {
@@ -50,6 +81,8 @@ oma_docker_build_common_run_args() {
     -e OMA_WORKDIR="${WORKDIR_IN_CONTAINER}"
     -e OMA_REPO_ROOT="${REPO_MOUNT_TARGET}"
     -e OMA_CONFIG_PATH="${CONFIG_PATH_IN_CONTAINER}"
+    -e TZ="${OMA_REPORT_TIMEZONE_VALUE}"
+    -e OMA_REPORT_TIMEZONE="${OMA_REPORT_TIMEZONE_VALUE}"
     -e OMA_AGENT_CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS="${OMA_AGENT_CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS:-true}"
     -e OMA_AGENT_CLAUDE_PERMISSION_MODE="${OMA_AGENT_CLAUDE_PERMISSION_MODE:-}"
     -e OMA_AGENT_CODEX_SANDBOX_MODE="${OMA_AGENT_CODEX_SANDBOX_MODE:-danger-full-access}"
@@ -66,6 +99,7 @@ oma_docker_print_banner() {
   echo "[oma] repo mount: ${REPO_MOUNT_PATH} -> ${REPO_MOUNT_TARGET}"
   echo "[oma] workdir in container: ${WORKDIR_IN_CONTAINER}"
   echo "[oma] config path in container: ${CONFIG_PATH_IN_CONTAINER}"
+  echo "[oma] report timezone in container: ${OMA_REPORT_TIMEZONE_VALUE}"
   echo "[oma] path in container: ${OMA_CONTAINER_PATH}"
   echo "[oma] docker agent overrides: claude_skip_permissions=${OMA_AGENT_CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS:-true}, codex_sandbox=${OMA_AGENT_CODEX_SANDBOX_MODE:-danger-full-access}, codex_bypass=${OMA_AGENT_CODEX_DANGEROUSLY_BYPASS_APPROVALS_AND_SANDBOX:-true}"
 }

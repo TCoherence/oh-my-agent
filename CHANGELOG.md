@@ -15,6 +15,7 @@ The format is intentionally lightweight and release-oriented rather than exhaust
 
 - Human-input states now fan out through an internal notification layer instead of each flow hand-rolling Discord reminders
 - `auth_required`, `ask_user`, `DRAFT`, and `WAITING_MERGE` notifications now resolve explicitly when the underlying waiting state is cleared, while routine runtime progress still stays notification-free
+- Report-store helpers for `market-intel-report` and `deals-scanner` now derive their default local report date from `OMA_REPORT_TIMEZONE` / `TZ` instead of implicitly inheriting UTC-like container defaults, and Docker helper scripts now pass an explicit report timezone into the container
 
 ## v0.7.2 - 2026-03-16
 

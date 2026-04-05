@@ -8,11 +8,45 @@ import tempfile
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 VALID_MODES = {"daily_scan", "weekly_digest"}
 SOURCES = {"credit-cards", "uscardforum", "rakuten", "slickdeals", "dealmoon"}
 WEEKLY_SOURCE = "all-sources"
+DAILY_SUMMARY_SOURCE = "summary"
+DAILY_REFERENCE_DIR = "references"
+
+
+def resolve_report_timezone_name() -> str | None:
+    for key in ("OMA_REPORT_TIMEZONE", "TZ"):
+        raw = os.environ.get(key)
+        if raw and raw.strip():
+            return raw.strip()
+    return None
+
+
+def resolve_report_timezone():
+    tz_name = resolve_report_timezone_name()
+    if tz_name:
+        try:
+            return ZoneInfo(tz_name)
+        except ZoneInfoNotFoundError:
+            pass
+    return datetime.now().astimezone().tzinfo or UTC
+
+
+def current_local_datetime(now: datetime | None = None) -> datetime:
+    tz = resolve_report_timezone()
+    if now is None:
+        return datetime.now(tz)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=UTC)
+    return now.astimezone(tz)
+
+
+def current_local_date(now: datetime | None = None) -> date:
+    return current_local_datetime(now).date()
 
 
 def resolve_reports_root(root: str | Path | None = None) -> Path:
@@ -37,8 +71,11 @@ def _validate_mode_source(mode: str, source: str) -> None:
     if mode == "daily_scan":
         if source == WEEKLY_SOURCE:
             raise ValueError("daily_scan does not accept 'all-sources'; use a specific source")
-        if source not in SOURCES:
-            raise ValueError(f"unsupported source for daily_scan: {source}; expected one of {sorted(SOURCES)}")
+        if source not in SOURCES and source != DAILY_SUMMARY_SOURCE:
+            raise ValueError(
+                "unsupported source for daily_scan: "
+                f"{source}; expected one of {sorted(SOURCES | {DAILY_SUMMARY_SOURCE})}"
+            )
     elif mode == "weekly_digest":
         if source != WEEKLY_SOURCE:
             raise ValueError(f"weekly_digest requires source='all-sources', got '{source}'")
@@ -56,16 +93,37 @@ def build_report_paths(
     store_root = resolve_reports_root(root)
 
     if mode == "weekly_digest":
-        week_label = iso_week or iso_week_for_date(report_date or date.today())
+        week_label = iso_week or iso_week_for_date(report_date or current_local_date())
         md_path = store_root / "weekly" / week_label / f"{WEEKLY_SOURCE}.md"
         json_path = store_root / "weekly" / week_label / f"{WEEKLY_SOURCE}.json"
         return md_path, json_path
 
-    day = report_date or date.today()
+    day = report_date or current_local_date()
     day_label = day.isoformat()
-    md_path = store_root / "daily" / day_label / f"{source}.md"
-    json_path = store_root / "daily" / day_label / f"{source}.json"
+    if source == DAILY_SUMMARY_SOURCE:
+        md_path = store_root / "daily" / day_label / f"{DAILY_SUMMARY_SOURCE}.md"
+        json_path = store_root / "daily" / day_label / f"{DAILY_SUMMARY_SOURCE}.json"
+        return md_path, json_path
+    md_path = store_root / "daily" / day_label / DAILY_REFERENCE_DIR / f"{source}.md"
+    json_path = store_root / "daily" / day_label / DAILY_REFERENCE_DIR / f"{source}.json"
     return md_path, json_path
+
+
+def _daily_reference_pairs() -> list[tuple[str, str]]:
+    return [
+        ("credit-cards", "信用卡优惠"),
+        ("uscardforum", "美卡论坛"),
+        ("rakuten", "Rakuten 返现"),
+        ("slickdeals", "Slickdeals"),
+        ("dealmoon", "Dealmoon"),
+    ]
+
+
+def _daily_reference_index_lines() -> list[str]:
+    return [
+        f"- [{label}]({DAILY_REFERENCE_DIR}/{source}.md)"
+        for source, label in _daily_reference_pairs()
+    ]
 
 
 def atomic_write_text(path: Path, content: str) -> None:
@@ -88,8 +146,37 @@ def atomic_write_text(path: Path, content: str) -> None:
 
 def build_markdown_skeleton(*, mode: str, source: str, report_date: date | None = None, iso_week: str | None = None) -> str:
     _validate_mode_source(mode, source)
-    day_label = (report_date or date.today()).isoformat()
-    week_label = iso_week or iso_week_for_date(report_date or date.today())
+    day_label = (report_date or current_local_date()).isoformat()
+    week_label = iso_week or iso_week_for_date(report_date or current_local_date())
+
+    if mode == "daily_scan" and source == DAILY_SUMMARY_SOURCE:
+        return "\n".join([
+            f"# 优惠扫描总览｜{day_label}",
+            "",
+            "一句话结论：",
+            "",
+            "## 今日总览",
+            "",
+            "## Top deals 总榜",
+            "",
+            "## 各渠道速览",
+            "",
+            "### 信用卡优惠",
+            "",
+            "### 美卡论坛",
+            "",
+            "### Rakuten 返现",
+            "",
+            "### Slickdeals",
+            "",
+            "### Dealmoon",
+            "",
+            "## Reference 索引",
+            *_daily_reference_index_lines(),
+            "",
+            "## 来源与说明",
+            "",
+        ])
 
     if mode == "daily_scan" and source == "credit-cards":
         return "\n".join([
@@ -165,7 +252,7 @@ def build_markdown_skeleton(*, mode: str, source: str, report_date: date | None 
             "",
             "## 家居生活与日用",
             "",
-            "## 其他值得关注",
+            "## 服饰 / 户外 / 其他值得关注",
             "",
             "## 来源与说明",
             "",
@@ -185,9 +272,9 @@ def build_markdown_skeleton(*, mode: str, source: str, report_date: date | None 
             "",
             "## 美妆个护",
             "",
-            "## 时尚服饰与鞋包",
+            "## 电子数码",
             "",
-            "## 美食与生活",
+            "## 家居生活",
             "",
             "## 来源与说明",
             "",
@@ -227,7 +314,7 @@ def build_markdown_skeleton(*, mode: str, source: str, report_date: date | None 
 # ---------------------------------------------------------------------------
 
 def _base_json_payload(*, mode: str, source: str, report_date: date | None = None) -> dict[str, Any]:
-    day = report_date or date.today()
+    day = report_date or current_local_date()
     return {
         "version": 1,
         "mode": mode,
@@ -253,6 +340,24 @@ def build_json_scaffold(
 ) -> dict[str, Any]:
     _validate_mode_source(mode, source)
     payload = _base_json_payload(mode=mode, source=source, report_date=report_date)
+
+    if mode == "daily_scan" and source == DAILY_SUMMARY_SOURCE:
+        payload["reference_reports"] = [
+            {
+                "source": item_source,
+                "label": label,
+                "markdown_path": f"{DAILY_REFERENCE_DIR}/{item_source}.md",
+                "json_path": f"{DAILY_REFERENCE_DIR}/{item_source}.json",
+            }
+            for item_source, label in _daily_reference_pairs()
+        ]
+        payload["sections"] = [
+            {"slug": "overview", "heading": "今日总览", "summary": "", "deals": []},
+            {"slug": "top-deals", "heading": "Top deals 总榜", "summary": "", "deals": []},
+            {"slug": "source-snapshots", "heading": "各渠道速览", "summary": "", "deals": []},
+            {"slug": "reference-index", "heading": "Reference 索引", "summary": "", "deals": []},
+        ]
+        return payload
 
     if mode == "daily_scan" and source == "credit-cards":
         payload["sections"] = [
@@ -286,7 +391,7 @@ def build_json_scaffold(
             {"slug": "frontpage", "heading": "今日热门 Frontpage 优惠", "summary": "", "deals": []},
             {"slug": "tech", "heading": "电子产品与科技", "summary": "", "deals": []},
             {"slug": "home-living", "heading": "家居生活与日用", "summary": "", "deals": []},
-            {"slug": "other", "heading": "其他值得关注", "summary": "", "deals": []},
+            {"slug": "broader-mix", "heading": "服饰 / 户外 / 其他值得关注", "summary": "", "deals": []},
         ]
         return payload
 
@@ -295,13 +400,13 @@ def build_json_scaffold(
             {"slug": "top-picks", "heading": "今日精选折扣", "summary": "", "deals": []},
             {"slug": "exclusive-codes", "heading": "独家折扣码与优惠", "summary": "", "deals": []},
             {"slug": "beauty", "heading": "美妆个护", "summary": "", "deals": []},
-            {"slug": "fashion", "heading": "时尚服饰与鞋包", "summary": "", "deals": []},
-            {"slug": "food-lifestyle", "heading": "美食与生活", "summary": "", "deals": []},
+            {"slug": "electronics", "heading": "电子数码", "summary": "", "deals": []},
+            {"slug": "home-living", "heading": "家居生活", "summary": "", "deals": []},
         ]
         return payload
 
     if mode == "weekly_digest" and source == WEEKLY_SOURCE:
-        day = report_date or date.today()
+        day = report_date or current_local_date()
         payload["iso_week"] = iso_week or iso_week_for_date(day)
         payload["trend_summary"] = ""
         payload["cross_source_highlights"] = []
@@ -348,10 +453,11 @@ def persist_report(
     normalized["mode"] = mode
     normalized["source"] = source
     normalized.setdefault("generated_at", datetime.now(UTC).isoformat())
+    normalized.setdefault("report_timezone", resolve_report_timezone_name() or str(resolve_report_timezone()))
     if report_date is not None:
         normalized.setdefault("report_date", report_date.isoformat())
     if mode == "weekly_digest":
-        normalized.setdefault("iso_week", iso_week or iso_week_for_date(report_date or date.today()))
+        normalized.setdefault("iso_week", iso_week or iso_week_for_date(report_date or current_local_date()))
     atomic_write_text(md_path, markdown)
     atomic_write_text(json_path, json.dumps(normalized, ensure_ascii=False, indent=2) + "\n")
     return md_path, json_path
@@ -372,7 +478,10 @@ def _load_json(path: Path) -> dict[str, Any]:
 def _iter_json_files(mode: str, root: str | Path | None = None) -> list[Path]:
     store_root = resolve_reports_root(root)
     if mode == "daily_scan":
-        return sorted((store_root / "daily").glob("*/*.json"))
+        return sorted(
+            list((store_root / "daily").glob(f"*/{DAILY_SUMMARY_SOURCE}.json"))
+            + list((store_root / "daily").glob(f"*/{DAILY_REFERENCE_DIR}/*.json"))
+        )
     if mode == "weekly_digest":
         return sorted((store_root / "weekly").glob("*/*.json"))
     raise ValueError(f"unsupported mode: {mode}")
@@ -414,7 +523,7 @@ def load_recent_daily_reports(
     as_of: date | None = None,
     days: int = 7,
 ) -> list[dict[str, Any]]:
-    end = as_of or date.today()
+    end = as_of or current_local_date()
     start = end - timedelta(days=max(days - 1, 0))
     start_label = start.isoformat()
     end_label = end.isoformat()
@@ -437,6 +546,24 @@ def load_recent_weekly_reports(
     return items
 
 
+def load_daily_reference_reports(
+    *,
+    root: str | Path | None = None,
+    report_date: date | None = None,
+) -> dict[str, dict[str, Any]]:
+    day = (report_date or current_local_date()).isoformat()
+    items: dict[str, dict[str, Any]] = {}
+    for source in sorted(SOURCES):
+        matches = [
+            item
+            for item in list_reports(mode="daily_scan", source=source, root=root)
+            if item.get("period_end") == day
+        ]
+        if matches:
+            items[source] = matches[0]
+    return items
+
+
 def build_context(
     *,
     mode: str,
@@ -447,7 +574,7 @@ def build_context(
     weekly_limit: int = 4,
 ) -> dict[str, Any]:
     _validate_mode_source(mode, source)
-    day = as_of or date.today()
+    day = as_of or current_local_date()
     context: dict[str, Any] = {
         "mode": mode,
         "source": source,
@@ -455,6 +582,16 @@ def build_context(
         "reports_root": str(resolve_reports_root(root)),
     }
     if mode == "daily_scan":
+        if source == DAILY_SUMMARY_SOURCE:
+            context["current_references"] = load_daily_reference_reports(root=root, report_date=day)
+            context["recent_summary"] = load_recent_daily_reports(
+                DAILY_SUMMARY_SOURCE,
+                root=root,
+                as_of=day,
+                days=days,
+            )
+            context["recent_weekly"] = load_recent_weekly_reports(root=root, limit=min(weekly_limit, 2))
+            return context
         context["recent_daily"] = load_recent_daily_reports(source, root=root, as_of=day, days=days)
         context["recent_weekly"] = load_recent_weekly_reports(root=root, limit=min(weekly_limit, 2))
         return context
