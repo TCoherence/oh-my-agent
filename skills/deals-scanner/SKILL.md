@@ -120,8 +120,10 @@ When the user asks for a broad daily scan or leaves the source intentionally bro
 2. Persist each one under the day-level `references/` directory.
 3. Generate one additional `daily_scan` report with `source=summary`.
 4. The summary report must:
-   - rank the best deals across sources
+   - read like a morning brief rather than a directory page
+   - group top items into `Apply now`, `Buy now`, `Stack now`, and `Watchlist`
    - give one short readout per source
+   - explicitly state any source that missed the high-confidence floor
    - include explicit links to `references/<source>.md`
 5. In the final answer, show the summary first and treat per-source files as drill-down references.
 
@@ -146,9 +148,13 @@ Read the relevant reference before drafting:
 ### Daily report structures
 
 - `summary` (internal daily aggregation target for broad scans)
-  - 今日总览
-  - Top deals 总榜
-  - 各渠道速览
+  - 今日判断
+  - Apply now
+  - Buy now
+  - Stack now
+  - Watchlist
+  - 各渠道一句话结论
+  - Coverage / Confidence
   - Reference 索引
 - `credit-cards`
   - 开卡奖励（Sign-up Bonuses）
@@ -211,6 +217,8 @@ The JSON sidecar is part of the report contract. Keep these fields present:
 - `source`
 - `title`
 - `generated_at`
+- `report_timezone`
+- `report_date`
 - `period_start`
 - `period_end`
 - `summary`
@@ -218,6 +226,18 @@ The JSON sidecar is part of the report contract. Keep these fields present:
 - `source_mix_note`
 - `sources`
 - `sections`
+
+For daily reference reports, also include:
+
+- `lower_confidence_watchlist`
+- `high_confidence_count`
+- `coverage_floor_met`
+
+For `source=summary`, also include:
+
+- `action_buckets`
+- `source_snapshots`
+- `coverage_status`
 
 For weekly digest, also include:
 
@@ -255,14 +275,25 @@ Each entry in `top_deals` and `sections[].deals[]`:
 
 - Default output language is Chinese.
 - Markdown should be readable as a finished deal report, not just raw bullets.
+- `summary.md` should read like a decisive morning brief, not a directory page.
 - Each deal should include: deal title, value/discount amount, expiration info, link, and a brief quality assessment.
 - JSON should stay compact and structured for later machine reuse.
 - Daily source scans should aim for `12-15` verified items and should not stop below `10` unless the source genuinely lacks enough credible candidates that day.
-- If a source cannot produce at least `10` credible items, say so explicitly in the summary and in that source's `来源与说明` section.
+- The `10` item floor applies to high-confidence items.
+- If a source cannot produce at least `10` high-confidence items:
+  - do not pad the main body with low-quality filler
+  - place weaker candidates in `lower_confidence_watchlist`
+  - say so explicitly in the summary `Coverage / Confidence` section and in that source's `来源与说明`
 - Core sections should generally carry at least `2-3` items each; do not let one section absorb everything while others stay empty unless the source genuinely lacks coverage.
 - The broad daily bundle should always produce the day-level `summary.md|json` in addition to per-source references.
 - If a source has no notable deals today, say so explicitly rather than padding with filler.
 - Weekly trend claims must be grounded in stored daily report files, not vague memory.
+- Deal links should default to concrete deal pages, forum threads, or issuer / merchant product pages. Homepage or list-page links belong only in supporting citations or `lower_confidence_watchlist`.
+- `Dealmoon` should stay focused on beauty, electronics, and home. Do not let apparel dominate its daily scan unless it clearly breaks into the overall top picks.
+- `Slickdeals` should remain broad across frontpage, tech, home, and other high-signal categories rather than narrowing into a pure tech feed.
+- `credit-cards` top items should be cross-checked with issuer official pages or other concrete sources when feasible.
+- `Rakuten` should prefer merchant-level entry pages or concrete merchant offers. `allstores` is overview-only and should not be the only link for a top item.
+- The helper owns `generated_at`, `report_timezone`, and `report_date`; do not invent placeholder metadata values in the model output.
 
 ## Research approach
 

@@ -10,16 +10,23 @@ JSON and Markdown structure definitions for deals-scanner reports.
   "mode": "daily_scan",
   "source": "<credit-cards|uscardforum|rakuten|slickdeals|dealmoon>",
   "title": "信用卡优惠日报｜2026-04-04",
-  "generated_at": "2026-04-04T08:00:00+00:00",
+  "generated_at": "2026-04-04T08:13:27+00:00",
+  "report_timezone": "America/Los_Angeles",
+  "report_date": "2026-04-04",
   "period_start": "2026-04-04",
   "period_end": "2026-04-04",
   "summary": "一句话结论",
   "top_deals": [],
   "source_mix_note": "来源构成说明",
   "sources": [],
-  "sections": []
+  "sections": [],
+  "lower_confidence_watchlist": [],
+  "high_confidence_count": 0,
+  "coverage_floor_met": false
 }
 ```
+
+`generated_at`、`report_timezone`、`report_date` 由 helper 在 persist 时统一覆盖，不接受模型自填的占位值。
 
 ## Daily summary extra fields
 
@@ -27,6 +34,25 @@ For broad daily bundles, `source` is `summary` and the JSON should also include:
 
 ```json
 {
+  "action_buckets": {
+    "apply_now": [],
+    "buy_now": [],
+    "stack_now": [],
+    "watchlist": []
+  },
+  "source_snapshots": [
+    {
+      "source": "credit-cards",
+      "summary": "",
+      "high_confidence_count": 0,
+      "watchlist_count": 0,
+      "met_floor": false
+    }
+  ],
+  "coverage_status": {
+    "target_floor": 10,
+    "sources_below_floor": []
+  },
   "reference_reports": [
     {
       "source": "credit-cards",
@@ -201,9 +227,13 @@ Sections use `deals[]` arrays (not `bullets[]`). Each element follows the deal e
 ```
 # 优惠扫描总览｜<date>
 一句话结论：
-## 今日总览
-## Top deals 总榜
-## 各渠道速览
+## 今日判断
+## Apply now
+## Buy now
+## Stack now
+## Watchlist
+## 各渠道一句话结论
+## Coverage / Confidence
 ## Reference 索引
 - [信用卡优惠](references/credit-cards.md)
 - [美卡论坛](references/uscardforum.md)
@@ -236,8 +266,18 @@ Deal descriptions **must** carry inline source links in the body. This is a hard
 - Style: `- Chase Sapphire 开卡奖励 80K 积分（[DoC](https://...), [Chase](https://...)）`
 - Per deal: 1-2 high-signal links, not a long chain.
 - The final `来源与说明` section serves as a compact appendix, not the only place links appear.
+- Prefer a deal-level link:
+  - concrete deal page
+  - concrete forum thread
+  - concrete merchant / issuer / product page
+- Homepage, list pages, and roundup pages are acceptable only as supplemental evidence or in `lower_confidence_watchlist`. They should not be the only link for a mainline deal entry.
 
 ## Coverage floor
 
 - Daily reference reports should target `12-15` verified items and should not stop below `10` unless the source genuinely lacks enough credible candidates.
-- The summary report should explicitly mention if any source failed to clear the `10` item floor.
+- High-confidence floor is `10`.
+- If a source cannot reach `10` high-confidence items:
+  - keep the main正文 focused on high-confidence entries only
+  - put weaker candidates into `lower_confidence_watchlist`
+  - set `coverage_floor_met=false`
+  - call the gap out explicitly in the summary report's `Coverage / Confidence` section

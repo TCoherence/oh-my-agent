@@ -23,10 +23,51 @@ This skill uses **web search**, not automated scraping. For each source, the age
 ## Coverage floor
 
 - Daily source scans should target `12-15` verified items.
-- Do not stop below `10` unless the source genuinely lacks enough credible candidates that day.
+- High-confidence floor is `10`.
+- Do not stop below `10` high-confidence items unless the source genuinely lacks enough credible candidates that day.
 - When coverage is thin, keep searching adjacent queries / category pages before giving up.
-- If the final usable set is still below `10`, state that explicitly in the report instead of pretending the scan is complete.
+- If the final usable set is still below `10`:
+  - keep the正文 focused on the high-confidence set
+  - move weaker candidates into `lower_confidence_watchlist`
+  - state that explicitly in the report instead of pretending the scan is complete
 - For broad daily bundles, the `summary` report should call out which sources cleared the coverage floor and which did not.
+
+## Link and confidence policy
+
+Mainline deal entries should prefer concrete deal-level URLs:
+
+- a specific deal page
+- a specific forum thread
+- a specific merchant page
+- an issuer official offer / product page
+
+Homepage, list pages, and roundup pages are weaker evidence:
+
+- acceptable as supplementary citations
+- acceptable in `lower_confidence_watchlist`
+- not acceptable as the only link for a mainline high-confidence deal
+
+High-confidence entries should have:
+
+- a concrete deal-level URL
+- title / merchant / value mostly clear
+- expiration or deal status reasonably inferable
+- enough evidence to support a `quality_score` without guesswork
+
+## Summary action-bucket policy
+
+Broad daily `summary.md` should classify cross-source items into:
+
+- `Apply now`
+  - card sign-up bonuses
+  - expiring registrations
+  - targeted enrollment offers
+- `Buy now`
+  - deals that are ready to purchase today
+- `Stack now`
+  - portal + coupon + card offer combinations
+- `Watchlist`
+  - worth tracking, but not yet strong enough for immediate action
 
 ## Per-source search strategies
 
@@ -59,6 +100,10 @@ This skill uses **web search**, not automated scraping. For each source, the age
 - Targeted offers (Amex offers, Chase offers, etc.)
 - Referral bonus changes
 - Expiring offers (within 7 days)
+
+**Extra rules:**
+- Do not let aggregator/blog roundup links be the only evidence for top items when an issuer page exists.
+- For mainline `Apply now` items, try to pair a blog/forum explainer with an issuer official page or more concrete landing page.
 
 ### uscardforum (single site)
 
@@ -96,6 +141,10 @@ This skill uses **web search**, not automated scraping. For each source, the age
 - In-store cashback offers
 - Seasonal event cashback boosts
 
+**Extra rules:**
+- Prefer merchant-level Rakuten entry pages when available.
+- Treat `allstores` / broad listing pages as overview-only; do not use them as the only link for a top deal.
+
 ### slickdeals (single site)
 
 **Search queries:**
@@ -115,6 +164,9 @@ This skill uses **web search**, not automated scraping. For each source, the age
 - Notable coupon codes or stacking opportunities
 - Price error / clearance deals
 
+**Positioning:**
+- Keep Slickdeals broad. It is the wide deal radar across categories, not just a tech feed.
+
 ### dealmoon (single site)
 
 **Search queries:**
@@ -133,6 +185,10 @@ This skill uses **web search**, not automated scraping. For each source, the age
 - Electronics and gadget deals
 - Home, kitchen, and household deals
 - Chinese community-oriented deals (Asian grocery, shipping to China, etc.)
+
+**Positioning:**
+- Dealmoon daily coverage should stay centered on beauty, electronics, and home.
+- Apparel/fashion can appear only when it clearly makes the day-level top picks or watchlist; it should not dominate the source report.
 
 ## Deal quality evaluation criteria
 

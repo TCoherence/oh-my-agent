@@ -66,16 +66,38 @@ def test_scaffold_for_all_sources_has_expected_sections():
         mode="daily_scan", source="summary", report_date=date(2026, 4, 4),
     )
     assert "# 优惠扫描总览｜2026-04-04" in summary_md
-    assert "## Top deals 总榜" in summary_md
+    assert "## Apply now" in summary_md
+    assert "## Buy now" in summary_md
+    assert "## Stack now" in summary_md
+    assert "## Watchlist" in summary_md
+    assert "## Coverage / Confidence" in summary_md
     assert "[信用卡优惠](references/credit-cards.md)" in summary_md
 
     summary_json = module.build_json_scaffold(
         mode="daily_scan", source="summary", report_date=date(2026, 4, 4),
     )
     assert summary_json["source"] == "summary"
+    assert summary_json["action_buckets"] == {
+        "apply_now": [],
+        "buy_now": [],
+        "stack_now": [],
+        "watchlist": [],
+    }
+    assert summary_json["source_snapshots"][0] == {
+        "source": "credit-cards",
+        "summary": "",
+        "high_confidence_count": 0,
+        "watchlist_count": 0,
+        "met_floor": False,
+    }
+    assert summary_json["coverage_status"] == {
+        "target_floor": 10,
+        "sources_below_floor": [],
+    }
     assert summary_json["reference_reports"][0]["markdown_path"] == "references/credit-cards.md"
     assert {s["slug"] for s in summary_json["sections"]} == {
-        "overview", "top-deals", "source-snapshots", "reference-index",
+        "judgement", "apply-now", "buy-now", "stack-now", "watchlist", "source-snapshots",
+        "coverage-confidence", "reference-index",
     }
 
     # credit-cards daily
@@ -91,6 +113,9 @@ def test_scaffold_for_all_sources_has_expected_sections():
     )
     assert cc_json["mode"] == "daily_scan"
     assert cc_json["source"] == "credit-cards"
+    assert cc_json["lower_confidence_watchlist"] == []
+    assert cc_json["high_confidence_count"] == 0
+    assert cc_json["coverage_floor_met"] is False
     assert {s["slug"] for s in cc_json["sections"]} == {
         "signup-bonuses", "cashback-rewards", "fee-offers", "expiring",
     }
@@ -150,8 +175,10 @@ def test_scaffold_for_all_sources_has_expected_sections():
     assert weekly_json["iso_week"] == "2026-W14"
 
 
-def test_persist_report_writes_markdown_and_json_atomically(tmp_path):
+def test_persist_report_writes_markdown_and_json_atomically(tmp_path, monkeypatch):
     module = _load_module()
+    monkeypatch.setenv("OMA_REPORT_TIMEZONE", "America/Los_Angeles")
+    monkeypatch.delenv("TZ", raising=False)
 
     md_path, json_path = module.persist_report(
         mode="daily_scan",
@@ -159,6 +186,9 @@ def test_persist_report_writes_markdown_and_json_atomically(tmp_path):
         markdown="# Rakuten 返现日报\n",
         payload={
             "title": "Rakuten 返现日报",
+            "generated_at": "2000-01-01T00:00:00Z",
+            "report_timezone": "UTC",
+            "report_date": "1999-01-01",
             "period_start": "2026-04-04",
             "period_end": "2026-04-04",
             "summary": "今日 Sephora 12% 返现",
@@ -178,6 +208,10 @@ def test_persist_report_writes_markdown_and_json_atomically(tmp_path):
     assert data["mode"] == "daily_scan"
     assert data["source"] == "rakuten"
     assert data["summary"] == "今日 Sephora 12% 返现"
+    assert data["report_timezone"] == "America/Los_Angeles"
+    assert data["report_date"] == "2026-04-04"
+    assert data["generated_at"] != "2000-01-01T00:00:00Z"
+    assert "T" in data["generated_at"]
 
 
 def test_context_uses_recent_daily_reports_and_weekly_history(tmp_path):

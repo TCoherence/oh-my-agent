@@ -16,6 +16,7 @@ SOURCES = {"credit-cards", "uscardforum", "rakuten", "slickdeals", "dealmoon"}
 WEEKLY_SOURCE = "all-sources"
 DAILY_SUMMARY_SOURCE = "summary"
 DAILY_REFERENCE_DIR = "references"
+COVERAGE_FLOOR = 10
 
 
 def resolve_report_timezone_name() -> str | None:
@@ -55,7 +56,7 @@ def resolve_reports_root(root: str | Path | None = None) -> Path:
 
 
 def parse_report_date(raw: str | None) -> date | None:
-    if raw is None:
+    if raw is None or not str(raw).strip():
         return None
     return date.fromisoformat(raw)
 
@@ -119,6 +120,10 @@ def _daily_reference_pairs() -> list[tuple[str, str]]:
     ]
 
 
+def _ordered_sources() -> list[str]:
+    return [source for source, _ in _daily_reference_pairs()]
+
+
 def _daily_reference_index_lines() -> list[str]:
     return [
         f"- [{label}]({DAILY_REFERENCE_DIR}/{source}.md)"
@@ -155,11 +160,17 @@ def build_markdown_skeleton(*, mode: str, source: str, report_date: date | None 
             "",
             "一句话结论：",
             "",
-            "## 今日总览",
+            "## 今日判断",
             "",
-            "## Top deals 总榜",
+            "## Apply now",
             "",
-            "## 各渠道速览",
+            "## Buy now",
+            "",
+            "## Stack now",
+            "",
+            "## Watchlist",
+            "",
+            "## 各渠道一句话结论",
             "",
             "### 信用卡优惠",
             "",
@@ -170,6 +181,8 @@ def build_markdown_skeleton(*, mode: str, source: str, report_date: date | None 
             "### Slickdeals",
             "",
             "### Dealmoon",
+            "",
+            "## Coverage / Confidence",
             "",
             "## Reference 索引",
             *_daily_reference_index_lines(),
@@ -315,12 +328,15 @@ def build_markdown_skeleton(*, mode: str, source: str, report_date: date | None 
 
 def _base_json_payload(*, mode: str, source: str, report_date: date | None = None) -> dict[str, Any]:
     day = report_date or current_local_date()
+    report_timezone = resolve_report_timezone_name() or str(resolve_report_timezone())
     return {
         "version": 1,
         "mode": mode,
         "source": source,
         "title": "",
-        "generated_at": "",
+        "generated_at": datetime.now(UTC).isoformat(),
+        "report_timezone": report_timezone,
+        "report_date": day.isoformat(),
         "period_start": day.isoformat(),
         "period_end": day.isoformat(),
         "summary": "",
@@ -328,6 +344,9 @@ def _base_json_payload(*, mode: str, source: str, report_date: date | None = Non
         "source_mix_note": "",
         "sources": [],
         "sections": [],
+        "lower_confidence_watchlist": [],
+        "high_confidence_count": 0,
+        "coverage_floor_met": False,
     }
 
 
@@ -351,10 +370,34 @@ def build_json_scaffold(
             }
             for item_source, label in _daily_reference_pairs()
         ]
+        payload["action_buckets"] = {
+            "apply_now": [],
+            "buy_now": [],
+            "stack_now": [],
+            "watchlist": [],
+        }
+        payload["source_snapshots"] = [
+            {
+                "source": item_source,
+                "summary": "",
+                "high_confidence_count": 0,
+                "watchlist_count": 0,
+                "met_floor": False,
+            }
+            for item_source in _ordered_sources()
+        ]
+        payload["coverage_status"] = {
+            "target_floor": COVERAGE_FLOOR,
+            "sources_below_floor": [],
+        }
         payload["sections"] = [
-            {"slug": "overview", "heading": "今日总览", "summary": "", "deals": []},
-            {"slug": "top-deals", "heading": "Top deals 总榜", "summary": "", "deals": []},
-            {"slug": "source-snapshots", "heading": "各渠道速览", "summary": "", "deals": []},
+            {"slug": "judgement", "heading": "今日判断", "summary": "", "deals": []},
+            {"slug": "apply-now", "heading": "Apply now", "summary": "", "deals": []},
+            {"slug": "buy-now", "heading": "Buy now", "summary": "", "deals": []},
+            {"slug": "stack-now", "heading": "Stack now", "summary": "", "deals": []},
+            {"slug": "watchlist", "heading": "Watchlist", "summary": "", "deals": []},
+            {"slug": "source-snapshots", "heading": "各渠道一句话结论", "summary": "", "deals": []},
+            {"slug": "coverage-confidence", "heading": "Coverage / Confidence", "summary": "", "deals": []},
             {"slug": "reference-index", "heading": "Reference 索引", "summary": "", "deals": []},
         ]
         return payload
@@ -449,15 +492,19 @@ def persist_report(
         iso_week=iso_week,
     )
     normalized = dict(payload)
+    effective_date = (
+        report_date
+        or parse_report_date(str(normalized.get("report_date") or normalized.get("period_end") or ""))
+        or current_local_date()
+    )
     normalized.setdefault("version", 1)
     normalized["mode"] = mode
     normalized["source"] = source
-    normalized.setdefault("generated_at", datetime.now(UTC).isoformat())
-    normalized.setdefault("report_timezone", resolve_report_timezone_name() or str(resolve_report_timezone()))
-    if report_date is not None:
-        normalized.setdefault("report_date", report_date.isoformat())
+    normalized["generated_at"] = datetime.now(UTC).isoformat()
+    normalized["report_timezone"] = resolve_report_timezone_name() or str(resolve_report_timezone())
+    normalized["report_date"] = effective_date.isoformat()
     if mode == "weekly_digest":
-        normalized.setdefault("iso_week", iso_week or iso_week_for_date(report_date or current_local_date()))
+        normalized["iso_week"] = iso_week or iso_week_for_date(effective_date)
     atomic_write_text(md_path, markdown)
     atomic_write_text(json_path, json.dumps(normalized, ensure_ascii=False, indent=2) + "\n")
     return md_path, json_path
