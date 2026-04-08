@@ -85,7 +85,10 @@ class NotificationManager:
         event: NotificationEvent,
     ) -> str | None:
         channel = session.channel
-        mentions = " ".join(channel.render_user_mention(owner_id) for owner_id in sorted(self._owner_user_ids))
+        render_user_mention = getattr(channel, "render_user_mention", None)
+        if not callable(render_user_mention):
+            render_user_mention = lambda user_id: f"`{user_id}`"
+        mentions = " ".join(render_user_mention(owner_id) for owner_id in sorted(self._owner_user_ids))
         lines = [f"{mentions} **{event.title}**", f"Reason: {self._reason_label(event.kind)}"]
         if event.task_id:
             lines.append(f"Task: `{event.task_id}`")

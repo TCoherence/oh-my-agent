@@ -10,7 +10,7 @@ Inspired by [OpenClaw](https://openclaw.dev).
 - `SkillSync` reverse sync is implemented and runs on startup.
 - v0.5 is runtime-first: durable autonomous task loops (`DRAFT -> RUNNING -> WAITING_MERGE -> MERGED/...`).
 - v0.6 skill-first autonomy + adaptive memory is complete.
-- v0.7.2 extends the v0.7 line with auth-first runtime pause/resume, file-driven automations, generic Discord-first `ask_user` HITL, market-intel reporting, and skill-specific timeout overrides for slow direct skill invocations.
+- v0.7.2 extends the v0.7 line with auth-first runtime pause/resume, file-driven automations, generic Discord-first `ask_user` HITL, market briefings, and skill-specific timeout overrides for slow direct skill invocations.
 - Discord approvals use buttons first, slash fallback, reactions as status-only signals.
 - Optional LLM routing is implemented: incoming messages can be classified as `reply_once`, `invoke_existing_skill`, `propose_artifact_task`, `propose_repo_task`, or `create_skill`.
 - Runtime observability is implemented: `/task_logs`, sampled progress events in SQLite, and a single updatable Discord status message.
@@ -19,7 +19,7 @@ Inspired by [OpenClaw](https://openclaw.dev).
 - Multi-type runtime is implemented: only `repo_change` and `skill_change` tasks use merge gate; `artifact` tasks complete without merge.
 - Runtime hardening is complete: true subprocess interruption, message-driven control (stop/pause/resume), PAUSED state, completion summaries, metrics.
 - Automations are now file-driven under `~/.oh-my-agent/automations/`, with polling-based hot reload and per-file enable/disable.
-- `market-intel-report` adds persisted bootstrap/daily/weekly report workflows under `~/.oh-my-agent/reports/market-intel/` for politics, finance, and AI trend tracking.
+- `market-briefing` adds persisted bootstrap/daily/weekly report workflows under `~/.oh-my-agent/reports/market-briefing/` for politics, finance, and AI trend tracking.
 - Adaptive memory is implemented: auto-extraction from conversations, injection into agent prompts, `/memories` and `/forget` commands.
 - CLI session resume is implemented for Claude, Codex, and Gemini, with persisted session IDs restored after restart.
 - Auth-first QR login infrastructure is implemented for Discord owner flows, with local credential persistence and runtime resume hooks.
@@ -419,26 +419,31 @@ initial_delay_seconds: 10
 author: scheduler
 ```
 
-### Market-Intel Reports
+### Market Briefings
 
-- `market-intel-report` is one core skill for:
+- `market-briefing` is one core skill for:
   - `bootstrap_backfill`
   - `daily_digest`
   - `weekly_synthesis`
-- Reports are persisted under `~/.oh-my-agent/reports/market-intel/` as both Markdown and JSON:
+- Reports are persisted under `~/.oh-my-agent/reports/market-briefing/` as both Markdown and JSON:
   - `bootstrap/<domain>/<date>.md|json`
   - `daily/<date>/<domain>.md|json`
   - `weekly/<iso-week>/cross-domain.md|json`
 - Domain model:
   - daily: `politics`, `finance`, `ai`
   - weekly: one `cross-domain` synthesis
+- Finance daily defaults:
+  - China macro + policy
+  - US macro + policy
+  - tracked holdings over the last 7 days: `NVDA`, `MSFT`, `AAPL`, `AMZN`, `GOOG`, `TSLA`, `META`, `VOO`, `SPY`, `S&P 500`
+  - market / index-fund implications
 - Bounded bootstrap defaults:
   - politics: 30 days
   - finance: 30 days
   - ai: 14 days
 - Trend continuity is expected to come from persisted report files plus current-source research, not just Discord history.
 - The bundled helper script lives at:
-  - `skills/market-intel-report/scripts/report_store.py`
+  - `skills/market-briefing/scripts/report_store.py`
 - The `scheduler` skill now validates file-driven automation YAML under `~/.oh-my-agent/automations/` instead of the old inline `config.yaml` job model.
 
 ### Auth QR Login

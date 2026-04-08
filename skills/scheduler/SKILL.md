@@ -64,7 +64,7 @@ enabled: false
 platform: discord
 channel_id: "${DISCORD_CHANNEL_ID}"
 delivery: channel
-prompt: "Use the market-intel-report skill in daily_digest mode for politics. Research today's China central policy signals, US federal policy signals, and China-US or geopolitical moves. Read prior stored reports under ~/.oh-my-agent/reports/market-intel/, persist the new Markdown and JSON report, then post the finished Chinese report with the saved location."
+prompt: "Use the market-briefing skill in daily_digest mode for politics. Research today's China central policy signals, US federal policy signals, and China-US or geopolitical moves. Read prior stored reports under ~/.oh-my-agent/reports/market-briefing/, persist the new Markdown and JSON report, then post the finished Chinese report with the saved location."
 agent: codex
 cron: "0 8 * * *"
 author: scheduler

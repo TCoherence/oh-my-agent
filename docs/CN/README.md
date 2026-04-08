@@ -10,7 +10,7 @@
 - `SkillSync` reverse sync 已实现，并在启动时执行。
 - v0.5 runtime-first 已完成（包括 runtime hardening pass）。
 - v0.6 主线是 skill-first autonomy + adaptive memory；全部已完成。
-- v0.7.2 在 v0.7 基线上补齐了 auth-first 暂停/恢复、文件驱动 automation、通用 Discord `ask_user` HITL、market-intel 报告能力，以及慢速 direct skill 调用的 skill-specific timeout override。
+- v0.7.2 在 v0.7 基线上补齐了 auth-first 暂停/恢复、文件驱动 automation、通用 Discord `ask_user` HITL、market briefing 报告能力，以及慢速 direct skill 调用的 skill-specific timeout override。
 - 后续版本继续推进语义记忆检索（向量搜索）和 hybrid autonomy。
 - Discord 审批交互采用按钮优先、slash 兜底，reaction 只做状态信号。
 - 可选的 LLM 路由已实现：消息可被分类为 `reply_once`、`invoke_existing_skill`、`propose_artifact_task`、`propose_repo_task` 或 `create_skill`。
@@ -18,7 +18,7 @@
 - Gateway/消息日志现在会用 `purpose=...` 区分普通回复、显式 skill 调用和 router 驱动回复；后台 memory/compression agent 调用会继承同一个 `req_id`，便于串联排查。
 - Runtime hardening 已完成：真正的子进程中断、消息驱动控制（stop/pause/resume）、PAUSED 状态、完成摘要、metrics。
 - Automation 已迁到 `~/.oh-my-agent/automations/` 文件驱动目录，并支持轮询热加载和单条开关。
-- `market-intel-report` 已加入，支持把 politics / finance / ai 的 bootstrap、日报、周报持久化到 `~/.oh-my-agent/reports/market-intel/`。
+- `market-briefing` 已加入，支持把 politics / finance / ai 的 bootstrap、日报、周报持久化到 `~/.oh-my-agent/reports/market-briefing/`。
 - Adaptive Memory 已实现：对话中自动提取记忆、注入 agent prompt、`/memories` 和 `/forget` 命令。
 - Claude / Codex / Gemini 的 CLI session resume 已实现，线程级 session ID 会持久化并在重启后恢复。
 - Auth-first 二维码登录基础设施已实现：Discord owner 可手动发起登录，登录态会本地持久化，并可恢复等待中的 runtime task。
@@ -413,26 +413,31 @@ initial_delay_seconds: 10
 author: scheduler
 ```
 
-### Market-Intel 报告
+### Market Briefing 报告
 
-- `market-intel-report` 是一个核心 skill，统一支持：
+- `market-briefing` 是一个核心 skill，统一支持：
   - `bootstrap_backfill`
   - `daily_digest`
   - `weekly_synthesis`
-- 报告会以 Markdown + JSON 双份落盘到 `~/.oh-my-agent/reports/market-intel/`：
+- 报告会以 Markdown + JSON 双份落盘到 `~/.oh-my-agent/reports/market-briefing/`：
   - `bootstrap/<domain>/<date>.md|json`
   - `daily/<date>/<domain>.md|json`
   - `weekly/<iso-week>/cross-domain.md|json`
 - 领域模型：
   - 日报：`politics`、`finance`、`ai`
   - 周报：一份 `cross-domain` 跨域整合
+- finance 日报默认覆盖：
+  - 中国宏观 + 政策
+  - 美国宏观 + 政策
+  - 近 7 天重点持仓：`NVDA`、`MSFT`、`AAPL`、`AMZN`、`GOOG`、`TSLA`、`META`、`VOO`、`SPY`、`S&P 500`
+  - 市场 / 指数基金视角
 - 有限 bootstrap 默认窗口：
   - politics：30 天
   - finance：30 天
   - ai：14 天
 - 趋势延续应主要基于持久化报告文件 + 当前外部研究，而不是只依赖 Discord 历史。
 - 配套 helper 脚本：
-  - `skills/market-intel-report/scripts/report_store.py`
+  - `skills/market-briefing/scripts/report_store.py`
 - `scheduler` skill 现在也已经切到 file-driven automation YAML 校验，不再指向旧的 `config.yaml` 内联 jobs。
 
 ### 二维码登录

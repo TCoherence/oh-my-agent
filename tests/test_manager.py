@@ -1207,10 +1207,10 @@ async def test_explicit_skill_invocation_passes_skill_timeout_override(tmp_path)
     router.route = AsyncMock()
 
     skills_root = tmp_path / "skills"
-    skill_dir = skills_root / "market-intel-report"
+    skill_dir = skills_root / "market-briefing"
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text(
-        "---\nname: market-intel-report\ndescription: long report\nmetadata:\n  timeout_seconds: 900\n---\n",
+        "---\nname: market-briefing\ndescription: long report\nmetadata:\n  timeout_seconds: 900\n---\n",
         encoding="utf-8",
     )
     syncer = MagicMock()
@@ -1224,7 +1224,7 @@ async def test_explicit_skill_invocation_passes_skill_timeout_override(tmp_path)
         skill_syncer=syncer,
     )
 
-    msg = _make_msg(thread_id="thread-1", content="/market-intel-report")
+    msg = _make_msg(thread_id="thread-1", content="/market-briefing")
     await gm.handle_message(session, registry, msg)
 
     registry.run.assert_awaited_once()

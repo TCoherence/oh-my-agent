@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -8,8 +9,8 @@ import pytest
 
 
 def _load_module():
-    path = Path("skills/market-intel-report/scripts/report_store.py")
-    spec = importlib.util.spec_from_file_location("market_intel_report_store", path)
+    path = Path("skills/market-briefing/scripts/report_store.py")
+    spec = importlib.util.spec_from_file_location("market_briefing_report_store", path)
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -19,7 +20,7 @@ def _load_module():
 
 def test_build_report_paths_for_daily_and_weekly():
     module = _load_module()
-    root = Path("/tmp/market-intel-test").resolve()
+    root = Path("/tmp/market-briefing-test").resolve()
 
     daily_md, daily_json = module.build_report_paths(
         mode="daily_digest",
@@ -49,8 +50,49 @@ def test_current_local_date_respects_report_timezone(monkeypatch):
     assert module.current_local_date(now) == date(2026, 4, 4)
 
 
-def test_scaffold_for_daily_ai_and_weekly_has_expected_sections():
+def test_default_reports_root_uses_market_briefing_path(monkeypatch, tmp_path):
     module = _load_module()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    target_root = tmp_path / ".oh-my-agent" / "reports" / "market-briefing"
+
+    resolved = module.resolve_reports_root()
+
+    assert resolved == target_root.resolve()
+
+
+def test_scaffold_for_finance_ai_and_weekly_has_expected_sections():
+    module = _load_module()
+
+    finance_markdown = module.build_markdown_skeleton(
+        mode="daily_digest",
+        domain="finance",
+        report_date=date(2026, 3, 15),
+    )
+    assert "# 财经日报｜2026-03-15" in finance_markdown
+    assert "## 中国宏观与政策" in finance_markdown
+    assert "## 美国宏观与政策" in finance_markdown
+    assert "## 重点持仓财报 / 管理层表态 / CEO 公开发言" in finance_markdown
+    assert "## 市场与指数基金视角" in finance_markdown
+
+    finance_json = module.build_json_scaffold(
+        mode="daily_digest",
+        domain="finance",
+        report_date=date(2026, 3, 15),
+    )
+    assert finance_json["tracked_universe"] == ["NVDA", "MSFT", "AAPL", "AMZN", "GOOG", "TSLA", "META", "VOO", "SPY", "S&P 500"]
+    assert finance_json["holdings_window_days"] == 7
+    assert finance_json["china_macro_policy_summary"] == ""
+    assert finance_json["us_macro_policy_summary"] == ""
+    assert finance_json["market_index_view"] == ""
+    assert finance_json["coverage_gaps"] == []
+    assert finance_json["confidence_flags"] == []
+    assert {section["slug"] for section in finance_json["sections"]} == {
+        "cn-macro-policy",
+        "us-macro-policy",
+        "tracked-holdings",
+        "market-index-view",
+        "watchlist",
+    }
 
     ai_markdown = module.build_markdown_skeleton(
         mode="daily_digest",
@@ -96,6 +138,8 @@ def test_scaffold_for_daily_ai_and_weekly_has_expected_sections():
     assert weekly_json["cross_domain_links"] == []
     assert weekly_json["period_start"] == "2026-03-09"
     assert weekly_json["period_end"] == "2026-03-15"
+    assert weekly_json["coverage_gaps"] == []
+    assert weekly_json["confidence_flags"] == []
 
 
 def test_persist_report_writes_markdown_and_json_atomically(tmp_path):
@@ -126,6 +170,37 @@ def test_persist_report_writes_markdown_and_json_atomically(tmp_path):
     data = json_path.read_text(encoding="utf-8")
     assert '"mode": "bootstrap_backfill"' in data
     assert '"domain": "politics"' in data
+
+
+def test_persist_report_overrides_report_time_metadata(tmp_path):
+    module = _load_module()
+
+    _, json_path = module.persist_report(
+        mode="daily_digest",
+        domain="finance",
+        markdown="# finance\n",
+        payload={
+            "title": "财经日报",
+            "generated_at": "1999-01-01T00:00:00+00:00",
+            "report_timezone": "UTC",
+            "report_date": "1999-01-01",
+            "period_start": "2026-03-15",
+            "period_end": "2026-03-15",
+            "summary": "summary",
+            "key_takeaways": [],
+            "source_mix_note": "",
+            "verification_note": "",
+            "sources": [],
+            "sections": [],
+        },
+        root=tmp_path,
+        report_date=date(2026, 3, 15),
+    )
+
+    payload = json.loads(json_path.read_text(encoding="utf-8"))
+    assert payload["report_date"] == "2026-03-15"
+    assert payload["report_timezone"]
+    assert payload["generated_at"] != "1999-01-01T00:00:00+00:00"
 
 
 def test_context_uses_recent_daily_reports_bootstrap_and_weekly_history(tmp_path):

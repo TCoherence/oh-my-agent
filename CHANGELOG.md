@@ -17,7 +17,9 @@ The format is intentionally lightweight and release-oriented rather than exhaust
 
 - Human-input states now fan out through an internal notification layer instead of each flow hand-rolling Discord reminders
 - `auth_required`, `ask_user`, `DRAFT`, and `WAITING_MERGE` notifications now resolve explicitly when the underlying waiting state is cleared, while routine runtime progress still stays notification-free
-- Report-store helpers for `market-intel-report` and `deals-scanner` now derive their default local report date from `OMA_REPORT_TIMEZONE` / `TZ` instead of implicitly inheriting UTC-like container defaults, and Docker helper scripts now pass an explicit report timezone into the container
+- `market-intel-report` has been renamed to `market-briefing`, and persisted report storage now lives under `~/.oh-my-agent/reports/market-briefing/`
+- `market-briefing` finance daily now defaults to China macro/policy, US macro/policy, tracked holdings over the last 7 days, and a market/index-fund lens, and all daily domains now carry stricter no-signal / low-confidence guidance in schema and prompts
+- Report-store helpers for `market-briefing` and `deals-scanner` now derive their default local report date from `OMA_REPORT_TIMEZONE` / `TZ` instead of implicitly inheriting UTC-like container defaults, and Docker helper scripts now pass an explicit report timezone into the container
 - `memory.path` now refers to the conversation store only; runtime task/auth/HITL/notification/session state moves to `runtime.state_path`, and skill provenance/telemetry moves to `skills.telemetry_path`
 - Runtime task claiming no longer opens a nested `BEGIN IMMEDIATE` transaction on a shared SQLite connection
 
@@ -31,8 +33,8 @@ The format is intentionally lightweight and release-oriented rather than exhaust
 - Discord operator automation commands: `/automation_status`, `/automation_reload`, `/automation_enable`, `/automation_disable`
 - Temporary `docs/archive/next_up.md` note for near-term execution focus
 - Long-running Docker helper scripts: `docker-start.sh`, `docker-logs.sh`, `docker-stop.sh`, `docker-status.sh`
-- `market-intel-report` skill for persisted politics / finance / AI bootstrap, daily, and weekly reports
-- Report-store helper for canonical Markdown + JSON outputs under `~/.oh-my-agent/reports/market-intel/`
+- `market-briefing` skill for persisted politics / finance / AI bootstrap, daily, and weekly reports
+- Report-store helper for canonical Markdown + JSON outputs under `~/.oh-my-agent/reports/market-briefing/`
 - Generic Discord-first HITL `ask_user` control path for owner-only single-choice questions across direct chat and runtime tasks
 - Skill-specific `metadata.timeout_seconds` frontmatter override for slow direct-chat skill invocations
 
@@ -49,7 +51,7 @@ The format is intentionally lightweight and release-oriented rather than exhaust
 - README and Chinese README now document the external automation directory, hot-reload semantics, and current in-memory-only runtime state behavior
 - Docker docs now distinguish attached development runs from detached long-running service runs, including postmortem debugging expectations around `docker logs` and persistent application log files
 - Scheduler skill and validator now target file-driven automation YAML under `~/.oh-my-agent/automations/` instead of the old `config.yaml` job model
-- README and Chinese README now document the market-intel reporting skill, report storage layout, and bounded bootstrap workflow
+- README and Chinese README now document the market-briefing skill, report storage layout, and bounded bootstrap workflow
 - `OMA_CONTROL` now supports generic `ask_user` challenges alongside `auth_required`, with persisted `hitl_prompts`, visible Discord choice prompts, auto-resume behavior, and persistent-view recovery after restart
 - `WAITING_USER_INPUT` now covers both QR auth pauses and generic owner-choice pauses for runtime tasks and automations
 - Direct-chat skill invocations can now temporarily override the normal per-agent CLI timeout from `SKILL.md` frontmatter `metadata.timeout_seconds` without changing default chat timeouts for the rest of the system
