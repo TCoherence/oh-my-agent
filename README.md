@@ -20,6 +20,7 @@ Inspired by [OpenClaw](https://openclaw.dev).
 - Runtime hardening is complete: true subprocess interruption, message-driven control (stop/pause/resume), PAUSED state, completion summaries, metrics.
 - Automations are now file-driven under `~/.oh-my-agent/automations/`, with polling-based hot reload and per-file enable/disable.
 - `market-briefing` adds persisted bootstrap/daily/weekly report workflows under `~/.oh-my-agent/reports/market-briefing/` for politics, finance, and AI trend tracking.
+- AI daily in `market-briefing` now supports a tracked people/community pool, X.com as a signal layer with cross-checking, and a runtime candidate queue under `~/.oh-my-agent/reports/market-briefing/state/`.
 - Adaptive memory is implemented: auto-extraction from conversations, injection into agent prompts, `/memories` and `/forget` commands.
 - CLI session resume is implemented for Claude, Codex, and Gemini, with persisted session IDs restored after restart.
 - Auth-first QR login infrastructure is implemented for Discord owner flows, with local credential persistence and runtime resume hooks.
@@ -437,6 +438,10 @@ author: scheduler
   - US macro + policy
   - tracked holdings over the last 7 days: `NVDA`, `MSFT`, `AAPL`, `AMZN`, `GOOG`, `TSLA`, `META`, `VOO`, `SPY`, `S&P 500`
   - market / index-fund implications
+- AI daily defaults:
+  - tracked people groups + bounded discovery sweep
+  - X.com / community signals as early-signal input with cross-checking
+  - runtime candidate queue and explicit curated sync back to repo seed
 - Bounded bootstrap defaults:
   - politics: 30 days
   - finance: 30 days

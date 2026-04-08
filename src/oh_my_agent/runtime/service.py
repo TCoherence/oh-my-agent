@@ -215,6 +215,39 @@ class RuntimeService:
         meta = RuntimeService._extract_skill_frontmatter(skill_dir / "SKILL.md")
         return str(meta.get("description") or "").strip()
 
+    def _skill_frontmatter_by_name(self, skill_name: str | None) -> dict[str, Any]:
+        if not skill_name:
+            return {}
+        candidates: list[Path] = []
+        if isinstance(self._skills_path, Path):
+            candidates.append(self._skills_path / skill_name / "SKILL.md")
+        candidates.append(self._repo_root / "skills" / skill_name / "SKILL.md")
+        seen: set[Path] = set()
+        for candidate in candidates:
+            candidate = candidate.resolve()
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            if candidate.exists():
+                return self._extract_skill_frontmatter(candidate)
+        return {}
+
+    def _skill_timeout_seconds_by_name(self, skill_name: str | None) -> int | None:
+        meta = self._skill_frontmatter_by_name(skill_name)
+        metadata = meta.get("metadata")
+        value = None
+        if isinstance(metadata, dict):
+            value = metadata.get("timeout_seconds")
+        if value is None:
+            value = meta.get("timeout_seconds")
+        if value is None:
+            return None
+        try:
+            timeout = int(value)
+        except (TypeError, ValueError):
+            return None
+        return timeout if timeout > 0 else None
+
     @staticmethod
     def _normalize_similarity_tokens(text: str) -> set[str]:
         return set(re.findall(r"[a-z0-9]+", text.lower()))
@@ -1634,6 +1667,9 @@ class RuntimeService:
         )
 
         resume_context = run.resume_context or {}
+        skill_timeout_override = self._skill_timeout_seconds_by_name(
+            str(resume_context.get("skill_name") or "") or None
+        )
         prompt = self._build_suspended_run_resume_prompt(run, include_original_request=True)
         log_path = self.chat_agent_log_base_path(
             thread_id=run.thread_id,
@@ -1647,6 +1683,8 @@ class RuntimeService:
             thread_id=run.thread_id,
             force_agent=run.agent_name,
             log_path=log_path,
+            purpose="resume",
+            timeout_override_seconds=skill_timeout_override,
         )
         if response.error and getattr(agent, "get_session_id", None):
             logger.warning(
@@ -1669,6 +1707,8 @@ class RuntimeService:
                     request_id=f"{run.id}-fresh",
                     purpose="resume",
                 ),
+                purpose="resume_fresh",
+                timeout_override_seconds=skill_timeout_override,
             )
 
         await self._sync_thread_agent_session(session=session, thread_id=run.thread_id, agent=agent)
@@ -3387,17 +3427,60 @@ class RuntimeService:
         thread_id: str,
         force_agent: str,
         log_path: Path | None,
+        purpose: str,
+        timeout_override_seconds: int | None = None,
     ) -> AgentResponse:
         history = await session.get_history(thread_id)
-        _agent, response = await registry.run(
-            prompt,
-            history,
-            thread_id=thread_id,
-            force_agent=force_agent,
-            log_path=log_path,
-            run_label=f"suspended_resume thread={thread_id}",
+        logger.info(
+            "THREAD_AGENT_START purpose=%s thread=%s force_agent=%s skill_timeout_override=%r history_turns=%d",
+            purpose,
+            thread_id,
+            force_agent,
+            timeout_override_seconds,
+            len(history),
         )
-        return response
+        run_task = asyncio.create_task(
+            registry.run(
+                prompt,
+                history,
+                thread_id=thread_id,
+                force_agent=force_agent,
+                log_path=log_path,
+                run_label=f"{purpose} thread={thread_id}",
+                timeout_override_seconds=timeout_override_seconds,
+            )
+        )
+        started_at = time.perf_counter()
+        interval = self._agent_heartbeat_seconds
+        try:
+            while True:
+                try:
+                    _agent, response = await asyncio.wait_for(asyncio.shield(run_task), timeout=interval)
+                    elapsed = time.perf_counter() - started_at
+                    logger.info(
+                        "THREAD_AGENT_DONE purpose=%s thread=%s agent=%s elapsed=%.2fs response_error=%s response_len=%d",
+                        purpose,
+                        thread_id,
+                        force_agent,
+                        elapsed,
+                        bool(response.error),
+                        len(response.text or ""),
+                    )
+                    return response
+                except asyncio.TimeoutError:
+                    elapsed = time.perf_counter() - started_at
+                    logger.info(
+                        "THREAD_AGENT_RUNNING purpose=%s thread=%s agent=%s elapsed=%.2fs",
+                        purpose,
+                        thread_id,
+                        force_agent,
+                        elapsed,
+                    )
+        finally:
+            if not run_task.done():
+                run_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await run_task
 
     def _build_suspended_run_resume_prompt(
         self,
@@ -3709,6 +3792,9 @@ class RuntimeService:
             agent=agent,
             fallback_session_id=prompt.session_id_snapshot,
         )
+        skill_timeout_override = self._skill_timeout_seconds_by_name(
+            str(prompt.resume_context.get("skill_name") or "") or None
+        )
         response = await self._invoke_thread_agent(
             registry=registry,
             session=session,
@@ -3720,6 +3806,8 @@ class RuntimeService:
                 request_id=prompt.id,
                 purpose="hitl_resume",
             ),
+            purpose="hitl_resume",
+            timeout_override_seconds=skill_timeout_override,
         )
         if response.error and getattr(agent, "get_session_id", None):
             self._clear_thread_agent_session(agent, prompt.thread_id)
@@ -3734,6 +3822,8 @@ class RuntimeService:
                     request_id=f"{prompt.id}-fresh",
                     purpose="hitl_resume",
                 ),
+                purpose="hitl_resume_fresh",
+                timeout_override_seconds=skill_timeout_override,
             )
 
         await self._sync_thread_agent_session(session=session, thread_id=prompt.thread_id, agent=agent)

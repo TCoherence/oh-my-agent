@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import asyncio
 
 import pytest
 
@@ -186,3 +187,144 @@ async def test_send_dm_uses_dm_channel(tmp_path):
 def test_render_user_mention_uses_discord_syntax():
     channel = DiscordChannel(token="x", channel_id="100")
     assert channel.render_user_mention("42") == "<@42>"
+
+
+def test_render_hitl_prompt_message_shows_resolving_state():
+    channel = DiscordChannel(token="x", channel_id="100")
+    prompt = HitlPrompt(
+        id="hitl-1",
+        target_kind="thread",
+        platform="discord",
+        channel_id="100",
+        thread_id="200",
+        task_id=None,
+        agent_name="codex",
+        status="resolving",
+        question="Pick one",
+        details="Single choice.",
+        choices=(
+            {"id": "ai", "label": "AI daily", "description": "Five layers"},
+        ),
+        selected_choice_id="ai",
+        selected_choice_label="AI daily",
+        selected_choice_description="Five layers",
+        control_envelope_json="{}",
+        resume_context={},
+        session_id_snapshot="sess-1",
+        prompt_message_id="123456789",
+        created_by="owner-1",
+    )
+
+    text = channel._render_hitl_prompt_message(prompt)
+
+    assert text.startswith("**Input recorded**")
+    assert "Status: resuming the agent with your choice." in text
+
+
+class _FakeInteractionResponse:
+    def __init__(self, events: list[str]) -> None:
+        self._events = events
+
+    async def send_message(self, text, ephemeral=False):
+        self._events.append(f"send_message:{text}:{ephemeral}")
+
+    async def defer(self, ephemeral=False):
+        self._events.append(f"defer:{ephemeral}")
+
+
+class _FakeInteractionFollowup:
+    def __init__(self, events: list[str]) -> None:
+        self._events = events
+
+    async def send(self, text, ephemeral=False):
+        self._events.append(f"followup:{text}:{ephemeral}")
+
+
+class _FakeInteractionMessage:
+    def __init__(self, events: list[str]) -> None:
+        self._events = events
+
+    async def edit(self, *, content=None, view=None):
+        del view
+        self._events.append(f"edit:{content}")
+
+
+class _FakeRuntimeInteractionService:
+    def __init__(self, events: list[str], prompt: HitlPrompt) -> None:
+        self._events = events
+        self._prompt = prompt
+
+    async def get_hitl_prompt(self, prompt_id: str):
+        self._events.append(f"get:{prompt_id}:{self._prompt.status}")
+        return self._prompt
+
+    async def answer_hitl_prompt(self, prompt_id: str, *, choice_id: str, actor_id: str):
+        self._events.append(f"answer:start:{prompt_id}:{choice_id}:{actor_id}")
+        await asyncio.sleep(0)
+        self._prompt = HitlPrompt(
+            **{
+                **self._prompt.__dict__,
+                "status": "completed",
+                "selected_choice_id": choice_id,
+                "selected_choice_label": "AI daily",
+                "selected_choice_description": "Five layers",
+            }
+        )
+        self._events.append(f"answer:done:{prompt_id}")
+        return f"Interactive prompt `{prompt_id}` answered and resumed successfully."
+
+    async def cancel_hitl_prompt(self, prompt_id: str, *, actor_id: str):
+        self._events.append(f"cancel:{prompt_id}:{actor_id}")
+        return f"Interactive prompt `{prompt_id}` cancelled."
+
+
+@pytest.mark.asyncio
+async def test_handle_hitl_interaction_updates_prompt_to_resolving_before_resume():
+    events: list[str] = []
+    channel = DiscordChannel(token="x", channel_id="100", owner_user_ids={"42"})
+    prompt = HitlPrompt(
+        id="hitl-1",
+        target_kind="thread",
+        platform="discord",
+        channel_id="100",
+        thread_id="200",
+        task_id=None,
+        agent_name="codex",
+        status="waiting",
+        question="Pick one",
+        details="Single choice.",
+        choices=(
+            {"id": "ai", "label": "AI daily", "description": "Five layers"},
+            {"id": "finance", "label": "Finance daily", "description": "Macro"},
+        ),
+        selected_choice_id=None,
+        selected_choice_label=None,
+        selected_choice_description=None,
+        control_envelope_json="{}",
+        resume_context={},
+        session_id_snapshot="sess-1",
+        prompt_message_id="123456789",
+        created_by="owner-1",
+    )
+    channel.set_runtime_service(_FakeRuntimeInteractionService(events, prompt))
+    interaction = SimpleNamespace(
+        user=SimpleNamespace(id=42),
+        response=_FakeInteractionResponse(events),
+        followup=_FakeInteractionFollowup(events),
+        message=_FakeInteractionMessage(events),
+    )
+
+    await channel._handle_hitl_interaction(  # type: ignore[arg-type]
+        interaction,
+        prompt_id="hitl-1",
+        choice_id="ai",
+        cancel=False,
+    )
+
+    assert events[0] == "defer:True"
+    assert events[1].startswith("get:hitl-1:waiting")
+    assert events[2].startswith("edit:**Input recorded**")
+    assert events[3] == "followup:Input recorded. Resuming now...:True"
+    assert events[4] == "answer:start:hitl-1:ai:42"
+    assert "answer:done:hitl-1" in events
+    assert events[-1].startswith("edit:**Input resolved**")

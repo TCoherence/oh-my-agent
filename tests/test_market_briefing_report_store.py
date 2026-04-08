@@ -100,10 +100,12 @@ def test_scaffold_for_finance_ai_and_weekly_has_expected_sections():
         report_date=date(2026, 3, 15),
     )
     assert "# AI 日报｜2026-03-15" in ai_markdown
+    assert "## 关键人物与社区信号" in ai_markdown
     assert "## Energy" in ai_markdown
     assert "## Chips" in ai_markdown
     assert "## Application" in ai_markdown
     assert "## 层间联动影响" in ai_markdown
+    assert "## 候选池变化与后续关注" in ai_markdown
 
     ai_json = module.build_json_scaffold(
         mode="daily_digest",
@@ -112,13 +114,26 @@ def test_scaffold_for_finance_ai_and_weekly_has_expected_sections():
     )
     assert ai_json["mode"] == "daily_digest"
     assert ai_json["domain"] == "ai"
+    assert ai_json["tracked_people_groups"] == [
+        "claude-code-builders",
+        "openai-builders",
+        "oss-ai-builders",
+        "ai-generalists",
+    ]
+    assert ai_json["tracked_people"] == []
+    assert ai_json["people_signal_summary"] == ""
+    assert ai_json["new_candidate_people"] == []
+    assert ai_json["promoted_people"] == []
+    assert ai_json["candidate_queue_summary"] == ""
     assert {section["slug"] for section in ai_json["sections"]} == {
+        "people-signals",
         "energy",
         "chips",
         "infra",
         "model",
         "application",
         "cross-layer",
+        "candidate-queue",
     }
 
     weekly_markdown = module.build_markdown_skeleton(

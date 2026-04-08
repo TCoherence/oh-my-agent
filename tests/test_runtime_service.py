@@ -5,6 +5,7 @@ import os
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -2018,6 +2019,98 @@ async def test_mark_thread_ask_user_waits_then_resumes(tmp_path):
     assert history[-1]["role"] == "assistant"
     assert history[-1]["content"] == "根据你的选择，我继续完成这次分析。"
     assert any("The previous run paused because it required a single explicit user choice." in prompt for prompt in agent.prompts)
+
+    await runtime.stop()
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_thread_hitl_resume_logs_progress_and_honors_skill_timeout_override(tmp_path, caplog):
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    skills_path = tmp_path / "skills"
+    skill_dir = skills_path / "market-briefing"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        """---
+name: market-briefing
+metadata:
+  timeout_seconds: 900
+---
+""",
+        encoding="utf-8",
+    )
+
+    store = SQLiteMemoryStore(tmp_path / "hitl-thread-logging.db")
+    await store.init()
+    runtime = RuntimeService(
+        store,
+        config={
+            "enabled": True,
+            "worker_concurrency": 1,
+            "worktree_root": str(tmp_path / "worktrees"),
+            "default_agent": "ask-user-agent",
+            "default_test_command": "true",
+            "risk_profile": "strict",
+            "cleanup": {"enabled": False},
+            "merge_gate": {"enabled": True},
+        },
+        owner_user_ids={"owner-1"},
+        repo_root=repo,
+        skills_path=skills_path,
+    )
+    runtime._agent_heartbeat_seconds = 0.005
+    channel = _FakeChannel()
+    agent = _ResumableAskUserAgent()
+    registry = MagicMock(spec=AgentRegistry)
+    registry.get_agent.return_value = agent
+
+    async def _slow_resume(*args, **kwargs):
+        await asyncio.sleep(0.02)
+        return agent, AgentResponse(text="根据你的选择，我继续完成这次分析。")
+
+    registry.run = AsyncMock(side_effect=_slow_resume)
+    session = ChannelSession(platform="discord", channel_id="100", channel=channel, registry=registry)
+    session.memory_store = store
+    await session.append_user("thread-1", "帮我继续这个分析", "alice")
+    runtime.register_session(session, registry)
+
+    await runtime.mark_thread_ask_user_required(
+        platform="discord",
+        channel_id="100",
+        thread_id="thread-1",
+        actor_id="owner-1",
+        agent_name="ask-user-agent",
+        question="今天先看哪一条线？",
+        details="只能单选。",
+        choices=(
+            {"id": "finance", "label": "Finance daily", "description": "关注财报"},
+            {"id": "ai", "label": "AI daily", "description": "关注五层结构"},
+        ),
+        control_envelope_json=(
+            '{"version":1,"type":"challenge","data":{"challenge_type":"ask_user","question":"今天先看哪一条线？","details":"只能单选。","choices":[{"id":"finance","label":"Finance daily","description":"关注财报"},{"id":"ai","label":"AI daily","description":"关注五层结构"}]}}'
+        ),
+        session_id_snapshot="sess-hitl",
+        resume_context={
+            "agent_prompt": "继续完成分析",
+            "original_user_content": "帮我继续这个分析",
+            "skill_name": "market-briefing",
+        },
+    )
+    prompt = await store.get_active_hitl_prompt_for_thread(
+        platform="discord",
+        channel_id="100",
+        thread_id="thread-1",
+    )
+    assert prompt is not None
+
+    with caplog.at_level("INFO"):
+        result = await runtime.answer_hitl_prompt(prompt.id, choice_id="ai", actor_id="owner-1")
+
+    assert "resumed successfully" in result
+    assert registry.run.await_args.kwargs["timeout_override_seconds"] == 900
+    assert "THREAD_AGENT_RUNNING purpose=hitl_resume" in caplog.text
+    assert "THREAD_AGENT_DONE purpose=hitl_resume" in caplog.text
 
     await runtime.stop()
     await store.close()

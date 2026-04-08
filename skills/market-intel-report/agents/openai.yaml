@@ -1,4 +1,0 @@
-interface:
-  display_name: "Market Intel Report"
-  short_description: "Persisted politics, finance, and AI daily/weekly intelligence reports"
-  default_prompt: "Use the market-intel-report skill to produce a Chinese report with an explicit mode, domain, and report date. If the scope is ambiguous, propose politics / finance / ai daily or cross-domain weekly variants instead of silently defaulting to ai. Persist Markdown and JSON outputs under ~/.oh-my-agent/reports/market-intel/ and include inline source links in the main body."

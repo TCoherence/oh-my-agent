@@ -216,6 +216,8 @@ def build_markdown_skeleton(*, mode: str, domain: str, report_date: date | None 
                 "",
                 "## 摘要",
                 "",
+                "## 关键人物与社区信号",
+                "",
                 "## Energy",
                 "",
                 "## Chips",
@@ -227,6 +229,8 @@ def build_markdown_skeleton(*, mode: str, domain: str, report_date: date | None 
                 "## Application",
                 "",
                 "## 层间联动影响",
+                "",
+                "## 候选池变化与后续关注",
                 "",
                 "## 来源与交叉验证说明",
                 "",
@@ -318,13 +322,26 @@ def build_json_scaffold(
         ]
         return payload
     if mode == "daily_digest" and domain == "ai":
+        payload["tracked_people_groups"] = [
+            "claude-code-builders",
+            "openai-builders",
+            "oss-ai-builders",
+            "ai-generalists",
+        ]
+        payload["tracked_people"] = []
+        payload["people_signal_summary"] = ""
+        payload["new_candidate_people"] = []
+        payload["promoted_people"] = []
+        payload["candidate_queue_summary"] = ""
         payload["sections"] = [
+            {"slug": "people-signals", "heading": "关键人物与社区信号", "summary": "", "bullets": [], "evidence_links": []},
             {"slug": "energy", "heading": "Energy", "summary": "", "bullets": [], "evidence_links": []},
             {"slug": "chips", "heading": "Chips", "summary": "", "bullets": [], "evidence_links": []},
             {"slug": "infra", "heading": "Infra", "summary": "", "bullets": [], "evidence_links": []},
             {"slug": "model", "heading": "Model", "summary": "", "bullets": [], "evidence_links": []},
             {"slug": "application", "heading": "Application", "summary": "", "bullets": [], "evidence_links": []},
             {"slug": "cross-layer", "heading": "层间联动影响", "summary": "", "bullets": [], "evidence_links": []},
+            {"slug": "candidate-queue", "heading": "候选池变化与后续关注", "summary": "", "bullets": [], "evidence_links": []},
         ]
         return payload
     if mode == "weekly_synthesis" and domain == WEEKLY_DOMAIN:

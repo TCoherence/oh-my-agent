@@ -1,0 +1,130 @@
+version: 1
+groups:
+  claude-code-builders:
+    label: "Claude / Anthropic builders"
+    description: "Public Anthropic / Claude ecosystem builders and contributors worth tracking for developer-tooling and model-behavior signals."
+    people:
+      - person_id: "boris-cherny"
+        name: "Boris Cherny"
+        x_handle: "bcherny"
+        role: "Anthropic product / engineering"
+        why_track: "Claude Code and developer-workflow signals"
+        search_terms: ["Boris Cherny Anthropic Claude Code"]
+        aliases: []
+      - person_id: "amanda-askell"
+        name: "Amanda Askell"
+        x_handle: "AmandaAskell"
+        role: "Anthropic model behavior and alignment"
+        why_track: "Model behavior, safety, and developer-facing implications"
+        search_terms: ["Amanda Askell Anthropic"]
+        aliases: []
+      - person_id: "alex-albert"
+        name: "Alex Albert"
+        x_handle: ""
+        role: "Anthropic public communication / community signal"
+        why_track: "Claude and Anthropic product / community updates"
+        search_terms: ["Alex Albert Anthropic"]
+        aliases: []
+  openai-builders:
+    label: "OpenAI builders"
+    description: "Public OpenAI builders and operator-facing leaders whose posts often surface product, API, or infra shifts early."
+    people:
+      - person_id: "sam-altman"
+        name: "Sam Altman"
+        x_handle: "sama"
+        role: "CEO"
+        why_track: "Strategy, product direction, deployment posture"
+        search_terms: ["Sam Altman OpenAI"]
+        aliases: []
+      - person_id: "greg-brockman"
+        name: "Greg Brockman"
+        x_handle: "gdb"
+        role: "President / co-founder"
+        why_track: "Model, product, and developer-platform signals"
+        search_terms: ["Greg Brockman OpenAI"]
+        aliases: []
+      - person_id: "kevin-weil"
+        name: "Kevin Weil"
+        x_handle: "kevinweil"
+        role: "Product / platform leader"
+        why_track: "Shipping, productization, and developer workflow updates"
+        search_terms: ["Kevin Weil OpenAI"]
+        aliases: []
+      - person_id: "romain-huet"
+        name: "Romain Huet"
+        x_handle: "romainhuet"
+        role: "Developer relations / platform"
+        why_track: "Developer-facing platform and API ecosystem signals"
+        search_terms: ["Romain Huet OpenAI"]
+        aliases: []
+  oss-ai-builders:
+    label: "OSS AI builders"
+    description: "Active open-source AI maintainers and builders whose public posts often surface code, release, and workflow shifts earlier than mainstream coverage."
+    people:
+      - person_id: "simon-willison"
+        name: "Simon Willison"
+        x_handle: "simonw"
+        role: "Open-source builder and LLM tooling maintainer"
+        why_track: "Tooling, evals, retrieval, and model usage patterns"
+        search_terms: ["Simon Willison LLM"]
+        aliases: []
+      - person_id: "harrison-chase"
+        name: "Harrison Chase"
+        x_handle: "hwchase17"
+        role: "LangChain builder"
+        why_track: "Agent frameworks and developer workflow signals"
+        search_terms: ["Harrison Chase LangChain"]
+        aliases: []
+      - person_id: "jeremy-howard"
+        name: "Jeremy Howard"
+        x_handle: "jeremyphoward"
+        role: "fast.ai co-founder"
+        why_track: "Applied model usage, open-source releases, practical AI workflows"
+        search_terms: ["Jeremy Howard fast.ai"]
+        aliases: []
+      - person_id: "jerry-liu"
+        name: "Jerry Liu"
+        x_handle: "jerryjliu0"
+        role: "LlamaIndex builder"
+        why_track: "RAG, agent, and application-layer OSS signals"
+        search_terms: ["Jerry Liu LlamaIndex"]
+        aliases: []
+      - person_id: "sebastian-raschka"
+        name: "Sebastian Raschka"
+        x_handle: "rasbt"
+        role: "Open-source educator and builder"
+        why_track: "Model implementation, benchmarking, and practical ML signals"
+        search_terms: ["Sebastian Raschka"]
+        aliases: []
+  ai-generalists:
+    label: "AI generalists"
+    description: "Broad, high-signal commentators who connect model, product, infra, and go-to-market themes across the ecosystem."
+    people:
+      - person_id: "andrej-karpathy"
+        name: "Andrej Karpathy"
+        x_handle: "karpathy"
+        role: "Research / product generalist"
+        why_track: "Model/product framing and developer-tooling direction"
+        search_terms: ["Andrej Karpathy"]
+        aliases: []
+      - person_id: "shawn-wang"
+        name: "Shawn Wang"
+        x_handle: "swyx"
+        role: "AI engineer / community builder"
+        why_track: "Developer sentiment, agent workflows, tooling narrative"
+        search_terms: ["Shawn Wang swyx"]
+        aliases: []
+      - person_id: "ethan-mollick"
+        name: "Ethan Mollick"
+        x_handle: "emollick"
+        role: "AI adoption and education commentator"
+        why_track: "Application-layer adoption and organizational behavior"
+        search_terms: ["Ethan Mollick"]
+        aliases: []
+      - person_id: "nathan-lambert"
+        name: "Nathan Lambert"
+        x_handle: "natolambert"
+        role: "Open model / research commentator"
+        why_track: "Model ecosystem, benchmarks, and frontier-model framing"
+        search_terms: ["Nathan Lambert AI"]
+        aliases: []

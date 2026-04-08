@@ -48,12 +48,12 @@ Use the market-briefing skill in daily_digest mode for finance for the current l
 
 ```text
 Use the market-briefing skill in daily_digest mode for finance for the current local date, with scope concentrated on macro prints, central-bank signals, fiscal or industrial policy, and the market/economic implications across both China and the US. Read prior stored reports, persist Markdown + JSON, and keep inline source links near all key claims.
+```
 
 ### Holdings-and-China-focused finance daily
 
 ```text
 Use the market-briefing skill in daily_digest mode for finance for the current local date, with explicit focus on China macro / policy and the tracked holdings over the last 7 days: NVDA, MSFT, AAPL, AMZN, GOOG, TSLA, META, VOO, SPY, and S&P 500. Cover China and US macro/policy separately, then analyze tracked-holdings earnings, filings, investor presentations, conference appearances, or CEO/CFO/IR public remarks, and finish with market / index-fund implications. Persist Markdown + JSON and keep inline source links on all key claims.
-```
 ```
 
 ## AI daily
@@ -61,19 +61,25 @@ Use the market-briefing skill in daily_digest mode for finance for the current l
 ### Broad AI five-layer daily
 
 ```text
-Use the market-briefing skill in daily_digest mode for ai for the current local date. Structure the report in five layers: energy, chips, infra, model, application. For each layer, cover important movement, implications, and cross-layer spillover. If a layer has no high-confidence incremental signal, say so explicitly instead of filling the section with generic prose. Read prior stored reports under ~/.oh-my-agent/reports/market-briefing/, persist Markdown + JSON, and use inline source links in the body rather than only at the end.
+Use the market-briefing skill in daily_digest mode for ai for the current local date. Read prior stored reports and the current AI people pool, then structure the report around tracked people/community signals plus the five layers: energy, chips, infra, model, application. Consult tracked people/groups first, do a bounded discovery sweep for new relevant people on X.com and the open-source community, and record new candidates/promotions back into the AI people pool. If a layer has no high-confidence incremental signal, say so explicitly instead of filling the section with generic prose. Persist Markdown + JSON under ~/.oh-my-agent/reports/market-briefing/ and keep inline source links in the body rather than only at the end.
 ```
 
 ### Chips-and-infra-focused AI daily
 
 ```text
-Use the market-briefing skill in daily_digest mode for ai for the current local date, but prioritize chips and infra, and only cover energy, model, and application when they materially change the interpretation. If chips or infra have no high-confidence incremental signal, say so explicitly and move the section into watchlist-style follow-up rather than generic filler. Read prior stored reports, persist Markdown + JSON, and use inline source links for all major claims.
+Use the market-briefing skill in daily_digest mode for ai for the current local date, but prioritize chips and infra, and only cover energy, model, and application when they materially change the interpretation. Use tracked people/community X.com signals as an early-signal layer, but cross-check any core chips/infra conclusion with docs, code, talks, or independent reporting. If chips or infra have no high-confidence incremental signal, say so explicitly and move the section into watchlist-style follow-up rather than generic filler. Read prior stored reports, persist Markdown + JSON, and use inline source links for all major claims.
 ```
 
 ### Model-and-application-focused AI daily
 
 ```text
-Use the market-briefing skill in daily_digest mode for ai for the current local date, but prioritize model and application while still noting major changes in energy, chips, and infra that constrain deployment. Read prior stored reports, persist Markdown + JSON, and use inline source links in the body.
+Use the market-briefing skill in daily_digest mode for ai for the current local date, but prioritize model and application while still noting major changes in energy, chips, and infra that constrain deployment. The report must still include a tracked-people/community signal section, use bounded discovery for new people worth following, and record any candidate/promoted people into the AI people pool. Read prior stored reports, persist Markdown + JSON, and use inline source links in the body.
+```
+
+### People-and-community-focused AI daily
+
+```text
+Use the market-briefing skill in daily_digest mode for ai for the current local date, with explicit focus on tracked people/groups, X.com, and active open-source/community contributors. Read the current AI people pool first, then surface the day’s most important people-driven signals, cross-check the key ones with docs, code, release notes, talks, or independent reporting, and map them back into the five-layer structure. Record new candidates and promotions into the AI people pool, persist Markdown + JSON, and keep inline source links on all key claims.
 ```
 
 ## Bootstrap backfill
@@ -101,5 +107,5 @@ Use the market-briefing skill in bootstrap_backfill mode for ai with a 14-day lo
 ### Cross-domain weekly
 
 ```text
-Use the market-briefing skill in weekly_synthesis mode for cross-domain for the current ISO week. Read the previous 7 days of stored politics, finance, and ai daily reports, plus the latest bootstrap dossiers and a bounded number of previous weekly reports under ~/.oh-my-agent/reports/market-briefing/. The finance weekly mainline must absorb China macro / policy, tracked-holdings developments over the last 7 days, and broad-market implications. Produce a detailed Chinese cross-domain weekly report with inline source links in the body, persist Markdown + JSON, and explicitly explain structural trends rather than just repeating headlines.
+Use the market-briefing skill in weekly_synthesis mode for cross-domain for the current ISO week. Read the previous 7 days of stored politics, finance, and ai daily reports, plus the latest bootstrap dossiers and a bounded number of previous weekly reports under ~/.oh-my-agent/reports/market-briefing/. The finance weekly mainline must absorb China macro / policy, tracked-holdings developments over the last 7 days, and broad-market implications. The AI weekly mainline should also surface the week’s key people/community signals, candidate-pool changes, and which people are becoming durable sources instead of one-off mentions. Produce a detailed Chinese cross-domain weekly report with inline source links in the body, persist Markdown + JSON, and explicitly explain structural trends rather than just repeating headlines.
 ```

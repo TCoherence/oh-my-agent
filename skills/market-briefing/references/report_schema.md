@@ -41,6 +41,13 @@ All report JSON sidecars should include:
 }
 ```
 
+`source_type` may be one of:
+
+- `primary / official`
+- `company / filing`
+- `media / analysis`
+- `community / social`
+
 `sections` entries should use:
 
 ```json
@@ -174,6 +181,10 @@ Markdown shape:
 
 <2-4 段，允许在段末加入紧凑来源链接>
 
+## 关键人物与社区信号
+
+<先写 tracked people / groups 的高价值增量，再写 bounded discovery 中发现的新人物；若主要来自 X.com，正文里要明确它只是 signal 还是已 cross-check>
+
 ## Energy
 
 ## Chips
@@ -186,7 +197,42 @@ Markdown shape:
 
 ## 层间联动影响
 
+## 候选池变化与后续关注
+
 ## 来源与交叉验证说明
+```
+
+AI JSON should also include:
+
+```json
+{
+  "tracked_people_groups": [
+    "claude-code-builders",
+    "openai-builders",
+    "oss-ai-builders",
+    "ai-generalists"
+  ],
+  "tracked_people": [],
+  "people_signal_summary": "",
+  "new_candidate_people": [],
+  "promoted_people": [],
+  "candidate_queue_summary": ""
+}
+```
+
+`new_candidate_people` and `promoted_people` should use:
+
+```json
+{
+  "person_id": "",
+  "name": "",
+  "x_handle": "",
+  "group": "ai-generalists",
+  "reason": "",
+  "evidence_urls": [],
+  "cross_checked": false,
+  "promote_recommended": false
+}
 ```
 
 ## Bootstrap dossier

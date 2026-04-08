@@ -20,6 +20,7 @@ Default stance:
 - slightly favor primary sources for key conclusions
 - use media/analysis to fill context and interpretation
 - cross-check major claims whenever possible
+- for AI people/community signals, treat X.com and other community posts as early signal, not as the sole basis for high-risk conclusions
 
 ## What to record
 
@@ -58,6 +59,23 @@ Default finance stance:
 - China coverage defaults to macro + policy, not broad China listed-company scanning
 - tracked holdings use a rolling 7-day window
 - `VOO`, `SPY`, and `S&P 500` should be interpreted as market / allocation lenses rather than pseudo-company events
+
+## AI source family requirements
+
+AI daily should cover two layers of sources:
+
+- topic sources
+  - company blogs, release notes, model cards, docs, talks, papers, code repos, infrastructure announcements
+- people/community sources
+  - X.com posts, open-source maintainer commentary, developer writeups, community threads
+
+Default AI stance:
+
+- tracked people / groups should be consulted first
+- run a bounded discovery sweep for new people strongly tied to the day’s most important AI themes
+- new people enter the candidate queue first
+- X.com is a signal source and normally needs cross-checking before it becomes a five-layer core conclusion
+- if a people/community signal remains unverified, keep it in the people section or candidate queue section rather than promoting it into the main factual spine
 
 ## Section density and degraded sections
 

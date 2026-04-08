@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import logging
 import tempfile
 import uuid
@@ -181,6 +182,18 @@ class DiscordChannel(BaseChannel):
             if prompt.selected_choice_description:
                 lines.append(f"Details: {prompt.selected_choice_description}")
             return "\n".join(lines)[:1900]
+        if prompt.status == "resolving":
+            selected = prompt.selected_choice_label or prompt.selected_choice_id or "unknown"
+            lines = [
+                "**Input recorded**",
+                f"Prompt: `{prompt.id}`",
+                f"Question: {prompt.question}",
+                f"Selected: **{selected}** (`{prompt.selected_choice_id or ''}`)",
+                "Status: resuming the agent with your choice.",
+            ]
+            if prompt.selected_choice_description:
+                lines.append(f"Details: {prompt.selected_choice_description}")
+            return "\n".join(lines)[:1900]
         if prompt.status == "cancelled":
             return (
                 f"**Input cancelled**\n"
@@ -217,6 +230,25 @@ class DiscordChannel(BaseChannel):
             ]
         )
         return "\n".join(lines)[:1900]
+
+    @staticmethod
+    def _with_selected_choice(prompt: HitlPrompt, choice_id: str | None) -> HitlPrompt:
+        if not choice_id:
+            return prompt
+        selected = next((choice for choice in prompt.choices if str(choice.get("id") or "") == choice_id), None)
+        if selected is None:
+            return prompt
+        return replace(
+            prompt,
+            status="resolving",
+            selected_choice_id=str(selected.get("id") or ""),
+            selected_choice_label=str(selected.get("label") or "") or str(selected.get("id") or ""),
+            selected_choice_description=(
+                str(selected.get("description")).strip()
+                if selected.get("description") is not None
+                else None
+            ),
+        )
 
     async def send_hitl_prompt(self, *, thread_id: str, prompt: HitlPrompt) -> str | None:
         thread = await self._resolve_channel(thread_id)
@@ -270,6 +302,17 @@ class DiscordChannel(BaseChannel):
             return
 
         await interaction.response.defer(ephemeral=True)
+        prompt = await self._runtime_service.get_hitl_prompt(prompt_id)
+        if not cancel and prompt is not None and interaction.message is not None:
+            resolving_prompt = self._with_selected_choice(prompt, choice_id)
+            try:
+                await interaction.message.edit(
+                    content=self._render_hitl_prompt_message(resolving_prompt),
+                    view=_HitlPromptView(self, resolving_prompt, disabled=True),
+                )
+            except Exception:
+                logger.debug("Failed to update HITL prompt message %s to resolving", prompt_id, exc_info=True)
+            await interaction.followup.send("Input recorded. Resuming now...", ephemeral=True)
         if cancel:
             result = await self._runtime_service.cancel_hitl_prompt(
                 prompt_id,
@@ -293,7 +336,8 @@ class DiscordChannel(BaseChannel):
             except Exception:
                 logger.debug("Failed to update HITL prompt message %s", prompt_id, exc_info=True)
 
-        await interaction.followup.send(result[:1900], ephemeral=True)
+        if cancel or (prompt is not None and prompt.status == "failed"):
+            await interaction.followup.send(result[:1900], ephemeral=True)
 
     def set_scheduler(self, scheduler) -> None:
         """Inject scheduler for /automation_* commands."""

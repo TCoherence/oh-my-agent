@@ -117,6 +117,7 @@ Read the relevant reference before drafting:
 
 - Report schemas: `references/report_schema.md`
 - Source policy: `references/source_policy.md`
+- AI people seed: `references/ai_people_seed.yaml`
 - Automation templates: `references/automation_templates.md`
 - Prompt recipes: `references/prompt_recipes.md`
 
@@ -147,6 +148,7 @@ Read the relevant reference before drafting:
   - 持仓池默认滚动窗口：`7 天`
   - 中国财经默认只做到宏观 + 政策，不默认扩展到中国上市公司日常扫盘
 - `ai`
+  - 关键人物与社区信号
   - 固定五层：
     - `energy`
     - `chips`
@@ -155,6 +157,7 @@ Read the relevant reference before drafting:
     - `application`
   - 每层关键变化
   - 层间联动影响
+  - 候选池变化与后续关注
 
 ### Weekly synthesis structure
 
@@ -186,7 +189,35 @@ Every report should include:
 - a short verification note
 - inline source links in the main body, not only in the final source appendix
 
+For AI daily, `community / social` is also a valid source family, but it should be treated as a signal layer that normally requires cross-checking before it becomes a core conclusion.
+
 Do not treat `/search` as an external news source. In this repo, `/search` is internal conversation-history search only.
+
+## AI people-pool workflow
+
+For `daily_digest` with `domain=ai`:
+
+1. Load prior report context with `report_store.py context`.
+2. Load the current people pool:
+
+```bash
+./.venv/bin/python skills/market-briefing/scripts/ai_people_pool.py context
+```
+
+3. Research both:
+   - five-layer AI developments
+   - tracked people / community / X.com signals plus a bounded discovery sweep for new names
+4. Fill the AI Markdown + JSON.
+5. Record new candidates and promotions:
+
+```bash
+./.venv/bin/python skills/market-briefing/scripts/ai_people_pool.py record \
+  --report-json /tmp/ai_daily.json
+```
+
+6. Persist the report with `report_store.py persist`.
+
+Only use `sync-repo` for explicit curated maintenance. Do not rewrite the repo seed file during a normal daily run.
 
 ## JSON requirements
 
@@ -223,6 +254,15 @@ For weekly synthesis, also include:
 - `trend_summary`
 - `cross_domain_links`
 
+For AI daily, also keep:
+
+- `tracked_people_groups`
+- `tracked_people`
+- `people_signal_summary`
+- `new_candidate_people`
+- `promoted_people`
+- `candidate_queue_summary`
+
 ## Output rules
 
 - Default output language is Chinese.
@@ -241,9 +281,11 @@ For weekly synthesis, also include:
   - explicitly say there is no high-confidence new signal
   - explain why
   - state what to keep watching
+- For AI daily, people / community signals should be surfaced explicitly rather than buried inside a generic five-layer summary.
 - JSON should stay compact and structured for later machine reuse.
 - If evidence is incomplete, say so directly and keep the uncertainty localized to the affected section.
 - Weekly trend claims must be grounded in stored report files and current-source cross-checking, not vague memory.
+- AI people discovered in one run should go into the candidate queue first, not become repo seed automatically.
 
 ## Inline citation rules
 

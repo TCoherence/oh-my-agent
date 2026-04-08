@@ -19,6 +19,7 @@
 - Runtime hardening 已完成：真正的子进程中断、消息驱动控制（stop/pause/resume）、PAUSED 状态、完成摘要、metrics。
 - Automation 已迁到 `~/.oh-my-agent/automations/` 文件驱动目录，并支持轮询热加载和单条开关。
 - `market-briefing` 已加入，支持把 politics / finance / ai 的 bootstrap、日报、周报持久化到 `~/.oh-my-agent/reports/market-briefing/`。
+- `market-briefing` 的 AI 日报现在支持 tracked people/community 池、X.com 早期信号层，以及 `~/.oh-my-agent/reports/market-briefing/state/` 下的候选池状态。
 - Adaptive Memory 已实现：对话中自动提取记忆、注入 agent prompt、`/memories` 和 `/forget` 命令。
 - Claude / Codex / Gemini 的 CLI session resume 已实现，线程级 session ID 会持久化并在重启后恢复。
 - Auth-first 二维码登录基础设施已实现：Discord owner 可手动发起登录，登录态会本地持久化，并可恢复等待中的 runtime task。
@@ -431,6 +432,10 @@ author: scheduler
   - 美国宏观 + 政策
   - 近 7 天重点持仓：`NVDA`、`MSFT`、`AAPL`、`AMZN`、`GOOG`、`TSLA`、`META`、`VOO`、`SPY`、`S&P 500`
   - 市场 / 指数基金视角
+- AI 日报默认覆盖：
+  - tracked people / community 池
+  - X.com / 社区信号作为早期输入层
+  - bounded discovery sweep + candidate queue
 - 有限 bootstrap 默认窗口：
   - politics：30 天
   - finance：30 天
