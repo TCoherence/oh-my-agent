@@ -10,12 +10,16 @@ The format is intentionally lightweight and release-oriented rather than exhaust
 
 - Discord-first owner notifications for `auth_required`, `ask_user`, `DRAFT`, and `WAITING_MERGE`, with a separate ping message in the same thread plus best-effort owner DMs
 - Persistent `notification_events` rows in SQLite for notification dedupe and future escalation/reminder support
+- Split SQLite runtime layout with dedicated conversation, runtime-state, and skills-telemetry databases
+- Automatic startup migration from legacy monolithic `memory.db` into `memory.db`, `runtime.db`, and `skills.db`, with preserved `.monolith.bak` backup bundles
 
 ### Changed
 
 - Human-input states now fan out through an internal notification layer instead of each flow hand-rolling Discord reminders
 - `auth_required`, `ask_user`, `DRAFT`, and `WAITING_MERGE` notifications now resolve explicitly when the underlying waiting state is cleared, while routine runtime progress still stays notification-free
 - Report-store helpers for `market-intel-report` and `deals-scanner` now derive their default local report date from `OMA_REPORT_TIMEZONE` / `TZ` instead of implicitly inheriting UTC-like container defaults, and Docker helper scripts now pass an explicit report timezone into the container
+- `memory.path` now refers to the conversation store only; runtime task/auth/HITL/notification/session state moves to `runtime.state_path`, and skill provenance/telemetry moves to `skills.telemetry_path`
+- Runtime task claiming no longer opens a nested `BEGIN IMMEDIATE` transaction on a shared SQLite connection
 
 ## v0.7.2 - 2026-03-16
 

@@ -1,6 +1,6 @@
 # 架构说明
 
-本文档描述 `oh-my-agent` 在 `v0.7.2` 时刻的当前架构。
+本文档描述 `oh-my-agent` 当前 `main` 分支上的实际架构。
 
 它优先解释今天真实存在的代码结构，而不是理想化的未来设计。
 
@@ -31,7 +31,9 @@ flowchart TD
     GM --> SS["SkillSync"]
 
     RT --> AR
-    RT --> DB["SQLite memory.db"]
+    RT --> DB["SQLite runtime.db"]
+    GM --> CDB["SQLite memory.db"]
+    GM --> SDB["SQLite skills.db"]
     RT --> FS["runtime/tasks + runtime/logs"]
     RT --> HITL["hitl_prompts"]
 
@@ -91,7 +93,7 @@ Gateway 是协调层。它本身不直接执行 agent，也不负责长生命周
 职责：
 
 - 持有自主任务执行循环。
-- 在 SQLite 里持久化 task 状态。
+- 在独立的 runtime-state SQLite 库里持久化 task 状态。
 - 重启后 requeue 未完成任务。
 - 执行多步 task 状态迁移。
 - 区分带 merge gate 的 repo work 和一次性 artifact work。
@@ -119,15 +121,19 @@ Gateway 是协调层。它本身不直接执行 agent，也不负责长生命周
 
 职责：
 
-- 在 SQLite（`memory.db`）里保存 thread / task / runtime 记录。
+- 在 `memory.db` 里保存 thread history 和 summaries。
+- 在 `runtime.db` 里保存 runtime/auth/HITL/notification/session 状态。
+- 在 `skills.db` 里保存 skill provenance 和 telemetry。
 - 用 SQLite FTS 维护可搜索的对话历史。
 - 用文件系统维护 daily + curated 两层 adaptive memory。
 - 在 curated 变化时合成 `MEMORY.md`。
 
 当前 memory 的拆分方式：
 
-- SQLite 是 thread、runtime task、events、skill feedback 的事务型真源。
-- YAML + Markdown 是面向人可读、可编辑的长期记忆外层。
+- `memory.db` 是对话库：`turns`、`summaries`、`turns_fts*`。
+- `runtime.db` 是控制面库：runtime tasks、auth、HITL prompts、notifications、agent sessions。
+- `skills.db` 是遥测/治理库：skill provenance、invocations、feedback、evaluations。
+- YAML + Markdown 仍然是面向人可读、可编辑的长期记忆外层。
 
 ### 5. Skills
 
@@ -334,10 +340,18 @@ flowchart TD
     ├── tasks/
     │   ├── _artifacts/<task_id>/
     │   └── <repo-change-task-id>/
-    └── memory.db
+    ├── memory.db
+    ├── runtime.db
+    └── skills.db
 ```
 
-其中 `memory.db` 里现在除了 task 状态，也包含 `hitl_prompts` 这类 owner 交互等待态记录，以及 `notification_events` 这类面向 `auth_required`、`ask_user`、`DRAFT`、`WAITING_MERGE` 的去重通知记录。
+各库职责：
+
+- `memory.db`：对话历史 + FTS
+- `runtime.db`：task/auth/HITL/notification/session 状态
+- `skills.db`：skill provenance 和 telemetry
+
+这次拆分的目标是把写热点和职责边界物理隔离。SQLite 依然不是按 table 粒度解决多写者并发的数据库；关键是不要再让 direct chat history、runtime queue 和 skill telemetry 一起挤在一个单体文件和一条连接上。
 
 ## Janitor 与清理机制
 
@@ -403,19 +417,24 @@ flowchart TD
 
 代价：
 
-- runtime 状态目前还没有持久化
+- scheduler 的可见 job snapshot 仍然只保存在内存里，重启后会重建
 - invalid / conflicting 文件现在仍主要通过日志暴露，而不是完整进入 operator UI
 
-### SQLite + 文件系统记忆的混合模型
+### 拆分后的 SQLite + 文件系统记忆混合模型
 
 原因：
 
-- SQLite 适合操作态和搜索
+- 先把三类高频写入物理拆开：
+  - 对话历史
+  - runtime / control-plane 状态
+  - skill 遥测
+- SQLite 仍然适合操作态和搜索
 - YAML / Markdown 更适合作为长期可读、可编辑的记忆外层
 
 代价：
 
-- 事务型运行状态和人类可读记忆之间会有刻意的双层表示
+- 事务型运行状态和人类可读记忆之间仍然会有刻意的双层表示
+- 启动迁移逻辑会更复杂，因为旧版单体 `memory.db` 需要安全拆分成三库
 
 ### Runtime 与 direct chat 分离
 

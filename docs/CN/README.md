@@ -96,17 +96,10 @@ memory:
     enabled: true
     memory_dir: ~/.oh-my-agent/memory
 
-workspace: ~/.oh-my-agent/agent-workspace
-
-short_workspace:
-  enabled: true
-  root: ~/.oh-my-agent/agent-workspace/sessions
-  ttl_hours: 24
-  cleanup_interval_minutes: 1440
-
 skills:
   enabled: true
   path: skills/
+  telemetry_path: ~/.oh-my-agent/runtime/skills.db
   evaluation:
     enabled: true
     stats_recent_days: 7
@@ -122,6 +115,14 @@ skills:
     source_grounded:
       enabled: true
       block_auto_merge: true
+
+workspace: ~/.oh-my-agent/agent-workspace
+
+short_workspace:
+  enabled: true
+  root: ~/.oh-my-agent/agent-workspace/sessions
+  ttl_hours: 24
+  cleanup_interval_minutes: 1440
 
 router:
   enabled: true
@@ -141,6 +142,7 @@ automations:
 
 runtime:
   enabled: true
+  state_path: ~/.oh-my-agent/runtime/runtime.db
   worker_concurrency: 3
   worktree_root: ~/.oh-my-agent/runtime/tasks
   default_agent: codex
@@ -170,9 +172,17 @@ auth:
 
 敏感信息放在 `.env` 文件中，`config.yaml` 里的 `${VAR}` 会自动替换。
 
+`memory.path` 现在只表示对话记忆库：thread history、summaries 和 SQLite FTS。Runtime 控制面状态单独放在 `runtime.state_path`，skill 遥测单独放在 `skills.telemetry_path`。
+
 Runtime 清理器会在保留窗口后删除旧的 task workspace 和 agent log 文件。默认保留 7 天（`168` 小时）。
 
-Runtime 产物默认放在 `~/.oh-my-agent/runtime/`（包括 memory DB、日志、task worktree）。旧版 `.workspace/` 会在启动时自动迁移。
+Runtime 产物默认放在 `~/.oh-my-agent/runtime/`：
+- `memory.db`：对话历史 + FTS
+- `runtime.db`：task/auth/HITL/notification/session 状态
+- `skills.db`：skill provenance / invocation / feedback / evaluation 遥测
+- `logs/`、`tasks/`：runtime 文件产物
+
+旧版单体 `memory.db` 会在启动时自动拆分成这三库，并把原始文件保留为 `.monolith.bak` 备份。
 Automation 定义文件现在放在 `~/.oh-my-agent/automations/*.yaml`，修改这些文件不需要重启进程。
 
 ### 启动

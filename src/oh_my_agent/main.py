@@ -151,6 +151,7 @@ def _apply_v052_defaults(config: dict) -> None:
     skills_cfg = config.setdefault("skills", {})
     skills_cfg.setdefault("enabled", True)
     skills_cfg.setdefault("path", "skills/")
+    skills_cfg.setdefault("telemetry_path", "~/.oh-my-agent/runtime/skills.db")
     skill_eval_cfg = skills_cfg.setdefault("evaluation", {})
     skill_eval_cfg.setdefault("enabled", True)
     skill_eval_cfg.setdefault("stats_recent_days", 7)
@@ -222,6 +223,7 @@ def _apply_v052_defaults(config: dict) -> None:
 
     runtime_cfg = config.setdefault("runtime", {})
     runtime_cfg.setdefault("enabled", True)
+    runtime_cfg.setdefault("state_path", "~/.oh-my-agent/runtime/runtime.db")
     runtime_cfg.setdefault("worker_concurrency", 3)
     runtime_cfg.setdefault("worktree_root", "~/.oh-my-agent/runtime/tasks")
     runtime_cfg.setdefault("default_agent", "codex")
@@ -419,13 +421,32 @@ async def _async_main(config: dict, logger: logging.Logger, *, project_root: Pat
     compressor = None
 
     if memory_cfg.get("backend", "sqlite") == "sqlite":
-        from oh_my_agent.memory.store import SQLiteMemoryStore
+        from oh_my_agent.memory.store import SplitSQLiteMemoryStore, maybe_split_legacy_memory_db
         from oh_my_agent.memory.compressor import HistoryCompressor
 
-        db_path = str(Path(memory_cfg.get("path", "~/.oh-my-agent/runtime/memory.db")).expanduser().resolve())
-        memory_store = SQLiteMemoryStore(db_path)
+        conversation_db_path = Path(memory_cfg.get("path", "~/.oh-my-agent/runtime/memory.db")).expanduser().resolve()
+        runtime_db_path = Path(config.get("runtime", {}).get("state_path", "~/.oh-my-agent/runtime/runtime.db")).expanduser().resolve()
+        skills_db_path = Path(config.get("skills", {}).get("telemetry_path", "~/.oh-my-agent/runtime/skills.db")).expanduser().resolve()
+
+        await maybe_split_legacy_memory_db(
+            memory_path=conversation_db_path,
+            runtime_state_path=runtime_db_path,
+            skills_telemetry_path=skills_db_path,
+            logger=logger,
+        )
+
+        memory_store = SplitSQLiteMemoryStore(
+            conversation_path=conversation_db_path,
+            runtime_state_path=runtime_db_path,
+            skills_telemetry_path=skills_db_path,
+        )
         await memory_store.init()
-        logger.info("Memory store ready: %s", db_path)
+        logger.info(
+            "Memory stores ready: conversation=%s runtime=%s skills=%s",
+            conversation_db_path,
+            runtime_db_path,
+            skills_db_path,
+        )
 
         compressor = HistoryCompressor(
             store=memory_store,

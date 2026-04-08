@@ -1,6 +1,6 @@
 # Architecture
 
-This document describes the current architecture of `oh-my-agent` as of `v0.7.2`.
+This document describes the current architecture of `oh-my-agent` on the current `main` branch.
 
 It focuses on the code that actually exists today, not an idealized future design.
 
@@ -31,7 +31,9 @@ flowchart TD
     GM --> SS["SkillSync"]
 
     RT --> AR
-    RT --> DB["SQLite memory.db"]
+    RT --> DB["SQLite runtime.db"]
+    GM --> CDB["SQLite memory.db"]
+    GM --> SDB["SQLite skills.db"]
     RT --> FS["runtime/tasks + runtime/logs"]
     RT --> HITL["hitl_prompts"]
 
@@ -91,7 +93,7 @@ Primary code:
 Responsibilities:
 
 - Own the durable task loop for autonomous work.
-- Persist task state in SQLite.
+- Persist task state in the dedicated runtime-state SQLite store.
 - Requeue unfinished tasks after restart.
 - Execute multi-step task state transitions.
 - Handle merge-gated repo work separately from one-shot artifact tasks.
@@ -119,15 +121,19 @@ Primary code:
 
 Responsibilities:
 
-- Store thread/task records and runtime state in SQLite (`memory.db`).
+- Store thread history and summaries in `memory.db`.
+- Store runtime/auth/HITL/notification/session state in `runtime.db`.
+- Store skill provenance and telemetry in `skills.db`.
 - Maintain searchable chat history using SQLite FTS.
 - Maintain adaptive memory as file-backed daily + curated records.
 - Synthesize `MEMORY.md` from curated memory when curated state changes.
 
 Current memory split:
 
-- SQLite is the transactional system of record for threads, runtime tasks, events, and skill feedback.
-- YAML + Markdown are the human-editable / human-readable memory surfaces.
+- `memory.db` is the conversation store: `turns`, `summaries`, and `turns_fts*`.
+- `runtime.db` is the control-plane store: runtime tasks, auth, HITL prompts, notifications, and agent sessions.
+- `skills.db` is the telemetry/governance store: skill provenance, invocations, feedback, and evaluations.
+- YAML + Markdown remain the human-editable / human-readable memory surfaces.
 
 ### 5. Skills
 
@@ -334,10 +340,18 @@ Current safeguards:
     ├── tasks/
     │   ├── _artifacts/<task_id>/
     │   └── <repo-change-task-id>/
-    └── memory.db
+    ├── memory.db
+    ├── runtime.db
+    └── skills.db
 ```
 
-Within `memory.db`, runtime-owned tables now include task state, `hitl_prompts` rows for persisted interactive owner questions, and `notification_events` rows for deduped owner-action notifications (`auth_required`, `ask_user`, `DRAFT`, `WAITING_MERGE`).
+Store responsibilities:
+
+- `memory.db`: conversation history + FTS
+- `runtime.db`: task/auth/HITL/notification/session state
+- `skills.db`: skill provenance and telemetry
+
+This split is about physically isolating write hotspots and responsibilities. SQLite still is not a table-level multi-writer database; the point is to stop direct chat history, runtime queue state, and skill telemetry from fighting over one monolithic file and one connection.
 
 ## Janitors and Cleanup
 
@@ -403,19 +417,24 @@ Reason:
 
 Tradeoff:
 
-- runtime status is not yet persisted
+- the scheduler's visible job snapshot still lives in memory and is rebuilt on startup
 - invalid or conflicting files are still mostly log-visible, not fully surfaced in operator UI
 
-### SQLite + file-backed memory hybrid
+### Split SQLite + file-backed memory hybrid
 
 Reason:
 
-- SQLite is strong for operational state and search
-- YAML/Markdown are better for long-term editable memory artifacts
+- separate hot write domains physically:
+  - conversation history
+  - runtime/control-plane state
+  - skill telemetry
+- keep SQLite where transactional state and search help
+- keep YAML/Markdown where humans need readable/editable memory artifacts
 
 Tradeoff:
 
-- there is deliberate duplication between transactional runtime state and human-readable memory outputs
+- there is still deliberate duplication between transactional runtime state and human-readable memory outputs
+- startup migration logic is more complex because old monolithic `memory.db` instances must be split safely into three files
 
 ### Runtime vs direct chat split
 

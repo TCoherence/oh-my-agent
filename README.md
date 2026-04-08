@@ -97,17 +97,10 @@ memory:
     enabled: true
     memory_dir: ~/.oh-my-agent/memory
 
-workspace: ~/.oh-my-agent/agent-workspace
-
-short_workspace:
-  enabled: true
-  root: ~/.oh-my-agent/agent-workspace/sessions
-  ttl_hours: 24
-  cleanup_interval_minutes: 1440
-
 skills:
   enabled: true
   path: skills/
+  telemetry_path: ~/.oh-my-agent/runtime/skills.db
   evaluation:
     enabled: true
     stats_recent_days: 7
@@ -123,6 +116,14 @@ skills:
     source_grounded:
       enabled: true
       block_auto_merge: true
+
+workspace: ~/.oh-my-agent/agent-workspace
+
+short_workspace:
+  enabled: true
+  root: ~/.oh-my-agent/agent-workspace/sessions
+  ttl_hours: 24
+  cleanup_interval_minutes: 1440
 
 router:
   enabled: true
@@ -142,6 +143,7 @@ automations:
 
 runtime:
   enabled: true
+  state_path: ~/.oh-my-agent/runtime/runtime.db
   worker_concurrency: 3
   worktree_root: ~/.oh-my-agent/runtime/tasks
   default_agent: codex
@@ -175,9 +177,17 @@ auth:
 
 Secrets should live in `.env`; `${VAR}` placeholders are substituted automatically.
 
+`memory.path` now points to the conversation store only: thread history, summaries, and SQLite FTS. Runtime state is stored separately under `runtime.state_path`, and skill telemetry lives under `skills.telemetry_path`.
+
 Runtime cleanup removes old task workspaces and agent log files after the retention window. The default window is 7 days (`168` hours).
 
-Runtime artifacts default to `~/.oh-my-agent/runtime/` (memory DB, logs, task worktrees). Legacy `.workspace/` is migrated automatically on startup.
+Runtime artifacts default to `~/.oh-my-agent/runtime/`:
+- `memory.db`: conversation history + FTS
+- `runtime.db`: runtime/auth/HITL/notification/session state
+- `skills.db`: skill provenance/invocation/feedback/evaluation telemetry
+- `logs/` and `tasks/`: runtime filesystem outputs
+
+Older monolithic `memory.db` files are split automatically on startup into these three stores, with the original bundle preserved as a `.monolith.bak` backup.
 Automation definitions now live under `~/.oh-my-agent/automations/*.yaml`; edits there are picked up automatically without restarting the process.
 
 ### Run

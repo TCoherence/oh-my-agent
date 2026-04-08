@@ -16,6 +16,7 @@ memory:
 skills:
   enabled: true
   path: skills/
+  telemetry_path: ~/.oh-my-agent/runtime/skills.db
   evaluation:
     enabled: true
     stats_recent_days: 7
@@ -77,6 +78,7 @@ automations:
 
 runtime:
   enabled: true
+  state_path: ~/.oh-my-agent/runtime/runtime.db
   worker_concurrency: 3
   worktree_root: ~/.oh-my-agent/runtime/tasks
   default_agent: codex

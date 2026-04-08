@@ -4,6 +4,8 @@ import asyncio
 import json
 import logging
 import os
+import shutil
+import sqlite3
 import tempfile
 import uuid
 from abc import ABC, abstractmethod
@@ -17,6 +19,69 @@ from oh_my_agent.auth.types import AUTH_SCOPE_DEFAULT, AuthFlow, CredentialHandl
 from oh_my_agent.runtime.types import HitlPrompt, NotificationRecord, RuntimeTask, SuspendedAgentRun
 
 logger = logging.getLogger(__name__)
+
+CONVERSATION_TABLES = {
+    "turns",
+    "turns_fts",
+    "summaries",
+}
+CONVERSATION_FTS_SHADOW_TABLES = {
+    "turns_fts_data",
+    "turns_fts_idx",
+    "turns_fts_docsize",
+    "turns_fts_config",
+}
+RUNTIME_STATE_TABLES = {
+    "agent_sessions",
+    "runtime_tasks",
+    "auth_credentials",
+    "auth_flows",
+    "suspended_agent_runs",
+    "hitl_prompts",
+    "notification_events",
+    "runtime_task_events",
+    "runtime_task_checkpoints",
+    "runtime_task_decisions",
+    "ephemeral_workspaces",
+}
+SKILLS_TELEMETRY_TABLES = {
+    "skill_provenance",
+    "skill_invocations",
+    "skill_feedback",
+    "skill_evaluations",
+}
+ALL_TOP_LEVEL_TABLES = CONVERSATION_TABLES | RUNTIME_STATE_TABLES | SKILLS_TELEMETRY_TABLES
+TABLE_COPY_ORDER = [
+    "turns",
+    "summaries",
+    "agent_sessions",
+    "runtime_tasks",
+    "runtime_task_events",
+    "runtime_task_checkpoints",
+    "runtime_task_decisions",
+    "auth_credentials",
+    "auth_flows",
+    "suspended_agent_runs",
+    "hitl_prompts",
+    "notification_events",
+    "ephemeral_workspaces",
+    "skill_provenance",
+    "skill_invocations",
+    "skill_feedback",
+    "skill_evaluations",
+]
+TABLE_COPY_DEFAULTS: dict[str, dict[str, Any]] = {
+    "runtime_tasks": {
+        "completion_mode": "merge",
+        "task_type": "repo_change",
+    },
+    "auth_credentials": {
+        "scope_key": AUTH_SCOPE_DEFAULT,
+    },
+    "skill_provenance": {
+        "auto_disabled": 0,
+    },
+}
 
 # --------------------------------------------------------------------------- #
 #  Abstract base                                                               #
@@ -771,10 +836,12 @@ CREATE INDEX IF NOT EXISTS idx_skill_evaluations_skill_created
 class SQLiteMemoryStore(MemoryStore):
     """SQLite-backed memory store with FTS5 full-text search."""
 
+    SCHEMA_SQL = _SCHEMA
+
     def __init__(self, db_path: str | Path) -> None:
         self._db_path = Path(db_path)
         self._db: aiosqlite.Connection | None = None
-        self._runtime_write_lock = asyncio.Lock()
+        self._write_lock = asyncio.Lock()
 
     async def _conn(self) -> aiosqlite.Connection:
         if self._db is None:
@@ -789,7 +856,7 @@ class SQLiteMemoryStore(MemoryStore):
 
     async def init(self) -> None:
         db = await self._conn()
-        await db.executescript(_SCHEMA)
+        await db.executescript(self.SCHEMA_SQL)
         await self._migrate_runtime_schema()
         await db.commit()
         logger.info("Memory store initialised at %s", self._db_path)
@@ -816,11 +883,31 @@ class SQLiteMemoryStore(MemoryStore):
         await self._ensure_column("skill_provenance", "auto_disabled_reason", "TEXT")
         await self._ensure_column("skill_provenance", "auto_disabled_at", "TIMESTAMP")
         db = await self._conn()
-        await db.execute("UPDATE runtime_tasks SET task_type='repo_change' WHERE task_type='code'")
-        await db.execute("UPDATE runtime_tasks SET task_type='skill_change' WHERE task_type='skill'")
+        if await self._table_exists("runtime_tasks"):
+            await db.execute("UPDATE runtime_tasks SET task_type='repo_change' WHERE task_type='code'")
+            await db.execute("UPDATE runtime_tasks SET task_type='skill_change' WHERE task_type='skill'")
         await db.commit()
 
+    async def _table_exists(self, table: str) -> bool:
+        db = await self._conn()
+        cursor = await db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (table,),
+        )
+        row = await cursor.fetchone()
+        return row is not None
+
+    async def _list_user_tables(self) -> set[str]:
+        db = await self._conn()
+        cursor = await db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+        )
+        rows = await cursor.fetchall()
+        return {str(row["name"]) for row in rows}
+
     async def _ensure_column(self, table: str, column: str, ddl_type: str) -> None:
+        if not await self._table_exists(table):
+            return
         db = await self._conn()
         cursor = await db.execute(f"PRAGMA table_info({table})")
         rows = await cursor.fetchall()
@@ -902,21 +989,22 @@ class SQLiteMemoryStore(MemoryStore):
         thread_id: str,
         turn: dict,
     ) -> int:
-        db = await self._conn()
-        cursor = await db.execute(
-            "INSERT INTO turns (platform, channel_id, thread_id, role, content, author, agent) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (
-                platform,
-                channel_id,
-                thread_id,
-                turn["role"],
-                turn["content"],
-                turn.get("author"),
-                turn.get("agent"),
-            ),
-        )
-        await db.commit()
+        async with self._write_lock:
+            db = await self._conn()
+            cursor = await db.execute(
+                "INSERT INTO turns (platform, channel_id, thread_id, role, content, author, agent) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    platform,
+                    channel_id,
+                    thread_id,
+                    turn["role"],
+                    turn["content"],
+                    turn.get("author"),
+                    turn.get("agent"),
+                ),
+            )
+            await db.commit()
         return cursor.lastrowid  # type: ignore[return-value]
 
     async def save_summary(
@@ -928,19 +1016,20 @@ class SQLiteMemoryStore(MemoryStore):
         turns_start: int,
         turns_end: int,
     ) -> None:
-        db = await self._conn()
-        await db.execute(
-            "INSERT INTO summaries (platform, channel_id, thread_id, summary, turns_start, turns_end) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (platform, channel_id, thread_id, summary, turns_start, turns_end),
-        )
-        # Delete the raw turns that have been summarised
-        await db.execute(
-            "DELETE FROM turns WHERE platform=? AND channel_id=? AND thread_id=? "
-            "AND id BETWEEN ? AND ?",
-            (platform, channel_id, thread_id, turns_start, turns_end),
-        )
-        await db.commit()
+        async with self._write_lock:
+            db = await self._conn()
+            await db.execute(
+                "INSERT INTO summaries (platform, channel_id, thread_id, summary, turns_start, turns_end) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (platform, channel_id, thread_id, summary, turns_start, turns_end),
+            )
+            # Delete the raw turns that have been summarised
+            await db.execute(
+                "DELETE FROM turns WHERE platform=? AND channel_id=? AND thread_id=? "
+                "AND id BETWEEN ? AND ?",
+                (platform, channel_id, thread_id, turns_start, turns_end),
+            )
+            await db.commit()
         logger.info(
             "Compressed turns %d–%d into summary for thread %s",
             turns_start,
@@ -956,32 +1045,37 @@ class SQLiteMemoryStore(MemoryStore):
         channel_id: str,
         thread_id: str,
     ) -> None:
-        db = await self._conn()
-        await db.execute(
-            "DELETE FROM turns WHERE platform=? AND channel_id=? AND thread_id=?",
-            (platform, channel_id, thread_id),
-        )
-        await db.execute(
-            "DELETE FROM summaries WHERE platform=? AND channel_id=? AND thread_id=?",
-            (platform, channel_id, thread_id),
-        )
-        await db.execute(
-            "DELETE FROM agent_sessions WHERE platform=? AND channel_id=? AND thread_id=?",
-            (platform, channel_id, thread_id),
-        )
-        await db.commit()
+        async with self._write_lock:
+            db = await self._conn()
+            if await self._table_exists("turns"):
+                await db.execute(
+                    "DELETE FROM turns WHERE platform=? AND channel_id=? AND thread_id=?",
+                    (platform, channel_id, thread_id),
+                )
+            if await self._table_exists("summaries"):
+                await db.execute(
+                    "DELETE FROM summaries WHERE platform=? AND channel_id=? AND thread_id=?",
+                    (platform, channel_id, thread_id),
+                )
+            if await self._table_exists("agent_sessions"):
+                await db.execute(
+                    "DELETE FROM agent_sessions WHERE platform=? AND channel_id=? AND thread_id=?",
+                    (platform, channel_id, thread_id),
+                )
+            await db.commit()
 
     async def save_session(
         self, platform: str, channel_id: str, thread_id: str, agent: str, session_id: str
     ) -> None:
-        db = await self._conn()
-        await db.execute(
-            "INSERT OR REPLACE INTO agent_sessions "
-            "(platform, channel_id, thread_id, agent, session_id, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
-            (platform, channel_id, thread_id, agent, session_id),
-        )
-        await db.commit()
+        async with self._write_lock:
+            db = await self._conn()
+            await db.execute(
+                "INSERT OR REPLACE INTO agent_sessions "
+                "(platform, channel_id, thread_id, agent, session_id, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+                (platform, channel_id, thread_id, agent, session_id),
+            )
+            await db.commit()
 
     async def load_session(
         self, platform: str, channel_id: str, thread_id: str, agent: str
@@ -998,18 +1092,19 @@ class SQLiteMemoryStore(MemoryStore):
     async def delete_session(
         self, platform: str, channel_id: str, thread_id: str, agent: str
     ) -> None:
-        db = await self._conn()
-        await db.execute(
-            "DELETE FROM agent_sessions "
-            "WHERE platform=? AND channel_id=? AND thread_id=? AND agent=?",
-            (platform, channel_id, thread_id, agent),
-        )
-        await db.commit()
+        async with self._write_lock:
+            db = await self._conn()
+            await db.execute(
+                "DELETE FROM agent_sessions "
+                "WHERE platform=? AND channel_id=? AND thread_id=? AND agent=?",
+                (platform, channel_id, thread_id, agent),
+            )
+            await db.commit()
 
     # -- runtime tasks -----------------------------------------------------
 
     async def create_runtime_task(self, **kwargs) -> RuntimeTask:
-        async with self._runtime_write_lock:
+        async with self._write_lock:
             db = await self._conn()
             await db.execute(
                 "INSERT INTO runtime_tasks "
@@ -1081,17 +1176,18 @@ class SQLiteMemoryStore(MemoryStore):
         return [RuntimeTask.from_row(self._normalize_runtime_task_row(dict(r))) for r in rows]
 
     async def upsert_ephemeral_workspace(self, workspace_key: str, workspace_path: str) -> None:
-        db = await self._conn()
-        await db.execute(
-            "INSERT INTO ephemeral_workspaces (workspace_key, workspace_path, last_used_at, cleaned_at) "
-            "VALUES (?, ?, CURRENT_TIMESTAMP, NULL) "
-            "ON CONFLICT(workspace_key) DO UPDATE SET "
-            "workspace_path=excluded.workspace_path, "
-            "last_used_at=CURRENT_TIMESTAMP, "
-            "cleaned_at=NULL",
-            (workspace_key, workspace_path),
-        )
-        await db.commit()
+        async with self._write_lock:
+            db = await self._conn()
+            await db.execute(
+                "INSERT INTO ephemeral_workspaces (workspace_key, workspace_path, last_used_at, cleaned_at) "
+                "VALUES (?, ?, CURRENT_TIMESTAMP, NULL) "
+                "ON CONFLICT(workspace_key) DO UPDATE SET "
+                "workspace_path=excluded.workspace_path, "
+                "last_used_at=CURRENT_TIMESTAMP, "
+                "cleaned_at=NULL",
+                (workspace_key, workspace_path),
+            )
+            await db.commit()
 
     async def list_expired_ephemeral_workspaces(
         self,
@@ -1117,19 +1213,20 @@ class SQLiteMemoryStore(MemoryStore):
         ]
 
     async def mark_ephemeral_workspace_cleaned(self, workspace_key: str) -> None:
-        db = await self._conn()
-        await db.execute(
-            "UPDATE ephemeral_workspaces "
-            "SET cleaned_at=CURRENT_TIMESTAMP "
-            "WHERE workspace_key=?",
-            (workspace_key,),
-        )
-        await db.commit()
+        async with self._write_lock:
+            db = await self._conn()
+            await db.execute(
+                "UPDATE ephemeral_workspaces "
+                "SET cleaned_at=CURRENT_TIMESTAMP "
+                "WHERE workspace_key=?",
+                (workspace_key,),
+            )
+            await db.commit()
 
     async def update_runtime_task(self, task_id: str, **updates) -> RuntimeTask | None:
         if not updates:
             return await self.get_runtime_task(task_id)
-        async with self._runtime_write_lock:
+        async with self._write_lock:
             db = await self._conn()
 
             sets: list[str] = []
@@ -1157,9 +1254,8 @@ class SQLiteMemoryStore(MemoryStore):
         return await self.get_runtime_task(task_id)
 
     async def claim_pending_runtime_task(self) -> RuntimeTask | None:
-        async with self._runtime_write_lock:
+        async with self._write_lock:
             db = await self._conn()
-            await db.execute("BEGIN IMMEDIATE")
             try:
                 cursor = await db.execute(
                     "SELECT id FROM runtime_tasks "
@@ -1186,7 +1282,7 @@ class SQLiteMemoryStore(MemoryStore):
         return await self.get_runtime_task(task_id)
 
     async def requeue_inflight_runtime_tasks(self) -> int:
-        async with self._runtime_write_lock:
+        async with self._write_lock:
             db = await self._conn()
             cursor = await db.execute(
                 "UPDATE runtime_tasks "
@@ -1199,7 +1295,7 @@ class SQLiteMemoryStore(MemoryStore):
         return int(cursor.rowcount or 0)
 
     async def add_runtime_event(self, task_id: str, event_type: str, payload: dict[str, Any]) -> None:
-        async with self._runtime_write_lock:
+        async with self._write_lock:
             db = await self._conn()
             cursor = await db.execute(
                 "SELECT COALESCE(MAX(seq), 0) + 1 FROM runtime_task_events WHERE task_id=?",
@@ -1251,7 +1347,7 @@ class SQLiteMemoryStore(MemoryStore):
         test_result: str,
         files_changed: list[str],
     ) -> None:
-        async with self._runtime_write_lock:
+        async with self._write_lock:
             db = await self._conn()
             await db.execute(
                 "INSERT INTO runtime_task_checkpoints "
@@ -1280,7 +1376,7 @@ class SQLiteMemoryStore(MemoryStore):
         return dict(row) if row else None
 
     async def create_runtime_decision_nonce(self, task_id: str, *, ttl_minutes: int) -> str:
-        async with self._runtime_write_lock:
+        async with self._write_lock:
             db = await self._conn()
             nonce = uuid.uuid4().hex[:8]
             await db.execute(
@@ -1312,7 +1408,7 @@ class SQLiteMemoryStore(MemoryStore):
         source: str,
         result: str,
     ) -> bool:
-        async with self._runtime_write_lock:
+        async with self._write_lock:
             db = await self._conn()
             cursor = await db.execute(
                 "UPDATE runtime_task_decisions "
@@ -1348,7 +1444,7 @@ class SQLiteMemoryStore(MemoryStore):
         return [RuntimeTask.from_row(dict(r)) for r in rows]
 
     async def upsert_auth_credential(self, **kwargs) -> CredentialHandle:
-        async with self._runtime_write_lock:
+        async with self._write_lock:
             db = await self._conn()
             metadata_json = (
                 json.dumps(kwargs.get("metadata_json"), ensure_ascii=False)
@@ -1411,15 +1507,16 @@ class SQLiteMemoryStore(MemoryStore):
         *,
         scope_key: str = AUTH_SCOPE_DEFAULT,
     ) -> None:
-        db = await self._conn()
-        await db.execute(
-            "DELETE FROM auth_credentials WHERE provider=? AND owner_user_id=? AND scope_key=?",
-            (provider, owner_user_id, scope_key),
-        )
-        await db.commit()
+        async with self._write_lock:
+            db = await self._conn()
+            await db.execute(
+                "DELETE FROM auth_credentials WHERE provider=? AND owner_user_id=? AND scope_key=?",
+                (provider, owner_user_id, scope_key),
+            )
+            await db.commit()
 
     async def create_auth_flow(self, **kwargs) -> AuthFlow:
-        async with self._runtime_write_lock:
+        async with self._write_lock:
             db = await self._conn()
             await db.execute(
                 "INSERT INTO auth_flows ("
@@ -1472,7 +1569,7 @@ class SQLiteMemoryStore(MemoryStore):
     async def update_auth_flow(self, flow_id: str, **updates) -> AuthFlow | None:
         if not updates:
             return await self.get_auth_flow(flow_id)
-        async with self._runtime_write_lock:
+        async with self._write_lock:
             db = await self._conn()
             sets: list[str] = []
             values: list[Any] = []
@@ -1506,7 +1603,7 @@ class SQLiteMemoryStore(MemoryStore):
         return [AuthFlow.from_row(dict(row)) for row in rows]
 
     async def create_suspended_agent_run(self, **kwargs) -> SuspendedAgentRun:
-        async with self._runtime_write_lock:
+        async with self._write_lock:
             db = await self._conn()
             resume_context_json = kwargs.get("resume_context_json")
             if resume_context_json is not None and not isinstance(resume_context_json, str):
@@ -1568,7 +1665,7 @@ class SQLiteMemoryStore(MemoryStore):
     async def update_suspended_agent_run(self, run_id: str, **updates) -> SuspendedAgentRun | None:
         if not updates:
             return await self.get_suspended_agent_run(run_id)
-        async with self._runtime_write_lock:
+        async with self._write_lock:
             db = await self._conn()
             sets: list[str] = []
             values: list[Any] = []
@@ -1593,7 +1690,7 @@ class SQLiteMemoryStore(MemoryStore):
         return await self.get_suspended_agent_run(run_id)
 
     async def create_hitl_prompt(self, **kwargs) -> HitlPrompt:
-        async with self._runtime_write_lock:
+        async with self._write_lock:
             db = await self._conn()
             choices_json = kwargs.get("choices_json")
             if choices_json is not None and not isinstance(choices_json, str):
@@ -1700,7 +1797,7 @@ class SQLiteMemoryStore(MemoryStore):
     async def update_hitl_prompt(self, prompt_id: str, **updates) -> HitlPrompt | None:
         if not updates:
             return await self.get_hitl_prompt(prompt_id)
-        async with self._runtime_write_lock:
+        async with self._write_lock:
             db = await self._conn()
             sets: list[str] = []
             values: list[Any] = []
@@ -1725,7 +1822,7 @@ class SQLiteMemoryStore(MemoryStore):
         return await self.get_hitl_prompt(prompt_id)
 
     async def create_notification_event(self, **kwargs) -> NotificationRecord:
-        async with self._runtime_write_lock:
+        async with self._write_lock:
             db = await self._conn()
             payload_json = kwargs.get("payload_json")
             if payload_json is not None and not isinstance(payload_json, str):
@@ -1797,7 +1894,7 @@ class SQLiteMemoryStore(MemoryStore):
     ) -> NotificationRecord | None:
         if not updates:
             return await self.get_notification_event(notification_id)
-        async with self._runtime_write_lock:
+        async with self._write_lock:
             db = await self._conn()
             sets: list[str] = []
             values: list[Any] = []
@@ -1827,7 +1924,7 @@ class SQLiteMemoryStore(MemoryStore):
         dedupe_key: str,
         status: str = "resolved",
     ) -> int:
-        async with self._runtime_write_lock:
+        async with self._write_lock:
             db = await self._conn()
             cursor = await db.execute(
                 "UPDATE notification_events "
@@ -1839,7 +1936,7 @@ class SQLiteMemoryStore(MemoryStore):
         return int(cursor.rowcount or 0)
 
     async def upsert_skill_provenance(self, skill_name: str, **kwargs) -> None:
-        async with self._runtime_write_lock:
+        async with self._write_lock:
             db = await self._conn()
             warnings = kwargs.get("validation_warnings")
             warnings_json = (
@@ -1905,7 +2002,7 @@ class SQLiteMemoryStore(MemoryStore):
         return data
 
     async def record_skill_invocation(self, **kwargs) -> int | None:
-        async with self._runtime_write_lock:
+        async with self._write_lock:
             db = await self._conn()
             cursor = await db.execute(
                 "INSERT INTO skill_invocations ("
@@ -1941,12 +2038,13 @@ class SQLiteMemoryStore(MemoryStore):
         invocation_id: int,
         message_id: str,
     ) -> None:
-        db = await self._conn()
-        await db.execute(
-            "UPDATE skill_invocations SET response_message_id=? WHERE id=?",
-            (message_id, int(invocation_id)),
-        )
-        await db.commit()
+        async with self._write_lock:
+            db = await self._conn()
+            await db.execute(
+                "UPDATE skill_invocations SET response_message_id=? WHERE id=?",
+                (message_id, int(invocation_id)),
+            )
+            await db.commit()
 
     async def get_skill_invocation_by_message(
         self,
@@ -1961,33 +2059,35 @@ class SQLiteMemoryStore(MemoryStore):
         return dict(row) if row else None
 
     async def upsert_skill_feedback(self, **kwargs) -> None:
-        db = await self._conn()
-        await db.execute(
-            "INSERT INTO skill_feedback ("
-            " invocation_id, actor_id, platform, channel_id, thread_id, score, source, updated_at"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP) "
-            "ON CONFLICT(invocation_id, actor_id) DO UPDATE SET "
-            "score=excluded.score, platform=excluded.platform, channel_id=excluded.channel_id, "
-            "thread_id=excluded.thread_id, source=excluded.source, updated_at=CURRENT_TIMESTAMP",
-            (
-                int(kwargs["invocation_id"]),
-                kwargs["actor_id"],
-                kwargs.get("platform"),
-                kwargs.get("channel_id"),
-                kwargs.get("thread_id"),
-                int(kwargs["score"]),
-                kwargs.get("source", "reaction"),
-            ),
-        )
-        await db.commit()
+        async with self._write_lock:
+            db = await self._conn()
+            await db.execute(
+                "INSERT INTO skill_feedback ("
+                " invocation_id, actor_id, platform, channel_id, thread_id, score, source, updated_at"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP) "
+                "ON CONFLICT(invocation_id, actor_id) DO UPDATE SET "
+                "score=excluded.score, platform=excluded.platform, channel_id=excluded.channel_id, "
+                "thread_id=excluded.thread_id, source=excluded.source, updated_at=CURRENT_TIMESTAMP",
+                (
+                    int(kwargs["invocation_id"]),
+                    kwargs["actor_id"],
+                    kwargs.get("platform"),
+                    kwargs.get("channel_id"),
+                    kwargs.get("thread_id"),
+                    int(kwargs["score"]),
+                    kwargs.get("source", "reaction"),
+                ),
+            )
+            await db.commit()
 
     async def delete_skill_feedback(self, *, invocation_id: int, actor_id: str) -> None:
-        db = await self._conn()
-        await db.execute(
-            "DELETE FROM skill_feedback WHERE invocation_id=? AND actor_id=?",
-            (int(invocation_id), actor_id),
-        )
-        await db.commit()
+        async with self._write_lock:
+            db = await self._conn()
+            await db.execute(
+                "DELETE FROM skill_feedback WHERE invocation_id=? AND actor_id=?",
+                (int(invocation_id), actor_id),
+            )
+            await db.commit()
 
     async def list_recent_skill_invocations(self, skill_name: str, *, limit: int) -> list[dict[str, Any]]:
         db = await self._conn()
@@ -2094,25 +2194,26 @@ ORDER BY recent_invocations DESC, s.skill_name ASC
         disabled: bool,
         reason: str | None = None,
     ) -> None:
-        db = await self._conn()
-        if disabled:
-            await db.execute(
-                "INSERT INTO skill_provenance (skill_name, auto_disabled, auto_disabled_reason, auto_disabled_at, updated_at) "
-                "VALUES (?, 1, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) "
-                "ON CONFLICT(skill_name) DO UPDATE SET "
-                "auto_disabled=1, auto_disabled_reason=excluded.auto_disabled_reason, "
-                "auto_disabled_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP",
-                (skill_name, reason),
-            )
-        else:
-            await db.execute(
-                "INSERT INTO skill_provenance (skill_name, auto_disabled, updated_at) "
-                "VALUES (?, 0, CURRENT_TIMESTAMP) "
-                "ON CONFLICT(skill_name) DO UPDATE SET "
-                "auto_disabled=0, auto_disabled_reason=NULL, auto_disabled_at=NULL, updated_at=CURRENT_TIMESTAMP",
-                (skill_name,),
-            )
-        await db.commit()
+        async with self._write_lock:
+            db = await self._conn()
+            if disabled:
+                await db.execute(
+                    "INSERT INTO skill_provenance (skill_name, auto_disabled, auto_disabled_reason, auto_disabled_at, updated_at) "
+                    "VALUES (?, 1, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) "
+                    "ON CONFLICT(skill_name) DO UPDATE SET "
+                    "auto_disabled=1, auto_disabled_reason=excluded.auto_disabled_reason, "
+                    "auto_disabled_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP",
+                    (skill_name, reason),
+                )
+            else:
+                await db.execute(
+                    "INSERT INTO skill_provenance (skill_name, auto_disabled, updated_at) "
+                    "VALUES (?, 0, CURRENT_TIMESTAMP) "
+                    "ON CONFLICT(skill_name) DO UPDATE SET "
+                    "auto_disabled=0, auto_disabled_reason=NULL, auto_disabled_at=NULL, updated_at=CURRENT_TIMESTAMP",
+                    (skill_name,),
+                )
+            await db.commit()
 
     async def list_auto_disabled_skills(self) -> set[str]:
         db = await self._conn()
@@ -2123,24 +2224,25 @@ ORDER BY recent_invocations DESC, s.skill_name ASC
         return {str(row["skill_name"]) for row in rows}
 
     async def add_skill_evaluation(self, **kwargs) -> None:
-        db = await self._conn()
-        details_json = (
-            json.dumps(kwargs.get("details_json"), ensure_ascii=False)
-            if kwargs.get("details_json") is not None and not isinstance(kwargs.get("details_json"), str)
-            else kwargs.get("details_json")
-        )
-        await db.execute(
-            "INSERT INTO skill_evaluations (skill_name, source_task_id, evaluation_type, status, summary, details_json) VALUES (?, ?, ?, ?, ?, ?)",
-            (
-                kwargs["skill_name"],
-                kwargs.get("source_task_id"),
-                kwargs["evaluation_type"],
-                kwargs["status"],
-                kwargs["summary"],
-                details_json,
-            ),
-        )
-        await db.commit()
+        async with self._write_lock:
+            db = await self._conn()
+            details_json = (
+                json.dumps(kwargs.get("details_json"), ensure_ascii=False)
+                if kwargs.get("details_json") is not None and not isinstance(kwargs.get("details_json"), str)
+                else kwargs.get("details_json")
+            )
+            await db.execute(
+                "INSERT INTO skill_evaluations (skill_name, source_task_id, evaluation_type, status, summary, details_json) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    kwargs["skill_name"],
+                    kwargs.get("source_task_id"),
+                    kwargs["evaluation_type"],
+                    kwargs["status"],
+                    kwargs["summary"],
+                    details_json,
+                ),
+            )
+            await db.commit()
 
     async def get_latest_skill_evaluations(
         self,
@@ -2250,39 +2352,438 @@ ORDER BY recent_invocations DESC, s.skill_name ASC
         return {"version": 1, "turns": turns, "summaries": summaries}
 
     async def import_data(self, data: dict[str, Any]) -> int:
-        db = await self._conn()
-        count = 0
+        async with self._write_lock:
+            db = await self._conn()
+            count = 0
 
-        for turn in data.get("turns", []):
-            await db.execute(
-                "INSERT INTO turns (platform, channel_id, thread_id, role, content, author, agent) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (
-                    turn["platform"],
-                    turn["channel_id"],
-                    turn["thread_id"],
-                    turn["role"],
-                    turn["content"],
-                    turn.get("author"),
-                    turn.get("agent"),
-                ),
-            )
-            count += 1
+            for turn in data.get("turns", []):
+                await db.execute(
+                    "INSERT INTO turns (platform, channel_id, thread_id, role, content, author, agent) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        turn["platform"],
+                        turn["channel_id"],
+                        turn["thread_id"],
+                        turn["role"],
+                        turn["content"],
+                        turn.get("author"),
+                        turn.get("agent"),
+                    ),
+                )
+                count += 1
 
-        for summary in data.get("summaries", []):
-            await db.execute(
-                "INSERT INTO summaries (platform, channel_id, thread_id, summary, turns_start, turns_end) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    summary["platform"],
-                    summary["channel_id"],
-                    summary["thread_id"],
-                    summary["summary"],
-                    summary["turns_start"],
-                    summary["turns_end"],
-                ),
-            )
+            for summary in data.get("summaries", []):
+                await db.execute(
+                    "INSERT INTO summaries (platform, channel_id, thread_id, summary, turns_start, turns_end) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        summary["platform"],
+                        summary["channel_id"],
+                        summary["thread_id"],
+                        summary["summary"],
+                        summary["turns_start"],
+                        summary["turns_end"],
+                    ),
+                )
 
-        await db.commit()
+            await db.commit()
         logger.info("Imported %d turns and %d summaries", count, len(data.get("summaries", [])))
         return count
+
+
+class SQLiteScopedStore(SQLiteMemoryStore):
+    def __init__(self, db_path: str | Path, *, keep_tables: set[str], label: str) -> None:
+        super().__init__(db_path)
+        self._keep_tables = set(keep_tables)
+        self._label = label
+
+    def _allowed_tables(self) -> set[str]:
+        allowed = set(self._keep_tables)
+        if "turns_fts" in allowed:
+            allowed |= CONVERSATION_FTS_SHADOW_TABLES
+        return allowed
+
+    async def _drop_unkept_tables(self) -> None:
+        db = await self._conn()
+        allowed = self._allowed_tables()
+        for table in ALL_TOP_LEVEL_TABLES:
+            if table in allowed:
+                continue
+            await db.execute(f'DROP TABLE IF EXISTS "{table}"')
+
+    async def init(self) -> None:
+        db = await self._conn()
+        existing_tables = await self._list_user_tables()
+        if not existing_tables:
+            await db.executescript(self.SCHEMA_SQL)
+            await self._migrate_runtime_schema()
+            await self._drop_unkept_tables()
+            await db.commit()
+        else:
+            allowed = self._allowed_tables()
+            unexpected = {
+                table
+                for table in existing_tables
+                if table in (ALL_TOP_LEVEL_TABLES | CONVERSATION_FTS_SHADOW_TABLES) and table not in allowed
+            }
+            if unexpected:
+                raise RuntimeError(
+                    f"{self._label} store at {self._db_path} has unexpected tables: {sorted(unexpected)}"
+                )
+            await self._migrate_runtime_schema()
+            await db.commit()
+        logger.info("%s store initialised at %s", self._label, self._db_path)
+
+
+class SQLiteConversationStore(SQLiteScopedStore):
+    def __init__(self, db_path: str | Path) -> None:
+        super().__init__(db_path, keep_tables=CONVERSATION_TABLES, label="Conversation")
+
+
+class SQLiteRuntimeStateStore(SQLiteScopedStore):
+    def __init__(self, db_path: str | Path) -> None:
+        super().__init__(db_path, keep_tables=RUNTIME_STATE_TABLES, label="Runtime state")
+
+
+class SQLiteSkillsTelemetryStore(SQLiteScopedStore):
+    def __init__(self, db_path: str | Path) -> None:
+        super().__init__(db_path, keep_tables=SKILLS_TELEMETRY_TABLES, label="Skills telemetry")
+
+
+class SplitSQLiteMemoryStore:
+    _CONVERSATION_METHODS = {
+        "load_history",
+        "append",
+        "save_summary",
+        "delete_thread",
+        "search",
+        "count_turns",
+        "export_data",
+        "import_data",
+    }
+    _RUNTIME_METHODS = {
+        "save_session",
+        "load_session",
+        "delete_session",
+        "create_runtime_task",
+        "get_runtime_task",
+        "list_runtime_tasks",
+        "update_runtime_task",
+        "claim_pending_runtime_task",
+        "requeue_inflight_runtime_tasks",
+        "add_runtime_event",
+        "list_runtime_events",
+        "add_runtime_checkpoint",
+        "get_last_runtime_checkpoint",
+        "create_runtime_decision_nonce",
+        "get_active_runtime_decision_nonce",
+        "consume_runtime_decision_nonce",
+        "list_runtime_cleanup_candidates",
+        "upsert_auth_credential",
+        "get_auth_credential",
+        "delete_auth_credential",
+        "create_auth_flow",
+        "get_auth_flow",
+        "get_active_auth_flow",
+        "update_auth_flow",
+        "list_active_auth_flows",
+        "create_suspended_agent_run",
+        "get_suspended_agent_run",
+        "get_active_suspended_agent_run",
+        "update_suspended_agent_run",
+        "create_hitl_prompt",
+        "get_hitl_prompt",
+        "get_active_hitl_prompt_for_thread",
+        "get_active_hitl_prompt_for_task",
+        "list_active_hitl_prompts",
+        "update_hitl_prompt",
+        "create_notification_event",
+        "get_notification_event",
+        "list_active_notification_events",
+        "update_notification_event",
+        "resolve_notification_events",
+        "upsert_ephemeral_workspace",
+        "list_expired_ephemeral_workspaces",
+        "mark_ephemeral_workspace_cleaned",
+    }
+    _SKILLS_METHODS = {
+        "upsert_skill_provenance",
+        "get_skill_provenance",
+        "record_skill_invocation",
+        "set_skill_invocation_response_message",
+        "get_skill_invocation_by_message",
+        "upsert_skill_feedback",
+        "delete_skill_feedback",
+        "list_recent_skill_invocations",
+        "get_skill_stats",
+        "set_skill_auto_disabled",
+        "list_auto_disabled_skills",
+        "add_skill_evaluation",
+        "get_latest_skill_evaluations",
+    }
+
+    def __init__(
+        self,
+        *,
+        conversation_path: str | Path,
+        runtime_state_path: str | Path,
+        skills_telemetry_path: str | Path,
+    ) -> None:
+        self._conversation_store = SQLiteConversationStore(conversation_path)
+        self._runtime_state_store = SQLiteRuntimeStateStore(runtime_state_path)
+        self._skills_telemetry_store = SQLiteSkillsTelemetryStore(skills_telemetry_path)
+        self.paths = {
+            "conversation": str(Path(conversation_path).expanduser().resolve()),
+            "runtime": str(Path(runtime_state_path).expanduser().resolve()),
+            "skills": str(Path(skills_telemetry_path).expanduser().resolve()),
+        }
+
+    async def init(self) -> None:
+        await self._conversation_store.init()
+        await self._runtime_state_store.init()
+        await self._skills_telemetry_store.init()
+
+    async def close(self) -> None:
+        await self._conversation_store.close()
+        await self._runtime_state_store.close()
+        await self._skills_telemetry_store.close()
+
+    async def delete_thread(
+        self,
+        platform: str,
+        channel_id: str,
+        thread_id: str,
+    ) -> None:
+        await self._conversation_store.delete_thread(platform, channel_id, thread_id)
+        await self._runtime_state_store.delete_thread(platform, channel_id, thread_id)
+
+    def __getattr__(self, name: str):
+        if name in self._CONVERSATION_METHODS:
+            return getattr(self._conversation_store, name)
+        if name in self._RUNTIME_METHODS:
+            return getattr(self._runtime_state_store, name)
+        if name in self._SKILLS_METHODS:
+            return getattr(self._skills_telemetry_store, name)
+        raise AttributeError(name)
+
+
+def _user_tables_sync(db_path: Path) -> set[str]:
+    if not db_path.exists():
+        return set()
+    with sqlite3.connect(str(db_path)) as conn:
+        rows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+        ).fetchall()
+    return {str(row[0]) for row in rows}
+
+
+def _copy_tables_sync(source_db: Path, dest_db: Path, tables: set[str]) -> None:
+    with sqlite3.connect(str(dest_db)) as conn:
+        conn.execute("ATTACH DATABASE ? AS src", (str(source_db),))
+        try:
+            ordered_tables = [table for table in TABLE_COPY_ORDER if table in tables]
+            for table in ordered_tables:
+                exists = conn.execute(
+                    "SELECT 1 FROM src.sqlite_master WHERE type='table' AND name=?",
+                    (table,),
+                ).fetchone()
+                if not exists:
+                    continue
+                source_columns = {
+                    str(row[1])
+                    for row in conn.execute(f'PRAGMA src.table_info("{table}")').fetchall()
+                }
+                dest_columns = [
+                    str(row[1])
+                    for row in conn.execute(f'PRAGMA main.table_info("{table}")').fetchall()
+                ]
+                column_defaults = TABLE_COPY_DEFAULTS.get(table, {})
+
+                insert_columns: list[str] = []
+                select_expressions: list[str] = []
+                for column in dest_columns:
+                    if column in source_columns:
+                        if column in column_defaults:
+                            default = json.dumps(column_defaults[column], ensure_ascii=False)
+                            select_expressions.append(
+                                f'COALESCE(src."{table}"."{column}", {default})'
+                            )
+                        else:
+                            select_expressions.append(f'src."{table}"."{column}"')
+                        insert_columns.append(f'"{column}"')
+                    elif column in column_defaults:
+                        insert_columns.append(f'"{column}"')
+                        select_expressions.append(json.dumps(column_defaults[column], ensure_ascii=False))
+
+                if not insert_columns:
+                    continue
+
+                conn.execute(
+                    f'INSERT INTO "{table}" ({", ".join(insert_columns)}) '
+                    f'SELECT {", ".join(select_expressions)} FROM src."{table}"'
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.execute("DETACH DATABASE src")
+
+
+def _validate_table_counts_sync(source_db: Path, dest_db: Path, tables: set[str]) -> None:
+    with sqlite3.connect(str(source_db)) as source_conn, sqlite3.connect(str(dest_db)) as dest_conn:
+        for table in sorted(tables):
+            source_exists = source_conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).fetchone()
+            if not source_exists:
+                continue
+            source_count = int(source_conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0])
+            dest_count = int(dest_conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0])
+            if source_count != dest_count:
+                raise RuntimeError(
+                    f"Row-count mismatch while splitting {table}: source={source_count} dest={dest_count}"
+                )
+
+
+def _replace_with_temp_file(temp_path: Path, final_path: Path) -> None:
+    final_path.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(str(temp_path), str(final_path))
+
+
+def _replace_sqlite_bundle(temp_path: Path, final_path: Path) -> None:
+    _replace_with_temp_file(temp_path, final_path)
+    temp_wal = temp_path.with_name(f"{temp_path.name}-wal")
+    temp_shm = temp_path.with_name(f"{temp_path.name}-shm")
+    final_wal = final_path.with_name(f"{final_path.name}-wal")
+    final_shm = final_path.with_name(f"{final_path.name}-shm")
+    if temp_wal.exists():
+        _replace_with_temp_file(temp_wal, final_wal)
+    if temp_shm.exists():
+        _replace_with_temp_file(temp_shm, final_shm)
+
+
+def _cleanup_sqlite_bundle(path: Path) -> None:
+    for candidate in (
+        path,
+        path.with_name(f"{path.name}-wal"),
+        path.with_name(f"{path.name}-shm"),
+    ):
+        if candidate.exists():
+            candidate.unlink()
+
+
+def _monolith_backup_paths(memory_path: Path) -> tuple[Path, Path, Path]:
+    backup_db = memory_path.with_name(f"{memory_path.name}.monolith.bak")
+    backup_wal = memory_path.with_name(f"{memory_path.name}.monolith.bak-wal")
+    backup_shm = memory_path.with_name(f"{memory_path.name}.monolith.bak-shm")
+    return backup_db, backup_wal, backup_shm
+
+
+async def maybe_split_legacy_memory_db(
+    *,
+    memory_path: str | Path,
+    runtime_state_path: str | Path,
+    skills_telemetry_path: str | Path,
+    logger: logging.Logger,
+) -> bool:
+    conversation_path = Path(memory_path).expanduser().resolve()
+    runtime_path = Path(runtime_state_path).expanduser().resolve()
+    skills_path = Path(skills_telemetry_path).expanduser().resolve()
+    backup_db, backup_wal, backup_shm = _monolith_backup_paths(conversation_path)
+
+    conv_exists = conversation_path.exists()
+    runtime_exists = runtime_path.exists()
+    skills_exists = skills_path.exists()
+    backup_exists = backup_db.exists()
+
+    if runtime_exists or skills_exists:
+        if not (conv_exists and runtime_exists and skills_exists):
+            raise RuntimeError(
+                "Detected partial split-memory layout; expected conversation/runtime/skills DBs to either all exist or all be absent."
+            )
+        conversation_tables = _user_tables_sync(conversation_path)
+        unexpected_conversation_tables = {
+            table for table in conversation_tables if table in (RUNTIME_STATE_TABLES | SKILLS_TELEMETRY_TABLES)
+        }
+        if unexpected_conversation_tables:
+            raise RuntimeError(
+                f"Conversation DB still contains non-conversation tables after split: {sorted(unexpected_conversation_tables)}"
+            )
+        return False
+
+    if not conv_exists and not backup_exists:
+        return False
+
+    source_db = backup_db if (not conv_exists and backup_exists) else conversation_path
+    conversation_tables = _user_tables_sync(source_db)
+    if not conversation_tables:
+        return False
+
+    monolithic_tables = conversation_tables & (RUNTIME_STATE_TABLES | SKILLS_TELEMETRY_TABLES)
+    if not monolithic_tables:
+        raise RuntimeError(
+            "Detected conversation-only memory.db without runtime.db and skills.db; refusing to continue with a partial split layout."
+        )
+
+    conversation_path.parent.mkdir(parents=True, exist_ok=True)
+    runtime_path.parent.mkdir(parents=True, exist_ok=True)
+    skills_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if source_db == conversation_path:
+        for backup in (backup_db, backup_wal, backup_shm):
+            if backup.exists():
+                raise RuntimeError(f"Split-memory backup path already exists: {backup}")
+
+        shutil.move(str(conversation_path), str(backup_db))
+        wal_src = conversation_path.with_name(f"{conversation_path.name}-wal")
+        shm_src = conversation_path.with_name(f"{conversation_path.name}-shm")
+        if wal_src.exists():
+            shutil.move(str(wal_src), str(backup_wal))
+        if shm_src.exists():
+            shutil.move(str(shm_src), str(backup_shm))
+        source_db = backup_db
+
+    temp_suffix = uuid.uuid4().hex[:8]
+    conversation_tmp = conversation_path.with_name(f"{conversation_path.name}.tmp-{temp_suffix}")
+    runtime_tmp = runtime_path.with_name(f"{runtime_path.name}.tmp-{temp_suffix}")
+    skills_tmp = skills_path.with_name(f"{skills_path.name}.tmp-{temp_suffix}")
+
+    try:
+        conversation_store = SQLiteConversationStore(conversation_tmp)
+        runtime_store = SQLiteRuntimeStateStore(runtime_tmp)
+        skills_store = SQLiteSkillsTelemetryStore(skills_tmp)
+        try:
+            await conversation_store.init()
+            await runtime_store.init()
+            await skills_store.init()
+        finally:
+            await conversation_store.close()
+            await runtime_store.close()
+            await skills_store.close()
+
+        _copy_tables_sync(source_db, conversation_tmp, {"turns", "summaries"})
+        _copy_tables_sync(source_db, runtime_tmp, RUNTIME_STATE_TABLES)
+        _copy_tables_sync(source_db, skills_tmp, SKILLS_TELEMETRY_TABLES)
+
+        _validate_table_counts_sync(source_db, conversation_tmp, {"turns", "summaries"})
+        _validate_table_counts_sync(source_db, runtime_tmp, RUNTIME_STATE_TABLES)
+        _validate_table_counts_sync(source_db, skills_tmp, SKILLS_TELEMETRY_TABLES)
+
+        _replace_sqlite_bundle(conversation_tmp, conversation_path)
+        _replace_sqlite_bundle(runtime_tmp, runtime_path)
+        _replace_sqlite_bundle(skills_tmp, skills_path)
+    except Exception:
+        for temp_path in (conversation_tmp, runtime_tmp, skills_tmp):
+            _cleanup_sqlite_bundle(temp_path)
+        raise
+
+    logger.info(
+        "Split legacy monolithic memory store into conversation=%s runtime=%s skills=%s (backup=%s)",
+        conversation_path,
+        runtime_path,
+        skills_path,
+        backup_db,
+    )
+    return True
