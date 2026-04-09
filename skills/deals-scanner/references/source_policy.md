@@ -32,6 +32,17 @@ This skill uses **web search**, not automated scraping. For each source, the age
   - state that explicitly in the report instead of pretending the scan is complete
 - For broad daily bundles, the `summary` report should call out which sources cleared the coverage floor and which did not.
 
+## Daily lookback defaults
+
+- `credit-cards`: recent `3` days
+- `uscardforum`: recent `3` days
+- `rakuten`: recent `3` days
+- `slickdeals`: recent `7` days
+- `dealmoon`: recent `7` days
+- broad `summary`: recent `7` days
+
+These defaults apply to `daily_scan` only. `weekly_digest` remains a fixed recent `7` day synthesis across all five sources.
+
 ## Link and confidence policy
 
 Mainline deal entries should prefer concrete deal-level URLs:
@@ -69,6 +80,15 @@ Broad daily `summary.md` should classify cross-source items into:
 - `Watchlist`
   - worth tracking, but not yet strong enough for immediate action
 
+Additional summary rules:
+
+- `summary` should read like a decision brief, not a directory page.
+- Keep the main payload in `Apply now` / `Buy now` / `Stack now`.
+- Aim for roughly `8-12` concrete items across those three buckets unless the day is genuinely thin.
+- `各渠道一句话结论` is supportive; it should not replace the main action buckets.
+- `Coverage / Confidence` should explicitly state each source's lookback window and whether it cleared the high-confidence floor.
+- If an item falls outside that source's mainline daily window but still matters, keep it in `Watchlist` only and mark it as a carryover / 超窗延续项.
+
 ## Per-source search strategies
 
 ### credit-cards (topic bucket)
@@ -104,6 +124,7 @@ Broad daily `summary.md` should classify cross-source items into:
 **Extra rules:**
 - Do not let aggregator/blog roundup links be the only evidence for top items when an issuer page exists.
 - For mainline `Apply now` items, try to pair a blog/forum explainer with an issuer official page or more concrete landing page.
+- Mainline daily items should come from the recent `3` day window. Older but still notable items belong in `Watchlist` only.
 
 ### uscardforum (single site)
 
@@ -144,6 +165,7 @@ Broad daily `summary.md` should classify cross-source items into:
 **Extra rules:**
 - Prefer merchant-level Rakuten entry pages when available.
 - Treat `allstores` / broad listing pages as overview-only; do not use them as the only link for a top deal.
+- Mainline daily items should come from the recent `3` day window. Older but still notable items belong in `Watchlist` only.
 
 ### slickdeals (single site)
 
@@ -166,6 +188,7 @@ Broad daily `summary.md` should classify cross-source items into:
 
 **Positioning:**
 - Keep Slickdeals broad. It is the wide deal radar across categories, not just a tech feed.
+- The mainline daily window is recent `7` days.
 
 ### dealmoon (single site)
 
@@ -189,6 +212,8 @@ Broad daily `summary.md` should classify cross-source items into:
 **Positioning:**
 - Dealmoon daily coverage should stay centered on beauty, electronics, and home.
 - Apparel/fashion can appear only when it clearly makes the day-level top picks or watchlist; it should not dominate the source report.
+- High-confidence mainline entries should prefer concrete deal or merchant pages rather than homepage/roundup links.
+- The mainline daily window is recent `7` days.
 
 ## Deal quality evaluation criteria
 

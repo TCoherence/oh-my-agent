@@ -15,6 +15,7 @@ JSON and Markdown structure definitions for deals-scanner reports.
   "report_date": "2026-04-04",
   "period_start": "2026-04-04",
   "period_end": "2026-04-04",
+  "lookback_window_days": 3,
   "summary": "一句话结论",
   "top_deals": [],
   "source_mix_note": "来源构成说明",
@@ -46,7 +47,8 @@ For broad daily bundles, `source` is `summary` and the JSON should also include:
       "summary": "",
       "high_confidence_count": 0,
       "watchlist_count": 0,
-      "met_floor": false
+      "met_floor": false,
+      "lookback_window_days": 3
     }
   ],
   "coverage_status": {
@@ -89,7 +91,8 @@ Used in `top_deals[]`, `sections[].deals[]`, and `cross_source_highlights[]`.
   "url": "https://...",
   "expires": "2026-04-30",
   "quality_score": 5,
-  "notes": "需在3个月内消费$4,000"
+  "notes": "需在3个月内消费$4,000",
+  "carryover": false
 }
 ```
 
@@ -104,6 +107,7 @@ Used in `top_deals[]`, `sections[].deals[]`, and `cross_source_highlights[]`.
 | `expires` | string | no | Expiration date (ISO) or "ongoing" or empty if unknown |
 | `quality_score` | int (1-5) | yes | See scale below |
 | `notes` | string | no | Conditions, restrictions, tips |
+| `carryover` | bool | no | `true` when the item is outside the source's main daily window and is only being kept in `Watchlist` as a continuing item |
 
 ### quality_score scale (1-5 integer)
 
@@ -276,8 +280,13 @@ Deal descriptions **must** carry inline source links in the body. This is a hard
 
 - Daily reference reports should target `12-15` verified items and should not stop below `10` unless the source genuinely lacks enough credible candidates.
 - High-confidence floor is `10`.
+- Daily mainline lookback defaults are source-specific:
+  - `credit-cards/uscardforum/rakuten = 3`
+  - `slickdeals/dealmoon/summary = 7`
 - If a source cannot reach `10` high-confidence items:
   - keep the main正文 focused on high-confidence entries only
   - put weaker candidates into `lower_confidence_watchlist`
   - set `coverage_floor_met=false`
   - call the gap out explicitly in the summary report's `Coverage / Confidence` section
+- Items outside a source's mainline daily window should not enter the summary's main action buckets. Keep them in `Watchlist` and mark them with `carryover=true` or equivalent wording in `notes`.
+- `summary.md` should read like a decision brief, not an index page. The main decision payload should stay in `Apply now` / `Buy now` / `Stack now`, with roughly `8-12` concrete items total unless the day is genuinely thin.

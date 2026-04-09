@@ -5,14 +5,14 @@ Reusable prompt variants for deals-scanner. Use these when the user asks for a s
 ## Daily scan — broad bundle
 
 ```text
-Use the deals-scanner skill to produce a broad daily bundle for the current local date. Research all five sources: credit-cards, uscardforum, rakuten, slickdeals, and dealmoon. Persist five per-source reference reports under ~/.oh-my-agent/reports/deals-scanner/daily/<date>/references/, then write one summary.md + summary.json that reads like a morning brief rather than a directory page. The summary must group cross-source items into Apply now / Buy now / Stack now / Watchlist, include one concise snapshot per source, call out any source that missed the 10-item high-confidence floor, and link to each reference file. Aim for 12-15 items per source with a hard high-confidence goal of 10; if a source cannot reach that floor, keep weaker items in lower_confidence_watchlist instead of padding the main body. Prefer deal-level links, use Dealmoon mainly for beauty/electronics/home, and keep Slickdeals broad across frontpage, tech, home, and other notable categories.
+Use the deals-scanner skill to produce a broad daily bundle for the current local date. Research all five sources with source-specific default windows: credit-cards/uscardforum/rakuten over the recent 3 days, slickdeals/dealmoon over the recent 7 days. Persist five per-source reference reports under ~/.oh-my-agent/reports/deals-scanner/daily/<date>/references/, then write one summary.md + summary.json that reads like a decision-ready morning brief rather than a directory page. The summary must keep its main payload in Apply now / Buy now / Stack now, carry roughly 8-12 concrete items across those buckets unless the day is genuinely thin, include concise source snapshots, call out each source's lookback window and whether it missed the 10-item high-confidence floor, and link to each reference file. Older carryover items outside a source's mainline window may only appear in Watchlist. Prefer deal-level links, use Dealmoon mainly for beauty/electronics/home, and keep Slickdeals broad across frontpage, tech, home, and other notable categories.
 ```
 
 ## Daily scan — credit-cards (broad)
 
 ```text
 Use the deals-scanner skill in daily_scan mode for credit-cards.
-Research today's US credit card deals from Doctor of Credit, NerdWallet,
+Research recent US credit card deals from the last 3 days using Doctor of Credit, NerdWallet,
 The Points Guy, and issuer sites. Cover sign-up bonuses, cashback/rewards
 promotions, annual fee waivers, and expiring offers.
 Aim for 12-15 items and try not to stop below 10 high-confidence items if the source quality allows it. If you still finish below 10, keep weaker candidates in lower_confidence_watchlist and say so explicitly.
@@ -26,15 +26,15 @@ report with the saved location.
 ```text
 Use the deals-scanner skill in daily_scan mode for credit-cards.
 Focus specifically on new or improved sign-up bonuses and targeted card
-offers. Check Doctor of Credit and issuer sites for any changes in the
-last 24 hours. Read prior stored reports, persist, and post in Chinese.
+offers from the last 3 days. Check Doctor of Credit and issuer sites for
+recent changes. Read prior stored reports, persist, and post in Chinese.
 ```
 
 ## Daily scan — uscardforum
 
 ```text
 Use the deals-scanner skill in daily_scan mode for uscardforum.
-Scan uscardforum.com for today's hot discussions, new approval/denial
+Scan uscardforum.com for the last 3 days of hot discussions, new approval/denial
 data points, redemption strategy threads, and any bank policy change
 reports. Aim for at least 10 verified threads/data points if feasible.
 Read prior stored reports, persist the new Markdown and JSON
@@ -45,7 +45,7 @@ report, then post the finished Chinese report with the saved location.
 
 ```text
 Use the deals-scanner skill in daily_scan mode for rakuten.
-Research today's Rakuten cashback deals, flash promotions, new merchant
+Research Rakuten cashback deals from the last 3 days, flash promotions, new merchant
 additions, and notable high-cashback merchants. Identify stacking
 opportunities with credit card portals. Prefer merchant-level Rakuten
 entry pages over all-stores overview pages. Aim for at least 10
@@ -66,9 +66,9 @@ in Chinese.
 
 ```text
 Use the deals-scanner skill in daily_scan mode for slickdeals.
-Research today's Slickdeals frontpage deals and popular community-voted
+Research Slickdeals frontpage deals and popular community-voted
 deals across tech, home, apparel, outdoor, and other categories. Keep the
-source broad rather than reducing it to a tech-only feed. Prioritize
+source broad rather than reducing it to a tech-only feed. Use the recent 7 day window by default. Prioritize
 highly-voted deals and notable price drops, and aim for at least 10
 high-confidence items if feasible. Read prior stored reports, persist,
 and post in Chinese.
@@ -87,7 +87,7 @@ smart home devices. Persist and post in Chinese.
 
 ```text
 Use the deals-scanner skill in daily_scan mode for dealmoon.
-Research today's Dealmoon (北美省钱快报) featured deals, exclusive
+Research Dealmoon (北美省钱快报) featured deals from the recent 7 days, exclusive
 discount codes, and focus on beauty, electronics, and home. Do not let
 fashion/apparel dominate the scan unless it clearly breaks into the day's
 top picks. Aim for at least 10 high-confidence items if feasible. Read

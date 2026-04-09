@@ -22,6 +22,7 @@ The format is intentionally lightweight and release-oriented rather than exhaust
 - `market-briefing` finance daily now defaults to China macro/policy, US macro/policy, tracked holdings over the last 7 days, and a market/index-fund lens, and all daily domains now carry stricter no-signal / low-confidence guidance in schema and prompts
 - `market-briefing` AI daily now adds tracked people/community signals, a bounded X.com discovery sweep, candidate/promotion state under `~/.oh-my-agent/reports/market-briefing/state/`, and explicit no-signal fallbacks for thin layers
 - Report-store helpers for `market-briefing` and `deals-scanner` now derive their default local report date from `OMA_REPORT_TIMEZONE` / `TZ` instead of implicitly inheriting UTC-like container defaults, and Docker helper scripts now pass an explicit report timezone into the container
+- `deals-scanner` daily scans now use source-specific default lookback windows (`3` days for credit-cards/uscardforum/rakuten, `7` days for slickdeals/dealmoon/summary), expose `lookback_window_days` in daily JSON, and treat older carryover items as `Watchlist`-only instead of mixing them into the main summary buckets
 - `memory.path` now refers to the conversation store only; runtime task/auth/HITL/notification/session state moves to `runtime.state_path`, and skill provenance/telemetry moves to `skills.telemetry_path`
 - Runtime task claiming no longer opens a nested `BEGIN IMMEDIATE` transaction on a shared SQLite connection
 

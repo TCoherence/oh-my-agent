@@ -17,6 +17,15 @@ WEEKLY_SOURCE = "all-sources"
 DAILY_SUMMARY_SOURCE = "summary"
 DAILY_REFERENCE_DIR = "references"
 COVERAGE_FLOOR = 10
+DEFAULT_DAILY_LOOKBACK_DAYS = {
+    "credit-cards": 3,
+    "uscardforum": 3,
+    "rakuten": 3,
+    "slickdeals": 7,
+    "dealmoon": 7,
+    DAILY_SUMMARY_SOURCE: 7,
+}
+DEFAULT_WEEKLY_LOOKBACK_DAYS = 7
 
 
 def resolve_report_timezone_name() -> str | None:
@@ -122,6 +131,19 @@ def _daily_reference_pairs() -> list[tuple[str, str]]:
 
 def _ordered_sources() -> list[str]:
     return [source for source, _ in _daily_reference_pairs()]
+
+
+def default_lookback_window_days(*, mode: str, source: str) -> int:
+    _validate_mode_source(mode, source)
+    if mode == "weekly_digest":
+        return DEFAULT_WEEKLY_LOOKBACK_DAYS
+    return DEFAULT_DAILY_LOOKBACK_DAYS[source]
+
+
+def resolve_lookback_window_days(*, mode: str, source: str, days: int | None) -> int:
+    if days is not None:
+        return days
+    return default_lookback_window_days(mode=mode, source=source)
 
 
 def _daily_reference_index_lines() -> list[str]:
@@ -329,7 +351,7 @@ def build_markdown_skeleton(*, mode: str, source: str, report_date: date | None 
 def _base_json_payload(*, mode: str, source: str, report_date: date | None = None) -> dict[str, Any]:
     day = report_date or current_local_date()
     report_timezone = resolve_report_timezone_name() or str(resolve_report_timezone())
-    return {
+    payload = {
         "version": 1,
         "mode": mode,
         "source": source,
@@ -348,6 +370,9 @@ def _base_json_payload(*, mode: str, source: str, report_date: date | None = Non
         "high_confidence_count": 0,
         "coverage_floor_met": False,
     }
+    if mode == "daily_scan":
+        payload["lookback_window_days"] = default_lookback_window_days(mode=mode, source=source)
+    return payload
 
 
 def build_json_scaffold(
@@ -383,6 +408,7 @@ def build_json_scaffold(
                 "high_confidence_count": 0,
                 "watchlist_count": 0,
                 "met_floor": False,
+                "lookback_window_days": default_lookback_window_days(mode="daily_scan", source=item_source),
             }
             for item_source in _ordered_sources()
         ]
@@ -503,6 +529,17 @@ def persist_report(
     normalized["generated_at"] = datetime.now(UTC).isoformat()
     normalized["report_timezone"] = resolve_report_timezone_name() or str(resolve_report_timezone())
     normalized["report_date"] = effective_date.isoformat()
+    if mode == "daily_scan":
+        normalized.setdefault("lookback_window_days", default_lookback_window_days(mode=mode, source=source))
+        if source == DAILY_SUMMARY_SOURCE:
+            snapshots = normalized.get("source_snapshots")
+            if isinstance(snapshots, list):
+                for snapshot in snapshots:
+                    if isinstance(snapshot, dict) and snapshot.get("source") in SOURCES:
+                        snapshot.setdefault(
+                            "lookback_window_days",
+                            default_lookback_window_days(mode="daily_scan", source=str(snapshot["source"])),
+                        )
     if mode == "weekly_digest":
         normalized["iso_week"] = iso_week or iso_week_for_date(effective_date)
     atomic_write_text(md_path, markdown)
@@ -617,34 +654,45 @@ def build_context(
     source: str,
     root: str | Path | None = None,
     as_of: date | None = None,
-    days: int = 7,
+    days: int | None = None,
     weekly_limit: int = 4,
 ) -> dict[str, Any]:
     _validate_mode_source(mode, source)
     day = as_of or current_local_date()
+    lookback_days = resolve_lookback_window_days(mode=mode, source=source, days=days)
     context: dict[str, Any] = {
         "mode": mode,
         "source": source,
         "as_of": day.isoformat(),
         "reports_root": str(resolve_reports_root(root)),
+        "lookback_window_days": lookback_days,
     }
     if mode == "daily_scan":
         if source == DAILY_SUMMARY_SOURCE:
+            context["source_lookback_windows"] = {
+                item_source: default_lookback_window_days(mode="daily_scan", source=item_source)
+                for item_source in _ordered_sources()
+            }
             context["current_references"] = load_daily_reference_reports(root=root, report_date=day)
             context["recent_summary"] = load_recent_daily_reports(
                 DAILY_SUMMARY_SOURCE,
                 root=root,
                 as_of=day,
-                days=days,
+                days=lookback_days,
             )
             context["recent_weekly"] = load_recent_weekly_reports(root=root, limit=min(weekly_limit, 2))
             return context
-        context["recent_daily"] = load_recent_daily_reports(source, root=root, as_of=day, days=days)
+        context["recent_daily"] = load_recent_daily_reports(source, root=root, as_of=day, days=lookback_days)
         context["recent_weekly"] = load_recent_weekly_reports(root=root, limit=min(weekly_limit, 2))
         return context
     if mode == "weekly_digest":
         context["recent_daily"] = {
-            s: load_recent_daily_reports(s, root=root, as_of=day, days=days)
+            s: load_recent_daily_reports(
+                s,
+                root=root,
+                as_of=day,
+                days=default_lookback_window_days(mode="weekly_digest", source=WEEKLY_SOURCE),
+            )
             for s in sorted(SOURCES)
         }
         context["recent_weekly"] = load_recent_weekly_reports(root=root, limit=weekly_limit)
@@ -682,7 +730,7 @@ def _parse_args() -> argparse.Namespace:
     context_cmd.add_argument("--source", required=True)
     context_cmd.add_argument("--root")
     context_cmd.add_argument("--as-of")
-    context_cmd.add_argument("--days", type=int, default=7)
+    context_cmd.add_argument("--days", type=int)
     context_cmd.add_argument("--weekly-limit", type=int, default=4)
 
     list_cmd = subparsers.add_parser("list", help="list stored reports")

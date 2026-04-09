@@ -83,12 +83,14 @@ def test_scaffold_for_all_sources_has_expected_sections():
         "stack_now": [],
         "watchlist": [],
     }
+    assert summary_json["lookback_window_days"] == 7
     assert summary_json["source_snapshots"][0] == {
         "source": "credit-cards",
         "summary": "",
         "high_confidence_count": 0,
         "watchlist_count": 0,
         "met_floor": False,
+        "lookback_window_days": 3,
     }
     assert summary_json["coverage_status"] == {
         "target_floor": 10,
@@ -116,6 +118,7 @@ def test_scaffold_for_all_sources_has_expected_sections():
     assert cc_json["lower_confidence_watchlist"] == []
     assert cc_json["high_confidence_count"] == 0
     assert cc_json["coverage_floor_met"] is False
+    assert cc_json["lookback_window_days"] == 3
     assert {s["slug"] for s in cc_json["sections"]} == {
         "signup-bonuses", "cashback-rewards", "fee-offers", "expiring",
     }
@@ -145,6 +148,7 @@ def test_scaffold_for_all_sources_has_expected_sections():
     sd_json = module.build_json_scaffold(
         mode="daily_scan", source="slickdeals", report_date=date(2026, 4, 4),
     )
+    assert sd_json["lookback_window_days"] == 7
     assert {s["slug"] for s in sd_json["sections"]} == {
         "frontpage", "tech", "home-living", "broader-mix",
     }
@@ -153,6 +157,7 @@ def test_scaffold_for_all_sources_has_expected_sections():
     dm_json = module.build_json_scaffold(
         mode="daily_scan", source="dealmoon", report_date=date(2026, 4, 4),
     )
+    assert dm_json["lookback_window_days"] == 7
     assert {s["slug"] for s in dm_json["sections"]} == {
         "top-picks", "exclusive-codes", "beauty", "electronics", "home-living",
     }
@@ -210,6 +215,7 @@ def test_persist_report_writes_markdown_and_json_atomically(tmp_path, monkeypatc
     assert data["summary"] == "今日 Sephora 12% 返现"
     assert data["report_timezone"] == "America/Los_Angeles"
     assert data["report_date"] == "2026-04-04"
+    assert data["lookback_window_days"] == 3
     assert data["generated_at"] != "2000-01-01T00:00:00Z"
     assert "T" in data["generated_at"]
 
@@ -217,9 +223,9 @@ def test_persist_report_writes_markdown_and_json_atomically(tmp_path, monkeypatc
 def test_context_uses_recent_daily_reports_and_weekly_history(tmp_path):
     module = _load_module()
 
-    # Populate daily reports for credit-cards and rakuten
+    # Populate daily reports for all sources
     for day in range(1, 8):
-        for src in ("credit-cards", "rakuten"):
+        for src in ("credit-cards", "rakuten", "slickdeals", "dealmoon", "uscardforum"):
             module.persist_report(
                 mode="daily_scan",
                 source=src,
@@ -285,9 +291,24 @@ def test_context_uses_recent_daily_reports_and_weekly_history(tmp_path):
         source="credit-cards",
         root=tmp_path,
         as_of=date(2026, 4, 7),
-        days=7,
     )
+    assert daily_context["lookback_window_days"] == 3
     assert [item["period_end"] for item in daily_context["recent_daily"]] == [
+        "2026-04-05",
+        "2026-04-06",
+        "2026-04-07",
+    ]
+    assert daily_context["recent_daily"][0]["title"] == "credit-cards day 5"
+    assert daily_context["recent_weekly"][0]["title"] == "week 13"
+
+    slickdeals_context = module.build_context(
+        mode="daily_scan",
+        source="slickdeals",
+        root=tmp_path,
+        as_of=date(2026, 4, 7),
+    )
+    assert slickdeals_context["lookback_window_days"] == 7
+    assert [item["period_end"] for item in slickdeals_context["recent_daily"]] == [
         "2026-04-01",
         "2026-04-02",
         "2026-04-03",
@@ -296,15 +317,21 @@ def test_context_uses_recent_daily_reports_and_weekly_history(tmp_path):
         "2026-04-06",
         "2026-04-07",
     ]
-    assert daily_context["recent_weekly"][0]["title"] == "week 13"
 
     summary_context = module.build_context(
         mode="daily_scan",
         source="summary",
         root=tmp_path,
         as_of=date(2026, 4, 7),
-        days=7,
     )
+    assert summary_context["lookback_window_days"] == 7
+    assert summary_context["source_lookback_windows"] == {
+        "credit-cards": 3,
+        "uscardforum": 3,
+        "rakuten": 3,
+        "slickdeals": 7,
+        "dealmoon": 7,
+    }
     assert summary_context["current_references"]["credit-cards"]["title"] == "credit-cards day 7"
     assert summary_context["current_references"]["rakuten"]["title"] == "rakuten day 7"
     assert summary_context["recent_summary"][0]["title"] == "summary day 7"
@@ -315,12 +342,22 @@ def test_context_uses_recent_daily_reports_and_weekly_history(tmp_path):
         source="all-sources",
         root=tmp_path,
         as_of=date(2026, 4, 7),
-        days=7,
     )
+    assert weekly_context["lookback_window_days"] == 7
     assert len(weekly_context["recent_daily"]["credit-cards"]) == 7
     assert len(weekly_context["recent_daily"]["rakuten"]) == 7
-    assert len(weekly_context["recent_daily"]["dealmoon"]) == 0  # no data
+    assert len(weekly_context["recent_daily"]["dealmoon"]) == 7
     assert weekly_context["recent_weekly"][0]["title"] == "week 13"
+
+    overridden_context = module.build_context(
+        mode="daily_scan",
+        source="credit-cards",
+        root=tmp_path,
+        as_of=date(2026, 4, 7),
+        days=7,
+    )
+    assert overridden_context["lookback_window_days"] == 7
+    assert len(overridden_context["recent_daily"]) == 7
 
 
 def test_invalid_mode_source_combinations_raise_value_error():

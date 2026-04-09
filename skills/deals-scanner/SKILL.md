@@ -43,7 +43,7 @@ For broad daily scans, the durable output is a bundle:
 
 - `daily_scan`
   - Generate one daily report for a single source channel.
-  - Focuses on today's active deals and notable changes.
+  - Focuses on the source-specific recent window rather than a flat same-day sweep.
 - `weekly_digest`
   - Generate one cross-source weekly report using recent stored daily reports.
   - Focuses on trends, best deals of the week, and upcoming opportunities.
@@ -63,6 +63,19 @@ For broad daily scans, the durable output is a bundle:
 - `daily_scan` accepts the 5 named sources plus the internal aggregation target `summary`; rejects `all-sources`.
 - `weekly_digest` only accepts `all-sources`; rejects named sources.
 - Invalid combinations raise an error.
+
+### Daily lookback defaults
+
+When `daily_scan` runs without an explicit `--days` override, use these defaults:
+
+- `credit-cards`: recent `3` days
+- `uscardforum`: recent `3` days
+- `rakuten`: recent `3` days
+- `slickdeals`: recent `7` days
+- `dealmoon`: recent `7` days
+- `summary`: recent `7` days
+
+`weekly_digest` does not inherit these defaults. It keeps a fixed recent `7` day window across all sources.
 
 ## Required workflow
 
@@ -122,9 +135,12 @@ When the user asks for a broad daily scan or leaves the source intentionally bro
 4. The summary report must:
    - read like a morning brief rather than a directory page
    - group top items into `Apply now`, `Buy now`, `Stack now`, and `Watchlist`
+   - carry at least `8-12` concrete items across the first three action buckets unless the day is genuinely thin
    - give one short readout per source
    - explicitly state any source that missed the high-confidence floor
+   - explicitly state each source's lookback window in `Coverage / Confidence`
    - include explicit links to `references/<source>.md`
+   - keep `各渠道一句话结论` as a supporting layer, not the main content
 5. In the final answer, show the summary first and treat per-source files as drill-down references.
 
 ## Storage layout
@@ -221,6 +237,7 @@ The JSON sidecar is part of the report contract. Keep these fields present:
 - `report_date`
 - `period_start`
 - `period_end`
+- `lookback_window_days`
 - `summary`
 - `top_deals`
 - `source_mix_note`
@@ -238,6 +255,8 @@ For `source=summary`, also include:
 - `action_buckets`
 - `source_snapshots`
 - `coverage_status`
+
+Every summary source snapshot should include its own `lookback_window_days`.
 
 For weekly digest, also include:
 
@@ -257,7 +276,8 @@ Each entry in `top_deals` and `sections[].deals[]`:
   "url": "",
   "expires": "",
   "quality_score": 3,
-  "notes": ""
+  "notes": "",
+  "carryover": false
 }
 ```
 
@@ -276,6 +296,7 @@ Each entry in `top_deals` and `sections[].deals[]`:
 - Default output language is Chinese.
 - Markdown should be readable as a finished deal report, not just raw bullets.
 - `summary.md` should read like a decisive morning brief, not a directory page.
+- `summary.md` should keep the main decision payload in `Apply now` / `Buy now` / `Stack now`; `各渠道一句话结论` is supportive, not the main body.
 - Each deal should include: deal title, value/discount amount, expiration info, link, and a brief quality assessment.
 - JSON should stay compact and structured for later machine reuse.
 - Daily source scans should aim for `12-15` verified items and should not stop below `10` unless the source genuinely lacks enough credible candidates that day.
@@ -284,6 +305,13 @@ Each entry in `top_deals` and `sections[].deals[]`:
   - do not pad the main body with low-quality filler
   - place weaker candidates in `lower_confidence_watchlist`
   - say so explicitly in the summary `Coverage / Confidence` section and in that source's `来源与说明`
+- Source windows apply only to the main daily body:
+  - `credit-cards/uscardforum/rakuten` mainline items should come from the recent `3` day window
+  - `slickdeals/dealmoon` mainline items can use the recent `7` day window
+- If an older item still matters but falls outside that source's mainline window:
+  - do not put it in `Apply now` / `Buy now` / `Stack now`
+  - place it in `Watchlist`
+  - mark it as a carryover / 超窗延续项 in `notes` or `carryover=true`
 - Core sections should generally carry at least `2-3` items each; do not let one section absorb everything while others stay empty unless the source genuinely lacks coverage.
 - The broad daily bundle should always produce the day-level `summary.md|json` in addition to per-source references.
 - If a source has no notable deals today, say so explicitly rather than padding with filler.
