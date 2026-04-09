@@ -136,11 +136,15 @@ When the user asks for a broad daily scan or leaves the source intentionally bro
    - read like a morning brief rather than a directory page
    - group top items into `Apply now`, `Buy now`, `Stack now`, and `Watchlist`
    - carry at least `8-12` concrete items across the first three action buckets unless the day is genuinely thin
-   - give one short readout per source
+   - open with a `简短结论` that uses `2` short sentences rather than a slogan
+   - make the first `简短结论` sentence state today's priority action and cite `1-2` concrete drivers
+   - make the second `简短结论` sentence state the main limitation / risk / coverage caveat
+   - give one compact per-source snapshot
    - explicitly state any source that missed the high-confidence floor
    - explicitly state each source's lookback window in `Coverage / Confidence`
    - include explicit links to `references/<source>.md`
-   - keep `各渠道一句话结论` as a supporting layer, not the main content
+   - keep `各渠道快照` as a supporting layer, not the main content
+   - make each source snapshot a compact brief of `main opportunity + current caveat`, not a floor-only label
 5. In the final answer, show the summary first and treat per-source files as drill-down references.
 
 ## Storage layout
@@ -169,7 +173,7 @@ Read the relevant reference before drafting:
   - Buy now
   - Stack now
   - Watchlist
-  - 各渠道一句话结论
+  - 各渠道快照
   - Coverage / Confidence
   - Reference 索引
 - `credit-cards`
@@ -296,7 +300,11 @@ Each entry in `top_deals` and `sections[].deals[]`:
 - Default output language is Chinese.
 - Markdown should be readable as a finished deal report, not just raw bullets.
 - `summary.md` should read like a decisive morning brief, not a directory page.
-- `summary.md` should keep the main decision payload in `Apply now` / `Buy now` / `Stack now`; `各渠道一句话结论` is supportive, not the main body.
+- `summary.md` should open with `简短结论：` and use `2` short sentences rather than a slogan.
+- The first `简短结论` sentence should state today's priority and `1-2` concrete drivers.
+- The second `简短结论` sentence should state the main limitation / risk / coverage caveat.
+- `summary.md` should keep the main decision payload in `Apply now` / `Buy now` / `Stack now`; `各渠道快照` is supportive, not the main body.
+- Each source snapshot should describe the strongest recent opportunity plus the main caveat / floor state in one compact sentence. Do not reduce it to labels like `达到 floor` or `仅观察`.
 - Each deal should include: deal title, value/discount amount, expiration info, link, and a brief quality assessment.
 - JSON should stay compact and structured for later machine reuse.
 - Daily source scans should aim for `12-15` verified items and should not stop below `10` unless the source genuinely lacks enough credible candidates that day.

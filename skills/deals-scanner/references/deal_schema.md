@@ -66,6 +66,18 @@ For broad daily bundles, `source` is `summary` and the JSON should also include:
 }
 ```
 
+For `source=summary`, the top-level `summary` field should be a `2` sentence compact brief:
+
+- sentence 1: today's priority action plus `1-2` concrete drivers
+- sentence 2: the main limitation / risk / coverage caveat
+
+Each `source_snapshots[].summary` should be one compact sentence containing:
+
+- the strongest recent opportunity from that source
+- the current caveat / confidence / floor state
+
+Do not reduce either field to bare labels such as `先 Apply now` or `达到 floor`.
+
 ## Weekly-only extra fields
 
 ```json
@@ -230,13 +242,13 @@ Sections use `deals[]` arrays (not `bullets[]`). Each element follows the deal e
 
 ```
 # 优惠扫描总览｜<date>
-一句话结论：
+简短结论：
 ## 今日判断
 ## Apply now
 ## Buy now
 ## Stack now
 ## Watchlist
-## 各渠道一句话结论
+## 各渠道快照
 ## Coverage / Confidence
 ## Reference 索引
 - [信用卡优惠](references/credit-cards.md)
@@ -290,3 +302,4 @@ Deal descriptions **must** carry inline source links in the body. This is a hard
   - call the gap out explicitly in the summary report's `Coverage / Confidence` section
 - Items outside a source's mainline daily window should not enter the summary's main action buckets. Keep them in `Watchlist` and mark them with `carryover=true` or equivalent wording in `notes`.
 - `summary.md` should read like a decision brief, not an index page. The main decision payload should stay in `Apply now` / `Buy now` / `Stack now`, with roughly `8-12` concrete items total unless the day is genuinely thin.
+- `summary.md` should open with `简短结论` in `2` short sentences, and `各渠道快照` should stay compact but still include both main opportunity and caveat.

@@ -180,7 +180,7 @@ def build_markdown_skeleton(*, mode: str, source: str, report_date: date | None 
         return "\n".join([
             f"# 优惠扫描总览｜{day_label}",
             "",
-            "一句话结论：",
+            "简短结论：",
             "",
             "## 今日判断",
             "",
@@ -192,7 +192,7 @@ def build_markdown_skeleton(*, mode: str, source: str, report_date: date | None 
             "",
             "## Watchlist",
             "",
-            "## 各渠道一句话结论",
+            "## 各渠道快照",
             "",
             "### 信用卡优惠",
             "",
@@ -422,7 +422,7 @@ def build_json_scaffold(
             {"slug": "buy-now", "heading": "Buy now", "summary": "", "deals": []},
             {"slug": "stack-now", "heading": "Stack now", "summary": "", "deals": []},
             {"slug": "watchlist", "heading": "Watchlist", "summary": "", "deals": []},
-            {"slug": "source-snapshots", "heading": "各渠道一句话结论", "summary": "", "deals": []},
+            {"slug": "source-snapshots", "heading": "各渠道快照", "summary": "", "deals": []},
             {"slug": "coverage-confidence", "heading": "Coverage / Confidence", "summary": "", "deals": []},
             {"slug": "reference-index", "heading": "Reference 索引", "summary": "", "deals": []},
         ]

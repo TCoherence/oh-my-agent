@@ -66,10 +66,12 @@ def test_scaffold_for_all_sources_has_expected_sections():
         mode="daily_scan", source="summary", report_date=date(2026, 4, 4),
     )
     assert "# 优惠扫描总览｜2026-04-04" in summary_md
+    assert "简短结论：" in summary_md
     assert "## Apply now" in summary_md
     assert "## Buy now" in summary_md
     assert "## Stack now" in summary_md
     assert "## Watchlist" in summary_md
+    assert "## 各渠道快照" in summary_md
     assert "## Coverage / Confidence" in summary_md
     assert "[信用卡优惠](references/credit-cards.md)" in summary_md
 
