@@ -1,18 +1,23 @@
 # Todo / Roadmap
 
-## Snapshot (2026-03-01)
+## Snapshot (2026-04-09)
 
 - `/search` is implemented.
 - SkillSync reverse sync is implemented.
 - CLI-first foundations are in place.
+- Current branch state is `v0.7.2` baseline plus local follow-up work.
 - v0.5 runtime-first is complete (including runtime hardening pass).
 - Optional LLM router is implemented.
 - Runtime observability baseline is implemented.
 - Runtime live agent logging is implemented.
 - Multi-type runtime is implemented (`artifact`, `repo_change`, `skill_change`).
+- `WAITING_USER_INPUT` and generic single-choice `ask_user` HITL are implemented.
+- `repair_skill` router intent is implemented.
 - Adaptive memory is implemented (auto-extraction, injection, `/memories`, `/forget`).
 - Date-based memory is implemented (daily/curated two-tier, auto-promotion, MEMORY.md synthesis, `/promote`).
 - Image attachment support is implemented (Discord download, per-agent handling, temp file lifecycle).
+- Codex repo/workspace skill discovery now uses official `.agents/skills/`; generated workspace `AGENTS.md` is reduced to rules/metadata.
+- Next target: `v0.7.3 - HITL Completion, Delivery, and Operator Observability`.
 
 ## v0.5 Runtime Hardening (complete)
 
@@ -46,9 +51,9 @@
 - [x] Add skill routing for "turn this workflow into a skill" requests
 - [x] Add skill validation loop before merge
 - [x] Add skill memory / provenance metadata
-- [x] Cross-agent skill delivery: unified SKILL.md format, SkillSync distributes to `.claude/`, `.gemini/`, and `.agents/skills/`; generated `AGENTS.md` summarizes repo rules and local Codex-visible skills
-- [x] Codex integration: official repo/workspace `.agents/skills/` support plus generated `AGENTS.md`; reverse sync scans Claude/Gemini/Codex native skill dirs
-- [x] Skill invocation vs mutation: `/skill-name` → normal chat path; "create skill" → `TASK_TYPE_SKILL_CHANGE` runtime task with dedicated prompt, validation, and auto-merge
+- [x] Cross-agent skill delivery: unified SKILL.md format, SkillSync distributes to `.claude/`, `.gemini/`, and `.agents/skills/`; generated `AGENTS.md` summarizes repo rules and workspace metadata
+- [x] Codex integration: official repo/workspace `.agents/skills/` support plus generated `AGENTS.md` for rules/metadata; reverse sync scans Claude/Gemini/Codex native skill dirs
+- [x] Skill invocation vs mutation: `/skill-name` → normal chat path; "create skill" → `TASK_TYPE_SKILL_CHANGE` runtime task with dedicated prompt, validation, and merge gate
 
 ### Adaptive Memory (complete)
 
@@ -60,7 +65,7 @@
 - [x] Memory conflict resolution: Jaccard dedup (threshold 0.6) → merge with confidence boost; eviction by confidence × recency
 - [x] Cross-agent sharing: memories belong to the user, shared across all agents (YAML file, not per-agent)
 
-## v0.7 - Date-Based Memory + Human-in-the-Loop Ops Foundation
+## v0.7 - Date-Based Memory + HITL/Ops Foundations
 
 ### Date-Based Memory (complete)
 
@@ -73,18 +78,12 @@ Upgrade adaptive memory from flat YAML to a date-organized, two-tier architectur
 - [x] **Pre-compaction memory flush**: memory extraction runs before history compression (order swapped), ensuring no memory loss.
 - [x] **Discord commands**: `/memories` shows `[C]`/`[D]` tier tags, `/promote` for manual promotion.
 
-### Ops Foundation
+### Human-in-the-Loop Baseline (complete)
 
-- [ ] Scheduler-driven operational tasks (connect `automations` to runtime task types)
-- [ ] Event-driven triggers beyond cron (webhook ingestion, file-watch, external notifications)
-- [ ] **Operator-facing doctor command**: add a Discord-first self-diagnostics entrypoint (`/doctor` or equivalent) that can report recent crash/failure state, startup health, log pointers, and recommended next checks without requiring direct server log access
-
-### Human-in-the-Loop Runtime
-
-- [ ] **First-class waiting state**: add a dedicated `WAITING_USER_INPUT` runtime state instead of overloading `BLOCKED` for every human handoff
-- [ ] **Agent-initiated question surface**: let a running task ask the user a scoped question (with context and optional choices) directly in Discord
-- [ ] **Structured answer binding**: bind the next user reply to the pending question and resume the task with explicit answer payloads instead of ad hoc free-text resume instructions
-- [ ] **Mid-task approval checkpoints**: support explicit human checkpoints for risky or ambiguous steps without forcing the task into merge-only approval semantics
+- [x] **First-class waiting state**: `WAITING_USER_INPUT` is implemented for task and thread-level pauses
+- [x] **Agent-initiated question surface**: generic single-choice `ask_user` challenges are supported on Discord
+- [x] **Structured single-choice answers**: owner button responses are persisted and used to resume direct chat and runtime task flows
+- [x] **Owner notifications and persistence**: `ask_user` prompts are stored in SQLite, rehydrated on restart, and emit visible owner notifications
 
 ### Skill Evaluation
 
@@ -93,9 +92,18 @@ Upgrade adaptive memory from flat YAML to a date-organized, two-tier architectur
 - [x] **Skill health dashboard**: `/skill_stats [skill]` showing success rate, usage frequency, last invoked, average latency, and latest evaluation findings
 - [x] **Auto-disable**: if a skill's failure rate exceeds threshold over a rolling window, remove it from automatic routing while preserving explicit `/skill-name`; `/skill_enable` clears the flag
 - [x] **Duplicate-skill guard**: before auto-merging a new skill, compare its name/description/request against existing skills and force manual merge review when it substantially overlaps an existing capability
-- [x] **Source-grounded skill evaluation**: when a skill task adapts an external repo/tool/reference, require source metadata and run a review pass before allowing auto-merge
+- [x] **Source-grounded skill evaluation**: when a skill task adapts an external repo/tool/reference, require source metadata and run a review pass before allowing merge approval
 
-### Guest Session (temp isolation)
+## v0.7.3 - HITL Completion, Delivery, and Operator Observability
+
+- [ ] **Artifact delivery abstraction**: add a platform/runtime delivery layer that tries attachment upload first and falls back to a link when the artifact is too large
+- [ ] **Thread-scoped unified logs**: replace the current execution-path split with `~/.oh-my-agent/runtime/logs/threads/<thread_id>.log` as the main agent-audit surface
+- [ ] **HITL completion semantics**: formalize answer binding, resume-context injection, and reusable mid-task approval/checkpoint handling on top of the existing `WAITING_USER_INPUT` baseline
+- [ ] **Operator-facing doctor command**: add a Discord-first self-diagnostics entrypoint (`/doctor` or equivalent) that can report recent crash/failure state, startup health, log pointers, and recommended next checks without requiring direct server log access
+- [ ] **Event-driven triggers beyond cron**: webhook ingestion, file-watch, and external notification hooks for runtime entry
+- [ ] **Scheduler-driven operational tasks**: connect file-driven `automations` to runtime task types and operator surfaces
+
+## Deferred beyond v0.7.3
 
 - [ ] **Temp session mode**: flag a session as `guest` so it uses an isolated ephemeral memory scope (no writes to owner's adaptive memory, no skill mutation permissions)
 - [ ] Configurable via `/guest` toggle or per-user config
@@ -124,9 +132,8 @@ Upgrade adaptive memory from flat YAML to a date-organized, two-tier architectur
 ## Backlog (no version commitment)
 
 - [ ] Live observability ring buffer + status-card live excerpt
-- [ ] Artifact delivery abstraction (`attachment first`, link fallback)
 - [ ] Object-storage adapter for remote artifact delivery (R2/S3 style)
-- [ ] Delivery policy abstraction (`inline summary`, attachment, link)
+- [ ] Delivery policy refinement (`inline summary`, attachment, link) after the core delivery abstraction lands
 - [ ] Markdown-aware chunking for message delivery
 - [ ] Rate limiting / request queue
 - [x] Docker-based agent isolation (host-mounted `/home`, repo-mounted `/repo`, config from repo, editable install on start, preinstalled CLI tools)

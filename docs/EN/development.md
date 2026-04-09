@@ -14,42 +14,58 @@ Oh My Agent is a multi-platform bot that uses CLI-based AI agents as the executi
 ## Current Runtime Baseline
 
 Implemented:
-- Optional LLM intent routing (`reply_once`, `invoke_existing_skill`, `propose_artifact_task`, `propose_repo_task`, `create_skill`)
+- Optional LLM intent routing (`reply_once`, `invoke_existing_skill`, `propose_artifact_task`, `propose_repo_task`, `create_skill`, `repair_skill`)
 - Short conversation transient workspaces with TTL cleanup persisted in SQLite
 - Multi-type runtime orchestration:
   - `artifact` tasks complete without merge
   - `repo_change` and `skill_change` tasks continue through merge gate
+- First-class `WAITING_USER_INPUT` plus single-choice `ask_user` flows for direct chat and runtime tasks
+- Owner notifications, prompt persistence, and restart rehydration for active `ask_user` prompts
 - Runtime observability baseline:
   - `/task_logs`
   - sampled progress snapshots in SQLite
   - full heartbeat in process logs
   - single updatable Discord status message
   - separate underlying agent logs in `runtime/logs/agents/`
+- Codex skill integration now uses official repo/workspace `.agents/skills/`; generated workspace `AGENTS.md` is reduced to repo rules and metadata
 - True subprocess interruption (heartbeat loop checks PAUSED/STOPPED, cancels running agent/test)
 - Message-driven runtime control (`stop`, `pause`, `resume` from normal thread messages via `_parse_control_intent`)
 - PAUSED state with workspace preservation and resumable with instruction
 - Structured task completion summary (goal, files changed, test counts, timing)
 - Runtime metrics (`total_agent_s`, `total_test_s`, `total_elapsed_s`)
 - Adaptive memory: auto-extraction from conversations, injection into agent prompts, `/memories` and `/forget` commands
+- Skill evaluation is implemented: outcome tracking, user feedback, stats, auto-disable, overlap guard, and source-grounded review
+- Runtime skill repair routing is implemented via `repair_skill`
 
 Still missing:
-- in-memory live ring buffer and status-card live excerpt for running tasks
-- artifact delivery adapter (`attachment first`, link fallback)
-- stronger Codex skill integration strategy beyond current global-skills / `AGENTS.md` tradeoff
+- thread-scoped unified agent logs and an in-memory live excerpt layer for running tasks
+- artifact delivery abstraction (`attachment first`, link fallback) with local-first paths and later remote object-storage adapters
+- operator-facing doctor command
+- event-driven triggers beyond cron
+- richer HITL completion semantics (answer binding contract and mid-task approval checkpoints)
+- guest session isolation
 - semantic retrieval (v0.8+)
-- skill evaluation (success tracking, user feedback, health dashboard; planned for v0.7)
-- first-class human-in-the-loop runtime beyond the current `BLOCKED + resume` approximation
-- ops/event autonomy remains future work
 
 ## Next Product Direction
 
+- Current branch state is best read as `v0.7.2 baseline + local follow-up work`.
+- The next target is `v0.7.3 - HITL Completion, Delivery, and Operator Observability`.
 - v0.5 delivered runtime-first foundations (complete).
 - v0.6 delivered skill-first autonomy + adaptive memory.
-- v0.7 delivered date-based memory and now continues with ops foundation, human-in-the-loop runtime, and skill evaluation.
+- v0.7 delivered date-based memory, multi-type runtime, skill evaluation, and the current auth/HITL/runtime pass.
 - v0.8+ adds semantic memory retrieval (vector search) and hybrid autonomy.
 - Source-code self-modification is not the default autonomy path; it remains a high-risk, strongly gated capability.
 
 ## Historical Milestones
+
+### v0.7.2 baseline + follow-up work
+
+- Auth-first runtime pause/resume and generic Discord-first `ask_user`
+- File-driven automations and current market/reporting workflows
+- Multi-type runtime (`artifact`, `repo_change`, `skill_change`)
+- `repair_skill` routing for feedback on existing skills
+- Runtime live agent logging plus richer Discord status handling
+- Codex repo/workspace `.agents/skills/` delivery with generated workspace `AGENTS.md` reduced to rules/metadata
 
 ### v0.7.0
 
@@ -73,7 +89,7 @@ Still missing:
 - `MemoryExtractor`: agent-powered extraction from conversation turns after compression
 - Memory injection: `[Remembered context]` prepended to agent prompts
 - Discord `/memories` (list with category filter) and `/forget` (delete by ID)
-- Skill auto-approve and auto-merge for skill tasks
+- Initial skill auto-approve and auto-merge prototype for skill tasks
 - 189 tests passing
 
 ### v0.5.3

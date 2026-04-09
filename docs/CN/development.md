@@ -14,42 +14,58 @@ Oh My Agent 是一个多平台 bot，执行层直接使用 CLI Agent，而不是
 ## 当前 Runtime 基线
 
 已实现：
-- 可选 LLM 意图路由（`reply_once`、`invoke_existing_skill`、`propose_artifact_task`、`propose_repo_task`、`create_skill`）
+- 可选 LLM 意图路由（`reply_once`、`invoke_existing_skill`、`propose_artifact_task`、`propose_repo_task`、`create_skill`、`repair_skill`）
 - 短对话临时 workspace + TTL 清理，状态持久化到 SQLite
 - 多类型 runtime orchestration：
   - `artifact` 任务可直接完成，不进入 merge
   - `repo_change` 与 `skill_change` 继续走 merge gate
+- 一等 `WAITING_USER_INPUT` 状态，以及 direct chat / runtime task 的单选式 `ask_user`
+- active `ask_user` prompt 的 owner 通知、SQLite 持久化和重启后重新注册
 - Runtime 可观测性基线：
   - `/task_logs`
   - SQLite 中采样式 progress snapshot
   - 进程日志中的完整 heartbeat
   - Discord 中单条可更新的状态消息
   - `runtime/logs/agents/` 下独立的底层 agent 日志
+- Codex skill 接入已切到官方 repo/workspace `.agents/skills/`；生成的 workspace `AGENTS.md` 只保留 repo 规则和元信息
 - 真正的子进程中断（heartbeat 循环检查 PAUSED/STOPPED，取消运行中 agent/test）
 - 消息驱动的 runtime 控制（通过 `_parse_control_intent` 从普通 thread 消息触发 stop/pause/resume）
 - PAUSED 状态：非终态，workspace 保留，可带指令 resume
 - 结构化任务完成摘要（目标、变更文件、测试统计、耗时）
 - Runtime 指标（`total_agent_s`、`total_test_s`、`total_elapsed_s`）
 - Adaptive Memory：对话中自动提取记忆、注入 agent prompt、`/memories` 和 `/forget` 命令
+- Skill 评估已实现：结果追踪、用户反馈、健康统计、自动降级、重叠防重、source-grounded review
+- 基于 router 的 `repair_skill` 技能修复意图已实现
 
 仍缺少：
-- 针对运行中任务的内存级 live ring buffer 和状态卡 live excerpt
-- artifact delivery 适配层（附件优先、链接兜底）
-- 超出当前 `全局 skills + AGENTS.md` 折中的 Codex skill 接入方案
+- thread-scoped unified agent logs，以及运行中任务的内存级 live excerpt
+- artifact delivery 抽象（附件优先、链接兜底），先支持本地路径，后续再接远端对象存储
+- operator-facing doctor 命令
+- 超越 cron 的事件驱动触发器
+- 更完整的 HITL completion 语义（answer binding contract、mid-task approval checkpoints）
+- guest session 隔离
 - 语义检索（v0.8+）
-- Skill 评估（成功率追踪、用户反馈、健康看板；计划 v0.7）
-- 超出当前 `BLOCKED + resume` 近似模型的一等 Human-in-the-Loop runtime
-- ops/event autonomy 仍属于后续阶段
 
 ## 下一阶段产品方向
 
+- 当前分支更准确的版本表述是：`v0.7.2 基线 + 本地后续演进`。
+- 下一个版本目标是：`v0.7.3 - HITL Completion、Delivery、Operator Observability`。
 - v0.5 已完成 runtime-first 基线（全部完成）。
 - v0.6 已交付 skill-first autonomy + adaptive memory。
-- v0.7 已交付日期驱动记忆系统，当前继续推进 ops 基础、Human-in-the-Loop runtime 和 skill 评估。
+- v0.7 已交付日期驱动记忆、多类型 runtime、skill 评估，以及当前这轮 auth/HITL/runtime 基础设施。
 - v0.8+ 增加语义记忆检索（向量搜索）和 hybrid autonomy。
 - 源代码自我更迭不是默认自主性路径，而是高风险、强审批的特殊能力。
 
 ## 历史阶段
+
+### v0.7.2 基线 + 后续演进
+
+- auth-first runtime pause/resume 和通用 Discord `ask_user`
+- 文件驱动 automation 和当前的 market/reporting workflows
+- 多类型 runtime（`artifact`、`repo_change`、`skill_change`）
+- 面向现有 skill 反馈的 `repair_skill` 路由
+- runtime live agent logging 和更稳的 Discord 状态消息更新
+- Codex repo/workspace `.agents/skills/` 分发，生成的 workspace `AGENTS.md` 降级为 rules/metadata
 
 ### v0.7.0
 
@@ -73,7 +89,7 @@ Oh My Agent 是一个多平台 bot，执行层直接使用 CLI Agent，而不是
 - `MemoryExtractor`：对话压缩后由 agent 驱动提取记忆
 - 记忆注入：`[Remembered context]` 前置到 agent prompt
 - Discord `/memories`（列表 + 类别筛选）和 `/forget`（按 ID 删除）
-- Skill task 自动审批 + 自动合并
+- Skill task 的早期自动审批 + 自动合并原型
 - 189 项测试全部通过
 
 ### v0.5.3

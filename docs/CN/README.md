@@ -4,16 +4,18 @@
 
 灵感来自 [OpenClaw](https://openclaw.dev)。
 
-## 当前状态（2026-03-16）
+## 当前状态（2026-04-09）
 
 - `/search` 已通过 SQLite FTS5 实现跨线程检索。
 - `SkillSync` reverse sync 已实现，并在启动时执行。
+- 当前分支应视为 `v0.7.2` 基线之上的本地后续演进，最近主要推进了 routing、HITL、logging 和 market/deals 相关能力。
 - v0.5 runtime-first 已完成（包括 runtime hardening pass）。
 - v0.6 主线是 skill-first autonomy + adaptive memory；全部已完成。
 - v0.7.2 在 v0.7 基线上补齐了 auth-first 暂停/恢复、文件驱动 automation、通用 Discord `ask_user` HITL、market briefing 报告能力，以及慢速 direct skill 调用的 skill-specific timeout override。
-- 后续版本继续推进语义记忆检索（向量搜索）和 hybrid autonomy。
+- 下一个版本目标明确为 `v0.7.3 - HITL Completion、Delivery、Operator Observability`。
+- 更后面的版本继续推进语义记忆检索（向量搜索）和 hybrid autonomy。
 - Discord 审批交互采用按钮优先、slash 兜底，reaction 只做状态信号。
-- 可选的 LLM 路由已实现：消息可被分类为 `reply_once`、`invoke_existing_skill`、`propose_artifact_task`、`propose_repo_task` 或 `create_skill`。
+- 可选的 LLM 路由已实现：消息可被分类为 `reply_once`、`invoke_existing_skill`、`propose_artifact_task`、`propose_repo_task`、`create_skill` 或 `repair_skill`。
 - Runtime 可观测性已实现：支持 `/task_logs`、SQLite 中采样式 progress 事件，以及 Discord 中单条可更新的状态消息。
 - Gateway/消息日志现在会用 `purpose=...` 区分普通回复、显式 skill 调用和 router 驱动回复；后台 memory/compression agent 调用会继承同一个 `req_id`，便于串联排查。
 - Runtime hardening 已完成：真正的子进程中断、消息驱动控制（stop/pause/resume）、PAUSED 状态、完成摘要、metrics。
@@ -322,7 +324,7 @@ OMA_WORKDIR_IN_CONTAINER=/repo ./scripts/docker-run.sh
 - `/skill_stats [skill]` 可查看最近成功率、调用次数、平均延迟、反馈，以及最近的评估结论。
 - `/skill_enable <skill>` 可清除 auto-disabled 状态，让 router 自动调用重新纳入该 skill。
 - 自动降级只影响自动路由；显式 `/skill-name` 仍然可以继续执行。
-- `skill_change` 任务现在会在自动合并前增加两层评估：
+- `skill_change` 任务现在会在合并审批前增加两层评估：
   - 重复能力 overlap review
   - 外部 repo/tool/reference 内化任务的 source-grounded review
 - 如果 skill 要内化外部来源，需要在 `SKILL.md` frontmatter 的 `metadata` 中补齐：
@@ -485,14 +487,19 @@ author: scheduler
 
 ## Artifact Delivery
 
-- 先尝试直接上传附件，过大时回退为链接。
-- 交付能力做成抽象层，本地运行直接访问文件，远端部署接入对象存储（推荐 Cloudflare R2）。
+- Artifact delivery 还没有完全做完。
+- 已锁定的 v0.7.3 方向是：
+  - 先尝试直接上传附件
+  - 超过平台限制时回退为链接
+  - 抽象成统一交付层，本地运行走文件可达性，远端部署接入对象存储
+- 远端对象存储优先推荐 Cloudflare R2。
 
 ## Codex 接入说明
 
-- Codex 接入基础是 CLI 执行 + repo/workspace `.agents/skills/` + 生成的 `AGENTS.md`。
+- Codex 接入基础是 CLI 执行 + 官方 repo/workspace `.agents/skills/` + 平台层 routing/runtime 行为。
 - `SkillSync` 会把 canonical `skills/` 同步到 repo/workspace `.agents/skills/`。
-- Claude/Gemini 继续通过各自原生 skill 目录发现；Codex 使用官方 `.agents/skills/` 约定。生成的 `AGENTS.md` 只保留 repo 规则和元信息，不再列出 workspace skill 扩展。
+- Claude/Gemini 继续通过各自原生 skill 目录发现；Codex 使用官方 `.agents/skills/` 约定。
+- 生成的 workspace `AGENTS.md` 现在只保留 repo 规则和元信息，不再承担 Codex workspace skill 列举逻辑。
 
 ## Workspace 布局
 
@@ -508,6 +515,8 @@ author: scheduler
 
 ## 自主性方向
 
+- 当前分支状态应理解为：`v0.7.2 基线 + 本地后续演进`。
+- 下一个版本目标是：`v0.7.3 - HITL Completion、Delivery、Operator Observability`。
 - v0.5 建立 runtime-first 基线：长任务执行、恢复、审批和合并闭环（已完成）。
 - v0.6 聚焦 skill-first autonomy + adaptive memory：skill 创建路由验证、跨 session 用户记忆（已完成）。
 - v0.7 建立日期驱动记忆系统基线（已完成）。
@@ -519,6 +528,7 @@ author: scheduler
 
 - Artifact delivery 还没完全做完：附件优先、链接兜底的交付适配层还需要补齐。
 - Runtime 可观测性还缺少内存级 live excerpt；`/task_logs` 可读 live agent log tail，但 Discord 状态卡不会直接展示"最近在做什么"的摘要。
+- Runtime 日志目前仍按执行路径拆分；下一步计划把 agent 行为统一沉到 thread-scoped 日志里。
 - 服务挂掉或启动失败时，Discord 侧还没有面向 operator 的 doctor / 自诊断入口；当前排查仍然需要直接去服务器上看日志。
 - 通用 HITL v1 目前只做到了 Discord 单选按钮：
   - owner-only

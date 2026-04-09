@@ -4,15 +4,17 @@ Multi-platform bot that routes messages to CLI-based AI agents (Claude, Gemini, 
 
 Inspired by [OpenClaw](https://openclaw.dev).
 
-## Status Snapshot (2026-03-16)
+## Status Snapshot (2026-04-09)
 
 - `/search` is implemented with SQLite FTS5 across all threads.
 - `SkillSync` reverse sync is implemented and runs on startup.
+- Current branch state is `v0.7.2` baseline plus local follow-up work across routing, HITL, logging, and market/deals workflows.
 - v0.5 is runtime-first: durable autonomous task loops (`DRAFT -> RUNNING -> WAITING_MERGE -> MERGED/...`).
 - v0.6 skill-first autonomy + adaptive memory is complete.
 - v0.7.2 extends the v0.7 line with auth-first runtime pause/resume, file-driven automations, generic Discord-first `ask_user` HITL, market briefings, and skill-specific timeout overrides for slow direct skill invocations.
+- The next planning target is `v0.7.3 - HITL Completion, Delivery, and Operator Observability`.
 - Discord approvals use buttons first, slash fallback, reactions as status-only signals.
-- Optional LLM routing is implemented: incoming messages can be classified as `reply_once`, `invoke_existing_skill`, `propose_artifact_task`, `propose_repo_task`, or `create_skill`.
+- Optional LLM routing is implemented: incoming messages can be classified as `reply_once`, `invoke_existing_skill`, `propose_artifact_task`, `propose_repo_task`, `create_skill`, or `repair_skill`.
 - Runtime observability is implemented: `/task_logs`, sampled progress events in SQLite, and a single updatable Discord status message.
 - Runtime logging is split into service-level and per-agent logs under `~/.oh-my-agent/runtime/logs/`.
 - Gateway/message logs now distinguish direct replies, explicit skill invocations, and router-driven reply paths via `purpose=...`; background memory/compression agent runs inherit the same request ID for traceability.
@@ -333,7 +335,7 @@ Rebuild the image only when you change container-layer concerns such as `Dockerf
 - `/skill_stats [skill]` reports recent success rate, usage, latency, feedback, and latest evaluation findings.
 - `/skill_enable <skill>` clears an auto-disabled skill so router-based invocation can use it again.
 - Auto-disable only removes a skill from automatic routing. Explicit `/skill-name` still works.
-- Skill mutation tasks now gate auto-merge on:
+- Skill mutation tasks now gate merge approval on:
   - overlap review for likely duplicate skills
   - source-grounded review for external repo/tool/reference adaptations
 - External-source skill adaptations should populate `SKILL.md` frontmatter metadata:
@@ -500,19 +502,21 @@ author: scheduler
 
 ## Artifact Delivery
 
-- The current delivery direction is:
+- Artifact delivery is not fully implemented yet.
+- The agreed v0.7.3 direction is:
   - try direct attachment upload first
   - fall back to a link when the artifact is too large for the target platform
-  - keep delivery behind an abstraction so local-first runs can use direct filesystem access now and remote deployments can plug in object storage later
+  - keep delivery behind an abstraction so local-first runs can expose filesystem-backed artifacts now and remote deployments can plug in object storage later
 - This delivery layer is a platform/runtime capability, not just prompt behavior.
 - Recommended storage direction for remote deployment is S3-compatible object storage, with Cloudflare R2 as the preferred default because it keeps the integration simple and works well for presigned-link delivery.
 
 ## Codex Integration Notes
 
-- Codex support is currently grounded in CLI execution, `AGENTS.md`, and platform-level routing/runtime behavior.
+- Codex support is currently grounded in CLI execution, official repo/workspace `.agents/skills/`, and platform-level routing/runtime behavior.
 - The practical near-term assumption is:
   - Claude/Gemini use workspace skill directories refreshed by `SkillSync`
   - Codex uses repo/workspace `.agents/skills/`
+- The generated workspace `AGENTS.md` remains a derived rules/metadata file; it is no longer the primary mechanism for enumerating Codex workspace skills.
 
 ## Workspace Layout
 
@@ -530,6 +534,8 @@ author: scheduler
 
 ## Autonomy Direction
 
+- Current branch state should be read as `v0.7.2 baseline + local follow-up work`.
+- The next version target is `v0.7.3 - HITL Completion, Delivery, and Operator Observability`.
 - v0.5 establishes the runtime-first baseline: durable task execution, merge gating, and recovery.
 - v0.6 focuses on skill-first autonomy + adaptive memory: skill creation, skill routing, skill validation, reusable capability growth, and cross-session user knowledge.
 - v0.7 delivers date-based memory; v0.7.2 closes the current auth/runtime/video/automation/HITL pass on top of it.
@@ -540,6 +546,7 @@ author: scheduler
 
 - Artifact delivery is not finished yet: generated artifacts are tracked, but attachment-first and link-fallback delivery still needs a dedicated adapter layer.
 - Runtime observability still lacks an in-memory live excerpt layer; `/task_logs` can read live agent log tails, but Discord status cards do not yet show the latest agent activity summary.
+- Runtime logs are still split by execution path; thread-scoped unified agent logs are the next planned observability step.
 - There is still no operator-facing doctor/self-diagnostics entrypoint in Discord when the service crashes or fails to start; today, debugging still requires direct access to server logs.
 - Human-in-the-loop v1 is now implemented for Discord buttons only:
   - single-choice `ask_user` prompts

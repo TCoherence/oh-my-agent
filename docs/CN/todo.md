@@ -1,18 +1,23 @@
 # Todo / 路线图
 
-## 当前快照（2026-03-01）
+## 当前快照（2026-04-09）
 
 - `/search` 已实现。
 - SkillSync reverse sync 已实现。
 - CLI-first 基础设施已经到位。
+- 当前分支应视为 `v0.7.2 基线 + 本地后续演进`。
 - v0.5 runtime-first 已完成（包括 runtime hardening pass）。
 - 可选 LLM router 已实现。
 - Runtime 可观测性基线已实现。
 - Runtime live agent logging 已实现。
 - 多类型 runtime 已实现（`artifact`、`repo_change`、`skill_change`）。
+- `WAITING_USER_INPUT` 和通用单选式 `ask_user` HITL 已实现。
+- `repair_skill` router 意图已实现。
 - Adaptive Memory 已实现（自动提取、注入、`/memories`、`/forget`）。
 - 基于日期的记忆系统已实现（daily/curated 两层架构、自动晋升、MEMORY.md 合成、`/promote`）。
 - 图片附件支持已实现（Discord 下载、per-agent 处理、临时文件生命周期管理）。
+- Codex repo/workspace skill 发现已切到官方 `.agents/skills/`；生成的 workspace `AGENTS.md` 只保留 rules/metadata。
+- 下一个版本目标：`v0.7.3 - HITL Completion、Delivery、Operator Observability`。
 
 ## v0.5 Runtime 加固（已完成）
 
@@ -46,9 +51,9 @@
 - [x] 支持"把这个 workflow 变成 skill"类请求的路由
 - [x] 增加 merge 前的 skill 验证闭环
 - [x] 增加 skill memory / provenance 元数据
-- [x] 跨 agent skill 分发：统一 SKILL.md 格式，SkillSync 分发到 `.claude/`、`.gemini/` 和 `.agents/skills/`；生成的 `AGENTS.md` 汇总 repo 规则和本地 Codex 可见 skill
-- [x] Codex 接入：官方 repo/workspace `.agents/skills/` + 生成的 `AGENTS.md`；reverse sync 现在扫描 Claude/Gemini/Codex 原生 skill 目录
-- [x] Skill 调用与修改分离：`/skill-name` → 普通对话路径；"创建 skill" → `TASK_TYPE_SKILL_CHANGE` runtime task，专用 prompt、验证和自动合并
+- [x] 跨 agent skill 分发：统一 SKILL.md 格式，SkillSync 分发到 `.claude/`、`.gemini/` 和 `.agents/skills/`；生成的 `AGENTS.md` 汇总 repo 规则和 workspace 元信息
+- [x] Codex 接入：官方 repo/workspace `.agents/skills/` + 用于 rules/metadata 的生成 `AGENTS.md`；reverse sync 现在扫描 Claude/Gemini/Codex 原生 skill 目录
+- [x] Skill 调用与修改分离：`/skill-name` → 普通对话路径；"创建 skill" → `TASK_TYPE_SKILL_CHANGE` runtime task，专用 prompt、验证和 merge gate
 
 ### Adaptive Memory（已完成）
 
@@ -60,7 +65,7 @@
 - [x] 记忆冲突合并：Jaccard 去重（阈值 0.6）→ 合并并提升 confidence；按 confidence × 时效性 淘汰
 - [x] 跨 agent 共享：记忆属于用户，所有 agent 共用同一 YAML 文件
 
-## v0.7 - 基于日期的记忆系统 + Human-in-the-Loop Ops 基础
+## v0.7 - 基于日期的记忆系统 + HITL/Ops 基础
 
 ### 基于日期的记忆（已完成）
 
@@ -73,18 +78,12 @@
 - [x] **压缩前记忆刷写**：记忆提取在历史压缩之前执行（顺序调换），确保不丢失。
 - [x] **Discord 命令**：`/memories` 显示 `[C]`/`[D]` 层级标记，新增 `/promote` 命令。
 
-### Ops 基础
+### Human-in-the-Loop 基线（已完成）
 
-- [ ] Scheduler 驱动的主动任务（对接 `automations` 到 runtime task 类型）
-- [ ] 超越 cron 的事件驱动触发器（webhook 接入、文件监控、外部通知）
-- [ ] **面向 operator 的 doctor 命令**：增加 Discord 优先的自诊断入口（`/doctor` 或等价能力），在进程异常或服务挂掉后，能够汇报最近失败状态、启动健康情况、日志位置和建议排查步骤，而不要求先手动登录服务器找日志
-
-### Human-in-the-Loop Runtime
-
-- [ ] **一等等待状态**：增加专门的 `WAITING_USER_INPUT` runtime 状态，不再把所有人工交互都塞进 `BLOCKED`
-- [ ] **Agent 主动提问界面**：允许运行中的 task 在 Discord 里向用户发起带上下文和可选项的明确问题
-- [ ] **结构化答案绑定**：把用户的下一条回复绑定到 pending question，并以结构化 answer payload 恢复 task，而不是只靠自由文本 resume instruction
-- [ ] **任务中途审批检查点**：对高风险或高歧义步骤支持显式人工确认，而不是只在 merge 阶段做人类审批
+- [x] **一等等待状态**：`WAITING_USER_INPUT` 已实现，用于 thread 和 task 级暂停
+- [x] **Agent 主动提问界面**：通用单选式 `ask_user` challenge 已接到 Discord
+- [x] **结构化单选答案**：owner 按钮选择会持久化，并用于恢复 direct chat 和 runtime task
+- [x] **owner 通知与持久化**：`ask_user` prompt 会落到 SQLite、重启后重新注册，并触发可见 owner 提醒
 
 ### Skill 评估
 
@@ -93,9 +92,18 @@
 - [x] **Skill 健康看板**：`/skill_stats [skill]` 展示成功率、使用频率、最近调用时间、平均延迟和最近评估结论
 - [x] **自动降级**：当 skill 失败率超过滚动窗口阈值时，将其从自动路由中移除，但保留显式 `/skill-name`；`/skill_enable` 可人工恢复
 - [x] **重复 skill 防重护栏**：新 skill 自动合并前，对名称/描述/请求与现有 skills 做重叠判断；如果能力明显重合，则强制进入人工 merge review
-- [x] **基于来源的 skill 评估**：当 skill task 要内化外部 repo/tool/reference 时，要求补齐来源元数据，并在自动合并前跑 source-grounded review
+- [x] **基于来源的 skill 评估**：当 skill task 要内化外部 repo/tool/reference 时，要求补齐来源元数据，并在合并审批前跑 source-grounded review
 
-### 访客会话（临时隔离）
+## v0.7.3 - HITL Completion、Delivery、Operator Observability
+
+- [ ] **Artifact delivery 抽象**：增加统一平台/runtime 交付层，先尝试附件上传，超限时回退为链接
+- [ ] **按 thread 聚合的统一日志**：用 `~/.oh-my-agent/runtime/logs/threads/<thread_id>.log` 作为主要 agent 审计入口，取代当前按执行路径拆分的主视角
+- [ ] **HITL completion 语义补齐**：在现有 `WAITING_USER_INPUT` 基线上补齐 answer binding、resume context injection 和可复用的任务中途审批/checkpoint 语义
+- [ ] **面向 operator 的 doctor 命令**：增加 Discord 优先的自诊断入口（`/doctor` 或等价能力），在进程异常或服务挂掉后，能够汇报最近失败状态、启动健康情况、日志位置和建议排查步骤，而不要求先手动登录服务器找日志
+- [ ] **超越 cron 的事件驱动触发器**：webhook 接入、文件监控、外部通知等 runtime 入口
+- [ ] **Scheduler 驱动的主动任务**：把文件驱动的 `automations` 真正对接到 runtime task 类型和 operator surface
+
+## 延后到 v0.7.3 之后
 
 - [ ] **临时会话模式**：将 session 标记为 `guest`，使用隔离的临时记忆空间（不写入 owner 的 adaptive memory，无 skill 修改权限）
 - [ ] 通过 `/guest` 切换或 per-user 配置
@@ -124,9 +132,8 @@
 ## Backlog（无版本承诺）
 
 - [ ] Live observability ring buffer + 状态卡 live excerpt
-- [ ] Artifact delivery 抽象（附件优先、链接兜底）
 - [ ] 面向远端部署的对象存储交付适配器（R2/S3 风格）
-- [ ] 交付策略抽象（inline summary / attachment / link）
+- [ ] 交付策略细化（inline summary / attachment / link），放在核心 delivery abstraction 落地之后
 - [ ] Markdown 感知的分块发送
 - [ ] Rate limiting / request queue
 - [x] Docker 隔离（host 挂载到 `/home`，repo 挂载到 `/repo`，配置从 repo 读取，启动时 editable install，并预装 CLI 工具）
