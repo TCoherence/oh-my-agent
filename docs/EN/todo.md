@@ -17,8 +17,8 @@
 - Date-based memory is implemented (daily/curated two-tier, auto-promotion, MEMORY.md synthesis, `/promote`).
 - Image attachment support is implemented (Discord download, per-agent handling, temp file lifecycle).
 - Codex repo/workspace skill discovery now uses official `.agents/skills/`; generated workspace `AGENTS.md` is reduced to rules/metadata.
-- `v0.7.3 phase 1` is now implemented.
-- Current next target: `v0.7.3 phase 2`.
+- `v0.7.3` is now fully implemented (phases 1–3).
+- Current next target: deferred items and `v0.8+`.
 
 ## v0.5 Runtime Hardening (complete)
 
@@ -97,15 +97,29 @@ Upgrade adaptive memory from flat YAML to a date-organized, two-tier architectur
 
 ## v0.7.3 - HITL Completion, Delivery, and Operator Observability
 
+### Phase 1 (complete)
 - [x] **Artifact delivery abstraction**: platform/runtime delivery layer now tries attachment upload first and falls back to local absolute paths when upload is unavailable or artifacts exceed local limits
 - [x] **Thread-scoped unified logs**: `~/.oh-my-agent/runtime/logs/threads/<thread_id>.log` is now the main agent-audit surface across chat/invoke/runtime/HITL resume flows
 - [x] **HITL completion semantics**: single-choice answer binding, structured resume-context injection, and checkpoint reuse on top of `WAITING_USER_INPUT` are implemented
 - [x] **Operator-facing doctor command**: Discord `/doctor` now reports runtime, HITL, auth, scheduler, and log-pointer health snapshots
-- [ ] **Event-driven triggers beyond cron**: webhook ingestion, file-watch, and external notification hooks for runtime entry
-- [ ] **Scheduler-driven operational tasks**: connect file-driven `automations` to runtime task types and operator surfaces
+
+### Phase 2 — Automation State + Operator Surfaces + Delivery + Live Observability (complete)
+- [x] **Automation runtime state persistence**: `automation_runtime_state` SQLite table with `last_run_at`, `last_success_at`, `last_error`, `last_task_id`, `next_run_at`; scheduler fire/complete/fail paths write state; persists across restarts; disabled automations have `next_run_at = NULL`
+- [x] **Operator surfaces closeout**: `/doctor` now shows HITL waiting/resolving breakdown and recent automation failures; `/automation_status` shows persisted runtime state (last run, last success, next run, last error, last task ID) alongside definitions
+- [x] **Skill timeout propagation**: automation YAML `skill_name` field propagates `metadata.timeout_seconds` into `max_minutes` for scheduler-fired artifact tasks
+- [x] **Delivery closeout**: `_completed_text` unifies delivery info from `ArtifactDeliveryResult`; `deliver_files()` extracted as reusable core decoupled from `RuntimeTask`
+- [x] **Live observability closeout**: running task status cards include bounded `Latest activity` from live agent log; buttons already enter stable disabled state on all terminal actions
+
+### Phase 3 — HITL Checkpoint Semantics Closeout (complete)
+- [x] **Checkpoint model normalization**: `HITL_CHOICES_APPROVAL` and `HITL_CHOICES_CONTINUE` standard choice families as internal constants; `WAITING_USER_INPUT` remains the unified waiting state
+- [x] **Answer binding contract closeout**: answer payload includes `prompt_id`, `target_kind`, `question`, `choice_id`, `choice_label`, `choice_description`, `answered_at`; structured payload is the truth source, `[HITL Answer]` text block kept for agent compatibility
+- [x] **Resume semantics closeout**: task HITL resumes to PENDING with structured + text payload; thread HITL auto-resumes with `last_hitl_answer` inheritance (latest only, no chain); cross-task isolation via `task_id`-scoped event queries
+- [x] **Operator-visible HITL status**: `/task_logs` shows active/last HITL checkpoint question and selected answer
 
 ## Deferred beyond v0.7.3
 
+- [ ] **Event-driven triggers beyond cron**: webhook ingestion, file-watch, and external notification hooks for runtime entry
+- [ ] **Scheduler-driven operational tasks**: connect file-driven `automations` to runtime task types and operator surfaces
 - [ ] **Temp session mode**: flag a session as `guest` so it uses an isolated ephemeral memory scope (no writes to owner's adaptive memory, no skill mutation permissions)
 - [ ] Configurable via `/guest` toggle or per-user config
 
@@ -146,9 +160,9 @@ Upgrade adaptive memory from flat YAML to a date-organized, two-tier architectur
 - [x] Codex / Gemini CLI session resume
 - [ ] Add internal CLI agent lifecycle hooks (`pre-run`, `post-run`, `failure`, `resume`) for system-owned follow-up work such as reverse sync, artifact post-processing, and observability; keep this as an internal mechanism rather than a user-facing feature surface
 - [ ] Skill feedback UX follow-up: allow reactions on any chunk of a multi-message skill result, and optionally emit a dedicated feedback prompt/message after a completed skill result; keep feedback scoped to completed skill outputs only, not auth/system/general chat messages
-- [ ] Persist automation runtime state (`last_run`, `next_run`, `last_error`) instead of recomputing everything after restart
+- [x] Persist automation runtime state (`last_run`, `next_run`, `last_error`) instead of recomputing everything after restart
 - [x] Add operator automation controls such as `/automation_status`, `/automation_reload`, `/automation_enable`, and `/automation_disable` (Discord-only, owner-only, ephemeral MVP)
-- [ ] PRIORITY: propagate skill-level `metadata.timeout_seconds` into runtime task / automation execution so long-running automation-backed skills can inherit the same timeout override as direct skill invocations
+- [x] PRIORITY: propagate skill-level `metadata.timeout_seconds` into runtime task / automation execution so long-running automation-backed skills can inherit the same timeout override as direct skill invocations
 - [ ] Define missed-job behavior for downtime and restarts (skip, replay, or bounded catch-up)
 - [ ] Revisit automation scheduling model beyond v1 cron + interval fallback (for example RRULE or richer cron semantics)
 - [ ] Add an operator-facing automation observability surface for active jobs, recent fires, and last failures

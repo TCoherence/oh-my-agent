@@ -564,9 +564,29 @@ class GatewayManager:
     async def _run_scheduler(self) -> None:
         if not self._scheduler:
             return
+        self._scheduler._on_reload = self._sync_automation_runtime_state
+        await self._sync_automation_runtime_state()
         await self._scheduler.run(self._dispatch_scheduled_job)
 
+    async def _sync_automation_runtime_state(self) -> None:
+        """Persist next_run_at and enabled for all known automations."""
+        store = getattr(self, "_memory_store_ref", None)
+        if not store or not self._scheduler:
+            return
+        next_runs = self._scheduler.compute_all_next_run_at()
+        for record in self._scheduler.list_automations():
+            next_dt = next_runs.get(record.name)
+            next_run_iso = next_dt.isoformat() if next_dt else None
+            await store.upsert_automation_state(
+                record.name,
+                platform=record.platform,
+                channel_id=record.channel_id,
+                enabled=record.enabled,
+                next_run_at=next_run_iso,
+            )
+
     async def _dispatch_scheduled_job(self, job: ScheduledJob) -> None:
+        store = getattr(self, "_memory_store_ref", None)
         key = self._session_key(job.platform, job.channel_id)
         session = self._sessions.get(key)
         if session is None:
@@ -576,6 +596,13 @@ class GatewayManager:
                 job.platform,
                 job.channel_id,
             )
+            if store:
+                await store.upsert_automation_state(
+                    job.name,
+                    platform=job.platform,
+                    channel_id=job.channel_id,
+                    last_error=f"no active channel {job.platform}:{job.channel_id}",
+                )
             return
 
         thread_id: str
@@ -585,6 +612,13 @@ class GatewayManager:
                     "Scheduler job '%s' skipped: delivery=dm requires target_user_id",
                     job.name,
                 )
+                if store:
+                    await store.upsert_automation_state(
+                        job.name,
+                        platform=job.platform,
+                        channel_id=job.channel_id,
+                        last_error="delivery=dm requires target_user_id",
+                    )
                 return
             dm_resolver = getattr(session.channel, "ensure_dm_channel", None)
             if dm_resolver is None or not inspect.iscoroutinefunction(dm_resolver):
@@ -593,11 +627,16 @@ class GatewayManager:
                     job.name,
                     session.channel.platform,
                 )
+                if store:
+                    await store.upsert_automation_state(
+                        job.name,
+                        platform=job.platform,
+                        channel_id=job.channel_id,
+                        last_error=f"channel {session.channel.platform} does not support DM delivery",
+                    )
                 return
             thread_id = await dm_resolver(job.target_user_id)
         else:
-            # Scheduler jobs without explicit thread_id post to the parent
-            # channel by using channel_id as the target "thread".
             thread_id = job.thread_id or job.channel_id
 
         msg = IncomingMessage(
@@ -609,18 +648,44 @@ class GatewayManager:
             preferred_agent=job.agent,
             system=True,
         )
-        if self._runtime_service and self._runtime_service.enabled:
-            await self._runtime_service.enqueue_scheduler_task(
-                session=session,
-                registry=session.registry,
-                thread_id=thread_id,
-                automation_name=job.name,
-                prompt=job.prompt,
-                author=job.author,
-                preferred_agent=job.agent,
-            )
-            return
-        await self.handle_message(session, session.registry, msg)
+        try:
+            if self._runtime_service and self._runtime_service.enabled:
+                task = await self._runtime_service.enqueue_scheduler_task(
+                    session=session,
+                    registry=session.registry,
+                    thread_id=thread_id,
+                    automation_name=job.name,
+                    prompt=job.prompt,
+                    author=job.author,
+                    preferred_agent=job.agent,
+                    skill_name=job.skill_name,
+                )
+                if task and store:
+                    await store.upsert_automation_state(
+                        job.name,
+                        platform=job.platform,
+                        channel_id=job.channel_id,
+                        last_run_at="__NOW__",
+                        last_task_id=task.id,
+                    )
+                return
+            await self.handle_message(session, session.registry, msg)
+            if store:
+                await store.upsert_automation_state(
+                    job.name,
+                    platform=job.platform,
+                    channel_id=job.channel_id,
+                    last_run_at="__NOW__",
+                )
+        except Exception as exc:
+            logger.exception("Scheduler job '%s' fire failed: %s", job.name, exc)
+            if store:
+                await store.upsert_automation_state(
+                    job.name,
+                    platform=job.platform,
+                    channel_id=job.channel_id,
+                    last_error=str(exc)[:1000],
+                )
 
     async def handle_message(
         self,

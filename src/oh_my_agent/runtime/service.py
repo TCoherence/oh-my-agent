@@ -1020,6 +1020,7 @@ class RuntimeService:
         prompt: str,
         author: str,
         preferred_agent: str | None,
+        skill_name: str | None = None,
     ) -> RuntimeTask | None:
         tasks = await self._store.list_runtime_tasks(
             platform=session.platform,
@@ -1038,6 +1039,11 @@ class RuntimeService:
                 )
                 return None
 
+        max_minutes = 10
+        skill_timeout = self._skill_timeout_seconds_by_name(skill_name)
+        if skill_timeout is not None:
+            max_minutes = max(1, (skill_timeout + 59) // 60)
+
         return await self.create_artifact_task(
             session=session,
             registry=registry,
@@ -1048,7 +1054,7 @@ class RuntimeService:
             preferred_agent=preferred_agent,
             test_command="true",
             max_steps=1,
-            max_minutes=10,
+            max_minutes=max_minutes,
             source="scheduler",
             automation_name=automation_name,
         )
@@ -1469,11 +1475,20 @@ class RuntimeService:
             lines.append("- Task counts:")
             for status in important_statuses:
                 lines.append(f"  - `{status}`: {status_counts.get(status, 0)}")
+        prompt_waiting = sum(1 for p in prompts if p.status == "waiting")
+        prompt_resolving = sum(1 for p in prompts if p.status == "resolving")
         lines.extend(
             [
                 "",
                 "**HITL health**",
                 f"- Active prompts: `{len(prompts)}`",
+            ]
+        )
+        if prompts:
+            lines.append(f"  - waiting: `{prompt_waiting}`")
+            lines.append(f"  - resolving: `{prompt_resolving}`")
+        lines.extend(
+            [
                 "",
                 "**Scheduler health**",
                 f"- Enabled: `{bool(scheduler is not None)}`",
@@ -1484,6 +1499,13 @@ class RuntimeService:
                 automations = scheduler.list_automations()
                 lines.append(f"- Loaded automations: `{len(automations)}`")
                 lines.append(f"- Active jobs: `{len(scheduler.jobs)}`")
+                auto_states = await self._store.list_automation_states()
+                recent_failures = [s for s in auto_states if s.last_error]
+                if recent_failures:
+                    lines.append(f"- Recent failures: `{len(recent_failures)}`")
+                    for af in recent_failures[:3]:
+                        err_preview = (af.last_error or "")[:80]
+                        lines.append(f"  - `{af.name}`: {err_preview}")
             except Exception:
                 lines.append("- Scheduler summary unavailable.")
         lines.extend(
@@ -2038,6 +2060,26 @@ class RuntimeService:
                 lines.append(
                     f"- `{event['event_type']}`"
                     + (f": {summary}" if summary else "")
+                )
+
+        hitl_prompt = await self._store.get_active_hitl_prompt_for_task(task.id)
+        if hitl_prompt is None:
+            answered = await self._last_hitl_answer_payload_for_task(task.id)
+            if answered:
+                lines.append("")
+                lines.append("**Last HITL checkpoint**")
+                lines.append(f"- Question: {answered.get('question', '')[:200]}")
+                lines.append(
+                    f"- Answer: **{answered.get('choice_label', '')}** (`{answered.get('choice_id', '')}`)"
+                )
+        else:
+            lines.append("")
+            lines.append("**Active HITL prompt**")
+            lines.append(f"- Status: `{hitl_prompt.status}`")
+            lines.append(f"- Question: {hitl_prompt.question[:200]}")
+            if hitl_prompt.selected_choice_id:
+                lines.append(
+                    f"- Answer: **{hitl_prompt.selected_choice_label or ''}** (`{hitl_prompt.selected_choice_id}`)"
                 )
 
         ckpt = await self._store.get_last_runtime_checkpoint(task.id)
@@ -2816,6 +2858,13 @@ class RuntimeService:
                             },
                         )
                 if task.automation_name:
+                    await self._store.upsert_automation_state(
+                        task.automation_name,
+                        platform=task.platform,
+                        channel_id=task.channel_id,
+                        last_success_at="__NOW__",
+                        last_error=None,
+                    )
                     completion_text = await self._automation_completed_text(
                         task=completed_task,
                         changed_files=changed_files,
@@ -2826,10 +2875,8 @@ class RuntimeService:
                         task=completed_task,
                         changed_files=changed_files,
                         test_summary=test_summary,
+                        delivery=delivery,
                     )
-                    delivery_lines = self._render_delivery_lines(delivery)
-                    if delivery_lines:
-                        completion_text = "\n".join([completion_text, "", *delivery_lines])[:1900]
                 await self._notify(task, completion_text, record_history=True, terminal=True)
                 await self._signal_status_by_id(task, TASK_STATUS_COMPLETED)
                 return
@@ -2843,6 +2890,13 @@ class RuntimeService:
             summary="Task exceeded step budget.",
         )
         logger.info("Runtime task=%s TIMEOUT max_steps=%d", task.id, task.max_steps)
+        if task.automation_name:
+            await self._store.upsert_automation_state(
+                task.automation_name,
+                platform=task.platform,
+                channel_id=task.channel_id,
+                last_error=f"task {task.id} timed out (max_steps={task.max_steps})",
+            )
         await self._notify(task, f"Task `{task.id}` reached max steps and stopped.")
         await self._signal_status_by_id(task, TASK_STATUS_TIMEOUT)
 
@@ -3197,6 +3251,13 @@ class RuntimeService:
         )
         await self._store.add_runtime_event(task.id, "task.failed", {"error": error[:1000]})
         logger.error("Runtime task=%s FAILED error=%s", task.id, error[:600])
+        if task.automation_name:
+            await self._store.upsert_automation_state(
+                task.automation_name,
+                platform=task.platform,
+                channel_id=task.channel_id,
+                last_error=error[:1000],
+            )
         await self._notify(
             task,
             f"Task `{task.id}` failed: {error[:400]}",
@@ -3285,7 +3346,14 @@ class RuntimeService:
             parts.append(f"Validation: {formatted}")
         return " | ".join(parts)[:1000] if parts else None
 
-    def _completed_text(self, *, task: RuntimeTask, changed_files: list[str], test_summary: str) -> str:
+    def _completed_text(
+        self,
+        *,
+        task: RuntimeTask,
+        changed_files: list[str],
+        test_summary: str,
+        delivery: ArtifactDeliveryResult | None = None,
+    ) -> str:
         lines = [f"Task `{task.id}` completed."]
         if task.output_summary:
             lines.append(task.output_summary)
@@ -3299,6 +3367,10 @@ class RuntimeService:
             lines.append("")
             lines.append("Validation result:")
             lines.append(f"```text\n{formatted[:500]}\n```")
+        delivery_lines = self._render_delivery_lines(delivery)
+        if delivery_lines:
+            lines.append("")
+            lines.extend(delivery_lines)
         return "\n".join(lines)[:1900]
 
     def _artifact_paths_for_task(self, task: RuntimeTask, changed_files: list[str]) -> list[Path]:
@@ -3341,8 +3413,32 @@ class RuntimeService:
         artifact_paths = self._artifact_paths_for_task(task, changed_files)
         if not artifact_paths:
             return None
-
         summary_text = task.output_summary or f"{len(artifact_paths)} artifact(s) ready."
+        return await self.deliver_files(
+            session=session,
+            thread_id=task.thread_id,
+            artifact_paths=artifact_paths,
+            summary_text=summary_text,
+            log_label=f"task={task.id}",
+        )
+
+    async def deliver_files(
+        self,
+        *,
+        session: ChannelSession,
+        thread_id: str,
+        artifact_paths: list[Path],
+        summary_text: str,
+        log_label: str = "",
+    ) -> ArtifactDeliveryResult | None:
+        """Deliver files via attachment upload with local path fallback.
+
+        This is the reusable core of artifact delivery, decoupled from
+        RuntimeTask so it can serve future non-task callers.
+        """
+        if not artifact_paths:
+            return None
+
         channel_impl = type(session.channel)
         supports_attachment_upload = (
             getattr(channel_impl, "send_attachment", None) is not BaseChannel.send_attachment
@@ -3374,7 +3470,7 @@ class RuntimeService:
             and total_size <= self._artifact_attachment_max_total_bytes
         ):
             try:
-                message_ids = await session.channel.send_attachments(task.thread_id, attachments)
+                message_ids = await session.channel.send_attachments(thread_id, attachments)
                 return ArtifactDeliveryResult(
                     mode="attachment",
                     delivered_paths=[str(path.resolve()) for path in artifact_paths],
@@ -3383,7 +3479,7 @@ class RuntimeService:
                     attachment_names=[attachment.filename for attachment in attachments],
                 )
             except Exception:
-                logger.warning("Artifact attachment delivery failed task=%s", task.id, exc_info=True)
+                logger.warning("Artifact attachment delivery failed %s", log_label, exc_info=True)
 
         if (
             attachments
@@ -3755,6 +3851,23 @@ class RuntimeService:
         await session.channel.send(thread_id, text)
         return None
 
+    def _latest_activity_for_task(self, task_id: str, max_chars: int = 200) -> str | None:
+        """Read a bounded tail from the live agent log for a running task."""
+        log_path = self._live_agent_logs.get(task_id)
+        if not log_path or not log_path.exists():
+            return None
+        try:
+            content = log_path.read_text(encoding="utf-8", errors="replace").strip()
+        except Exception:
+            return None
+        if not content:
+            return None
+        tail = content[-max_chars:] if len(content) > max_chars else content
+        last_newline = tail.find("\n")
+        if last_newline > 0 and last_newline < len(tail) - 1:
+            tail = tail[last_newline + 1:]
+        return tail.strip() or None
+
     async def _notify(
         self,
         task: RuntimeTask,
@@ -3774,7 +3887,13 @@ class RuntimeService:
             return
         current = await self._store.get_runtime_task(task.id)
         status_message_id = current.status_message_id if current else task.status_message_id
-        body = self._format_status_message(text)
+        effective_status = current.status if current else task.status
+        enriched_text = text
+        if effective_status == TASK_STATUS_RUNNING and not terminal:
+            activity = self._latest_activity_for_task(task.id)
+            if activity:
+                enriched_text = f"{text}\n\n**Latest activity**\n```text\n{activity}\n```"
+        body = self._format_status_message(enriched_text)
         upsert = getattr(session.channel, "upsert_status_message", None)
         if upsert and callable(upsert):
             msg_id = await upsert(task.thread_id, body[:1900], message_id=status_message_id)

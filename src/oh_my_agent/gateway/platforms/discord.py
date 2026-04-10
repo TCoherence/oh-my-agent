@@ -731,6 +731,14 @@ class DiscordChannel(BaseChannel):
                 )
                 return
 
+            runtime_states: dict = {}
+            if self._memory_store:
+                try:
+                    for s in await self._memory_store.list_automation_states():
+                        runtime_states[s.name] = s
+                except Exception:
+                    pass
+
             if name:
                 record = self._scheduler.get_automation(name.strip())
                 if not record:
@@ -739,10 +747,11 @@ class DiscordChannel(BaseChannel):
                         ephemeral=True,
                     )
                     return
-                state = "enabled" if record.enabled else "disabled"
+                state_label = "enabled" if record.enabled else "disabled"
+                rs = runtime_states.get(record.name)
                 lines = [
                     f"**Automation** `{record.name}`",
-                    f"- State: `{state}`",
+                    f"- State: `{state_label}`",
                     f"- Schedule: {_format_automation_schedule(record)}",
                     f"- Delivery: `{record.delivery}`",
                     f"- Target: {_format_automation_target(record)}",
@@ -750,6 +759,15 @@ class DiscordChannel(BaseChannel):
                     f"- Author: `{record.author}`",
                     f"- Source: `{record.source_path}`",
                 ]
+                if rs:
+                    lines.append("")
+                    lines.append("**Runtime state**")
+                    lines.append(f"- Last run: `{rs.last_run_at or '—'}`")
+                    lines.append(f"- Last success: `{rs.last_success_at or '—'}`")
+                    lines.append(f"- Next run: `{rs.next_run_at or '—'}`")
+                    lines.append(f"- Last task: `{rs.last_task_id or '—'}`")
+                    if rs.last_error:
+                        lines.append(f"- Last error: {rs.last_error[:200]}")
                 await interaction.response.send_message("\n".join(lines)[:1900], ephemeral=True)
                 return
 
@@ -763,14 +781,23 @@ class DiscordChannel(BaseChannel):
 
             enabled_records = [record for record in records if record.enabled]
             disabled_records = [record for record in records if not record.enabled]
+            failed_names = [s.name for s in runtime_states.values() if s.last_error]
             lines = [
                 f"**Automations** — {len(enabled_records)} enabled, {len(disabled_records)} disabled",
             ]
+            if failed_names:
+                lines.append(f"- Recent failures: `{len(failed_names)}` ({', '.join(f'`{n}`' for n in failed_names[:5])})")
             if enabled_records:
                 lines.append("**Enabled**")
                 for record in enabled_records[:12]:
+                    rs = runtime_states.get(record.name)
+                    suffix = ""
+                    if rs and rs.last_error:
+                        suffix = " ⚠️"
+                    elif rs and rs.last_success_at:
+                        suffix = " ✓"
                     lines.append(
-                        f"- `{record.name}` · {_format_automation_schedule(record)} · {_format_automation_target(record)}"
+                        f"- `{record.name}` · {_format_automation_schedule(record)} · {_format_automation_target(record)}{suffix}"
                     )
             if disabled_records:
                 lines.append("**Disabled**")

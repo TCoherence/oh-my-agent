@@ -16,7 +16,13 @@ from typing import Any
 import aiosqlite
 
 from oh_my_agent.auth.types import AUTH_SCOPE_DEFAULT, AuthFlow, CredentialHandle
-from oh_my_agent.runtime.types import HitlPrompt, NotificationRecord, RuntimeTask, SuspendedAgentRun
+from oh_my_agent.runtime.types import (
+    AutomationRuntimeState,
+    HitlPrompt,
+    NotificationRecord,
+    RuntimeTask,
+    SuspendedAgentRun,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +49,7 @@ RUNTIME_STATE_TABLES = {
     "runtime_task_checkpoints",
     "runtime_task_decisions",
     "ephemeral_workspaces",
+    "automation_runtime_state",
 }
 SKILLS_TELEMETRY_TABLES = {
     "skill_provenance",
@@ -65,6 +72,7 @@ TABLE_COPY_ORDER = [
     "hitl_prompts",
     "notification_events",
     "ephemeral_workspaces",
+    "automation_runtime_state",
     "skill_provenance",
     "skill_invocations",
     "skill_feedback",
@@ -409,6 +417,20 @@ class MemoryStore(ABC):
     async def mark_ephemeral_workspace_cleaned(self, workspace_key: str) -> None:
         return None
 
+    # -- automation runtime state -------------------------------------------
+
+    async def upsert_automation_state(self, name: str, **updates) -> None:
+        return None
+
+    async def get_automation_state(self, name: str) -> AutomationRuntimeState | None:
+        return None
+
+    async def list_automation_states(self) -> list[AutomationRuntimeState]:
+        return []
+
+    async def delete_automation_state(self, name: str) -> None:
+        return None
+
     async def upsert_skill_provenance(self, skill_name: str, **kwargs) -> None:
         return None
 
@@ -747,6 +769,19 @@ CREATE TABLE IF NOT EXISTS ephemeral_workspaces (
 
 CREATE INDEX IF NOT EXISTS idx_ephemeral_workspaces_active
     ON ephemeral_workspaces(cleaned_at, last_used_at);
+
+CREATE TABLE IF NOT EXISTS automation_runtime_state (
+    name             TEXT PRIMARY KEY,
+    platform         TEXT NOT NULL,
+    channel_id       TEXT NOT NULL,
+    enabled          INTEGER NOT NULL DEFAULT 1,
+    last_run_at      TIMESTAMP,
+    last_success_at  TIMESTAMP,
+    last_error       TEXT,
+    last_task_id     TEXT,
+    next_run_at      TIMESTAMP,
+    updated_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 
 CREATE TABLE IF NOT EXISTS skill_provenance (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1220,6 +1255,89 @@ class SQLiteMemoryStore(MemoryStore):
                 "SET cleaned_at=CURRENT_TIMESTAMP "
                 "WHERE workspace_key=?",
                 (workspace_key,),
+            )
+            await db.commit()
+
+    # -- automation runtime state ------------------------------------------
+
+    async def upsert_automation_state(self, name: str, **updates) -> None:
+        async with self._write_lock:
+            db = await self._conn()
+            row = await (
+                await db.execute(
+                    "SELECT 1 FROM automation_runtime_state WHERE name=?",
+                    (name,),
+                )
+            ).fetchone()
+            if row is None:
+                platform = str(updates.pop("platform", ""))
+                channel_id = str(updates.pop("channel_id", ""))
+                enabled = bool(updates.pop("enabled", True))
+                sets: list[str] = []
+                values: list[Any] = []
+                for key, value in updates.items():
+                    if value == "__NOW__":
+                        sets.append(f"{key}=CURRENT_TIMESTAMP")
+                    else:
+                        sets.append(f"{key}=?")
+                        values.append(value)
+                cols = "name, platform, channel_id, enabled, updated_at"
+                vals = "?, ?, ?, ?, CURRENT_TIMESTAMP"
+                params: list[Any] = [name, platform, channel_id, int(enabled)]
+                for key, value in updates.items():
+                    if value == "__NOW__":
+                        cols += f", {key}"
+                        vals += ", CURRENT_TIMESTAMP"
+                    else:
+                        cols += f", {key}"
+                        vals += ", ?"
+                        params.append(value)
+                await db.execute(
+                    f"INSERT INTO automation_runtime_state ({cols}) VALUES ({vals})",
+                    tuple(params),
+                )
+            else:
+                sets = []
+                values = []
+                for key, value in updates.items():
+                    if value == "__NOW__":
+                        sets.append(f"{key}=CURRENT_TIMESTAMP")
+                    else:
+                        sets.append(f"{key}=?")
+                        values.append(value)
+                sets.append("updated_at=CURRENT_TIMESTAMP")
+                values.append(name)
+                await db.execute(
+                    f"UPDATE automation_runtime_state SET {', '.join(sets)} WHERE name=?",
+                    tuple(values),
+                )
+            await db.commit()
+
+    async def get_automation_state(self, name: str) -> AutomationRuntimeState | None:
+        db = await self._conn()
+        cursor = await db.execute(
+            "SELECT * FROM automation_runtime_state WHERE name=?",
+            (name,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return AutomationRuntimeState.from_row(dict(row))
+
+    async def list_automation_states(self) -> list[AutomationRuntimeState]:
+        db = await self._conn()
+        cursor = await db.execute(
+            "SELECT * FROM automation_runtime_state ORDER BY name"
+        )
+        rows = await cursor.fetchall()
+        return [AutomationRuntimeState.from_row(dict(row)) for row in rows]
+
+    async def delete_automation_state(self, name: str) -> None:
+        async with self._write_lock:
+            db = await self._conn()
+            await db.execute(
+                "DELETE FROM automation_runtime_state WHERE name=?",
+                (name,),
             )
             await db.commit()
 
@@ -2505,6 +2623,10 @@ class SplitSQLiteMemoryStore:
         "upsert_ephemeral_workspace",
         "list_expired_ephemeral_workspaces",
         "mark_ephemeral_workspace_cleaned",
+        "upsert_automation_state",
+        "get_automation_state",
+        "list_automation_states",
+        "delete_automation_state",
     }
     _SKILLS_METHODS = {
         "upsert_skill_provenance",

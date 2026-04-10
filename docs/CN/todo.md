@@ -17,8 +17,8 @@
 - 基于日期的记忆系统已实现（daily/curated 两层架构、自动晋升、MEMORY.md 合成、`/promote`）。
 - 图片附件支持已实现（Discord 下载、per-agent 处理、临时文件生命周期管理）。
 - Codex repo/workspace skill 发现已切到官方 `.agents/skills/`；生成的 workspace `AGENTS.md` 只保留 rules/metadata。
-- `v0.7.3 phase 1` 已实现。
-- 当前下一个目标：`v0.7.3 phase 2`。
+- `v0.7.3` 已全部实现（phase 1–3）。
+- 当前下一个目标：deferred items 和 `v0.8+`。
 
 ## v0.5 Runtime 加固（已完成）
 
@@ -97,15 +97,29 @@
 
 ## v0.7.3 - HITL Completion、Delivery、Operator Observability
 
-- [x] **Artifact delivery 抽象**：统一平台/runtime 交付层已实现，先尝试附件上传；上传不可用或产物超限时回退为本地绝对路径
+### Phase 1（已完成）
+- [x] **Artifact delivery 抽象**：统一平台/runtime 交付层，先尝试附件上传；上传不可用或产物超限时回退为本地绝对路径
 - [x] **按 thread 聚合的统一日志**：`~/.oh-my-agent/runtime/logs/threads/<thread_id>.log` 已成为 chat/invoke/runtime/HITL resume 的主要 agent 审计入口
 - [x] **HITL completion 语义补齐**：现有 `WAITING_USER_INPUT` 基线之上的单选 answer binding、resume context injection 和 checkpoint 复用语义已实现
-- [x] **面向 operator 的 doctor 命令**：Discord `/doctor` 已可输出 runtime、HITL、auth、scheduler 和日志路径健康快照
-- [ ] **超越 cron 的事件驱动触发器**：webhook 接入、文件监控、外部通知等 runtime 入口
-- [ ] **Scheduler 驱动的主动任务**：把文件驱动的 `automations` 真正对接到 runtime task 类型和 operator surface
+- [x] **面向 operator 的 doctor 命令**：Discord `/doctor` 输出 runtime、HITL、auth、scheduler 和日志路径健康快照
+
+### Phase 2 — Automation State + Operator Surfaces + Delivery + Live Observability（已完成）
+- [x] **Automation 运行时状态持久化**：`automation_runtime_state` SQLite 表，含 `last_run_at`、`last_success_at`、`last_error`、`last_task_id`、`next_run_at`；scheduler fire/complete/fail 路径写入状态；跨重启持久化；disabled 的 automation `next_run_at = NULL`
+- [x] **Operator surfaces 收尾**：`/doctor` 现在展示 HITL waiting/resolving 分布和近期 automation 失败；`/automation_status` 展示持久化的运行时状态（last run、last success、next run、last error、last task ID）以及定义信息
+- [x] **Skill timeout 传递**：automation YAML `skill_name` 字段把 `metadata.timeout_seconds` 传递到 scheduler 触发的 artifact task 的 `max_minutes`
+- [x] **Delivery 收尾**：`_completed_text` 统一渲染 `ArtifactDeliveryResult` 的交付信息；`deliver_files()` 提取为可复用的核心方法，与 `RuntimeTask` 解耦
+- [x] **Live observability 收尾**：运行中 task 的状态卡包含来自 live agent log 的有界 `Latest activity`；按钮在所有终态操作后进入稳定 disabled 状态
+
+### Phase 3 — HITL Checkpoint Semantics Closeout（已完成）
+- [x] **Checkpoint 模型归一化**：`HITL_CHOICES_APPROVAL` 和 `HITL_CHOICES_CONTINUE` 作为标准选项族内部常量；`WAITING_USER_INPUT` 仍为统一等待状态
+- [x] **Answer binding 契约收尾**：answer payload 包含 `prompt_id`、`target_kind`、`question`、`choice_id`、`choice_label`、`choice_description`、`answered_at`；结构化 payload 为 truth source，`[HITL Answer]` 文本块保留用于 agent 兼容
+- [x] **Resume 语义收尾**：task HITL 恢复到 PENDING 并携带结构化 + 文本 payload；thread HITL 自动恢复并继承 `last_hitl_answer`（仅保留最新，无链式传递）；跨 task 隔离通过 `task_id` 范围的事件查询实现
+- [x] **Operator 可见的 HITL 状态**：`/task_logs` 展示活跃/最近的 HITL checkpoint 问题和已选答案
 
 ## 延后到 v0.7.3 之后
 
+- [ ] **超越 cron 的事件驱动触发器**：webhook 接入、文件监控、外部通知等 runtime 入口
+- [ ] **Scheduler 驱动的运维任务**：把文件驱动的 `automations` 真正对接到 runtime task 类型和 operator surface
 - [ ] **临时会话模式**：将 session 标记为 `guest`，使用隔离的临时记忆空间（不写入 owner 的 adaptive memory，无 skill 修改权限）
 - [ ] 通过 `/guest` 切换或 per-user 配置
 
@@ -146,9 +160,9 @@
 - [x] Codex / Gemini CLI session resume
 - [ ] 增加内部 CLI agent 生命周期 hook（`pre-run`、`post-run`、`failure`、`resume`），用于 system-owned 的后处理能力，例如 reverse sync、artifact 后处理和可观测性收尾；这应保持为内部机制，而不是用户可见的新功能面
 - [ ] Skill feedback UX 后续优化：支持对同一次 skill 结果的任意消息分块做 reaction 反馈，并可选在 skill 完成后单独发一条 feedback prompt/message；反馈范围只针对已完成的 skill 输出，不覆盖 auth/system/普通聊天消息
-- [ ] 持久化 automation 运行时状态（`last_run`、`next_run`、`last_error`），而不是每次重启后全部重算
+- [x] 持久化 automation 运行时状态（`last_run`、`next_run`、`last_error`），而不是每次重启后全部重算
 - [x] 增加 automation 的 operator 控制面，例如 `/automation_status`、`/automation_reload`、`/automation_enable`、`/automation_disable`（当前是 Discord-only、owner-only、ephemeral 的 MVP）
-- [ ] PRIORITY：把 skill 级别的 `metadata.timeout_seconds` 继续传递到 runtime task / automation 执行链路里，让长耗时的 automation-backed skill 也能继承和直接 skill 调用一致的 timeout override
+- [x] PRIORITY：把 skill 级别的 `metadata.timeout_seconds` 继续传递到 runtime task / automation 执行链路里，让长耗时的 automation-backed skill 也能继承和直接 skill 调用一致的 timeout override
 - [ ] 明确停机和重启期间 missed jobs 的处理策略（跳过、补跑，或有限追赶）
 - [ ] 重新评估 v1 之后的 automation 调度模型（例如 RRULE 或更完整的 cron 语义）
 - [ ] 增加面向 operator 的 automation 可观测性界面，展示 active jobs、最近触发和最近失败

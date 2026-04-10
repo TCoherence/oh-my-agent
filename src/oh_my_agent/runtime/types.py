@@ -62,6 +62,17 @@ NotificationKind = Literal["auth_required", "ask_user", "task_draft", "task_wait
 NotificationSeverity = Literal["action_required"]
 NotificationStatus = Literal["active", "resolved", "failed", "cancelled"]
 
+# Standard HITL choice families — convenience constants, not enforced at type level.
+HITL_CHOICES_APPROVAL = (
+    {"id": "approve", "label": "Approve", "description": "Proceed as proposed"},
+    {"id": "request_changes", "label": "Request changes", "description": "Ask for modifications"},
+    {"id": "cancel", "label": "Cancel", "description": "Abort this action"},
+)
+HITL_CHOICES_CONTINUE = (
+    {"id": "continue", "label": "Continue", "description": "Proceed"},
+    {"id": "stop", "label": "Stop", "description": "Stop and discard"},
+)
+
 DecisionAction = Literal[
     "approve",
     "reject",
@@ -368,4 +379,33 @@ class NotificationRecord:
             created_at=row.get("created_at"),
             updated_at=row.get("updated_at"),
             resolved_at=row.get("resolved_at"),
+        )
+
+
+@dataclass(frozen=True)
+class AutomationRuntimeState:
+    name: str
+    platform: str
+    channel_id: str
+    enabled: bool
+    last_run_at: str | None = None
+    last_success_at: str | None = None
+    last_error: str | None = None
+    last_task_id: str | None = None
+    next_run_at: str | None = None
+    updated_at: str | None = None
+
+    @classmethod
+    def from_row(cls, row: dict[str, Any]) -> "AutomationRuntimeState":
+        return cls(
+            name=str(row["name"]),
+            platform=str(row["platform"]),
+            channel_id=str(row["channel_id"]),
+            enabled=bool(row.get("enabled", True)),
+            last_run_at=row.get("last_run_at"),
+            last_success_at=row.get("last_success_at"),
+            last_error=row.get("last_error"),
+            last_task_id=row.get("last_task_id"),
+            next_run_at=row.get("next_run_at"),
+            updated_at=row.get("updated_at"),
         )

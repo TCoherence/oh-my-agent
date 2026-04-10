@@ -56,6 +56,7 @@ class ScheduledJob:
     interval_seconds: int | None = None
     initial_delay_seconds: int = 0
     source_path: Path | None = None
+    skill_name: str | None = None
 
     @property
     def schedule_kind(self) -> str:
@@ -78,6 +79,7 @@ class AutomationRecord:
     interval_seconds: int | None = None
     initial_delay_seconds: int = 0
     source_path: Path | None = None
+    skill_name: str | None = None
 
     @property
     def schedule_kind(self) -> str:
@@ -98,6 +100,7 @@ class AutomationRecord:
             interval_seconds=self.interval_seconds,
             initial_delay_seconds=self.initial_delay_seconds,
             source_path=self.source_path,
+            skill_name=self.skill_name,
         )
 
 
@@ -141,6 +144,7 @@ class Scheduler:
         self._snapshot: dict[Path, tuple[int, int]] = {}
         self._reload_lock = asyncio.Lock()
         self._on_fire: Callable[[ScheduledJob], Awaitable[None]] | None = None
+        self._on_reload: Callable[[], Awaitable[None]] | None = None
         self._load_from_disk(initial=True)
 
     @property
@@ -150,6 +154,20 @@ class Scheduler:
     @property
     def storage_dir(self) -> Path:
         return self._storage_dir
+
+    def compute_next_run_at(self, job: ScheduledJob) -> datetime | None:
+        """Return the next fire time for *job* from now, or None for interval jobs on first fire."""
+        now = datetime.now(self._timezone)
+        if job.cron:
+            spec = _parse_cron_expression(job.cron)
+            return _next_cron_fire(spec, now)
+        if job.interval_seconds:
+            return now + timedelta(seconds=job.interval_seconds)
+        return None
+
+    def compute_all_next_run_at(self) -> dict[str, datetime | None]:
+        """Return ``{name: next_fire_dt | None}`` for every *active* job."""
+        return {name: self.compute_next_run_at(job) for name, job in self._jobs_by_name.items()}
 
     def list_automations(self) -> list[AutomationRecord]:
         return [self._records_by_name[name] for name in sorted(self._records_by_name)]
@@ -379,6 +397,8 @@ class Scheduler:
             if initial_delay_seconds < 0:
                 raise ValueError("initial_delay_seconds must be >= 0")
 
+        skill_name = str(raw["skill_name"]).strip() if raw.get("skill_name") else None
+
         record = AutomationRecord(
                 name=name,
                 platform=platform,
@@ -394,6 +414,7 @@ class Scheduler:
                 interval_seconds=interval_value,
                 initial_delay_seconds=initial_delay_seconds,
                 source_path=source_path,
+                skill_name=skill_name,
             )
         return _ParsedAutomation(
             record=record,
@@ -432,6 +453,11 @@ class Scheduler:
                 len(updated),
                 len(removed),
             )
+            if self._on_reload is not None:
+                try:
+                    await self._on_reload()
+                except Exception:
+                    logger.exception("Scheduler on_reload callback failed")
 
         return {
             "visible": len(self._records_by_name),
