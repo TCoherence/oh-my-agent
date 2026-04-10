@@ -26,7 +26,9 @@ Oh My Agent 是一个多平台 bot，执行层直接使用 CLI Agent，而不是
   - SQLite 中采样式 progress snapshot
   - 进程日志中的完整 heartbeat
   - Discord 中单条可更新的状态消息
-  - `runtime/logs/agents/` 下独立的底层 agent 日志
+  - Discord `/doctor`
+  - `runtime/logs/threads/` 下按 thread 聚合的统一日志
+  - `runtime/logs/agents/` 下内部 live agent spool 日志
 - Codex skill 接入已切到官方 repo/workspace `.agents/skills/`；生成的 workspace `AGENTS.md` 只保留 repo 规则和元信息
 - 真正的子进程中断（heartbeat 循环检查 PAUSED/STOPPED，取消运行中 agent/test）
 - 消息驱动的 runtime 控制（通过 `_parse_control_intent` 从普通 thread 消息触发 stop/pause/resume）
@@ -38,18 +40,18 @@ Oh My Agent 是一个多平台 bot，执行层直接使用 CLI Agent，而不是
 - 基于 router 的 `repair_skill` 技能修复意图已实现
 
 仍缺少：
-- thread-scoped unified agent logs，以及运行中任务的内存级 live excerpt
-- artifact delivery 抽象（附件优先、链接兜底），先支持本地路径，后续再接远端对象存储
-- operator-facing doctor 命令
+- 直接展示到 Discord 状态卡里的内存级 live excerpt
+- 超出本地 attachment/path 兜底之外的远端 delivery backend
 - 超越 cron 的事件驱动触发器
-- 更完整的 HITL completion 语义（answer binding contract、mid-task approval checkpoints）
+- 超出结构化单选 checkpoint 的更丰富 HITL 家族
 - guest session 隔离
 - 语义检索（v0.8+）
 
 ## 下一阶段产品方向
 
 - 当前分支更准确的版本表述是：`v0.7.2 基线 + 本地后续演进`。
-- 下一个版本目标是：`v0.7.3 - HITL Completion、Delivery、Operator Observability`。
+- 当前实现状态可表述为：`v0.7.2 基线 + 本地后续演进 + v0.7.3 phase 1`。
+- 剩余目标是 `v0.7.3 phase 2`，不是重复规划 phase 1。
 - v0.5 已完成 runtime-first 基线（全部完成）。
 - v0.6 已交付 skill-first autonomy + adaptive memory。
 - v0.7 已交付日期驱动记忆、多类型 runtime、skill 评估，以及当前这轮 auth/HITL/runtime 基础设施。
@@ -66,6 +68,13 @@ Oh My Agent 是一个多平台 bot，执行层直接使用 CLI Agent，而不是
 - 面向现有 skill 反馈的 `repair_skill` 路由
 - runtime live agent logging 和更稳的 Discord 状态消息更新
 - Codex repo/workspace `.agents/skills/` 分发，生成的 workspace `AGENTS.md` 降级为 rules/metadata
+
+### v0.7.3 phase 1
+
+- artifact delivery 抽象：附件优先，失败时回退到本地绝对路径
+- chat / invoke / runtime / HITL resume 统一沉淀到 thread-scoped agent 日志
+- 结构化 HITL answer binding 进入 task/thread resume context
+- Discord `/doctor` 提供 gateway/runtime/HITL/auth/log 健康快照
 
 ### v0.7.0
 

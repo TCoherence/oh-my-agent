@@ -248,12 +248,24 @@ async def test_handle_message_passes_log_path_for_chat_runs(tmp_path):
     mock_agent.name = "codex"
     registry = MagicMock(spec=AgentRegistry)
     registry.agents = [mock_agent]
-    registry.run = AsyncMock(return_value=(mock_agent, AgentResponse(text="hi")))
+    async def _run(*args, **kwargs):
+        callback = kwargs.get("on_agent_run")
+        if callback is not None:
+            await callback(
+                agent=mock_agent,
+                response=AgentResponse(text="hi"),
+                log_path=tmp_path / "chat-thread-codex.log",
+                duration_s=0.25,
+            )
+        return mock_agent, AgentResponse(text="hi")
+
+    registry.run = AsyncMock(side_effect=_run)
 
     runtime = MagicMock()
     runtime.chat_agent_log_base_path.return_value = tmp_path / "chat-thread.log"
     runtime.maybe_handle_thread_context = AsyncMock(return_value=False)
     runtime.maybe_handle_incoming = AsyncMock(return_value=False)
+    runtime.record_thread_agent_run = AsyncMock()
 
     session = _make_session(channel=channel, registry=registry)
     gm = GatewayManager([], runtime_service=runtime)
@@ -261,6 +273,8 @@ async def test_handle_message_passes_log_path_for_chat_runs(tmp_path):
     await gm.handle_message(session, registry, _make_msg(thread_id="thread-1", content="follow up"))
 
     assert registry.run.await_args.kwargs["log_path"] == tmp_path / "chat-thread.log"
+    runtime.record_thread_agent_run.assert_awaited_once()
+    assert runtime.record_thread_agent_run.await_args.kwargs["mode"] == "chat"
 
 
 @pytest.mark.asyncio

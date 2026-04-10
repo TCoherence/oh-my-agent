@@ -278,6 +278,7 @@ class GatewayManager:
         log_path: Path | None,
         image_paths: list[Path] | None,
         timeout_override_seconds: int | None,
+        on_agent_run=None,
     ):
         run_task = asyncio.create_task(
             registry.run(
@@ -289,6 +290,7 @@ class GatewayManager:
                 log_path=log_path,
                 image_paths=image_paths,
                 timeout_override_seconds=timeout_override_seconds,
+                on_agent_run=on_agent_run,
             )
         )
         started_at = time.perf_counter()
@@ -933,6 +935,7 @@ class GatewayManager:
             router_decision=router_decision,
             router_threshold=(self._intent_router.confidence_threshold if self._intent_router else None),
         )
+        log_mode = self._thread_log_mode_from_purpose(agent_purpose)
 
         logger.info(
             "[%s] AGENT starting purpose=%s preferred_agent=%r skill_timeout_override=%r registry=%s history_turns=%d",
@@ -984,6 +987,25 @@ class GatewayManager:
         )
         t_agent = time.perf_counter()
         async with channel.typing(thread_id):
+            async def _record_agent_run(*, agent, response, log_path, duration_s):
+                if self._runtime_service is None:
+                    return
+                recorder = getattr(self._runtime_service, "record_thread_agent_run", None)
+                if not callable(recorder):
+                    return
+                result = recorder(
+                    thread_id=thread_id,
+                    mode=log_mode,
+                    agent_name=agent.name,
+                    live_log_path=log_path,
+                    duration_s=duration_s,
+                    skill_name=tracked_skill,
+                    request_id=req_id,
+                    error=response.error,
+                )
+                if inspect.isawaitable(result):
+                    await result
+
             agent_used, response = await self._run_registry_with_progress_logging(
                 req_id=req_id,
                 purpose=agent_purpose,
@@ -996,6 +1018,7 @@ class GatewayManager:
                 log_path=log_path,
                 image_paths=image_paths,
                 timeout_override_seconds=skill_timeout_override,
+                on_agent_run=_record_agent_run,
             )
         elapsed_agent = time.perf_counter() - t_agent
         await self._sync_registry_sessions(session, thread_id, registry)
@@ -1365,6 +1388,16 @@ class GatewayManager:
         if router_decision.decision == "invoke_existing_skill":
             return "router_invoke_existing_skill"
         return "direct_reply"
+
+    @staticmethod
+    def _thread_log_mode_from_purpose(purpose: str) -> str:
+        if purpose in {"explicit_skill", "router_invoke_existing_skill"}:
+            return "invoke_existing_skill"
+        if purpose in {"hitl_resume", "hitl_resume_fresh"}:
+            return "hitl_resume"
+        if purpose in {"resume", "resume_fresh"}:
+            return "resume"
+        return "chat"
 
     @staticmethod
     def _format_usage(usage: dict) -> str:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 import fnmatch
 import inspect
 import json
@@ -26,7 +27,7 @@ from oh_my_agent.control.protocol import (
     parse_control_envelope,
     strip_control_frame_text,
 )
-from oh_my_agent.gateway.base import IncomingMessage
+from oh_my_agent.gateway.base import BaseChannel, IncomingMessage, OutgoingAttachment
 from oh_my_agent.gateway.session import ChannelSession
 from oh_my_agent.runtime.notifications import NotificationManager
 from oh_my_agent.runtime.policy import (
@@ -103,6 +104,24 @@ _ACTIVE_AUTOMATION_TASK_STATUSES = {
     TASK_STATUS_WAITING_MERGE,
 }
 
+_TASK_LIVE_STATUSES = {
+    TASK_STATUS_PENDING,
+    TASK_STATUS_RUNNING,
+    TASK_STATUS_VALIDATING,
+    TASK_STATUS_WAITING_USER_INPUT,
+    TASK_STATUS_BLOCKED,
+    TASK_STATUS_PAUSED,
+}
+
+
+@dataclass(frozen=True)
+class ArtifactDeliveryResult:
+    mode: str
+    delivered_paths: list[str]
+    message_ids: list[str]
+    summary_text: str
+    attachment_names: list[str]
+
 
 class RuntimeService:
     """Autonomous task runtime for multi-step coding loops."""
@@ -177,8 +196,18 @@ class RuntimeService:
         worktree_root = Path(cfg.get("worktree_root", "~/.oh-my-agent/runtime/tasks")).expanduser().resolve()
         self._runtime_workspace_root = worktree_root
         self._worktree = WorktreeManager(self._repo_root, worktree_root)
-        self._agent_logs_root = self._runtime_workspace_root.parent / "logs" / "agents"
+        self._logs_root = self._runtime_workspace_root.parent / "logs"
+        self._thread_logs_root = self._logs_root / "threads"
+        self._agent_logs_root = self._logs_root / "agents"  # Internal live spool files.
+        self._logs_root.mkdir(parents=True, exist_ok=True)
+        self._thread_logs_root.mkdir(parents=True, exist_ok=True)
         self._agent_logs_root.mkdir(parents=True, exist_ok=True)
+        self._service_log_path = self._logs_root / "oh-my-agent.log"
+        self._artifact_attachment_max_count = int(cfg.get("artifact_attachment_max_count", 5))
+        self._artifact_attachment_max_bytes = int(cfg.get("artifact_attachment_max_bytes", 8 * 1024 * 1024))
+        self._artifact_attachment_max_total_bytes = int(
+            cfg.get("artifact_attachment_max_total_bytes", 20 * 1024 * 1024)
+        )
         self._auth_service = auth_service
         if self._auth_service is not None:
             self._auth_service.add_listener(self._on_auth_flow_event)
@@ -192,6 +221,7 @@ class RuntimeService:
         )
         self._running_tasks: dict[str, asyncio.Task] = {}
         self._live_agent_logs: dict[str, Path] = {}
+        self._task_sources: dict[str, str] = {}
         self._workers: list[asyncio.Task] = []
         self._janitor_task: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
@@ -830,6 +860,7 @@ class RuntimeService:
             "task.created",
             {"source": source, "status": status, "risk_reasons": reasons, "force_draft": force_draft},
         )
+        self._task_sources[task.id] = source
         logger.info(
             "Runtime task created id=%s status=%s source=%s agent=%s budget=%d/%d",
             task.id,
@@ -1098,6 +1129,7 @@ class RuntimeService:
             "task.resumed",
             {"actor_id": actor_id, "instruction": instruction},
         )
+        self._task_sources[task.id] = "resume"
         await self._notify(task, f"Task `{task.id}` resumed and queued.")
         await self._signal_status_by_id(task, TASK_STATUS_PENDING)
         return f"Task `{task.id}` resumed and queued."
@@ -1397,6 +1429,101 @@ class RuntimeService:
             limit=limit,
         )
 
+    async def build_doctor_report(
+        self,
+        *,
+        platform: str,
+        channel_id: str,
+        scheduler=None,
+    ) -> str:
+        tasks = await self._store.list_runtime_tasks(
+            platform=platform,
+            channel_id=channel_id,
+            limit=500,
+        )
+        status_counts: dict[str, int] = {}
+        for task in tasks:
+            status_counts[task.status] = status_counts.get(task.status, 0) + 1
+        important_statuses = [
+            TASK_STATUS_DRAFT,
+            TASK_STATUS_RUNNING,
+            TASK_STATUS_WAITING_MERGE,
+            TASK_STATUS_WAITING_USER_INPUT,
+            TASK_STATUS_BLOCKED,
+        ]
+        active_task_count = sum(status_counts.get(status, 0) for status in important_statuses)
+        prompts = await self.list_active_hitl_prompts(platform=platform, channel_id=channel_id, limit=200)
+        active_auth_flows = await self._store.list_active_auth_flows(limit=100)
+        active_auth_waits = len(
+            [flow for flow in active_auth_flows if flow.platform == platform and flow.channel_id == channel_id]
+        )
+        lines = [
+            "**Runtime health**",
+            f"- Enabled: `{self._enabled}`",
+            f"- Workers: `{self._worker_concurrency}`",
+            f"- Default agent: `{self._default_agent}`",
+            f"- Active tasks: `{active_task_count}`",
+            f"- Recent tasks: `{len(tasks)}`",
+        ]
+        if any(status_counts.get(status, 0) for status in important_statuses):
+            lines.append("- Task counts:")
+            for status in important_statuses:
+                lines.append(f"  - `{status}`: {status_counts.get(status, 0)}")
+        lines.extend(
+            [
+                "",
+                "**HITL health**",
+                f"- Active prompts: `{len(prompts)}`",
+                "",
+                "**Scheduler health**",
+                f"- Enabled: `{bool(scheduler is not None)}`",
+            ]
+        )
+        if scheduler is not None:
+            try:
+                automations = scheduler.list_automations()
+                lines.append(f"- Loaded automations: `{len(automations)}`")
+                lines.append(f"- Active jobs: `{len(scheduler.jobs)}`")
+            except Exception:
+                lines.append("- Scheduler summary unavailable.")
+        lines.extend(
+            [
+                "",
+                "**Auth health**",
+                f"- Active auth waits: `{active_auth_waits}`",
+                "",
+                "**Log pointers**",
+                f"- Service log: `{self.service_log_path}`",
+                f"- Thread log root: `{self.thread_logs_root}`",
+            ]
+        )
+        failure_hints = self._recent_failure_hints()
+        if failure_hints:
+            lines.extend(
+                [
+                    "",
+                    "**Recent failure hints**",
+                    f"```text\n{failure_hints}\n```",
+                ]
+            )
+        return "\n".join(lines)[:3800]
+
+    def _recent_failure_hints(self) -> str:
+        if not self.service_log_path.exists():
+            return ""
+        try:
+            text = self.service_log_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return ""
+        lines = [
+            line.strip()
+            for line in text.splitlines()
+            if "[ERROR]" in line or "Traceback" in line or "[WARNING]" in line
+        ]
+        if not lines:
+            return ""
+        return "\n".join(lines[-6:])[:1000]
+
     async def mark_thread_ask_user_required(
         self,
         *,
@@ -1581,6 +1708,18 @@ class RuntimeService:
             selected_choice_id=choice["id"],
             selected_choice_label=choice["label"],
             selected_choice_description=choice.get("description"),
+            resume_context_json={
+                **(prompt.resume_context or {}),
+                "last_hitl_answer": {
+                    "prompt_id": prompt.id,
+                    "question": prompt.question,
+                    "choice_id": choice["id"],
+                    "choice_label": choice["label"],
+                    "choice_description": choice.get("description") or "",
+                    "answered_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                    "target_kind": prompt.target_kind,
+                },
+            },
         )
         prompt = await self._store.get_hitl_prompt(prompt.id) or prompt
 
@@ -1684,6 +1823,7 @@ class RuntimeService:
             force_agent=run.agent_name,
             log_path=log_path,
             purpose="resume",
+            skill_name=str(resume_context.get("skill_name") or "") or None,
             timeout_override_seconds=skill_timeout_override,
         )
         if response.error and getattr(agent, "get_session_id", None):
@@ -1708,6 +1848,7 @@ class RuntimeService:
                     purpose="resume",
                 ),
                 purpose="resume_fresh",
+                skill_name=str(resume_context.get("skill_name") or "") or None,
                 timeout_override_seconds=skill_timeout_override,
             )
 
@@ -1880,8 +2021,11 @@ class RuntimeService:
             lines.append(f"- Error: {task.error[:240]}")
         if task.artifact_manifest:
             lines.append(f"- Artifacts: {', '.join(task.artifact_manifest[:8])[:240]}")
+        thread_log_path = self._thread_log_path(task.thread_id)
+        if thread_log_path.exists():
+            lines.append(f"- Thread log: `{thread_log_path}`")
         live_log_path = self._live_agent_logs.get(task.id)
-        if live_log_path and live_log_path.exists():
+        if task.status in _TASK_LIVE_STATUSES and live_log_path and live_log_path.exists():
             lines.append(f"- Live agent log: `{live_log_path}`")
 
         events = await self._store.list_runtime_events(task.id, limit=self._log_event_limit)
@@ -1898,7 +2042,7 @@ class RuntimeService:
 
         ckpt = await self._store.get_last_runtime_checkpoint(task.id)
         live_agent_tail = None
-        if live_log_path and live_log_path.exists():
+        if task.status in _TASK_LIVE_STATUSES and live_log_path and live_log_path.exists():
             try:
                 live_agent_tail = self._tail_text(live_log_path.read_text(encoding="utf-8", errors="replace"))
             except Exception:
@@ -1907,6 +2051,12 @@ class RuntimeService:
             lines.append("")
             lines.append("**Live agent log tail**")
             lines.append(f"```text\n{live_agent_tail}\n```")
+        else:
+            thread_excerpt = self._extract_thread_log_excerpt(thread_id=task.thread_id, task_id=task.id)
+            if thread_excerpt:
+                lines.append("")
+                lines.append("**Thread log excerpt**")
+                lines.append(f"```text\n{thread_excerpt}\n```")
         if ckpt:
             agent_tail = self._tail_text(str(ckpt.get("agent_result", "")))
             test_tail = self._format_test_output(str(ckpt.get("test_result", "")))
@@ -2223,6 +2373,7 @@ class RuntimeService:
                 task,
                 f"Task `{task.id}` step {step}/{task.max_steps}: running agent `{task.preferred_agent or self._default_agent}`.",
             )
+            last_hitl_answer = await self._last_hitl_answer_payload_for_task(task.id)
             if task.task_type == TASK_TYPE_SKILL_CHANGE and task.skill_name:
                 prompt = build_skill_prompt(
                     skill_name=task.skill_name,
@@ -2232,6 +2383,7 @@ class RuntimeService:
                     max_steps=task.max_steps,
                     prior_failure=prior_failure,
                     resume_instruction=current.resume_instruction,
+                    last_hitl_answer=last_hitl_answer,
                 )
                 if self._has_external_source_signals(current.original_request or task.goal):
                     prompt += (
@@ -2250,6 +2402,7 @@ class RuntimeService:
                     max_steps=task.max_steps,
                     prior_failure=prior_failure,
                     resume_instruction=current.resume_instruction,
+                    last_hitl_answer=last_hitl_answer,
                 )
 
             t_agent = time.perf_counter()
@@ -2646,10 +2799,27 @@ class RuntimeService:
 
                 logger.info("Runtime task=%s COMPLETED step=%d", task.id, step)
                 completed_task = await self._store.get_runtime_task(task.id) or task
+                delivery = None
+                if completed_task.task_type == TASK_TYPE_ARTIFACT:
+                    delivery = await self._deliver_artifacts(
+                        task=completed_task,
+                        changed_files=changed_files,
+                    )
+                    if delivery is not None:
+                        await self._store.add_runtime_event(
+                            task.id,
+                            "task.artifacts_delivered",
+                            {
+                                "mode": delivery.mode,
+                                "paths": delivery.delivered_paths[:8],
+                                "attachments": delivery.attachment_names[:8],
+                            },
+                        )
                 if task.automation_name:
                     completion_text = await self._automation_completed_text(
                         task=completed_task,
                         changed_files=changed_files,
+                        delivery=delivery,
                     )
                 else:
                     completion_text = self._completed_text(
@@ -2657,6 +2827,9 @@ class RuntimeService:
                         changed_files=changed_files,
                         test_summary=test_summary,
                     )
+                    delivery_lines = self._render_delivery_lines(delivery)
+                    if delivery_lines:
+                        completion_text = "\n".join([completion_text, "", *delivery_lines])[:1900]
                 await self._notify(task, completion_text, record_history=True, terminal=True)
                 await self._signal_status_by_id(task, TASK_STATUS_COMPLETED)
                 return
@@ -2722,13 +2895,15 @@ class RuntimeService:
         started = asyncio.get_running_loop().time()
         last_notice = 0.0
         last_persist = 0.0
+        result: AgentResponse | None = None
         try:
             while True:
                 try:
-                    return await asyncio.wait_for(
+                    result = await asyncio.wait_for(
                         asyncio.shield(run_task),
                         timeout=self._agent_heartbeat_seconds,
                     )
+                    return result
                 except asyncio.TimeoutError:
                     elapsed = asyncio.get_running_loop().time() - started
                     # Check if user stopped or paused mid-run
@@ -2736,7 +2911,8 @@ class RuntimeService:
                     if current and current.status in {TASK_STATUS_STOPPED, TASK_STATUS_PAUSED}:
                         run_task.cancel()
                         reason = "paused" if current.status == TASK_STATUS_PAUSED else "stopped"
-                        return AgentResponse(text="", error=f"Task {reason} by user.")
+                        result = AgentResponse(text="", error=f"Task {reason} by user.")
+                        return result
                     logger.info(
                         "Runtime task=%s step=%d AGENT_RUNNING agent=%s elapsed=%.2fs",
                         task.id,
@@ -2759,10 +2935,30 @@ class RuntimeService:
                         )
         finally:
             self._running_tasks.pop(task.id, None)
+            if result is None and run_task.done() and not run_task.cancelled():
+                try:
+                    run_result = run_task.result()
+                    if isinstance(run_result, AgentResponse):
+                        result = run_result
+                except Exception:
+                    result = None
+            if result is not None:
+                await self._record_thread_agent_run(
+                    thread_id=task.thread_id,
+                    mode=await self._task_log_mode(task),
+                    agent_name=agent.name,
+                    live_log_path=log_path,
+                    duration_s=asyncio.get_running_loop().time() - started,
+                    task_id=task.id,
+                    skill_name=task.skill_name,
+                    request_id=f"{task.id}-step{step}",
+                    error=result.error,
+                )
 
     def _agent_log_path(self, task: RuntimeTask, step: int, agent_name: str) -> Path:
         safe_agent = re.sub(r"[^a-zA-Z0-9._-]+", "-", agent_name).strip("-") or "agent"
-        return self._agent_logs_root / f"{task.id}-step{step}-{safe_agent}.log"
+        safe_thread = re.sub(r"[^a-zA-Z0-9._-]+", "-", task.thread_id).strip("-") or "thread"
+        return self._agent_logs_root / f"thread-{safe_thread}-{task.id}-step{step}-{safe_agent}.log"
 
     def chat_agent_log_base_path(
         self,
@@ -2773,7 +2969,7 @@ class RuntimeService:
     ) -> Path:
         safe_thread = re.sub(r"[^a-zA-Z0-9._-]+", "-", thread_id).strip("-") or "thread"
         safe_purpose = re.sub(r"[^a-zA-Z0-9._-]+", "-", purpose).strip("-") or "chat"
-        return self._agent_logs_root / f"chat-{safe_thread}-{safe_purpose}-{request_id}.log"
+        return self._agent_logs_root / f"thread-{safe_thread}-{safe_purpose}-{request_id}.log"
 
     async def _execute_merge(self, task: RuntimeTask, *, actor_id: str, source: str) -> str:
         if task.status not in {TASK_STATUS_WAITING_MERGE, TASK_STATUS_APPLIED, TASK_STATUS_MERGE_FAILED}:
@@ -2941,31 +3137,34 @@ class RuntimeService:
         return cleaned
 
     async def _cleanup_expired_agent_logs(self) -> int:
-        if not self._agent_logs_root.exists():
+        roots = [root for root in (self._agent_logs_root, self._thread_logs_root) if root.exists()]
+        if not roots:
             return 0
         cutoff_ts = time.time() - (max(0, self._cleanup_retention_hours) * 3600)
         cleaned = 0
-        for path in self._agent_logs_root.rglob("*"):
-            if not path.is_file():
-                continue
-            try:
-                if path.stat().st_mtime > cutoff_ts:
+        for root in roots:
+            for path in root.rglob("*"):
+                if not path.is_file():
                     continue
-                path.unlink(missing_ok=True)
-                cleaned += 1
-            except Exception as exc:
-                logger.warning("Failed to remove stale agent log %s: %s", path, exc)
+                try:
+                    if path.stat().st_mtime > cutoff_ts:
+                        continue
+                    path.unlink(missing_ok=True)
+                    cleaned += 1
+                except Exception as exc:
+                    logger.warning("Failed to remove stale agent log %s: %s", path, exc)
         self._live_agent_logs = {
             task_id: path
             for task_id, path in self._live_agent_logs.items()
             if path.exists()
         }
-        for directory in sorted(self._agent_logs_root.rglob("*"), reverse=True):
-            if directory.is_dir():
-                try:
-                    directory.rmdir()
-                except OSError:
-                    pass
+        for root in roots:
+            for directory in sorted(root.rglob("*"), reverse=True):
+                if directory.is_dir():
+                    try:
+                        directory.rmdir()
+                    except OSError:
+                        pass
         return cleaned
 
     async def _cleanup_single_task(self, task: RuntimeTask) -> bool:
@@ -3102,7 +3301,111 @@ class RuntimeService:
             lines.append(f"```text\n{formatted[:500]}\n```")
         return "\n".join(lines)[:1900]
 
-    async def _automation_completed_text(self, *, task: RuntimeTask, changed_files: list[str]) -> str:
+    def _artifact_paths_for_task(self, task: RuntimeTask, changed_files: list[str]) -> list[Path]:
+        if not task.workspace_path:
+            return []
+        workspace = Path(task.workspace_path)
+        results: list[Path] = []
+        manifest = task.artifact_manifest or changed_files
+        for rel_path in manifest:
+            candidate = workspace / rel_path
+            if candidate.is_file():
+                results.append(candidate)
+        return results
+
+    def _render_delivery_lines(self, delivery: ArtifactDeliveryResult | None) -> list[str]:
+        if delivery is None:
+            return []
+        lines = [f"Delivery mode: `{delivery.mode}`"]
+        if delivery.mode == "attachment" and delivery.attachment_names:
+            lines.append("Attachments:")
+            lines.extend(f"- `{name}`" for name in delivery.attachment_names[:8])
+            if len(delivery.attachment_names) > 8:
+                lines.append(f"- ... and {len(delivery.attachment_names) - 8} more")
+        elif delivery.delivered_paths:
+            lines.append("Artifact paths:")
+            lines.extend(f"- `{path}`" for path in delivery.delivered_paths[:8])
+            if len(delivery.delivered_paths) > 8:
+                lines.append(f"- ... and {len(delivery.delivered_paths) - 8} more")
+        return lines
+
+    async def _deliver_artifacts(
+        self,
+        *,
+        task: RuntimeTask,
+        changed_files: list[str],
+    ) -> ArtifactDeliveryResult | None:
+        session = self._session_for(task)
+        if session is None:
+            return None
+        artifact_paths = self._artifact_paths_for_task(task, changed_files)
+        if not artifact_paths:
+            return None
+
+        summary_text = task.output_summary or f"{len(artifact_paths)} artifact(s) ready."
+        channel_impl = type(session.channel)
+        supports_attachment_upload = (
+            getattr(channel_impl, "send_attachment", None) is not BaseChannel.send_attachment
+            or getattr(channel_impl, "send_attachments", None) is not BaseChannel.send_attachments
+        )
+        total_size = 0
+        attachments = []
+        for path in artifact_paths:
+            try:
+                size = path.stat().st_size
+            except OSError:
+                size = self._artifact_attachment_max_bytes + 1
+            total_size += size
+            if size > self._artifact_attachment_max_bytes:
+                attachments = []
+                break
+            attachments.append(
+                OutgoingAttachment(
+                    filename=path.name,
+                    content_type="text/markdown" if path.suffix.lower() == ".md" else "application/octet-stream",
+                    local_path=path,
+                )
+            )
+
+        if (
+            supports_attachment_upload
+            and attachments
+            and len(attachments) <= self._artifact_attachment_max_count
+            and total_size <= self._artifact_attachment_max_total_bytes
+        ):
+            try:
+                message_ids = await session.channel.send_attachments(task.thread_id, attachments)
+                return ArtifactDeliveryResult(
+                    mode="attachment",
+                    delivered_paths=[str(path.resolve()) for path in artifact_paths],
+                    message_ids=message_ids,
+                    summary_text=summary_text,
+                    attachment_names=[attachment.filename for attachment in attachments],
+                )
+            except Exception:
+                logger.warning("Artifact attachment delivery failed task=%s", task.id, exc_info=True)
+
+        if (
+            attachments
+            and not supports_attachment_upload
+        ):
+            logger.info("Artifact delivery falling back to path mode because channel does not support uploads")
+
+        return ArtifactDeliveryResult(
+            mode="path",
+            delivered_paths=[str(path.resolve()) for path in artifact_paths],
+            message_ids=[],
+            summary_text=summary_text,
+            attachment_names=[],
+        )
+
+    async def _automation_completed_text(
+        self,
+        *,
+        task: RuntimeTask,
+        changed_files: list[str],
+        delivery: ArtifactDeliveryResult | None = None,
+    ) -> str:
         artifact_preview = self._automation_artifact_preview(task, changed_files)
         source_text = ""
         artifact_path: str | None = None
@@ -3142,6 +3445,10 @@ class RuntimeService:
 
         lines.append("")
         lines.append("-# ✅ automation run complete")
+        if delivery:
+            lines.append(f"-# delivery: `{delivery.mode}`")
+            for path in delivery.delivered_paths[:4]:
+                lines.append(f"-# path: `{path}`")
         return "\n".join(lines)[:1900]
 
     def _automation_artifact_preview(
@@ -3246,6 +3553,172 @@ class RuntimeService:
             if isinstance(agent, str) and agent:
                 return agent
         return task.preferred_agent or self._default_agent or ""
+
+    @property
+    def service_log_path(self) -> Path:
+        return self._service_log_path
+
+    @property
+    def thread_logs_root(self) -> Path:
+        return self._thread_logs_root
+
+    def _thread_log_path(self, thread_id: str) -> Path:
+        safe_thread = re.sub(r"[^A-Za-z0-9_.-]+", "-", thread_id or "thread").strip("-") or "thread"
+        return self._thread_logs_root / f"{safe_thread}.log"
+
+    @staticmethod
+    def _agent_specific_log_path(log_path: Path | None, agent_name: str) -> Path | None:
+        if log_path is None:
+            return None
+        safe_agent = re.sub(r"[^A-Za-z0-9_.-]+", "-", agent_name).strip("-") or "agent"
+        suffix = log_path.suffix or ".log"
+        return log_path.with_name(f"{log_path.stem}-{safe_agent}{suffix}")
+
+    async def _resolve_task_source(self, task: RuntimeTask) -> str:
+        cached = self._task_sources.get(task.id)
+        if cached:
+            return cached
+        events = await self._store.list_runtime_events(task.id, limit=8)
+        for event in events:
+            if event.get("event_type") == "task.created":
+                source = str(event.get("payload", {}).get("source") or "").strip()
+                if source:
+                    self._task_sources[task.id] = source
+                    return source
+            if event.get("event_type") == "task.resumed":
+                self._task_sources[task.id] = "resume"
+                return "resume"
+            if event.get("event_type") == "task.ask_user_answered":
+                self._task_sources[task.id] = "hitl_resume"
+                return "hitl_resume"
+        return ""
+
+    async def _task_log_mode(self, task: RuntimeTask) -> str:
+        source = await self._resolve_task_source(task)
+        if source == "repair_skill":
+            return "repair_skill"
+        if source == "resume":
+            return "resume"
+        if source == "hitl_resume":
+            return "hitl_resume"
+        return task.task_type
+
+    async def _last_hitl_answer_payload_for_task(self, task_id: str) -> dict[str, Any] | None:
+        events = await self._store.list_runtime_events(task_id, limit=12)
+        for event in reversed(events):
+            if event.get("event_type") != "task.ask_user_answered":
+                continue
+            payload = event.get("payload")
+            if isinstance(payload, dict):
+                return payload
+        return None
+
+    async def _record_thread_agent_run(
+        self,
+        *,
+        thread_id: str,
+        mode: str,
+        agent_name: str,
+        live_log_path: Path | None,
+        duration_s: float,
+        task_id: str | None = None,
+        skill_name: str | None = None,
+        request_id: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        thread_log = self._thread_log_path(thread_id)
+        thread_log.parent.mkdir(parents=True, exist_ok=True)
+        ended_ts = time.time()
+        started_ts = max(0.0, ended_ts - max(duration_s, 0.0))
+        started_at = time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(started_ts))
+        ended_at = time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(ended_ts))
+        content = ""
+        if live_log_path and live_log_path.exists():
+            try:
+                content = live_log_path.read_text(encoding="utf-8", errors="replace").strip()
+            except Exception:
+                content = ""
+        lines = [
+            "=== run start ===",
+            f"started_at={started_at}",
+            f"thread_id={thread_id}",
+            f"mode={mode}",
+            f"agent={agent_name}",
+        ]
+        if task_id:
+            lines.append(f"task_id={task_id}")
+        if skill_name:
+            lines.append(f"skill_name={skill_name}")
+        if request_id:
+            lines.append(f"request_id={request_id}")
+        if live_log_path:
+            lines.append(f"live_log_path={live_log_path}")
+        lines.append("--- output ---")
+        if content:
+            lines.append(content)
+        else:
+            lines.append("(no live output captured)")
+        lines.extend(
+            [
+                "=== run end ===",
+                f"ended_at={ended_at}",
+                f"duration_seconds={duration_s:.2f}",
+                f"error={error or ''}",
+                "",
+            ]
+        )
+        with thread_log.open("a", encoding="utf-8") as handle:
+            handle.write("\n".join(lines))
+
+    async def record_thread_agent_run(
+        self,
+        *,
+        thread_id: str,
+        mode: str,
+        agent_name: str,
+        live_log_path: Path | None,
+        duration_s: float,
+        task_id: str | None = None,
+        skill_name: str | None = None,
+        request_id: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        await self._record_thread_agent_run(
+            thread_id=thread_id,
+            mode=mode,
+            agent_name=agent_name,
+            live_log_path=live_log_path,
+            duration_s=duration_s,
+            task_id=task_id,
+            skill_name=skill_name,
+            request_id=request_id,
+            error=error,
+        )
+
+    def _extract_thread_log_excerpt(
+        self,
+        *,
+        thread_id: str,
+        task_id: str | None = None,
+        request_id: str | None = None,
+    ) -> str | None:
+        thread_log = self._thread_log_path(thread_id)
+        if not thread_log.exists():
+            return None
+        try:
+            text = thread_log.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return None
+        blocks = [block.strip() for block in text.split("=== run start ===") if block.strip()]
+        if not blocks:
+            return None
+        for block in reversed(blocks):
+            if task_id and f"task_id={task_id}" not in block:
+                continue
+            if request_id and f"request_id={request_id}" not in block:
+                continue
+            return self._tail_text("=== run start ===\n" + block)
+        return self._tail_text("=== run start ===\n" + blocks[-1])
 
     def _validate_changed_paths(self, paths: list[str]) -> str | None:
         for raw in paths:
@@ -3428,6 +3901,7 @@ class RuntimeService:
         force_agent: str,
         log_path: Path | None,
         purpose: str,
+        skill_name: str | None = None,
         timeout_override_seconds: int | None = None,
     ) -> AgentResponse:
         history = await session.get_history(thread_id)
@@ -3455,13 +3929,24 @@ class RuntimeService:
         try:
             while True:
                 try:
-                    _agent, response = await asyncio.wait_for(asyncio.shield(run_task), timeout=interval)
+                    agent_used, response = await asyncio.wait_for(asyncio.shield(run_task), timeout=interval)
                     elapsed = time.perf_counter() - started_at
+                    effective_log_path = self._agent_specific_log_path(log_path, agent_used.name)
+                    await self._record_thread_agent_run(
+                        thread_id=thread_id,
+                        mode=purpose,
+                        agent_name=agent_used.name,
+                        live_log_path=effective_log_path,
+                        duration_s=elapsed,
+                        skill_name=skill_name,
+                        request_id=effective_log_path.stem if effective_log_path else purpose,
+                        error=response.error,
+                    )
                     logger.info(
                         "THREAD_AGENT_DONE purpose=%s thread=%s agent=%s elapsed=%.2fs response_error=%s response_len=%d",
                         purpose,
                         thread_id,
-                        force_agent,
+                        agent_used.name,
                         elapsed,
                         bool(response.error),
                         len(response.text or ""),
@@ -3656,6 +4141,18 @@ class RuntimeService:
         return stripped
 
     @classmethod
+    def _build_hitl_answer_payload(cls, prompt: HitlPrompt) -> dict[str, Any]:
+        return {
+            "prompt_id": prompt.id,
+            "question": prompt.question,
+            "choice_id": prompt.selected_choice_id or "",
+            "choice_label": prompt.selected_choice_label or "",
+            "choice_description": prompt.selected_choice_description or "",
+            "answered_at": prompt.completed_at or prompt.updated_at or "",
+            "target_kind": prompt.target_kind,
+        }
+
+    @classmethod
     def _build_hitl_answer_block(cls, prompt: HitlPrompt) -> str:
         description = prompt.selected_choice_description or ""
         lines = [
@@ -3670,6 +4167,7 @@ class RuntimeService:
     @classmethod
     def _build_hitl_resume_prompt(cls, prompt: HitlPrompt, *, include_original_request: bool = False) -> str:
         context = prompt.resume_context or {}
+        answer_payload = context.get("last_hitl_answer")
         lines = [
             "[System Resume Context]",
             "- The previous run paused because it required a single explicit user choice.",
@@ -3680,6 +4178,14 @@ class RuntimeService:
             "Resolved user choice:",
             cls._build_hitl_answer_block(prompt),
         ]
+        if isinstance(answer_payload, dict) and answer_payload:
+            lines.extend(
+                [
+                    "",
+                    "Structured HITL answer payload:",
+                    json.dumps(answer_payload, ensure_ascii=False),
+                ]
+            )
         if context.get("skill_name"):
             lines.append(f"- Continue using skill `{context['skill_name']}` if still relevant.")
         if context.get("original_user_content"):
@@ -3746,6 +4252,7 @@ class RuntimeService:
             return f"Task `{prompt.task_id}` not found for prompt `{prompt.id}`."
 
         answer_block = self._build_hitl_answer_block(prompt)
+        answer_payload = self._build_hitl_answer_payload(prompt)
         await self._store.update_runtime_task(
             task.id,
             status=TASK_STATUS_PENDING,
@@ -3756,12 +4263,9 @@ class RuntimeService:
         await self._store.add_runtime_event(
             task.id,
             "task.ask_user_answered",
-            {
-                "prompt_id": prompt.id,
-                "choice_id": prompt.selected_choice_id,
-                "choice_label": prompt.selected_choice_label,
-            },
+            answer_payload,
         )
+        self._task_sources[task.id] = "hitl_resume"
         await self._send_hitl_answer_record(prompt)
         await self._store.update_hitl_prompt(prompt.id, status="completed", completed_at_now=True)
         await self._resolve_notification("ask_user", task_id=task.id)
@@ -3779,6 +4283,7 @@ class RuntimeService:
 
         await self._send_hitl_answer_record(prompt)
         answer_block = self._build_hitl_answer_block(prompt)
+        answer_payload = self._build_hitl_answer_payload(prompt)
         await session.append_user(prompt.thread_id, answer_block, "HITL")
 
         agent = registry.get_agent(prompt.agent_name)
@@ -3807,6 +4312,7 @@ class RuntimeService:
                 purpose="hitl_resume",
             ),
             purpose="hitl_resume",
+            skill_name=str(prompt.resume_context.get("skill_name") or "") or None,
             timeout_override_seconds=skill_timeout_override,
         )
         if response.error and getattr(agent, "get_session_id", None):
@@ -3823,6 +4329,7 @@ class RuntimeService:
                     purpose="hitl_resume",
                 ),
                 purpose="hitl_resume_fresh",
+                skill_name=str(prompt.resume_context.get("skill_name") or "") or None,
                 timeout_override_seconds=skill_timeout_override,
             )
 
@@ -3871,7 +4378,7 @@ class RuntimeService:
                 control_envelope_json=envelope.raw_json,
                 resume_context={
                     **(prompt.resume_context or {}),
-                    "last_hitl_answer": answer_block,
+                    "last_hitl_answer": answer_payload,
                 },
                 session_id_snapshot=agent.get_session_id(prompt.thread_id) if hasattr(agent, "get_session_id") else prompt.session_id_snapshot,
             )
@@ -3901,7 +4408,7 @@ class RuntimeService:
                 control_envelope_json=envelope.raw_json,
                 resume_context={
                     **(prompt.resume_context or {}),
-                    "last_hitl_answer": answer_block,
+                    "last_hitl_answer": answer_payload,
                 },
                 session_id_snapshot=agent.get_session_id(prompt.thread_id) if hasattr(agent, "get_session_id") else prompt.session_id_snapshot,
             )

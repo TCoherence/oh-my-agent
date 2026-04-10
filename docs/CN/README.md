@@ -12,11 +12,13 @@
 - v0.5 runtime-first 已完成（包括 runtime hardening pass）。
 - v0.6 主线是 skill-first autonomy + adaptive memory；全部已完成。
 - v0.7.2 在 v0.7 基线上补齐了 auth-first 暂停/恢复、文件驱动 automation、通用 Discord `ask_user` HITL、market briefing 报告能力，以及慢速 direct skill 调用的 skill-specific timeout override。
-- 下一个版本目标明确为 `v0.7.3 - HITL Completion、Delivery、Operator Observability`。
+- `v0.7.3 phase 1` 已完成：artifact delivery 抽象、thread-scoped unified logs、结构化 HITL answer binding，以及 Discord `/doctor`。
+- `v0.7.3` 剩余工作收敛为 phase 2：operator 打磨、事件驱动入口和远端 delivery 后端。
 - 更后面的版本继续推进语义记忆检索（向量搜索）和 hybrid autonomy。
 - Discord 审批交互采用按钮优先、slash 兜底，reaction 只做状态信号。
 - 可选的 LLM 路由已实现：消息可被分类为 `reply_once`、`invoke_existing_skill`、`propose_artifact_task`、`propose_repo_task`、`create_skill` 或 `repair_skill`。
-- Runtime 可观测性已实现：支持 `/task_logs`、SQLite 中采样式 progress 事件，以及 Discord 中单条可更新的状态消息。
+- Runtime 可观测性已实现：支持 `/task_logs`、SQLite 中采样式 progress 事件、Discord 中单条可更新的状态消息，以及 Discord `/doctor`。
+- Runtime 日志主视角现在是 `~/.oh-my-agent/runtime/logs/threads/` 下的 thread-scoped 日志；service log 和 live agent spool 仍保留在 `~/.oh-my-agent/runtime/logs/`。
 - Gateway/消息日志现在会用 `purpose=...` 区分普通回复、显式 skill 调用和 router 驱动回复；后台 memory/compression agent 调用会继承同一个 `req_id`，便于串联排查。
 - Runtime hardening 已完成：真正的子进程中断、消息驱动控制（stop/pause/resume）、PAUSED 状态、完成摘要、metrics。
 - Automation 已迁到 `~/.oh-my-agent/automations/` 文件驱动目录，并支持轮询热加载和单条开关。
@@ -487,12 +489,12 @@ author: scheduler
 
 ## Artifact Delivery
 
-- Artifact delivery 还没有完全做完。
-- 已锁定的 v0.7.3 方向是：
+- Artifact delivery 已作为 runtime/platform 能力落地到 `artifact` task。
+- 当前行为：
   - 先尝试直接上传附件
-  - 超过平台限制时回退为链接
-  - 抽象成统一交付层，本地运行走文件可达性，远端部署接入对象存储
-- 远端对象存储优先推荐 Cloudflare R2。
+  - 如果平台不支持上传或产物超限，则回退为本地绝对路径
+  - 完成消息会明确展示 delivery mode 和已交付的附件/路径
+- 远端对象存储仍然 deferred，后续优先推荐 Cloudflare R2 这类 S3 兼容后端。
 
 ## Codex 接入说明
 
@@ -507,7 +509,8 @@ author: scheduler
 - `~/.oh-my-agent/agent-workspace/sessions/` — 普通聊天 thread 的临时工作区（TTL 清理）
 - `~/.oh-my-agent/agent-workspace/.agents/skills/` — Codex 在外置 workspace 中使用的 repo/workspace 原生 skill 目录
 - `~/.oh-my-agent/runtime/tasks/` — runtime 长任务的 worktree 和 artifact 产物
-- `~/.oh-my-agent/runtime/logs/` — service log + per-agent 底层日志
+- `~/.oh-my-agent/runtime/logs/threads/` — 按 thread 聚合的统一 agent 审计日志
+- `~/.oh-my-agent/runtime/logs/` — service log + live agent spool
 - `~/.oh-my-agent/automations/` — 文件驱动的 automation 定义目录（支持热加载）
 - `~/.oh-my-agent/memory/daily/YYYY-MM-DD.yaml` — 每日追加的短期记忆
 - `~/.oh-my-agent/memory/curated.yaml` — 晋升后的长期记忆
@@ -516,7 +519,8 @@ author: scheduler
 ## 自主性方向
 
 - 当前分支状态应理解为：`v0.7.2 基线 + 本地后续演进`。
-- 下一个版本目标是：`v0.7.3 - HITL Completion、Delivery、Operator Observability`。
+- 当前实现状态可表述为：`v0.7.2 基线 + 本地后续演进 + v0.7.3 phase 1`。
+- 接下来的目标是 `v0.7.3 phase 2`，重点是 operator 打磨、事件驱动和剩余 delivery/runtime 缺口。
 - v0.5 建立 runtime-first 基线：长任务执行、恢复、审批和合并闭环（已完成）。
 - v0.6 聚焦 skill-first autonomy + adaptive memory：skill 创建路由验证、跨 session 用户记忆（已完成）。
 - v0.7 建立日期驱动记忆系统基线（已完成）。
@@ -526,14 +530,13 @@ author: scheduler
 
 ## 当前限制
 
-- Artifact delivery 还没完全做完：附件优先、链接兜底的交付适配层还需要补齐。
+- Artifact delivery 当前只支持 `attachment` 和本地 `path` 兜底；远端 link/object storage backend 还没接。
 - Runtime 可观测性还缺少内存级 live excerpt；`/task_logs` 可读 live agent log tail，但 Discord 状态卡不会直接展示"最近在做什么"的摘要。
-- Runtime 日志目前仍按执行路径拆分；下一步计划把 agent 行为统一沉到 thread-scoped 日志里。
-- 服务挂掉或启动失败时，Discord 侧还没有面向 operator 的 doctor / 自诊断入口；当前排查仍然需要直接去服务器上看日志。
 - 通用 HITL v1 目前只做到了 Discord 单选按钮：
   - owner-only
   - 可见 prompt + 可见答案/取消记录
   - direct chat / runtime task / automation 都能暂停后继续
+- HITL completion 已补齐到结构化单选答案，但自由文本 HITL、多选和更复杂 checkpoint 家族仍留在后续版本。
 - 自由文本 HITL、多选、非 Discord 平台交互、prompt 过期策略仍然故意留在后续版本。
 - Codex repo/workspace skill 发现现在已经走官方 `.agents/skills/`；生成的 `AGENTS.md` 不再承担 workspace skill 列举逻辑。
 - 记忆检索目前仍使用 Jaccard 词重叠做相似度；语义检索（向量搜索）仍是 v0.8+ 项目。

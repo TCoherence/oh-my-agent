@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 
@@ -161,6 +162,7 @@ def build_runtime_prompt(
     max_steps: int,
     prior_failure: str | None,
     resume_instruction: str | None,
+    last_hitl_answer: dict | None = None,
 ) -> str:
     lines = [
         "You are executing an autonomous coding task loop.",
@@ -192,6 +194,8 @@ def build_runtime_prompt(
         lines.extend(["", "Previous test failure summary:", prior_failure])
     if resume_instruction:
         lines.extend(["", "Resume instruction from user:", resume_instruction])
+    if last_hitl_answer:
+        lines.extend(["", "Structured HITL answer payload:", json.dumps(last_hitl_answer, ensure_ascii=False)])
     return "\n".join(lines)
 
 
@@ -204,6 +208,7 @@ def build_skill_prompt(
     max_steps: int,
     prior_failure: str | None,
     resume_instruction: str | None,
+    last_hitl_answer: dict | None = None,
 ) -> str:
     lines = [
         "You are executing an autonomous skill-creation task loop.",
@@ -236,6 +241,8 @@ def build_skill_prompt(
         lines.extend(["", "Previous validation failure summary:", prior_failure])
     if resume_instruction:
         lines.extend(["", "Resume instruction from user:", resume_instruction])
+    if last_hitl_answer:
+        lines.extend(["", "Structured HITL answer payload:", json.dumps(last_hitl_answer, ensure_ascii=False)])
     return "\n".join(lines)
 
 

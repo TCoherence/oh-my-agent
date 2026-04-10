@@ -23,6 +23,7 @@ from oh_my_agent.runtime import (
     TASK_STATUS_FAILED,
     TASK_STATUS_MERGED,
     TASK_STATUS_PAUSED,
+    TASK_STATUS_RUNNING,
     TASK_STATUS_STOPPED,
     TASK_STATUS_TIMEOUT,
     TASK_STATUS_WAITING_USER_INPUT,
@@ -108,6 +109,16 @@ class _FakeChannel:
         msg_id = f"a-{self._next_msg_id}"
         self._next_msg_id += 1
         return msg_id
+
+    async def send_attachments(self, thread_id: str, attachments, *, text: str | None = None) -> list[str]:
+        if text:
+            await self.send(thread_id, text)
+        message_ids: list[str] = []
+        for attachment in attachments:
+            message_id = await self.send_attachment(thread_id, attachment)
+            if message_id:
+                message_ids.append(message_id)
+        return message_ids
 
     async def send_hitl_prompt(self, *, thread_id: str, prompt) -> str:
         self.hitl_prompts.append(
@@ -290,6 +301,49 @@ class _ResumableAskUserAgent(BaseAgent):
         if thread_id:
             self._session_ids.setdefault(thread_id, "sess-hitl")
         return AgentResponse(text="根据你的选择，我继续完成这次分析。")
+
+
+class _ResumableAskUserChallengeAgent(BaseAgent):
+    def __init__(self) -> None:
+        self._session_ids: dict[str, str] = {}
+        self.prompts: list[str] = []
+
+    @property
+    def name(self) -> str:
+        return "ask-user-agent"
+
+    def get_session_id(self, thread_id: str) -> str | None:
+        return self._session_ids.get(thread_id)
+
+    def set_session_id(self, thread_id: str, session_id: str) -> None:
+        self._session_ids[thread_id] = session_id
+
+    def clear_session(self, thread_id: str) -> None:
+        self._session_ids.pop(thread_id, None)
+
+    async def run(
+        self,
+        prompt: str,
+        history: list[dict] | None = None,
+        *,
+        thread_id: str | None = None,
+        workspace_override: Path | None = None,
+        log_path: Path | None = None,
+    ) -> AgentResponse:
+        del history, workspace_override, log_path
+        self.prompts.append(prompt)
+        if thread_id:
+            self._session_ids.setdefault(thread_id, "sess-hitl")
+        return AgentResponse(
+            text=(
+                "我需要再确认一次。\n"
+                '<OMA_CONTROL>{"version":1,"type":"challenge","data":{"challenge_type":"ask_user",'
+                '"question":"下一步怎么继续？","details":"还是单选。","choices":['
+                '{"id":"deep","label":"Deep dive","description":"继续展开"},'
+                '{"id":"brief","label":"Brief","description":"保持简洁"}'
+                "]}}</OMA_CONTROL>"
+            )
+        )
 
 
 class _RootReadmeAgent(BaseAgent):
@@ -805,10 +859,88 @@ async def test_artifact_task_completes_without_merge(runtime_env):
     assert completed.task_type == "artifact"
     assert completed.output_summary
     assert completed.artifact_manifest == ["reports/daily-news.md"]
+    assert channel.attachments
     assert all(draft["task_id"] != task.id for draft in channel.drafts)
     assert "waiting merge" not in (completed.summary or "").lower()
     logs = await runtime.get_task_logs(task.id)
     assert "Artifacts:" in logs
+    assert "Thread log:" in logs
+
+
+@pytest.mark.asyncio
+async def test_artifact_task_delivery_falls_back_to_paths_when_attachments_not_allowed(runtime_env):
+    store: SQLiteMemoryStore = runtime_env["store"]
+    runtime: RuntimeService = runtime_env["runtime"]
+    channel: _FakeChannel = runtime_env["channel"]
+    registry = AgentRegistry([_ArtifactAgent()])
+    session = ChannelSession(
+        platform="discord",
+        channel_id="100",
+        channel=channel,
+        registry=registry,
+    )
+    runtime.register_session(session, registry)
+    runtime._artifact_attachment_max_bytes = 1  # noqa: SLF001
+    await runtime.start()
+
+    task = await runtime.create_artifact_task(
+        session=session,
+        registry=registry,
+        thread_id="thread-artifact-path",
+        goal="Generate a markdown daily news brief",
+        created_by="owner-1",
+        source="router",
+    )
+    completed = await _wait_for_status(store, task.id, {TASK_STATUS_COMPLETED})
+    assert completed.status == TASK_STATUS_COMPLETED
+    assert channel.attachments == []
+    sent_texts = [text for _, text in channel.sent]
+    assert any("Delivery mode: `path`" in text for text in sent_texts)
+    assert any("/reports/daily-news.md" in text for text in sent_texts)
+
+
+@pytest.mark.asyncio
+async def test_runtime_doctor_report_includes_counts_and_log_paths(runtime_env):
+    store: SQLiteMemoryStore = runtime_env["store"]
+    runtime: RuntimeService = runtime_env["runtime"]
+    await store.create_runtime_task(
+        task_id="doctor-active-1",
+        platform="discord",
+        channel_id="100",
+        thread_id="thread-doctor",
+        created_by="owner-1",
+        goal="active task",
+        preferred_agent="done-agent",
+        status=TASK_STATUS_RUNNING,
+        max_steps=1,
+        max_minutes=5,
+        test_command="true",
+    )
+    await store.create_runtime_task(
+        task_id="doctor-complete-1",
+        platform="discord",
+        channel_id="100",
+        thread_id="thread-doctor",
+        created_by="owner-1",
+        goal="completed task",
+        preferred_agent="done-agent",
+        status=TASK_STATUS_MERGED,
+        max_steps=1,
+        max_minutes=5,
+        test_command="true",
+    )
+    report = await runtime.build_doctor_report(
+        platform="discord",
+        channel_id="100",
+        scheduler=MagicMock(jobs=[], list_automations=MagicMock(return_value=[])),
+    )
+    assert "**Runtime health**" in report
+    assert "Active tasks: `1`" in report
+    assert "Recent tasks: `2`" in report
+    assert f"`{TASK_STATUS_RUNNING}`: 1" in report
+    assert "Service log:" in report
+    assert "Thread log root:" in report
+    assert "Active prompts:" in report
 
 
 @pytest.mark.asyncio
@@ -1173,7 +1305,8 @@ async def test_runtime_logs_include_live_agent_log_tail(runtime_env):
     waiting = await _wait_for_status(store, task.id, {TASK_STATUS_WAITING_MERGE})
     assert waiting.status == TASK_STATUS_WAITING_MERGE
 
-    live_log = runtime._agent_logs_root / f"{task.id}-step1-done-agent.log"  # noqa: SLF001
+    await store.update_runtime_task(task.id, status=TASK_STATUS_RUNNING, ended_at=None)
+    live_log = runtime._agent_log_path(waiting, 1, "done-agent")  # noqa: SLF001
     live_log.parent.mkdir(parents=True, exist_ok=True)
     live_log.write_text("[stdout] line one\n[stdout] line two\n", encoding="utf-8")
     runtime._live_agent_logs[task.id] = live_log  # noqa: SLF001
@@ -1182,6 +1315,42 @@ async def test_runtime_logs_include_live_agent_log_tail(runtime_env):
     assert "Live agent log:" in logs
     assert "Live agent log tail" in logs
     assert "line two" in logs
+
+
+@pytest.mark.asyncio
+async def test_runtime_logs_include_thread_excerpt_after_completion(runtime_env):
+    store: SQLiteMemoryStore = runtime_env["store"]
+    runtime: RuntimeService = runtime_env["runtime"]
+    channel: _FakeChannel = runtime_env["channel"]
+    registry = AgentRegistry([_DoneAgent()])
+    session = ChannelSession(
+        platform="discord",
+        channel_id="100",
+        channel=channel,
+        registry=registry,
+    )
+    runtime.register_session(session, registry)
+    await runtime.start()
+
+    task = await runtime.create_task(
+        session=session,
+        registry=registry,
+        thread_id="thread-thread-log",
+        goal="write a file and finish",
+        created_by="owner-1",
+        source="slash",
+    )
+    waiting = await _wait_for_status(store, task.id, {TASK_STATUS_WAITING_MERGE})
+    assert waiting.status == TASK_STATUS_WAITING_MERGE
+
+    logs = await runtime.get_task_logs(task.id)
+    assert "Thread log:" in logs
+    assert "Thread log excerpt" in logs
+    assert f"task_id={task.id}" in logs
+    thread_log = runtime._thread_log_path("thread-thread-log")  # noqa: SLF001
+    text = thread_log.read_text(encoding="utf-8")
+    assert "started_at=" in text
+    assert "ended_at=" in text
 
 
 @pytest.mark.asyncio
@@ -2013,12 +2182,91 @@ async def test_mark_thread_ask_user_waits_then_resumes(tmp_path):
     ) == []
 
     history = await session.get_history("thread-1")
+    resolved_prompt = await store.get_hitl_prompt(prompt.id)
+    assert resolved_prompt is not None
+    assert resolved_prompt.resume_context["last_hitl_answer"]["choice_id"] == "finance"
     assert history[-2]["role"] == "user"
     assert history[-2]["content"].startswith("[HITL Answer]")
     assert "Selected choice id: finance" in history[-2]["content"]
     assert history[-1]["role"] == "assistant"
     assert history[-1]["content"] == "根据你的选择，我继续完成这次分析。"
     assert any("The previous run paused because it required a single explicit user choice." in prompt for prompt in agent.prompts)
+    assert any("Structured HITL answer payload:" in prompt for prompt in agent.prompts)
+    assert any('"choice_id": "finance"' in prompt for prompt in agent.prompts)
+
+    await runtime.stop()
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_thread_hitl_nested_prompt_keeps_structured_answer_payload(tmp_path):
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    store = SQLiteMemoryStore(tmp_path / "hitl-thread-nested.db")
+    await store.init()
+    runtime = RuntimeService(
+        store,
+        config={
+            "enabled": True,
+            "worker_concurrency": 1,
+            "worktree_root": str(tmp_path / "worktrees"),
+            "default_agent": "ask-user-agent",
+            "default_test_command": "true",
+            "risk_profile": "strict",
+            "cleanup": {"enabled": False},
+            "merge_gate": {"enabled": True},
+        },
+        owner_user_ids={"owner-1"},
+        repo_root=repo,
+    )
+    channel = _FakeChannel()
+    agent = _ResumableAskUserChallengeAgent()
+    registry = AgentRegistry([agent])
+    session = ChannelSession(platform="discord", channel_id="100", channel=channel, registry=registry)
+    session.memory_store = store
+    await session.append_user("thread-1", "继续做这个判断", "alice")
+    runtime.register_session(session, registry)
+
+    result = await runtime.mark_thread_ask_user_required(
+        platform="discord",
+        channel_id="100",
+        thread_id="thread-1",
+        actor_id="owner-1",
+        agent_name="ask-user-agent",
+        question="先按哪个方向？",
+        details="只能单选。",
+        choices=(
+            {"id": "politics", "label": "Politics daily", "description": "关注地缘政治"},
+            {"id": "finance", "label": "Finance daily", "description": "关注财报"},
+        ),
+        control_envelope_json=(
+            '{"version":1,"type":"challenge","data":{"challenge_type":"ask_user","question":"先按哪个方向？","details":"只能单选。","choices":[{"id":"politics","label":"Politics daily","description":"关注地缘政治"},{"id":"finance","label":"Finance daily","description":"关注财报"}]}}'
+        ),
+        session_id_snapshot="sess-hitl",
+        resume_context={"agent_prompt": "继续做这个判断", "original_user_content": "继续做这个判断"},
+    )
+
+    assert "waiting for input" in result
+    first_prompt = await store.get_active_hitl_prompt_for_thread(
+        platform="discord",
+        channel_id="100",
+        thread_id="thread-1",
+    )
+    assert first_prompt is not None
+
+    resumed = await runtime.answer_hitl_prompt(first_prompt.id, choice_id="finance", actor_id="owner-1")
+    assert "waiting for input" in resumed
+
+    second_prompt = await store.get_active_hitl_prompt_for_thread(
+        platform="discord",
+        channel_id="100",
+        thread_id="thread-1",
+    )
+    assert second_prompt is not None
+    assert second_prompt.id != first_prompt.id
+    assert isinstance(second_prompt.resume_context["last_hitl_answer"], dict)
+    assert second_prompt.resume_context["last_hitl_answer"]["choice_id"] == "finance"
+    assert second_prompt.resume_context["last_hitl_answer"]["target_kind"] == "thread"
 
     await runtime.stop()
     await store.close()
@@ -2200,6 +2448,12 @@ async def test_mark_task_ask_user_waits_and_answer_requeues_task(tmp_path):
     prompt_after = await store.get_hitl_prompt(prompt.id)
     assert prompt_after is not None
     assert prompt_after.status == "completed"
+    assert prompt_after.resume_context["last_hitl_answer"]["choice_id"] == "ai"
+    events = await store.list_runtime_events(task.id, limit=10)
+    answered = [event for event in events if event["event_type"] == "task.ask_user_answered"]
+    assert answered
+    assert answered[-1]["payload"]["choice_id"] == "ai"
+    assert answered[-1]["payload"]["target_kind"] == "task"
     assert await store.list_active_notification_events(
         dedupe_key=f"task:{task.id}:ask_user",
         limit=10,

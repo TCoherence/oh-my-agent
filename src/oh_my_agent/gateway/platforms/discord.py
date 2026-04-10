@@ -1357,6 +1357,31 @@ class DiscordChannel(BaseChannel):
             result = await self._runtime_service.stop_task(task_id, actor_id=str(interaction.user.id))
             await interaction.followup.send(result[:1900], ephemeral=True)
 
+        @tree.command(name="doctor", description="Show a runtime/operator health snapshot")
+        async def slash_doctor(interaction: discord.Interaction):
+            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
+                await interaction.response.send_message(
+                    "This command is restricted to the configured owner.",
+                    ephemeral=True,
+                )
+                return
+            await interaction.response.defer(ephemeral=True)
+            lines = [
+                "**Gateway health**",
+                f"- Bot online: `{self._client.user is not None if self._client else False}`",
+                f"- Channel bound: `{self._channel_id}`",
+            ]
+            if self._runtime_service is None:
+                lines.extend(["", "**Runtime health**", "- Enabled: `False`"])
+            else:
+                report = await self._runtime_service.build_doctor_report(
+                    platform=self.platform,
+                    channel_id=self._channel_id,
+                    scheduler=self._scheduler,
+                )
+                lines.extend(["", report])
+            await interaction.followup.send("\n".join(lines)[:1900], ephemeral=True)
+
         # ---- Adaptive Memory commands --------------------------------------
 
         @tree.command(name="memories", description="Show learned user memories")

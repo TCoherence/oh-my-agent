@@ -26,7 +26,9 @@ Implemented:
   - sampled progress snapshots in SQLite
   - full heartbeat in process logs
   - single updatable Discord status message
-  - separate underlying agent logs in `runtime/logs/agents/`
+  - Discord `/doctor`
+  - thread-scoped unified logs in `runtime/logs/threads/`
+  - internal live agent spool logs in `runtime/logs/agents/`
 - Codex skill integration now uses official repo/workspace `.agents/skills/`; generated workspace `AGENTS.md` is reduced to repo rules and metadata
 - True subprocess interruption (heartbeat loop checks PAUSED/STOPPED, cancels running agent/test)
 - Message-driven runtime control (`stop`, `pause`, `resume` from normal thread messages via `_parse_control_intent`)
@@ -38,18 +40,18 @@ Implemented:
 - Runtime skill repair routing is implemented via `repair_skill`
 
 Still missing:
-- thread-scoped unified agent logs and an in-memory live excerpt layer for running tasks
-- artifact delivery abstraction (`attachment first`, link fallback) with local-first paths and later remote object-storage adapters
-- operator-facing doctor command
+- in-memory live excerpt surfaced directly into Discord status cards
+- remote delivery backends beyond local attachment/path fallback
 - event-driven triggers beyond cron
-- richer HITL completion semantics (answer binding contract and mid-task approval checkpoints)
+- richer HITL families beyond structured single-choice checkpoints
 - guest session isolation
 - semantic retrieval (v0.8+)
 
 ## Next Product Direction
 
 - Current branch state is best read as `v0.7.2 baseline + local follow-up work`.
-- The next target is `v0.7.3 - HITL Completion, Delivery, and Operator Observability`.
+- The current state is `v0.7.2 baseline + local follow-up work + v0.7.3 phase 1`.
+- The remaining target is `v0.7.3 phase 2`, not a repeat of phase 1.
 - v0.5 delivered runtime-first foundations (complete).
 - v0.6 delivered skill-first autonomy + adaptive memory.
 - v0.7 delivered date-based memory, multi-type runtime, skill evaluation, and the current auth/HITL/runtime pass.
@@ -66,6 +68,13 @@ Still missing:
 - `repair_skill` routing for feedback on existing skills
 - Runtime live agent logging plus richer Discord status handling
 - Codex repo/workspace `.agents/skills/` delivery with generated workspace `AGENTS.md` reduced to rules/metadata
+
+### v0.7.3 phase 1
+
+- Artifact delivery abstraction with attachment-first delivery and local absolute-path fallback
+- Thread-scoped unified agent logs across chat, invoke, runtime task, and HITL resume flows
+- Structured HITL answer binding carried into task/thread resume context
+- Discord `/doctor` for operator-facing gateway/runtime/HITL/auth/log health snapshots
 
 ### v0.7.0
 

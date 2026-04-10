@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import inspect
 import logging
 from pathlib import Path
 import re
-
+import time
 from oh_my_agent.agents.base import AgentResponse, BaseAgent
 
 logger = logging.getLogger(__name__)
@@ -66,21 +67,33 @@ class AgentRegistry:
         log_path,
         image_paths: list[Path] | None,
         timeout_override_seconds: int | None,
+        on_agent_run=None,
     ) -> AgentResponse:
-        import inspect
-
         sig = inspect.signature(agent.run)
         kwargs = {}
         if "thread_id" in sig.parameters:
             kwargs["thread_id"] = thread_id
         if "workspace_override" in sig.parameters:
             kwargs["workspace_override"] = workspace_override
+        agent_log_path = None
         if "log_path" in sig.parameters:
-            kwargs["log_path"] = self._agent_log_path(log_path, agent.name)
+            agent_log_path = self._agent_log_path(log_path, agent.name)
+            kwargs["log_path"] = agent_log_path
         if "image_paths" in sig.parameters:
             kwargs["image_paths"] = image_paths
+        started_at = time.perf_counter()
         with self._temporary_timeout(agent, timeout_override_seconds):
-            return await agent.run(prompt, history, **kwargs)
+            response = await agent.run(prompt, history, **kwargs)
+        if on_agent_run is not None:
+            maybe_result = on_agent_run(
+                agent=agent,
+                response=response,
+                log_path=agent_log_path,
+                duration_s=time.perf_counter() - started_at,
+            )
+            if inspect.isawaitable(maybe_result):
+                await maybe_result
+        return response
 
     async def run(
         self,
@@ -94,6 +107,7 @@ class AgentRegistry:
         image_paths: list[Path] | None = None,
         run_label: str | None = None,
         timeout_override_seconds: int | None = None,
+        on_agent_run=None,
     ) -> tuple[BaseAgent, AgentResponse]:
         """Try each agent in order. Return the first successful (agent, response) pair.
 
@@ -121,6 +135,7 @@ class AgentRegistry:
                 log_path=log_path,
                 image_paths=image_paths,
                 timeout_override_seconds=timeout_override_seconds,
+                on_agent_run=on_agent_run,
             )
             return agent, response
 
@@ -138,6 +153,7 @@ class AgentRegistry:
                 log_path=log_path,
                 image_paths=image_paths,
                 timeout_override_seconds=timeout_override_seconds,
+                on_agent_run=on_agent_run,
             )
             if not response.error:
                 return agent, response

@@ -17,7 +17,8 @@
 - Date-based memory is implemented (daily/curated two-tier, auto-promotion, MEMORY.md synthesis, `/promote`).
 - Image attachment support is implemented (Discord download, per-agent handling, temp file lifecycle).
 - Codex repo/workspace skill discovery now uses official `.agents/skills/`; generated workspace `AGENTS.md` is reduced to rules/metadata.
-- Next target: `v0.7.3 - HITL Completion, Delivery, and Operator Observability`.
+- `v0.7.3 phase 1` is now implemented.
+- Current next target: `v0.7.3 phase 2`.
 
 ## v0.5 Runtime Hardening (complete)
 
@@ -96,10 +97,10 @@ Upgrade adaptive memory from flat YAML to a date-organized, two-tier architectur
 
 ## v0.7.3 - HITL Completion, Delivery, and Operator Observability
 
-- [ ] **Artifact delivery abstraction**: add a platform/runtime delivery layer that tries attachment upload first and falls back to a link when the artifact is too large
-- [ ] **Thread-scoped unified logs**: replace the current execution-path split with `~/.oh-my-agent/runtime/logs/threads/<thread_id>.log` as the main agent-audit surface
-- [ ] **HITL completion semantics**: formalize answer binding, resume-context injection, and reusable mid-task approval/checkpoint handling on top of the existing `WAITING_USER_INPUT` baseline
-- [ ] **Operator-facing doctor command**: add a Discord-first self-diagnostics entrypoint (`/doctor` or equivalent) that can report recent crash/failure state, startup health, log pointers, and recommended next checks without requiring direct server log access
+- [x] **Artifact delivery abstraction**: platform/runtime delivery layer now tries attachment upload first and falls back to local absolute paths when upload is unavailable or artifacts exceed local limits
+- [x] **Thread-scoped unified logs**: `~/.oh-my-agent/runtime/logs/threads/<thread_id>.log` is now the main agent-audit surface across chat/invoke/runtime/HITL resume flows
+- [x] **HITL completion semantics**: single-choice answer binding, structured resume-context injection, and checkpoint reuse on top of `WAITING_USER_INPUT` are implemented
+- [x] **Operator-facing doctor command**: Discord `/doctor` now reports runtime, HITL, auth, scheduler, and log-pointer health snapshots
 - [ ] **Event-driven triggers beyond cron**: webhook ingestion, file-watch, and external notification hooks for runtime entry
 - [ ] **Scheduler-driven operational tasks**: connect file-driven `automations` to runtime task types and operator surfaces
 

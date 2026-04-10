@@ -12,11 +12,12 @@ Inspired by [OpenClaw](https://openclaw.dev).
 - v0.5 is runtime-first: durable autonomous task loops (`DRAFT -> RUNNING -> WAITING_MERGE -> MERGED/...`).
 - v0.6 skill-first autonomy + adaptive memory is complete.
 - v0.7.2 extends the v0.7 line with auth-first runtime pause/resume, file-driven automations, generic Discord-first `ask_user` HITL, market briefings, and skill-specific timeout overrides for slow direct skill invocations.
-- The next planning target is `v0.7.3 - HITL Completion, Delivery, and Operator Observability`.
+- `v0.7.3 phase 1` is now implemented: artifact delivery abstraction, thread-scoped unified logs, structured HITL answer binding, and Discord `/doctor`.
+- The remaining `v0.7.3` scope is phase 2 work around operator polish, richer delivery backends, and event-driven/runtime ops follow-up.
 - Discord approvals use buttons first, slash fallback, reactions as status-only signals.
 - Optional LLM routing is implemented: incoming messages can be classified as `reply_once`, `invoke_existing_skill`, `propose_artifact_task`, `propose_repo_task`, `create_skill`, or `repair_skill`.
-- Runtime observability is implemented: `/task_logs`, sampled progress events in SQLite, and a single updatable Discord status message.
-- Runtime logging is split into service-level and per-agent logs under `~/.oh-my-agent/runtime/logs/`.
+- Runtime observability is implemented: `/task_logs`, sampled progress events in SQLite, a single updatable Discord status message, and Discord `/doctor`.
+- Runtime logging now has a thread-scoped primary view under `~/.oh-my-agent/runtime/logs/threads/`, with service-level logs and live agent spool logs under `~/.oh-my-agent/runtime/logs/`.
 - Gateway/message logs now distinguish direct replies, explicit skill invocations, and router-driven reply paths via `purpose=...`; background memory/compression agent runs inherit the same request ID for traceability.
 - Multi-type runtime is implemented: only `repo_change` and `skill_change` tasks use merge gate; `artifact` tasks complete without merge.
 - Runtime hardening is complete: true subprocess interruption, message-driven control (stop/pause/resume), PAUSED state, completion summaries, metrics.
@@ -502,13 +503,12 @@ author: scheduler
 
 ## Artifact Delivery
 
-- Artifact delivery is not fully implemented yet.
-- The agreed v0.7.3 direction is:
+- Artifact delivery is now a runtime/platform capability for `artifact` tasks.
+- Current behavior:
   - try direct attachment upload first
-  - fall back to a link when the artifact is too large for the target platform
-  - keep delivery behind an abstraction so local-first runs can expose filesystem-backed artifacts now and remote deployments can plug in object storage later
-- This delivery layer is a platform/runtime capability, not just prompt behavior.
-- Recommended storage direction for remote deployment is S3-compatible object storage, with Cloudflare R2 as the preferred default because it keeps the integration simple and works well for presigned-link delivery.
+  - if upload is unavailable or the artifact exceeds local limits, fall back to absolute filesystem paths
+  - include delivery mode and delivered paths/attachment names in the completion message
+- Remote object storage is still deferred; the future direction remains an S3-compatible adapter, with Cloudflare R2 as the preferred default.
 
 ## Codex Integration Notes
 
@@ -528,6 +528,7 @@ author: scheduler
   - `MEMORY.md` for the synthesized natural-language view of curated memory
 - `~/.oh-my-agent/agent-workspace/.agents/skills/` is refreshed so Codex can use official repo/workspace skill discovery in external workspaces too.
 - `~/.oh-my-agent/runtime/tasks/` stores isolated runtime task worktrees and artifact task output directories.
+- `~/.oh-my-agent/runtime/logs/threads/` stores thread-scoped unified agent audit logs across chat, invoke, HITL resume, and runtime tasks.
 - `~/.oh-my-agent/automations/` stores file-driven automation definitions with hot reload.
 - The external workspace now uses a generated `AGENTS.md` as the single injected context document. Repo-root `AGENT.md`, `CLAUDE.md`, and `GEMINI.md` are no longer mirrored into the external workspace or session workspaces.
 - The generated workspace `AGENTS.md` includes visible metadata so it is clear when you are looking at a derived file instead of the repo source file.
@@ -535,7 +536,8 @@ author: scheduler
 ## Autonomy Direction
 
 - Current branch state should be read as `v0.7.2 baseline + local follow-up work`.
-- The next version target is `v0.7.3 - HITL Completion, Delivery, and Operator Observability`.
+- The current implementation state is `v0.7.2 baseline + local follow-up work + v0.7.3 phase 1`.
+- The remaining version target is `v0.7.3 phase 2`, centered on operator polish, event-driven triggers, and remaining delivery/runtime gaps.
 - v0.5 establishes the runtime-first baseline: durable task execution, merge gating, and recovery.
 - v0.6 focuses on skill-first autonomy + adaptive memory: skill creation, skill routing, skill validation, reusable capability growth, and cross-session user knowledge.
 - v0.7 delivers date-based memory; v0.7.2 closes the current auth/runtime/video/automation/HITL pass on top of it.
@@ -544,15 +546,14 @@ author: scheduler
 
 ## Current Limits
 
-- Artifact delivery is not finished yet: generated artifacts are tracked, but attachment-first and link-fallback delivery still needs a dedicated adapter layer.
+- Artifact delivery currently supports `attachment` and local `path` fallback only; remote link/object-storage backends are still pending.
 - Runtime observability still lacks an in-memory live excerpt layer; `/task_logs` can read live agent log tails, but Discord status cards do not yet show the latest agent activity summary.
-- Runtime logs are still split by execution path; thread-scoped unified agent logs are the next planned observability step.
-- There is still no operator-facing doctor/self-diagnostics entrypoint in Discord when the service crashes or fails to start; today, debugging still requires direct access to server logs.
 - Human-in-the-loop v1 is now implemented for Discord buttons only:
   - single-choice `ask_user` prompts
   - owner-only response handling
   - visible prompt + visible answer/cancel record
   - auto-resume for direct chat and runtime task paths
+- HITL completion is now structured for single-choice flows, but free-text HITL, multi-select prompts, and richer checkpoint families are still out of scope.
 - Free-text HITL, multi-select prompts, non-Discord interactive UIs, and prompt expiry policies are still intentionally out of scope.
 - Codex repo/workspace skill discovery now uses official `.agents/skills/`; the generated `AGENTS.md` is no longer used to enumerate workspace skills.
 - Memory retrieval still uses Jaccard word-overlap for similarity; semantic (vector) retrieval remains a v0.8+ item.

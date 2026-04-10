@@ -17,7 +17,8 @@
 - 基于日期的记忆系统已实现（daily/curated 两层架构、自动晋升、MEMORY.md 合成、`/promote`）。
 - 图片附件支持已实现（Discord 下载、per-agent 处理、临时文件生命周期管理）。
 - Codex repo/workspace skill 发现已切到官方 `.agents/skills/`；生成的 workspace `AGENTS.md` 只保留 rules/metadata。
-- 下一个版本目标：`v0.7.3 - HITL Completion、Delivery、Operator Observability`。
+- `v0.7.3 phase 1` 已实现。
+- 当前下一个目标：`v0.7.3 phase 2`。
 
 ## v0.5 Runtime 加固（已完成）
 
@@ -96,10 +97,10 @@
 
 ## v0.7.3 - HITL Completion、Delivery、Operator Observability
 
-- [ ] **Artifact delivery 抽象**：增加统一平台/runtime 交付层，先尝试附件上传，超限时回退为链接
-- [ ] **按 thread 聚合的统一日志**：用 `~/.oh-my-agent/runtime/logs/threads/<thread_id>.log` 作为主要 agent 审计入口，取代当前按执行路径拆分的主视角
-- [ ] **HITL completion 语义补齐**：在现有 `WAITING_USER_INPUT` 基线上补齐 answer binding、resume context injection 和可复用的任务中途审批/checkpoint 语义
-- [ ] **面向 operator 的 doctor 命令**：增加 Discord 优先的自诊断入口（`/doctor` 或等价能力），在进程异常或服务挂掉后，能够汇报最近失败状态、启动健康情况、日志位置和建议排查步骤，而不要求先手动登录服务器找日志
+- [x] **Artifact delivery 抽象**：统一平台/runtime 交付层已实现，先尝试附件上传；上传不可用或产物超限时回退为本地绝对路径
+- [x] **按 thread 聚合的统一日志**：`~/.oh-my-agent/runtime/logs/threads/<thread_id>.log` 已成为 chat/invoke/runtime/HITL resume 的主要 agent 审计入口
+- [x] **HITL completion 语义补齐**：现有 `WAITING_USER_INPUT` 基线之上的单选 answer binding、resume context injection 和 checkpoint 复用语义已实现
+- [x] **面向 operator 的 doctor 命令**：Discord `/doctor` 已可输出 runtime、HITL、auth、scheduler 和日志路径健康快照
 - [ ] **超越 cron 的事件驱动触发器**：webhook 接入、文件监控、外部通知等 runtime 入口
 - [ ] **Scheduler 驱动的主动任务**：把文件驱动的 `automations` 真正对接到 runtime task 类型和 operator surface
 
