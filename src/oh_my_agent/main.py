@@ -666,9 +666,25 @@ def main() -> None:
         action="version",
         version=f"%(prog)s {__version__}",
     )
-    parser.parse_args()
+    parser.add_argument(
+        "--config",
+        metavar="PATH",
+        default=None,
+        help="Path to config.yaml (overrides OMA_CONFIG_PATH env var)",
+    )
+    parser.add_argument(
+        "--validate-config",
+        action="store_true",
+        default=False,
+        help="Validate config and exit (exit 0 = ok, exit 1 = errors)",
+    )
+    args = parser.parse_args()
 
-    config_path_raw = os.environ.get("OMA_CONFIG_PATH", "config.yaml").strip() or "config.yaml"
+    # Resolve config path: --config flag > OMA_CONFIG_PATH env > default
+    if args.config:
+        config_path_raw = args.config
+    else:
+        config_path_raw = os.environ.get("OMA_CONFIG_PATH", "config.yaml").strip() or "config.yaml"
     config_path = Path(config_path_raw).expanduser()
     if not config_path.is_absolute():
         config_path = (Path.cwd() / config_path).resolve()
@@ -693,9 +709,26 @@ def main() -> None:
 
     _apply_v052_defaults(config)
     _apply_agent_env_overrides(config)
+
+    # Config validation — used by both --validate-config and normal startup
+    from oh_my_agent.config_validator import validate_config
+    validation = validate_config(config)
+
+    if args.validate_config:
+        print(validation.summary())
+        sys.exit(0 if validation.ok else 1)
+
     runtime_root = _runtime_root(config)
     _setup_logging(runtime_root)
     logger = logging.getLogger(__name__)
+
+    if not validation.ok:
+        logger.error("Config validation failed:\n%s", validation.summary())
+        sys.exit(1)
+    elif validation.errors:
+        # Warnings only — log but continue
+        logger.warning("Config validation warnings:\n%s", validation.summary())
+
     project_root = config_path.parent.resolve()
     _migrate_legacy_workspace(config, project_root, logger)
 

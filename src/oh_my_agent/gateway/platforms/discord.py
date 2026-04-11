@@ -12,9 +12,11 @@ import discord
 from discord import app_commands
 
 from oh_my_agent.gateway.base import (
+    ActionDescriptor,
     Attachment,
     BaseChannel,
     IncomingMessage,
+    InteractivePrompt,
     MessageHandler,
     OutgoingAttachment,
 )
@@ -1775,6 +1777,71 @@ class DiscordChannel(BaseChannel):
         ]
         msg = await thread.send(content=text, files=files)
         return [str(msg.id)]
+
+    async def stop(self) -> None:
+        if self._client and not self._client.is_closed():
+            await self._client.close()
+
+    async def edit_message(
+        self,
+        thread_id: str,
+        message_id: str,
+        text: str,
+    ) -> None:
+        try:
+            thread = await self._resolve_channel(thread_id)
+            msg = await thread.fetch_message(int(message_id))
+            await msg.edit(content=text)
+        except Exception:
+            logger.debug("edit_message failed thread=%s msg=%s", thread_id, message_id, exc_info=True)
+
+    async def send_interactive(
+        self,
+        thread_id: str,
+        prompt: InteractivePrompt,
+    ) -> str | None:
+        thread = await self._resolve_channel(thread_id)
+        view = self._build_interactive_view(prompt)
+        msg = await thread.send(content=prompt.text, view=view)
+        return str(msg.id)
+
+    async def update_interactive(
+        self,
+        thread_id: str,
+        message_id: str,
+        prompt: InteractivePrompt,
+    ) -> None:
+        try:
+            thread = await self._resolve_channel(thread_id)
+            msg = await thread.fetch_message(int(message_id))
+            view = self._build_interactive_view(prompt)
+            await msg.edit(content=prompt.text, view=view)
+        except Exception:
+            logger.debug("update_interactive failed thread=%s msg=%s", thread_id, message_id, exc_info=True)
+
+    @staticmethod
+    def _build_interactive_view(prompt: InteractivePrompt) -> discord.ui.View:
+        """Convert a platform-neutral ``InteractivePrompt`` into a Discord View."""
+        _STYLE_MAP = {
+            "primary": discord.ButtonStyle.primary,
+            "secondary": discord.ButtonStyle.secondary,
+            "danger": discord.ButtonStyle.danger,
+            "success": discord.ButtonStyle.success,
+        }
+        view = discord.ui.View(timeout=None)
+        for action in prompt.actions:
+            custom_id_parts = ["interactive"]
+            if prompt.entity_id:
+                custom_id_parts.append(prompt.entity_id)
+            custom_id_parts.append(action.id)
+            button = discord.ui.Button(
+                label=action.label[:80],
+                style=_STYLE_MAP.get(action.style, discord.ButtonStyle.secondary),
+                custom_id=":".join(custom_id_parts),
+                disabled=action.disabled,
+            )
+            view.add_item(button)
+        return view
 
     async def upsert_status_message(
         self,

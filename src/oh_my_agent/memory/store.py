@@ -431,6 +431,15 @@ class MemoryStore(ABC):
     async def delete_automation_state(self, name: str) -> None:
         return None
 
+    # -- schema version ---------------------------------------------------
+
+    async def get_schema_version(self) -> int:
+        """Return the current schema version.  Default is 0 (unknown)."""
+        return 0
+
+    async def set_schema_version(self, version: int) -> None:
+        """Persist a new schema version."""
+
     async def upsert_skill_provenance(self, skill_name: str, **kwargs) -> None:
         return None
 
@@ -865,7 +874,17 @@ CREATE TABLE IF NOT EXISTS skill_evaluations (
 
 CREATE INDEX IF NOT EXISTS idx_skill_evaluations_skill_created
     ON skill_evaluations(skill_name, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS schema_version (
+    id          INTEGER PRIMARY KEY CHECK (id = 1),
+    version     INTEGER NOT NULL,
+    updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+INSERT OR IGNORE INTO schema_version (id, version) VALUES (1, 1);
 """
+
+# Current schema version.  Bump this when adding migration steps.
+CURRENT_SCHEMA_VERSION = 1
 
 
 class SQLiteMemoryStore(MemoryStore):
@@ -893,8 +912,9 @@ class SQLiteMemoryStore(MemoryStore):
         db = await self._conn()
         await db.executescript(self.SCHEMA_SQL)
         await self._migrate_runtime_schema()
+        await self._run_schema_migrations()
         await db.commit()
-        logger.info("Memory store initialised at %s", self._db_path)
+        logger.info("Memory store initialised at %s (schema v%d)", self._db_path, await self.get_schema_version())
 
     async def close(self) -> None:
         if self._db:
@@ -922,6 +942,22 @@ class SQLiteMemoryStore(MemoryStore):
             await db.execute("UPDATE runtime_tasks SET task_type='repo_change' WHERE task_type='code'")
             await db.execute("UPDATE runtime_tasks SET task_type='skill_change' WHERE task_type='skill'")
         await db.commit()
+
+    async def _run_schema_migrations(self) -> None:
+        """Run forward-only schema migrations based on version tracking.
+
+        Add new migration steps here as ``if current < N:`` blocks.
+        Each block must call ``set_schema_version(N)`` on success.
+        """
+        current = await self.get_schema_version()
+        # -- future migration example --
+        # if current < 2:
+        #     db = await self._conn()
+        #     await db.execute("ALTER TABLE ... ADD COLUMN ...")
+        #     await self.set_schema_version(2)
+        #     current = 2
+        if current < CURRENT_SCHEMA_VERSION:
+            await self.set_schema_version(CURRENT_SCHEMA_VERSION)
 
     async def _table_exists(self, table: str) -> bool:
         db = await self._conn()
@@ -1338,6 +1374,27 @@ class SQLiteMemoryStore(MemoryStore):
             await db.execute(
                 "DELETE FROM automation_runtime_state WHERE name=?",
                 (name,),
+            )
+            await db.commit()
+
+    # -- schema version ---------------------------------------------------
+
+    async def get_schema_version(self) -> int:
+        db = await self._conn()
+        try:
+            cursor = await db.execute("SELECT version FROM schema_version WHERE id=1")
+            row = await cursor.fetchone()
+            return int(row["version"]) if row else 0
+        except Exception:
+            return 0
+
+    async def set_schema_version(self, version: int) -> None:
+        async with self._write_lock:
+            db = await self._conn()
+            await db.execute(
+                "INSERT OR REPLACE INTO schema_version (id, version, updated_at) "
+                "VALUES (1, ?, CURRENT_TIMESTAMP)",
+                (version,),
             )
             await db.commit()
 
@@ -2627,6 +2684,8 @@ class SplitSQLiteMemoryStore:
         "get_automation_state",
         "list_automation_states",
         "delete_automation_state",
+        "get_schema_version",
+        "set_schema_version",
     }
     _SKILLS_METHODS = {
         "upsert_skill_provenance",

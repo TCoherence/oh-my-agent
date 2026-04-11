@@ -60,6 +60,31 @@ SlashAgentHandler = Callable[[str, str], Awaitable[str]]                # (platf
 SlashSearchHandler = Callable[[str, int], Awaitable[list[dict]]]        # (query, limit) → results
 
 
+@dataclass
+class ActionDescriptor:
+    """A single action button in an interactive message."""
+
+    id: str
+    label: str
+    style: str = "secondary"   # primary | secondary | danger | success
+    disabled: bool = False
+
+
+@dataclass
+class InteractivePrompt:
+    """Platform-neutral interactive message with action buttons.
+
+    Used for HITL prompts, task approvals, and other owner interactions.
+    Platform adapters translate this into native widgets (Discord
+    buttons, Slack Block Kit, etc.).
+    """
+
+    text: str
+    actions: list[ActionDescriptor] = field(default_factory=list)
+    idempotency_key: str | None = None
+    entity_id: str | None = None    # task_id, prompt_id, etc.
+
+
 class TaskDecisionSurface(Protocol):
     def supports_buttons(self) -> bool: ...
 
@@ -101,6 +126,50 @@ class BaseChannel(ABC):
     async def send(self, thread_id: str, text: str) -> str | None:
         """Send *text* to the given thread and optionally return message id."""
         ...
+
+    # -- lifecycle --------------------------------------------------------
+
+    async def stop(self) -> None:
+        """Shut down the channel connection gracefully. No-op by default."""
+
+    # -- message editing --------------------------------------------------
+
+    async def edit_message(
+        self,
+        thread_id: str,
+        message_id: str,
+        text: str,
+    ) -> None:
+        """Edit an existing message's text. No-op by default."""
+        del thread_id, message_id, text
+
+    # -- interactive messages ---------------------------------------------
+
+    async def send_interactive(
+        self,
+        thread_id: str,
+        prompt: InteractivePrompt,
+    ) -> str | None:
+        """Send an interactive message with action buttons.
+
+        Default implementation sends the prompt text as a plain message
+        (buttons are silently dropped).
+        """
+        return await self.send(thread_id, prompt.text)
+
+    async def update_interactive(
+        self,
+        thread_id: str,
+        message_id: str,
+        prompt: InteractivePrompt,
+    ) -> None:
+        """Update an existing interactive message (e.g. disable buttons).
+
+        Default implementation falls back to ``edit_message``.
+        """
+        await self.edit_message(thread_id, message_id, prompt.text)
+
+    # -- platform helpers -------------------------------------------------
 
     def render_user_mention(self, user_id: str) -> str:
         """Render a user mention for the current platform."""
