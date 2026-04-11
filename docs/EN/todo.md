@@ -18,7 +18,7 @@
 - Image attachment support is implemented (Discord download, per-agent handling, temp file lifecycle).
 - Codex repo/workspace skill discovery now uses official `.agents/skills/`; generated workspace `AGENTS.md` is reduced to rules/metadata.
 - `v0.7.3` is now fully implemented (phases 1–3).
-- Current next target: deferred items and `v0.8+`.
+- Current next target: `v0.8` (1.0 hardening). See `v1.0-plan.md` for full roadmap.
 
 ## v0.5 Runtime Hardening (complete)
 
@@ -116,41 +116,81 @@ Upgrade adaptive memory from flat YAML to a date-organized, two-tier architectur
 - [x] **Resume semantics closeout**: task HITL resumes to PENDING with structured + text payload; thread HITL auto-resumes with `last_hitl_answer` inheritance (latest only, no chain); cross-task isolation via `task_id`-scoped event queries
 - [x] **Operator-visible HITL status**: `/task_logs` shows active/last HITL checkpoint question and selected answer
 
-## Deferred beyond v0.7.3
+## v0.8 — 1.0 Hardening
 
-- [ ] **Event-driven triggers beyond cron**: webhook ingestion, file-watch, and external notification hooks for runtime entry
-- [ ] **Scheduler-driven operational tasks**: connect file-driven `automations` to runtime task types and operator surfaces
-- [ ] **Temp session mode**: flag a session as `guest` so it uses an isolated ephemeral memory scope (no writes to owner's adaptive memory, no skill mutation permissions)
-- [ ] Configurable via `/guest` toggle or per-user config
+Full details in [`v1.0-plan.md`](v1.0-plan.md).
 
-## v0.8+ - Memory Intelligence + Hybrid Autonomy
+### 1. Platform Abstraction
+- [ ] Extract service-layer architecture from `discord.py` (platform-agnostic business logic)
+- [ ] Task control service (highest priority — most commands, heaviest state logic)
+- [ ] Ask service (core entry path)
+- [ ] Doctor / automation / auth / memory services
+- [ ] BaseChannel contract review: message edit, attachment upload, interactive prompt, etc.
+
+### 2. Reliability Hardening
+- [ ] Graceful shutdown contract (gateway, runtime workers, subprocesses, SQLite/WAL)
+- [ ] Startup config validation (schema checks, fail-fast, CLI binary validation)
+- [ ] Upgrade/migration contract (SQLite schema, config compat, skill/workspace path migrations)
+- [ ] Markdown-aware chunking
+- [ ] Rate-limit / request queue
+- [ ] Concurrent thread/task isolation testing
+- [ ] Log hygiene (rotation, log-level config, structured logging)
+- [ ] User-visible error contract (readable messages, not tracebacks)
+- [x] Missed-job policy = `skip` (implemented; needs documentation and test coverage)
+
+### 3. Deployment Hardening
+- [ ] First-class `docker-compose`
+- [ ] Local vs Docker install/run documentation parity
+- [ ] Runtime directories / backup / restore instructions
+- [ ] Operator-facing restart and upgrade SOPs
+- [ ] Health-check for long-running service mode
+
+## v0.9 — 1.0 RC / Contract Freeze
+
+- [ ] Finish remaining service-layer extraction
+- [ ] Eliminate remaining adapter-owned business logic
+- [ ] End-to-end restart/recovery tests (chat, skill invoke, runtime tasks, HITL, auth, automations)
+- [ ] Validate upgrades from older state layouts
+- [ ] Tighten docs into operator-grade product docs
+- [ ] Defer or remove experimental surfaces not ready for long-term support
+
+## Post-1.0 / 1.x
+
+All items below move off the `1.0` critical path. See [`v1.0-plan.md`](v1.0-plan.md) for rationale.
+
+### Platform Expansion
+- [ ] Slack adapter
+- [ ] Feishu/Lark adapter
+- [ ] WeChat adapter
 
 ### Semantic Memory
-
-- [ ] **Semantic memory search**: vector-indexed retrieval over memory files (embedding-based `memory_search`), replacing Jaccard word-overlap. BM25 + vector hybrid for exact tokens + semantic paraphrases.
-- [ ] **Chunking and indexing**: split memory files into semantic chunks (~400 tokens, 80 overlap), per-agent SQLite index, auto-reindex on file changes.
-- [ ] **MMR diversity re-ranking**: when selecting memories to inject, balance relevance with diversity to avoid redundant near-duplicates from daily notes.
+- [ ] Semantic memory search (BM25 + vector hybrid)
+- [ ] Chunking and indexing
+- [ ] MMR diversity re-ranking
 
 ### Hybrid Autonomy
-
 - [ ] Repeated-pattern detection from history (identify recurring workflows)
 - [ ] Skill recommendation / auto-draft from recurring workflows
 - [ ] Hybrid missions combining skill creation and scheduled execution
 - [ ] Unified operator surface for active ops and skill-growth workflows
 
 ### Agent Quality Feedback
+- [ ] Per-turn quality signal (reaction-based or `/rate` command)
+- [ ] Agent selection feedback loop
+- [ ] Skill-agent affinity
 
-- [ ] **Per-turn quality signal**: reaction-based (thumbs-up/down) or explicit `/rate` command, persisted per `(thread, turn, agent)`
-- [ ] **Agent selection feedback loop**: use accumulated quality signals to reweight agent fallback order or inform agent selection hints
-- [ ] **Skill-agent affinity**: track which agent produces best results for which skill, inform auto-routing
+### Other Deferred
+- [ ] Event-driven triggers beyond cron (webhook, file-watch, external notifications)
+- [ ] Scheduler-driven operational tasks (connect automations to runtime task types)
+- [ ] Guest session / tenant isolation (via `/guest` toggle or per-user config)
+- [ ] Free-text HITL
+- [ ] Remote object storage delivery (R2/S3 style)
+- [ ] Richer automation scheduling model (RRULE or full cron semantics)
 
 ## Backlog (no version commitment)
 
 - [ ] Live observability ring buffer + status-card live excerpt
-- [ ] Object-storage adapter for remote artifact delivery (R2/S3 style)
-- [ ] Delivery policy refinement (`inline summary`, attachment, link) after the core delivery abstraction lands
-- [ ] Markdown-aware chunking for message delivery
-- [ ] Rate limiting / request queue
+- [ ] Delivery policy refinement (`inline summary`, attachment, link)
 - [x] Docker-based agent isolation (host-mounted `/home`, repo-mounted `/repo`, config from repo, editable install on start, preinstalled CLI tools)
 - [ ] Discord `/restart` operator command that triggers a host-managed container restart path (securely scoped, implementation detail TBD)
 - [ ] Adaptive Memory encrypted storage + authenticated plaintext access
@@ -163,8 +203,5 @@ Upgrade adaptive memory from flat YAML to a date-organized, two-tier architectur
 - [x] Persist automation runtime state (`last_run`, `next_run`, `last_error`) instead of recomputing everything after restart
 - [x] Add operator automation controls such as `/automation_status`, `/automation_reload`, `/automation_enable`, and `/automation_disable` (Discord-only, owner-only, ephemeral MVP)
 - [x] PRIORITY: propagate skill-level `metadata.timeout_seconds` into runtime task / automation execution so long-running automation-backed skills can inherit the same timeout override as direct skill invocations
-- [ ] Define missed-job behavior for downtime and restarts (skip, replay, or bounded catch-up)
-- [ ] Revisit automation scheduling model beyond v1 cron + interval fallback (for example RRULE or richer cron semantics)
-- [ ] Add an operator-facing automation observability surface for active jobs, recent fires, and last failures
-- [ ] Feishu/Lark adapter
-- [ ] Slack adapter
+- [x] Missed-job policy finalized as `skip` (no replay, no catch-up)
+- [x] Operator-facing automation observability (`/automation_status` shows runtime state, `/doctor` shows recent failures)

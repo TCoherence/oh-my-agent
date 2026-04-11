@@ -18,7 +18,7 @@
 - 图片附件支持已实现（Discord 下载、per-agent 处理、临时文件生命周期管理）。
 - Codex repo/workspace skill 发现已切到官方 `.agents/skills/`；生成的 workspace `AGENTS.md` 只保留 rules/metadata。
 - `v0.7.3` 已全部实现（phase 1–3）。
-- 当前下一个目标：deferred items 和 `v0.8+`。
+- 当前下一个目标：`v0.8`（1.0 hardening）。详见 `v1.0-plan.md`。
 
 ## v0.5 Runtime 加固（已完成）
 
@@ -116,41 +116,81 @@
 - [x] **Resume 语义收尾**：task HITL 恢复到 PENDING 并携带结构化 + 文本 payload；thread HITL 自动恢复并继承 `last_hitl_answer`（仅保留最新，无链式传递）；跨 task 隔离通过 `task_id` 范围的事件查询实现
 - [x] **Operator 可见的 HITL 状态**：`/task_logs` 展示活跃/最近的 HITL checkpoint 问题和已选答案
 
-## 延后到 v0.7.3 之后
+## v0.8 — 1.0 Hardening
 
-- [ ] **超越 cron 的事件驱动触发器**：webhook 接入、文件监控、外部通知等 runtime 入口
-- [ ] **Scheduler 驱动的运维任务**：把文件驱动的 `automations` 真正对接到 runtime task 类型和 operator surface
-- [ ] **临时会话模式**：将 session 标记为 `guest`，使用隔离的临时记忆空间（不写入 owner 的 adaptive memory，无 skill 修改权限）
-- [ ] 通过 `/guest` 切换或 per-user 配置
+详见 [`v1.0-plan.md`](v1.0-plan.md)。
 
-## v0.8+ - 记忆智能 + Hybrid Autonomy
+### 1. 平台抽象（Platform Abstraction）
+- [ ] 从 `discord.py` 提取 service-layer 架构（平台无关的业务逻辑）
+- [ ] task control service（最高优先级 — 命令最多、状态逻辑最重）
+- [ ] ask service（核心入口路径）
+- [ ] doctor / automation / auth / memory services
+- [ ] BaseChannel contract review：message edit、attachment upload、interactive prompt 等
+
+### 2. 可靠性加固（Reliability Hardening）
+- [ ] graceful shutdown contract（gateway、runtime workers、subprocesses、SQLite/WAL）
+- [ ] startup config validation（schema 校验、fail-fast、CLI binary 检查）
+- [ ] upgrade/migration contract（SQLite schema、config 兼容性、skill/workspace 路径迁移）
+- [ ] markdown-aware chunking
+- [ ] rate-limit / request queue
+- [ ] concurrent thread/task isolation testing
+- [ ] log hygiene（rotation、log-level config、structured logging）
+- [ ] user-visible error contract（readable messages, not tracebacks）
+- [x] missed-job policy = `skip`（已实现，需文档化和测试覆盖）
+
+### 3. 部署加固（Deployment Hardening）
+- [ ] first-class `docker-compose`
+- [ ] local vs Docker 安装/运行文档统一
+- [ ] runtime directories / backup / restore instructions
+- [ ] operator-facing restart and upgrade SOP
+- [ ] health-check for long-running service mode
+
+## v0.9 — 1.0 RC / Contract Freeze
+
+- [ ] 完成剩余的 service-layer 抽取
+- [ ] 清除 adapter 中残留的业务逻辑
+- [ ] 端到端 restart/recovery 测试（chat、skill invoke、runtime tasks、HITL、auth、automations）
+- [ ] 旧版本 state layout 升级验证
+- [ ] 文档升级为 operator-grade product docs
+- [ ] 裁剪或延后未就绪的实验性 surface
+
+## Post-1.0 / 1.x
+
+以下移出 `1.0` 关键路径。详见 [`v1.0-plan.md`](v1.0-plan.md)。
+
+### 平台扩展
+- [ ] Slack 适配器
+- [ ] Feishu/Lark 适配器
+- [ ] WeChat 适配器
 
 ### 语义记忆
-
-- [ ] **语义记忆搜索**：基于向量索引的记忆文件检索（embedding `memory_search`），取代 Jaccard 词重叠。BM25 + 向量混合检索，兼顾精确词匹配和语义近义。
-- [ ] **分块与索引**：将记忆文件切分为语义块（~400 token，80 重叠），per-agent SQLite 索引，文件变更时自动重建索引。
-- [ ] **MMR 多样性重排**：选取注入的记忆时，平衡相关性与多样性，避免每日笔记产生的近重复内容。
+- [ ] 语义记忆搜索（BM25 + vector hybrid）
+- [ ] 分块与索引
+- [ ] MMR 多样性重排
 
 ### Hybrid Autonomy
-
 - [ ] 基于历史的重复模式发现（识别 recurring workflows）
-- [ ] recurring workflow → skill draft 的自动建议
-- [ ] skill growth + ops automation 的 hybrid missions
-- [ ] 支撑主动性运行的统一 operator surface
+- [ ] recurring workflow → skill draft 自动建议
+- [ ] hybrid missions（skill growth + ops automation）
+- [ ] 统一 operator surface
 
 ### Agent 质量反馈
+- [ ] 逐 turn 质量信号（reaction 或 `/rate` 命令）
+- [ ] Agent 选择反馈闭环
+- [ ] Skill-agent 亲和度
 
-- [ ] **逐 turn 质量信号**：基于 reaction（thumbs-up/down）或 `/rate` 命令，按 `(thread, turn, agent)` 持久化
-- [ ] **Agent 选择反馈闭环**：基于累积质量信号调整 fallback 权重或 agent 选择提示
-- [ ] **Skill-agent 亲和度**：追踪哪个 agent 对哪个 skill 效果最好，辅助自动路由
+### 其他延后项
+- [ ] 超越 cron 的事件驱动触发器（webhook、file-watch、外部通知）
+- [ ] Scheduler 驱动的运维任务（automations 对接 runtime task 类型）
+- [ ] 临时会话 / guest mode（`/guest` 切换或 per-user 配置）
+- [ ] free-text HITL
+- [ ] 远端对象存储交付（R2/S3 风格）
+- [ ] 更丰富的 automation 调度模型（RRULE 或完整 cron 语义）
 
 ## Backlog（无版本承诺）
 
 - [ ] Live observability ring buffer + 状态卡 live excerpt
-- [ ] 面向远端部署的对象存储交付适配器（R2/S3 风格）
-- [ ] 交付策略细化（inline summary / attachment / link），放在核心 delivery abstraction 落地之后
-- [ ] Markdown 感知的分块发送
-- [ ] Rate limiting / request queue
+- [ ] 交付策略细化（inline summary / attachment / link）
 - [x] Docker 隔离（host 挂载到 `/home`，repo 挂载到 `/repo`，配置从 repo 读取，启动时 editable install，并预装 CLI 工具）
 - [ ] Discord `/restart` 运维命令：触发 host 侧受控容器重启链路（安全边界先定，具体实现后续细化）
 - [ ] Adaptive Memory 加密存储 + 认证后明文访问
@@ -163,8 +203,5 @@
 - [x] 持久化 automation 运行时状态（`last_run`、`next_run`、`last_error`），而不是每次重启后全部重算
 - [x] 增加 automation 的 operator 控制面，例如 `/automation_status`、`/automation_reload`、`/automation_enable`、`/automation_disable`（当前是 Discord-only、owner-only、ephemeral 的 MVP）
 - [x] PRIORITY：把 skill 级别的 `metadata.timeout_seconds` 继续传递到 runtime task / automation 执行链路里，让长耗时的 automation-backed skill 也能继承和直接 skill 调用一致的 timeout override
-- [ ] 明确停机和重启期间 missed jobs 的处理策略（跳过、补跑，或有限追赶）
-- [ ] 重新评估 v1 之后的 automation 调度模型（例如 RRULE 或更完整的 cron 语义）
-- [ ] 增加面向 operator 的 automation 可观测性界面，展示 active jobs、最近触发和最近失败
-- [ ] Feishu/Lark 适配器
-- [ ] Slack 适配器
+- [x] missed-job policy 已定为 `skip`（不补跑、不追赶）
+- [x] 面向 operator 的 automation 可观测性（`/automation_status` 显示运行时状态，`/doctor` 显示近期失败）
