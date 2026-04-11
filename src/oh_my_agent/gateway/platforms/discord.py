@@ -20,7 +20,15 @@ from oh_my_agent.gateway.base import (
     MessageHandler,
     OutgoingAttachment,
 )
-from oh_my_agent.runtime.types import HitlPrompt, TaskDecisionEvent
+from oh_my_agent.gateway.services import AskService, AutomationService, DoctorService, TaskService
+from oh_my_agent.gateway.services.types import (
+    AutomationStatusResult,
+    DoctorResult,
+    InteractiveDecision,
+    TaskActionResult,
+    TaskListResult,
+)
+from oh_my_agent.runtime.types import HitlPrompt
 
 logger = logging.getLogger(__name__)
 
@@ -30,60 +38,51 @@ _MAX_IMAGE_BYTES = 10 * 1024 * 1024  # 10 MB
 _ATTACHMENT_DIR = Path(tempfile.gettempdir()) / "oh-my-agent" / "attachments"
 
 
-class _HitlPromptView(discord.ui.View):
-    def __init__(self, channel_adapter: "DiscordChannel", prompt: HitlPrompt, *, disabled: bool = False) -> None:
+class _InteractiveView(discord.ui.View):
+    def __init__(self, channel_adapter: "DiscordChannel", prompt: InteractivePrompt, *, disabled: bool = False) -> None:
         super().__init__(timeout=None)
         self._channel_adapter = channel_adapter
         self._prompt = prompt
-        self._disabled = disabled
 
-        for choice in prompt.choices:
+        style_map = {
+            "primary": discord.ButtonStyle.primary,
+            "secondary": discord.ButtonStyle.secondary,
+            "danger": discord.ButtonStyle.danger,
+            "success": discord.ButtonStyle.success,
+        }
+        for row, action in enumerate(prompt.actions):
             button = discord.ui.Button(
-                label=str(choice.get("label") or "")[:80] or str(choice.get("id") or "")[:80] or "Choice",
-                style=discord.ButtonStyle.primary,
-                custom_id=f"hitl:{prompt.id}:choose:{choice.get('id')}",
-                disabled=disabled,
-                row=0,
+                label=action.label[:80] or action.id[:80] or "Action",
+                style=style_map.get(action.style, discord.ButtonStyle.secondary),
+                custom_id=self._custom_id(prompt, action.id),
+                disabled=disabled or action.disabled,
+                row=min(row, 4),
             )
 
             async def _callback(
                 interaction: discord.Interaction,
                 *,
-                action_prompt_id: str = prompt.id,
-                action_choice_id: str = str(choice.get("id") or ""),
+                action_id: str = action.id,
             ) -> None:
-                await self._channel_adapter._handle_hitl_interaction(
+                await self._channel_adapter._handle_interactive_action(
                     interaction,
-                    prompt_id=action_prompt_id,
-                    choice_id=action_choice_id,
-                    cancel=False,
+                    prompt=self._prompt,
+                    decision=InteractiveDecision(
+                        entity_id=prompt.entity_id or "",
+                        entity_kind=prompt.entity_kind,
+                        action_id=action_id,
+                        actor_id=str(interaction.user.id),
+                        message_id=str(interaction.message.id) if interaction.message is not None else None,
+                    ),
                 )
 
             button.callback = _callback
             self.add_item(button)
 
-        cancel_button = discord.ui.Button(
-            label="Cancel",
-            style=discord.ButtonStyle.secondary,
-            custom_id=f"hitl:{prompt.id}:cancel",
-            disabled=disabled,
-            row=1,
-        )
-
-        async def _cancel_callback(
-            interaction: discord.Interaction,
-            *,
-            action_prompt_id: str = prompt.id,
-        ) -> None:
-            await self._channel_adapter._handle_hitl_interaction(
-                interaction,
-                prompt_id=action_prompt_id,
-                choice_id=None,
-                cancel=True,
-            )
-
-        cancel_button.callback = _cancel_callback
-        self.add_item(cancel_button)
+    @staticmethod
+    def _custom_id(prompt: InteractivePrompt, action_id: str) -> str:
+        parts = ["interactive", prompt.entity_kind or "generic", prompt.entity_id or "unknown", action_id]
+        return ":".join(parts)
 
 
 async def _download_discord_attachments(
@@ -145,6 +144,10 @@ class DiscordChannel(BaseChannel):
         self._runtime_service = None  # RuntimeService
         self._adaptive_memory_store = None  # AdaptiveMemoryStore
         self._scheduler = None  # Scheduler
+        self._ask_service = AskService()
+        self._task_service: TaskService | None = None
+        self._doctor_service: DoctorService | None = None
+        self._automation_service: AutomationService | None = None
         self._skill_eval_enabled = True
         self._skill_stats_recent_days = 7
         self._skill_feedback_emojis = {"👍", "👎"}
@@ -162,6 +165,7 @@ class DiscordChannel(BaseChannel):
         self._session = session
         self._registry = registry
         self._memory_store = memory_store
+        self._refresh_services()
 
     def set_skill_syncer(self, syncer, workspace_skills_dirs=None) -> None:
         """Inject skill syncer for the ``/reload-skills`` slash command."""
@@ -171,6 +175,7 @@ class DiscordChannel(BaseChannel):
     def set_runtime_service(self, runtime_service) -> None:
         """Inject runtime service for /task_* commands and decision buttons."""
         self._runtime_service = runtime_service
+        self._refresh_services()
 
     def _render_hitl_prompt_message(self, prompt: HitlPrompt) -> str:
         if prompt.status == "completed":
@@ -234,6 +239,140 @@ class DiscordChannel(BaseChannel):
         return "\n".join(lines)[:1900]
 
     @staticmethod
+    def _format_automation_schedule(record) -> str:
+        if record.schedule:
+            return record.schedule
+        if getattr(record, "cron", None):
+            return f"cron `{record.cron}`"
+        return f"interval `{record.interval_seconds}s`"
+
+    @staticmethod
+    def _format_automation_target(record) -> str:
+        if record.target:
+            return record.target
+        if getattr(record, "delivery", None) == "dm":
+            return f"dm user `{record.target_user_id or '?'}` via channel `{record.channel_id}`"
+        if getattr(record, "thread_id", None):
+            return f"channel `{record.channel_id}` thread `{record.thread_id}`"
+        return f"channel `{record.channel_id}`"
+
+    def _render_task_action_result(self, result: TaskActionResult) -> str:
+        task = result.task
+        if task is None:
+            return result.message[:1900]
+        lines = [
+            f"**Task** `{task.id}`",
+            f"- Status: `{task.status}`",
+            f"- Type: `{task.task_type}`",
+            f"- Completion: `{task.completion_mode}`",
+            f"- Goal: {task.goal[:200]}",
+            f"- Step: {task.step_no}/{task.max_steps}",
+            f"- Budget: {task.max_minutes} min",
+            f"- Agent: `{task.preferred_agent or 'fallback'}`",
+        ]
+        if task.blocked_reason:
+            lines.append(f"- Blocked: {task.blocked_reason[:300]}")
+        if task.error:
+            lines.append(f"- Error: {task.error[:300]}")
+        if task.output_summary:
+            lines.append(f"- Output: {task.output_summary[:300]}")
+        if task.artifact_manifest:
+            lines.append(f"- Artifacts: {', '.join(task.artifact_manifest[:8])[:300]}")
+        if task.merge_commit_hash:
+            lines.append(f"- Commit: `{task.merge_commit_hash}`")
+        if task.merge_error:
+            lines.append(f"- Merge error: {task.merge_error[:300]}")
+        if task.workspace_path:
+            lines.append(f"- Workspace: `{task.workspace_path}`")
+        return "\n".join(lines)[:1900]
+
+    def _render_task_list_result(self, result: TaskListResult) -> str:
+        if not result.tasks:
+            return "No runtime tasks found."
+        lines = [f"**Runtime tasks** ({len(result.tasks)})"]
+        for task in result.tasks:
+            lines.append(
+                f"- `{task.task_id}` [{task.status}] `{task.task_type}` {task.step_info or ''} · {task.goal[:80]}".rstrip()
+            )
+        return "\n".join(lines)[:1900]
+
+    def _render_doctor_result(self, result: DoctorResult) -> str:
+        parts: list[str] = []
+        for section in result.sections:
+            if parts:
+                parts.append("")
+            parts.append(f"**{section.title}**")
+            parts.extend(section.lines)
+        return "\n".join(parts)[:1900]
+
+    def _render_automation_status_result(
+        self,
+        result: AutomationStatusResult,
+        *,
+        name: str | None = None,
+    ) -> str:
+        if not result.success:
+            return result.message[:1900]
+        if name:
+            record = result.automations[0]
+            state_label = "enabled" if record.enabled else "disabled"
+            lines = [
+                f"**Automation** `{record.name}`",
+                f"- State: `{state_label}`",
+                f"- Schedule: {self._format_automation_schedule(record)}",
+                f"- Delivery: `{record.delivery}`",
+                f"- Target: {self._format_automation_target(record)}",
+                f"- Agent: `{record.agent or 'fallback'}`",
+            ]
+            if record.author:
+                lines.append(f"- Author: `{record.author}`")
+            if record.source_path:
+                lines.append(f"- Source: `{record.source_path}`")
+            if any(
+                value is not None
+                for value in (record.last_run_at, record.last_success_at, record.next_run_at, record.last_task_id, record.last_error)
+            ):
+                lines.extend(
+                    [
+                        "",
+                        "**Runtime state**",
+                        f"- Last run: `{record.last_run_at or '—'}`",
+                        f"- Last success: `{record.last_success_at or '—'}`",
+                        f"- Next run: `{record.next_run_at or '—'}`",
+                        f"- Last task: `{record.last_task_id or '—'}`",
+                    ]
+                )
+                if record.last_error:
+                    lines.append(f"- Last error: {record.last_error[:200]}")
+            return "\n".join(lines)[:1900]
+
+        enabled_records = [record for record in result.automations if record.enabled]
+        disabled_records = [record for record in result.automations if not record.enabled]
+        failed_names = [record.name for record in result.automations if record.last_error]
+        lines = [f"**Automations** — {len(enabled_records)} enabled, {len(disabled_records)} disabled"]
+        if failed_names:
+            lines.append(
+                f"- Recent failures: `{len(failed_names)}` ({', '.join(f'`{name}`' for name in failed_names[:5])})"
+            )
+        if enabled_records:
+            lines.append("**Enabled**")
+            for record in enabled_records[:12]:
+                suffix = " ⚠️" if record.last_error else (" ✓" if record.last_success_at else "")
+                lines.append(
+                    f"- `{record.name}` · {self._format_automation_schedule(record)} · {self._format_automation_target(record)}{suffix}"
+                )
+        if disabled_records:
+            lines.append("**Disabled**")
+            for record in disabled_records[:12]:
+                lines.append(
+                    f"- `{record.name}` · {self._format_automation_schedule(record)} · {self._format_automation_target(record)}"
+                )
+        if len(result.automations) > 24:
+            lines.append(f"_…and {len(result.automations) - 24} more_")
+        lines.append("_Invalid or conflicting automation files remain log-visible only._")
+        return "\n".join(lines)[:1900]
+
+    @staticmethod
     def _with_selected_choice(prompt: HitlPrompt, choice_id: str | None) -> HitlPrompt:
         if not choice_id:
             return prompt
@@ -252,13 +391,61 @@ class DiscordChannel(BaseChannel):
             ),
         )
 
-    async def send_hitl_prompt(self, *, thread_id: str, prompt: HitlPrompt) -> str | None:
-        thread = await self._resolve_channel(thread_id)
-        msg = await thread.send(
-            self._render_hitl_prompt_message(prompt),
-            view=_HitlPromptView(self, prompt),
+    def _build_hitl_interactive_prompt(self, prompt: HitlPrompt, *, disabled: bool = False) -> InteractivePrompt:
+        actions = [
+            ActionDescriptor(
+                id=str(choice.get("id") or ""),
+                label=str(choice.get("label") or "")[:80] or str(choice.get("id") or "")[:80] or "Choice",
+                style="primary",
+                disabled=disabled,
+            )
+            for choice in prompt.choices
+        ]
+        actions.append(ActionDescriptor(id="cancel", label="Cancel", style="secondary", disabled=disabled))
+        return InteractivePrompt(
+            text=self._render_hitl_prompt_message(prompt),
+            actions=actions,
+            entity_kind="hitl",
+            entity_id=prompt.id,
         )
-        return str(msg.id)
+
+    def _build_task_interactive_prompt(
+        self,
+        *,
+        draft_text: str,
+        task_id: str,
+        nonce: str,
+        actions: list[str],
+        disabled: bool = False,
+    ) -> InteractivePrompt:
+        action_meta = {
+            "approve": ("Approve", "success"),
+            "reject": ("Reject", "danger"),
+            "suggest": ("Suggest", "secondary"),
+            "merge": ("Merge", "success"),
+            "discard": ("Discard", "danger"),
+            "request_changes": ("Request Changes", "secondary"),
+        }
+        descriptors = [
+            ActionDescriptor(
+                id=action,
+                label=action_meta[action][0],
+                style=action_meta[action][1],
+                disabled=disabled,
+            )
+            for action in actions
+            if action in action_meta
+        ]
+        return InteractivePrompt(
+            text=draft_text,
+            actions=descriptors,
+            idempotency_key=nonce,
+            entity_kind="task",
+            entity_id=task_id,
+        )
+
+    async def send_hitl_prompt(self, *, thread_id: str, prompt: HitlPrompt) -> str | None:
+        return await self.send_interactive(thread_id, self._build_hitl_interactive_prompt(prompt))
 
     async def _rehydrate_hitl_prompt_views(self, client: discord.Client) -> None:
         if not self._runtime_service:
@@ -277,10 +464,33 @@ class DiscordChannel(BaseChannel):
             except (TypeError, ValueError):
                 logger.warning("Skipping HITL prompt view restore for non-numeric message id %r", prompt.prompt_message_id)
                 continue
-            client.add_view(_HitlPromptView(self, prompt), message_id=message_id)
+            client.add_view(
+                self._build_interactive_view(self._build_hitl_interactive_prompt(prompt)),
+                message_id=message_id,
+            )
             restored += 1
         if restored:
             logger.info("[discord] Restored %d active HITL prompt view(s)", restored)
+
+    async def _handle_interactive_action(
+        self,
+        interaction: discord.Interaction,
+        *,
+        prompt: InteractivePrompt,
+        decision: InteractiveDecision,
+    ) -> None:
+        if prompt.entity_kind == "hitl":
+            await self._handle_hitl_interaction(
+                interaction,
+                prompt_id=decision.entity_id,
+                choice_id=None if decision.action_id == "cancel" else decision.action_id,
+                cancel=decision.action_id == "cancel",
+            )
+            return
+        if prompt.entity_kind == "task":
+            await self._handle_task_interaction(interaction, prompt=prompt, decision=decision)
+            return
+        await interaction.response.send_message("Unsupported interactive action.", ephemeral=True)
 
     async def _handle_hitl_interaction(
         self,
@@ -308,9 +518,10 @@ class DiscordChannel(BaseChannel):
         if not cancel and prompt is not None and interaction.message is not None:
             resolving_prompt = self._with_selected_choice(prompt, choice_id)
             try:
-                await interaction.message.edit(
-                    content=self._render_hitl_prompt_message(resolving_prompt),
-                    view=_HitlPromptView(self, resolving_prompt, disabled=True),
+                await self.update_interactive(
+                    str(interaction.channel_id),
+                    str(interaction.message.id),
+                    self._build_hitl_interactive_prompt(resolving_prompt, disabled=True),
                 )
             except Exception:
                 logger.debug("Failed to update HITL prompt message %s to resolving", prompt_id, exc_info=True)
@@ -331,9 +542,10 @@ class DiscordChannel(BaseChannel):
         if prompt is not None and interaction.message is not None:
             disabled = prompt.status in {"completed", "cancelled", "failed"}
             try:
-                await interaction.message.edit(
-                    content=self._render_hitl_prompt_message(prompt),
-                    view=_HitlPromptView(self, prompt, disabled=disabled),
+                await self.update_interactive(
+                    str(interaction.channel_id),
+                    str(interaction.message.id),
+                    self._build_hitl_interactive_prompt(prompt, disabled=disabled),
                 )
             except Exception:
                 logger.debug("Failed to update HITL prompt message %s", prompt_id, exc_info=True)
@@ -341,13 +553,93 @@ class DiscordChannel(BaseChannel):
         if cancel or (prompt is not None and prompt.status == "failed"):
             await interaction.followup.send(result[:1900], ephemeral=True)
 
+    async def _handle_task_interaction(
+        self,
+        interaction: discord.Interaction,
+        *,
+        prompt: InteractivePrompt,
+        decision: InteractiveDecision,
+    ) -> None:
+        if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
+            await interaction.response.send_message(
+                "This interactive prompt is restricted to the configured owner.",
+                ephemeral=True,
+            )
+            return
+        if self._task_service is None:
+            await interaction.response.send_message(
+                "Runtime service is not enabled.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+        task = None
+        if self._runtime_service is not None:
+            task = await self._runtime_service.get_task(decision.entity_id)
+        try:
+            await self.update_interactive(
+                str(interaction.channel_id),
+                str(interaction.message.id) if interaction.message is not None else str(decision.message_id or ""),
+                self._build_task_interactive_prompt(
+                    draft_text=self._task_service.build_processing_text(
+                        original_text=prompt.text,
+                        task=task,
+                        action=decision.action_id,
+                    ),
+                    task_id=decision.entity_id,
+                    nonce=prompt.idempotency_key or "",
+                    actions=self._task_service.disable_actions(task),
+                    disabled=True,
+                ),
+            )
+        except Exception:
+            logger.debug("Failed to update task prompt %s to processing", decision.entity_id, exc_info=True)
+        result = await self._task_service.decide(
+            platform=self.platform,
+            channel_id=self._channel_id,
+            thread_id=str(interaction.channel_id),
+            task_id=decision.entity_id,
+            action=decision.action_id,
+            actor_id=decision.actor_id,
+            source="button",
+            nonce=prompt.idempotency_key,
+        )
+        try:
+            await self.update_interactive(
+                str(interaction.channel_id),
+                str(interaction.message.id) if interaction.message is not None else str(decision.message_id or ""),
+                self._build_task_interactive_prompt(
+                    draft_text=self._task_service.build_task_draft_text(
+                        original_text=prompt.text,
+                        task=result.task,
+                        result_message=result.message,
+                    ),
+                    task_id=decision.entity_id,
+                    nonce=prompt.idempotency_key or "",
+                    actions=self._task_service.disable_actions(
+                        result.task,
+                        suggestion_only=decision.action_id == "suggest",
+                    ),
+                    disabled=True,
+                ),
+            )
+        except Exception:
+            logger.debug("Failed to finalize task prompt %s", decision.entity_id, exc_info=True)
+        await interaction.followup.send(result.message[:1900], ephemeral=True)
+
     def set_scheduler(self, scheduler) -> None:
         """Inject scheduler for /automation_* commands."""
         self._scheduler = scheduler
+        self._refresh_services()
 
     def set_adaptive_memory_store(self, store) -> None:
         """Inject adaptive memory store for /memories and /forget commands."""
         self._adaptive_memory_store = store
+
+    def _refresh_services(self) -> None:
+        self._task_service = TaskService(self._runtime_service, self._memory_store)
+        self._doctor_service = DoctorService(self._runtime_service)
+        self._automation_service = AutomationService(self._scheduler, self._memory_store)
 
     def set_skill_evaluation_config(self, cfg: dict | None) -> None:
         cfg = cfg or {}
@@ -388,18 +680,6 @@ class DiscordChannel(BaseChannel):
                     f"- `{item['evaluation_type']}` [{item['status']}] {item['summary']}"
                 )
             return lines
-
-        def _format_automation_schedule(record) -> str:
-            if record.cron:
-                return f"cron `{record.cron}`"
-            return f"interval `{record.interval_seconds}s`"
-
-        def _format_automation_target(record) -> str:
-            if record.delivery == "dm":
-                return f"dm user `{record.target_user_id or '?'}` via channel `{record.channel_id}`"
-            if record.thread_id:
-                return f"channel `{record.channel_id}` thread `{record.thread_id}`"
-            return f"channel `{record.channel_id}`"
 
         async def _sync_skill_feedback_from_payload(payload: discord.RawReactionActionEvent) -> None:
             if not self._skill_eval_enabled or not self._memory_store:
@@ -501,15 +781,10 @@ class DiscordChannel(BaseChannel):
                 )
                 return
 
-            # Validate agent name early so the user gets immediate feedback
-            if agent and self._registry:
-                if self._registry.get_agent(agent) is None:
-                    names = [a.name for a in self._registry.agents]
-                    await interaction.response.send_message(
-                        f"Unknown agent `{agent}`. Available: {', '.join(f'`{n}`' for n in names)}",
-                        ephemeral=True,
-                    )
-                    return
+            validation_error = await self._ask_service.validate_ask_params(self._registry, agent)
+            if validation_error:
+                await interaction.response.send_message(validation_error, ephemeral=True)
+                return
 
             await interaction.response.send_message(question)
             response_msg = await interaction.original_response()
@@ -543,10 +818,8 @@ class DiscordChannel(BaseChannel):
                 )
                 return
 
-            if self._session:
-                await self._session.clear_history(str(ch.id))
-
-            await interaction.response.send_message("History cleared for this thread.")
+            result = await self._ask_service.reset_history(self._session, str(ch.id))
+            await interaction.response.send_message(result.message, ephemeral=not result.success)
 
         @tree.command(name="history", description="Show conversation history for this thread (for debugging)")
         async def slash_history(interaction: discord.Interaction):
@@ -565,28 +838,8 @@ class DiscordChannel(BaseChannel):
                 )
                 return
 
-            if not self._session:
-                await interaction.response.send_message("No session available.", ephemeral=True)
-                return
-
-            history = await self._session.get_history(str(ch.id))
-            if not history:
-                await interaction.response.send_message(
-                    "No history for this thread yet.", ephemeral=True
-                )
-                return
-
-            lines = [f"**Thread history** — {len(history)} turns:"]
-            for i, turn in enumerate(history, 1):
-                role = turn.get("role", "?")
-                label = turn.get("author") or turn.get("agent") or role
-                content = turn.get("content", "")
-                preview = content[:120] + ("…" if len(content) > 120 else "")
-                lines.append(f"`{i}` **{label}** [{role}]: {preview}")
-
-            await interaction.response.send_message(
-                "\n".join(lines)[:2000], ephemeral=True
-            )
+            result = await self._ask_service.get_history(self._session, str(ch.id))
+            await interaction.response.send_message(result.message[:2000], ephemeral=True)
 
         @tree.command(name="agent", description="Show available agents and their status")
         async def slash_agent(interaction: discord.Interaction):
@@ -597,15 +850,8 @@ class DiscordChannel(BaseChannel):
                 )
                 return
 
-            if not self._registry:
-                await interaction.response.send_message("No agents configured.", ephemeral=True)
-                return
-
-            lines = ["**Available agents** (in fallback order):"]
-            for i, agent in enumerate(self._registry.agents, 1):
-                lines.append(f"{i}. `{agent.name}`")
-
-            await interaction.response.send_message("\n".join(lines))
+            result = await self._ask_service.list_agents(self._registry)
+            await interaction.response.send_message(result.message[:2000], ephemeral=not result.success)
 
         @tree.command(name="search", description="Search across all conversation history")
         @app_commands.describe(
@@ -726,91 +972,11 @@ class DiscordChannel(BaseChannel):
                     ephemeral=True,
                 )
                 return
-            if not self._scheduler:
-                await interaction.response.send_message(
-                    "Automation scheduler is not enabled.",
-                    ephemeral=True,
-                )
-                return
-
-            runtime_states: dict = {}
-            if self._memory_store:
-                try:
-                    for s in await self._memory_store.list_automation_states():
-                        runtime_states[s.name] = s
-                except Exception:
-                    pass
-
-            if name:
-                record = self._scheduler.get_automation(name.strip())
-                if not record:
-                    await interaction.response.send_message(
-                        f"Automation `{name}` not found.",
-                        ephemeral=True,
-                    )
-                    return
-                state_label = "enabled" if record.enabled else "disabled"
-                rs = runtime_states.get(record.name)
-                lines = [
-                    f"**Automation** `{record.name}`",
-                    f"- State: `{state_label}`",
-                    f"- Schedule: {_format_automation_schedule(record)}",
-                    f"- Delivery: `{record.delivery}`",
-                    f"- Target: {_format_automation_target(record)}",
-                    f"- Agent: `{record.agent or 'fallback'}`",
-                    f"- Author: `{record.author}`",
-                    f"- Source: `{record.source_path}`",
-                ]
-                if rs:
-                    lines.append("")
-                    lines.append("**Runtime state**")
-                    lines.append(f"- Last run: `{rs.last_run_at or '—'}`")
-                    lines.append(f"- Last success: `{rs.last_success_at or '—'}`")
-                    lines.append(f"- Next run: `{rs.next_run_at or '—'}`")
-                    lines.append(f"- Last task: `{rs.last_task_id or '—'}`")
-                    if rs.last_error:
-                        lines.append(f"- Last error: {rs.last_error[:200]}")
-                await interaction.response.send_message("\n".join(lines)[:1900], ephemeral=True)
-                return
-
-            records = self._scheduler.list_automations()
-            if not records:
-                await interaction.response.send_message(
-                    "No visible automations found. Invalid or conflicting files are log-only for now.",
-                    ephemeral=True,
-                )
-                return
-
-            enabled_records = [record for record in records if record.enabled]
-            disabled_records = [record for record in records if not record.enabled]
-            failed_names = [s.name for s in runtime_states.values() if s.last_error]
-            lines = [
-                f"**Automations** — {len(enabled_records)} enabled, {len(disabled_records)} disabled",
-            ]
-            if failed_names:
-                lines.append(f"- Recent failures: `{len(failed_names)}` ({', '.join(f'`{n}`' for n in failed_names[:5])})")
-            if enabled_records:
-                lines.append("**Enabled**")
-                for record in enabled_records[:12]:
-                    rs = runtime_states.get(record.name)
-                    suffix = ""
-                    if rs and rs.last_error:
-                        suffix = " ⚠️"
-                    elif rs and rs.last_success_at:
-                        suffix = " ✓"
-                    lines.append(
-                        f"- `{record.name}` · {_format_automation_schedule(record)} · {_format_automation_target(record)}{suffix}"
-                    )
-            if disabled_records:
-                lines.append("**Disabled**")
-                for record in disabled_records[:12]:
-                    lines.append(
-                        f"- `{record.name}` · {_format_automation_schedule(record)} · {_format_automation_target(record)}"
-                    )
-            if len(records) > 24:
-                lines.append(f"_…and {len(records) - 24} more_")
-            lines.append("_Invalid or conflicting automation files remain log-visible only._")
-            await interaction.response.send_message("\n".join(lines)[:1900], ephemeral=True)
+            result = await self._automation_service.get_status(name=name)
+            await interaction.response.send_message(
+                self._render_automation_status_result(result, name=name)[:1900],
+                ephemeral=True,
+            )
 
         @tree.command(name="automation_reload", description="Force an automation directory reload")
         async def slash_automation_reload(interaction: discord.Interaction):
@@ -820,27 +986,9 @@ class DiscordChannel(BaseChannel):
                     ephemeral=True,
                 )
                 return
-            if not self._scheduler:
-                await interaction.response.send_message(
-                    "Automation scheduler is not enabled.",
-                    ephemeral=True,
-                )
-                return
-
             await interaction.response.defer(ephemeral=True)
-            summary = await self._scheduler.reload_now()
-            await interaction.followup.send(
-                (
-                    "**Automation reload complete**\n"
-                    f"- Visible: {summary['visible']}\n"
-                    f"- Active: {summary['active']}\n"
-                    f"- Added: {summary['added']}\n"
-                    f"- Updated: {summary['updated']}\n"
-                    f"- Removed: {summary['removed']}\n"
-                    "_Invalid or conflicting automation files remain log-visible only._"
-                )[:1900],
-                ephemeral=True,
-            )
+            result = await self._automation_service.reload()
+            await interaction.followup.send(result.message[:1900], ephemeral=True)
 
         async def _set_automation_enabled(interaction: discord.Interaction, *, name: str, enabled: bool):
             if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
@@ -849,28 +997,13 @@ class DiscordChannel(BaseChannel):
                     ephemeral=True,
                 )
                 return
-            if not self._scheduler:
-                await interaction.response.send_message(
-                    "Automation scheduler is not enabled.",
-                    ephemeral=True,
-                )
-                return
-
             await interaction.response.defer(ephemeral=True)
-            try:
-                record = await self._scheduler.set_automation_enabled(name.strip(), enabled=enabled)
-            except ValueError as exc:
-                await interaction.followup.send(str(exc)[:1900], ephemeral=True)
+            result = await self._automation_service.set_enabled(name.strip(), enabled=enabled)
+            if not result.success:
+                await interaction.followup.send(result.message[:1900], ephemeral=True)
                 return
-
-            action = "enabled" if enabled else "disabled"
             await interaction.followup.send(
-                (
-                    f"Automation `{record.name}` {action}.\n"
-                    f"- Schedule: {_format_automation_schedule(record)}\n"
-                    f"- Target: {_format_automation_target(record)}\n"
-                    f"- Source: `{record.source_path}`"
-                )[:1900],
+                self._render_automation_status_result(result, name=name)[:1900],
                 ephemeral=True,
             )
 
@@ -995,12 +1128,6 @@ class DiscordChannel(BaseChannel):
                     ephemeral=True,
                 )
                 return
-            if not self._runtime_service:
-                await interaction.response.send_message(
-                    "Runtime service is not enabled.",
-                    ephemeral=True,
-                )
-                return
             if not self._session or not self._registry:
                 await interaction.response.send_message(
                     "Session/registry not ready.",
@@ -1027,20 +1154,19 @@ class DiscordChannel(BaseChannel):
                 return
 
             await interaction.response.defer(ephemeral=True)
-            task = await self._runtime_service.create_repo_change_task(
+            result = await self._task_service.create_task(
                 session=self._session,
                 registry=self._registry,
                 thread_id=thread_id,
                 goal=goal,
-                created_by=str(interaction.user.id),
+                actor_id=str(interaction.user.id),
                 preferred_agent=agent,
                 test_command=test_command,
                 max_steps=max_steps,
                 max_minutes=max_minutes,
-                source="slash",
             )
             await interaction.followup.send(
-                f"Created task `{task.id}` with status `{task.status}`.",
+                result.message[:1900],
                 ephemeral=True,
             )
 
@@ -1053,41 +1179,11 @@ class DiscordChannel(BaseChannel):
                     ephemeral=True,
                 )
                 return
-            if not self._runtime_service:
-                await interaction.response.send_message(
-                    "Runtime service is not enabled.",
-                    ephemeral=True,
-                )
-                return
-            task = await self._runtime_service.get_task(task_id)
-            if not task:
-                await interaction.response.send_message(f"Task `{task_id}` not found.", ephemeral=True)
-                return
-            lines = [
-                f"**Task** `{task.id}`",
-                f"- Status: `{task.status}`",
-                f"- Type: `{task.task_type}`",
-                f"- Completion: `{task.completion_mode}`",
-                f"- Goal: {task.goal[:200]}",
-                f"- Step: {task.step_no}/{task.max_steps}",
-                f"- Budget: {task.max_minutes} min",
-                f"- Agent: `{task.preferred_agent or 'fallback'}`",
-            ]
-            if task.blocked_reason:
-                lines.append(f"- Blocked: {task.blocked_reason[:300]}")
-            if task.error:
-                lines.append(f"- Error: {task.error[:300]}")
-            if task.output_summary:
-                lines.append(f"- Output: {task.output_summary[:300]}")
-            if task.artifact_manifest:
-                lines.append(f"- Artifacts: {', '.join(task.artifact_manifest[:8])[:300]}")
-            if task.merge_commit_hash:
-                lines.append(f"- Commit: `{task.merge_commit_hash}`")
-            if task.merge_error:
-                lines.append(f"- Merge error: {task.merge_error[:300]}")
-            if task.workspace_path:
-                lines.append(f"- Workspace: `{task.workspace_path}`")
-            await interaction.response.send_message("\n".join(lines)[:1900], ephemeral=True)
+            result = await self._task_service.get_status(task_id)
+            await interaction.response.send_message(
+                self._render_task_action_result(result)[:1900],
+                ephemeral=True,
+            )
 
         @tree.command(name="auth_login", description="Start a QR login flow for a provider")
         @app_commands.describe(provider="Auth provider name")
@@ -1177,28 +1273,16 @@ class DiscordChannel(BaseChannel):
                     ephemeral=True,
                 )
                 return
-            if not self._runtime_service:
-                await interaction.response.send_message(
-                    "Runtime service is not enabled.",
-                    ephemeral=True,
-                )
-                return
-            tasks = await self._runtime_service.list_tasks(
+            result = await self._task_service.list_tasks(
                 platform=self.platform,
                 channel_id=self._channel_id,
                 status=status,
-                limit=max(1, min(limit, 30)),
+                limit=limit,
             )
-            if not tasks:
-                await interaction.response.send_message("No runtime tasks found.", ephemeral=True)
-                return
-            lines = [f"**Runtime tasks** ({len(tasks)})"]
-            for t in tasks:
-                lines.append(
-                    f"- `{t.id}` [{t.status}] `{t.task_type}`/{t.completion_mode} "
-                    f"step {t.step_no}/{t.max_steps} · {t.goal[:80]}"
-                )
-            await interaction.response.send_message("\n".join(lines)[:1900], ephemeral=True)
+            await interaction.response.send_message(
+                self._render_task_list_result(result)[:1900],
+                ephemeral=True,
+            )
 
         async def _slash_decide(
             interaction: discord.Interaction,
@@ -1213,13 +1297,8 @@ class DiscordChannel(BaseChannel):
                     ephemeral=True,
                 )
                 return
-            if not self._runtime_service:
-                await interaction.response.send_message(
-                    "Runtime service is not enabled.",
-                    ephemeral=True,
-                )
-                return
-            event = await self._runtime_service.build_slash_decision_event(
+            await interaction.response.defer(ephemeral=True)
+            result = await self._task_service.decide(
                 platform=self.platform,
                 channel_id=self._channel_id,
                 thread_id=str(interaction.channel_id),
@@ -1228,15 +1307,7 @@ class DiscordChannel(BaseChannel):
                 actor_id=str(interaction.user.id),
                 suggestion=suggestion,
             )
-            if not event:
-                await interaction.response.send_message(
-                    "No active approval token found for this task.",
-                    ephemeral=True,
-                )
-                return
-            await interaction.response.defer(ephemeral=True)
-            result = await self._runtime_service.handle_decision_event(event)
-            await interaction.followup.send(result[:1900], ephemeral=True)
+            await interaction.followup.send(result.message[:1900], ephemeral=True)
 
         @tree.command(name="task_approve", description="Approve a runtime task draft")
         @app_commands.describe(task_id="Task ID")
@@ -1255,14 +1326,9 @@ class DiscordChannel(BaseChannel):
             task_id: str,
             suggestion: str,
         ):
-            resolved_action = "suggest"
-            if self._runtime_service:
-                task = await self._runtime_service.get_task(task_id)
-                if task and task.status in {"WAITING_MERGE", "APPLIED"}:
-                    resolved_action = "request_changes"
             await _slash_decide(
                 interaction,
-                action=resolved_action,
+                action="suggest",
                 task_id=task_id,
                 suggestion=suggestion,
             )
@@ -1286,15 +1352,9 @@ class DiscordChannel(BaseChannel):
                     ephemeral=True,
                 )
                 return
-            if not self._runtime_service:
-                await interaction.response.send_message(
-                    "Runtime service is not enabled.",
-                    ephemeral=True,
-                )
-                return
             await interaction.response.defer(ephemeral=True)
-            text = await self._runtime_service.get_task_changes(task_id)
-            await interaction.followup.send(text[:1900], ephemeral=True)
+            result = await self._task_service.get_changes(task_id)
+            await interaction.followup.send(result.message[:1900], ephemeral=True)
 
         @tree.command(name="task_logs", description="Show recent logs/events for a runtime task")
         @app_commands.describe(task_id="Task ID")
@@ -1305,15 +1365,9 @@ class DiscordChannel(BaseChannel):
                     ephemeral=True,
                 )
                 return
-            if not self._runtime_service:
-                await interaction.response.send_message(
-                    "Runtime service is not enabled.",
-                    ephemeral=True,
-                )
-                return
             await interaction.response.defer(ephemeral=True)
-            text = await self._runtime_service.get_task_logs(task_id)
-            await interaction.followup.send(text[:1900], ephemeral=True)
+            result = await self._task_service.get_logs(task_id)
+            await interaction.followup.send(result.message[:1900], ephemeral=True)
 
         @tree.command(name="task_cleanup", description="Cleanup runtime task workspace(s)")
         @app_commands.describe(task_id="Optional task ID for immediate cleanup")
@@ -1327,18 +1381,12 @@ class DiscordChannel(BaseChannel):
                     ephemeral=True,
                 )
                 return
-            if not self._runtime_service:
-                await interaction.response.send_message(
-                    "Runtime service is not enabled.",
-                    ephemeral=True,
-                )
-                return
             await interaction.response.defer(ephemeral=True)
-            result = await self._runtime_service.cleanup_tasks(
+            result = await self._task_service.cleanup(
                 actor_id=str(interaction.user.id),
                 task_id=task_id,
             )
-            await interaction.followup.send(result[:1900], ephemeral=True)
+            await interaction.followup.send(result.message[:1900], ephemeral=True)
 
         @tree.command(name="task_resume", description="Resume a blocked runtime task")
         @app_commands.describe(task_id="Task ID", instruction="Instruction to unblock and continue")
@@ -1353,19 +1401,9 @@ class DiscordChannel(BaseChannel):
                     ephemeral=True,
                 )
                 return
-            if not self._runtime_service:
-                await interaction.response.send_message(
-                    "Runtime service is not enabled.",
-                    ephemeral=True,
-                )
-                return
             await interaction.response.defer(ephemeral=True)
-            result = await self._runtime_service.resume_task(
-                task_id,
-                instruction,
-                actor_id=str(interaction.user.id),
-            )
-            await interaction.followup.send(result[:1900], ephemeral=True)
+            result = await self._task_service.resume(task_id, instruction, actor_id=str(interaction.user.id))
+            await interaction.followup.send(result.message[:1900], ephemeral=True)
 
         @tree.command(name="task_stop", description="Stop a runtime task")
         @app_commands.describe(task_id="Task ID")
@@ -1376,15 +1414,9 @@ class DiscordChannel(BaseChannel):
                     ephemeral=True,
                 )
                 return
-            if not self._runtime_service:
-                await interaction.response.send_message(
-                    "Runtime service is not enabled.",
-                    ephemeral=True,
-                )
-                return
             await interaction.response.defer(ephemeral=True)
-            result = await self._runtime_service.stop_task(task_id, actor_id=str(interaction.user.id))
-            await interaction.followup.send(result[:1900], ephemeral=True)
+            result = await self._task_service.stop(task_id, actor_id=str(interaction.user.id))
+            await interaction.followup.send(result.message[:1900], ephemeral=True)
 
         @tree.command(name="doctor", description="Show a runtime/operator health snapshot")
         async def slash_doctor(interaction: discord.Interaction):
@@ -1395,21 +1427,16 @@ class DiscordChannel(BaseChannel):
                 )
                 return
             await interaction.response.defer(ephemeral=True)
-            lines = [
-                "**Gateway health**",
-                f"- Bot online: `{self._client.user is not None if self._client else False}`",
-                f"- Channel bound: `{self._channel_id}`",
-            ]
-            if self._runtime_service is None:
-                lines.extend(["", "**Runtime health**", "- Enabled: `False`"])
-            else:
-                report = await self._runtime_service.build_doctor_report(
-                    platform=self.platform,
-                    channel_id=self._channel_id,
-                    scheduler=self._scheduler,
-                )
-                lines.extend(["", report])
-            await interaction.followup.send("\n".join(lines)[:1900], ephemeral=True)
+            result = await self._doctor_service.build_report(
+                platform=self.platform,
+                channel_id=self._channel_id,
+                scheduler=self._scheduler,
+                gateway_info={
+                    "bot_online": self._client.user is not None if self._client else False,
+                    "channel_bound": self._channel_id,
+                },
+            )
+            await interaction.followup.send(self._render_doctor_result(result)[:1900], ephemeral=True)
 
         # ---- Adaptive Memory commands --------------------------------------
 
@@ -1618,97 +1645,13 @@ class DiscordChannel(BaseChannel):
         if not self._runtime_service:
             await self.send(thread_id, draft_text)
             return None
-
-        target = await self._resolve_channel(thread_id)
-
-        view = discord.ui.View(timeout=3600)
-        action_meta = {
-            "approve": ("Approve", discord.ButtonStyle.success),
-            "reject": ("Reject", discord.ButtonStyle.danger),
-            "suggest": ("Suggest", discord.ButtonStyle.secondary),
-            "merge": ("Merge", discord.ButtonStyle.success),
-            "discard": ("Discard", discord.ButtonStyle.danger),
-            "request_changes": ("Request Changes", discord.ButtonStyle.secondary),
-        }
-
-        for action in actions:
-            if action not in action_meta:
-                continue
-            label, style = action_meta[action]
-            button = discord.ui.Button(
-                label=label,
-                style=style,
-                custom_id=f"tdec:{task_id}:{action}:{nonce}",
-            )
-
-            async def _callback(
-                interaction: discord.Interaction,
-                *,
-                action_name: str = action,
-                action_nonce: str = nonce,
-                action_task_id: str = task_id,
-                original_text: str = draft_text,
-            ) -> None:
-                if not self._runtime_service:
-                    await interaction.response.send_message(
-                        "Runtime service not configured.",
-                        ephemeral=True,
-                    )
-                    return
-
-                event = TaskDecisionEvent(
-                    platform=self.platform,
-                    channel_id=self._channel_id,
-                    thread_id=str(interaction.channel_id),
-                    task_id=action_task_id,
-                    action=action_name,  # type: ignore[arg-type]
-                    actor_id=str(interaction.user.id),
-                    nonce=action_nonce,
-                    source="button",
-                )
-                task_after = await self._runtime_service.get_task(action_task_id)
-                for child in view.children:
-                    child.disabled = True
-                status = task_after.status if task_after else "PENDING"
-                processing_content = (
-                    f"{original_text}\n\n---\n"
-                    f"Status: `{status}`\n"
-                    f"Result: Processing `{action_name}`..."
-                )[:1900]
-                try:
-                    await interaction.response.edit_message(content=processing_content, view=view)
-                except Exception:
-                    logger.debug(
-                        "Failed to acknowledge decision message update for task %s",
-                        action_task_id,
-                        exc_info=True,
-                    )
-                    return
-
-                result = await self._runtime_service.handle_decision_event(event)
-
-                task_after = await self._runtime_service.get_task(action_task_id)
-                status = task_after.status if task_after else "UNKNOWN"
-                summary_bits = [f"Status: `{status}`"]
-                if task_after and task_after.merge_commit_hash:
-                    summary_bits.append(f"Commit: `{task_after.merge_commit_hash}`")
-                updated_content = (
-                    f"{original_text}\n\n---\n"
-                    + "\n".join(summary_bits)
-                    + f"\nResult: {result}"
-                )[:1900]
-                try:
-                    await interaction.message.edit(content=updated_content, view=view)
-                except Exception:
-                    logger.debug("Failed to finalize decision message for task %s", action_task_id, exc_info=True)
-
-                await interaction.followup.send(result, ephemeral=True)
-
-            button.callback = _callback
-            view.add_item(button)
-
-        message = await target.send(draft_text, view=view)
-        return str(message.id)
+        prompt = self._build_task_interactive_prompt(
+            draft_text=draft_text,
+            task_id=task_id,
+            nonce=nonce,
+            actions=actions,
+        )
+        return await self.send_interactive(thread_id, prompt)
 
     def parse_decision_event(self, raw):
         if not isinstance(raw, str):
@@ -1819,29 +1762,9 @@ class DiscordChannel(BaseChannel):
         except Exception:
             logger.debug("update_interactive failed thread=%s msg=%s", thread_id, message_id, exc_info=True)
 
-    @staticmethod
-    def _build_interactive_view(prompt: InteractivePrompt) -> discord.ui.View:
+    def _build_interactive_view(self, prompt: InteractivePrompt) -> discord.ui.View:
         """Convert a platform-neutral ``InteractivePrompt`` into a Discord View."""
-        _STYLE_MAP = {
-            "primary": discord.ButtonStyle.primary,
-            "secondary": discord.ButtonStyle.secondary,
-            "danger": discord.ButtonStyle.danger,
-            "success": discord.ButtonStyle.success,
-        }
-        view = discord.ui.View(timeout=None)
-        for action in prompt.actions:
-            custom_id_parts = ["interactive"]
-            if prompt.entity_id:
-                custom_id_parts.append(prompt.entity_id)
-            custom_id_parts.append(action.id)
-            button = discord.ui.Button(
-                label=action.label[:80],
-                style=_STYLE_MAP.get(action.style, discord.ButtonStyle.secondary),
-                custom_id=":".join(custom_id_parts),
-                disabled=action.disabled,
-            )
-            view.add_item(button)
-        return view
+        return _InteractiveView(self, prompt)
 
     async def upsert_status_message(
         self,

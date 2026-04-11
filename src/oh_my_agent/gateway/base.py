@@ -82,6 +82,7 @@ class InteractivePrompt:
     text: str
     actions: list[ActionDescriptor] = field(default_factory=list)
     idempotency_key: str | None = None
+    entity_kind: str | None = None
     entity_id: str | None = None    # task_id, prompt_id, etc.
 
 

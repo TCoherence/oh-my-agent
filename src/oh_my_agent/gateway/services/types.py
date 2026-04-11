@@ -11,6 +11,10 @@ extraction — do not pre-define fields that are not yet used.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from oh_my_agent.runtime.types import RuntimeTask
 
 
 # ── Base ────────────────────────────────────────────────────────────── #
@@ -43,6 +47,7 @@ class TaskActionResult(ServiceResult):
     task_id: str | None = None
     task_status: str | None = None
     detail: str | None = None
+    task: RuntimeTask | None = None
 
 
 @dataclass
@@ -87,6 +92,8 @@ class AutomationInfo:
     last_error: str | None = None
     last_task_id: str | None = None
     next_run_at: str | None = None
+    author: str | None = None
+    source_path: str | None = None
 
 
 @dataclass
@@ -94,3 +101,16 @@ class AutomationStatusResult(ServiceResult):
     """Result of querying automation status."""
 
     automations: list[AutomationInfo] = field(default_factory=list)
+
+
+# ── Interactive results ─────────────────────────────────────────────── #
+
+@dataclass
+class InteractiveDecision:
+    """Platform-neutral action emitted from an interactive message."""
+
+    entity_id: str
+    action_id: str
+    actor_id: str
+    entity_kind: str | None = None
+    message_id: str | None = None

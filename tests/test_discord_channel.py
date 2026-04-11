@@ -240,15 +240,6 @@ class _FakeInteractionFollowup:
         self._events.append(f"followup:{text}:{ephemeral}")
 
 
-class _FakeInteractionMessage:
-    def __init__(self, events: list[str]) -> None:
-        self._events = events
-
-    async def edit(self, *, content=None, view=None):
-        del view
-        self._events.append(f"edit:{content}")
-
-
 class _FakeRuntimeInteractionService:
     def __init__(self, events: list[str], prompt: HitlPrompt) -> None:
         self._events = events
@@ -311,8 +302,10 @@ async def test_handle_hitl_interaction_updates_prompt_to_resolving_before_resume
         user=SimpleNamespace(id=42),
         response=_FakeInteractionResponse(events),
         followup=_FakeInteractionFollowup(events),
-        message=_FakeInteractionMessage(events),
+        message=SimpleNamespace(id=999),
+        channel_id=200,
     )
+    channel.update_interactive = _fake_update_interactive(events)  # type: ignore[method-assign]
 
     await channel._handle_hitl_interaction(  # type: ignore[arg-type]
         interaction,
@@ -323,8 +316,79 @@ async def test_handle_hitl_interaction_updates_prompt_to_resolving_before_resume
 
     assert events[0] == "defer:True"
     assert events[1].startswith("get:hitl-1:waiting")
-    assert events[2].startswith("edit:**Input recorded**")
+    assert events[2].startswith("update:200:999:**Input recorded**")
     assert events[3] == "followup:Input recorded. Resuming now...:True"
     assert events[4] == "answer:start:hitl-1:ai:42"
     assert "answer:done:hitl-1" in events
-    assert events[-1].startswith("edit:**Input resolved**")
+    assert events[-1].startswith("update:200:999:**Input resolved**")
+
+
+def _fake_update_interactive(events: list[str]):
+    async def _inner(thread_id: str, message_id: str, prompt):
+        events.append(f"update:{thread_id}:{message_id}:{prompt.text}")
+
+    return _inner
+
+
+@pytest.mark.asyncio
+async def test_send_hitl_prompt_uses_send_interactive():
+    channel = DiscordChannel(token="x", channel_id="100")
+    prompt = HitlPrompt(
+        id="hitl-1",
+        target_kind="thread",
+        platform="discord",
+        channel_id="100",
+        thread_id="200",
+        task_id=None,
+        agent_name="codex",
+        status="waiting",
+        question="Pick one",
+        details=None,
+        choices=(
+            {"id": "ai", "label": "AI daily", "description": None},
+        ),
+        selected_choice_id=None,
+        selected_choice_label=None,
+        selected_choice_description=None,
+        control_envelope_json="{}",
+        resume_context={},
+        session_id_snapshot=None,
+        prompt_message_id=None,
+        created_by="owner-1",
+    )
+    captured: list[tuple[str, str, str | None]] = []
+
+    async def _fake_send_interactive(thread_id: str, interactive_prompt):
+        captured.append((thread_id, interactive_prompt.entity_kind, interactive_prompt.entity_id))
+        return "msg-1"
+
+    channel.send_interactive = _fake_send_interactive  # type: ignore[method-assign]
+
+    msg_id = await channel.send_hitl_prompt(thread_id="200", prompt=prompt)
+
+    assert msg_id == "msg-1"
+    assert captured == [("200", "hitl", "hitl-1")]
+
+
+@pytest.mark.asyncio
+async def test_send_task_draft_uses_send_interactive():
+    channel = DiscordChannel(token="x", channel_id="100")
+    channel.set_runtime_service(object())
+    captured: list[tuple[str, str, str | None, str | None]] = []
+
+    async def _fake_send_interactive(thread_id: str, prompt):
+        captured.append((thread_id, prompt.text, prompt.entity_kind, prompt.idempotency_key))
+        return "msg-2"
+
+    channel.send_interactive = _fake_send_interactive  # type: ignore[method-assign]
+
+    msg_id = await channel.send_task_draft(
+        thread_id="200",
+        draft_text="Approve this task",
+        task_id="task-1",
+        nonce="nonce-1",
+        actions=["approve", "reject"],
+    )
+
+    assert msg_id == "msg-2"
+    assert captured == [("200", "Approve this task", "task", "nonce-1")]
