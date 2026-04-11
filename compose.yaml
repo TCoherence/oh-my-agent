@@ -1,0 +1,62 @@
+# Oh My Agent — Docker Compose
+#
+# Usage:
+#   docker compose up -d          # start in background
+#   docker compose logs -f        # follow logs
+#   docker compose restart        # restart
+#   docker compose down           # stop and remove
+#
+# Prerequisites:
+#   1. Copy config.yaml.example → config.yaml and fill in tokens.
+#   2. Set DISCORD_BOT_TOKEN and DISCORD_CHANNEL_ID in .env or shell env.
+#
+# The container mounts the repo for editable install and a persistent
+# volume for runtime state (SQLite DBs, logs, task worktrees).
+#
+# See docs/EN/operator-guide.md (or docs/CN/operator-guide.md) for details.
+
+services:
+  oh-my-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: oh-my-agent
+    restart: unless-stopped
+
+    # ── Environment ──────────────────────────────────────────────────
+    environment:
+      - HOME=/home
+      - PATH=/home/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      - OMA_MOUNT_ROOT=/home
+      - OMA_WORKDIR=/home
+      - OMA_REPO_ROOT=/repo
+      - OMA_CONFIG_PATH=/repo/config.yaml
+      - TZ=${TZ:-UTC}
+      # Agent sandbox overrides (match docker-start.sh defaults)
+      - OMA_AGENT_CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS=${OMA_AGENT_CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS:-true}
+      - OMA_AGENT_CLAUDE_PERMISSION_MODE=${OMA_AGENT_CLAUDE_PERMISSION_MODE:-}
+      - OMA_AGENT_CODEX_SANDBOX_MODE=${OMA_AGENT_CODEX_SANDBOX_MODE:-danger-full-access}
+      - OMA_AGENT_CODEX_DANGEROUSLY_BYPASS_APPROVALS_AND_SANDBOX=${OMA_AGENT_CODEX_DANGEROUSLY_BYPASS_APPROVALS_AND_SANDBOX:-true}
+      # Forward API keys from host .env
+      - DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN}
+      - DISCORD_CHANNEL_ID=${DISCORD_CHANNEL_ID}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+
+    # ── Volumes ──────────────────────────────────────────────────────
+    volumes:
+      # Repo source — mounted read-write for editable install
+      - .:/repo
+      # Persistent runtime state: SQLite DBs, logs, task worktrees, memory
+      - oma-runtime:/home
+
+    # ── Security ─────────────────────────────────────────────────────
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges
+
+volumes:
+  oma-runtime:
+    driver: local
