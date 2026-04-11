@@ -1,4 +1,5 @@
 import asyncio
+import sqlite3
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from pathlib import Path
@@ -11,6 +12,11 @@ from oh_my_agent.automation import ScheduledJob
 from oh_my_agent.memory.store import SQLiteMemoryStore
 from oh_my_agent.gateway.router import RouteDecision
 from oh_my_agent.skills.skill_sync import SkillSync
+from oh_my_agent.utils.errors import (
+    USER_MSG_AGENT_CRASH,
+    USER_MSG_INTERNAL,
+    USER_MSG_STORE_FAILURE,
+)
 
 
 def _make_msg(thread_id=None, content="hello", author_id=None, system=False) -> IncomingMessage:
@@ -32,6 +38,7 @@ def _make_session(channel=None, registry=None) -> ChannelSession:
         channel.channel_id = "100"
         channel.create_thread = AsyncMock(return_value="thread-1")
         channel.send = AsyncMock()
+        channel.stop = AsyncMock()
         channel.typing = MagicMock()
         channel.typing.return_value.__aenter__ = AsyncMock(return_value=None)
         channel.typing.return_value.__aexit__ = AsyncMock(return_value=False)
@@ -624,8 +631,7 @@ async def test_handle_message_error_response_sent_and_history_cleaned():
     await gm.handle_message(session, registry, msg)
 
     sent = channel.send.call_args[0][1]
-    assert "Error" in sent
-    assert "boom" in sent
+    assert sent == USER_MSG_AGENT_CRASH
     # History should be empty (failed turn was popped)
     assert await session.get_history("t1") == []
 
@@ -1474,3 +1480,118 @@ def test_router_context_includes_recent_thread_skill_with_description(tmp_path):
 
     assert "Most recently invoked skill in this thread: bilibili-video-summarizer" in context
     assert "Summarize Bilibili links into concise Chinese notes." in context
+
+
+@pytest.mark.asyncio
+async def test_gateway_stop_rejects_new_messages():
+    session = _make_session()
+    gm = GatewayManager([(session.channel, session.registry)])
+
+    await gm.stop()
+    await gm.handle_message(session, session.registry, _make_msg(thread_id="thread-1", content="ignored"))
+
+    session.channel.send.assert_not_called()
+    session.channel.create_thread.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_gateway_stop_waits_for_inflight_messages():
+    channel = MagicMock()
+    channel.platform = "discord"
+    channel.channel_id = "100"
+    channel.create_thread = AsyncMock()
+    channel.send = AsyncMock()
+    channel.stop = AsyncMock()
+    channel.typing = MagicMock()
+    channel.typing.return_value.__aenter__ = AsyncMock(return_value=None)
+    channel.typing.return_value.__aexit__ = AsyncMock(return_value=False)
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+    mock_agent = MagicMock()
+    mock_agent.name = "claude"
+    registry = MagicMock(spec=AgentRegistry)
+    registry.agents = [mock_agent]
+
+    async def _run(*args, **kwargs):
+        started.set()
+        await release.wait()
+        return mock_agent, AgentResponse(text="reply")
+
+    registry.run = AsyncMock(side_effect=_run)
+    session = _make_session(channel=channel, registry=registry)
+    gm = GatewayManager([(channel, registry)])
+
+    message_task = asyncio.create_task(
+        gm.handle_message(session, registry, _make_msg(thread_id="thread-1", content="slow"))
+    )
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    stop_task = asyncio.create_task(gm.stop(timeout=0.1))
+    await asyncio.sleep(0.02)
+    assert stop_task.done() is False
+
+    release.set()
+    await asyncio.gather(message_task, stop_task)
+    channel.stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_handle_message_hides_agent_error_text():
+    channel = MagicMock()
+    channel.platform = "discord"
+    channel.channel_id = "100"
+    channel.create_thread = AsyncMock()
+    channel.send = AsyncMock()
+    channel.typing = MagicMock()
+    channel.typing.return_value.__aenter__ = AsyncMock(return_value=None)
+    channel.typing.return_value.__aexit__ = AsyncMock(return_value=False)
+
+    mock_agent = MagicMock()
+    mock_agent.name = "claude"
+    registry = MagicMock(spec=AgentRegistry)
+    registry.agents = [mock_agent]
+    registry.run = AsyncMock(
+        return_value=(mock_agent, AgentResponse(text="", error="secret stack", error_kind="cli_error"))
+    )
+
+    session = _make_session(channel=channel, registry=registry)
+    gm = GatewayManager([])
+
+    await gm.handle_message(session, registry, _make_msg(thread_id="thread-1", content="trigger"))
+
+    channel.send.assert_awaited_once_with("thread-1", USER_MSG_AGENT_CRASH)
+
+
+@pytest.mark.asyncio
+async def test_handle_message_maps_storage_error_to_user_safe_message():
+    channel = MagicMock()
+    channel.platform = "discord"
+    channel.channel_id = "100"
+    channel.create_thread = AsyncMock()
+    channel.send = AsyncMock()
+
+    session = _make_session(channel=channel)
+    session.get_history = AsyncMock(side_effect=sqlite3.OperationalError("db exploded"))
+    gm = GatewayManager([])
+
+    await gm.handle_message(session, session.registry, _make_msg(thread_id="thread-1", content="trigger"))
+
+    channel.send.assert_awaited_once_with("thread-1", USER_MSG_STORE_FAILURE)
+
+
+@pytest.mark.asyncio
+async def test_handle_message_maps_unexpected_error_to_internal_message():
+    channel = MagicMock()
+    channel.platform = "discord"
+    channel.channel_id = "100"
+    channel.create_thread = AsyncMock()
+    channel.send = AsyncMock()
+
+    session = _make_session(channel=channel)
+    session.get_history = AsyncMock(side_effect=RuntimeError("sensitive detail"))
+    gm = GatewayManager([])
+
+    await gm.handle_message(session, session.registry, _make_msg(thread_id="thread-1", content="trigger"))
+
+    channel.send.assert_awaited_once_with("thread-1", USER_MSG_INTERNAL)

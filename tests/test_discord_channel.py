@@ -67,10 +67,20 @@ class _FakeDiscordThread:
         return SimpleNamespace(id=123)
 
 
+class _FakeLimiter:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def acquire(self, tokens: int = 1) -> None:
+        del tokens
+        self.calls += 1
+
+
 @pytest.mark.asyncio
 async def test_send_attachment_uploads_png(tmp_path):
     channel = DiscordChannel(token="x", channel_id="100")
     thread = _FakeDiscordThread()
+    limiter = _FakeLimiter()
     png = tmp_path / "qr.png"
     png.write_bytes(b"png")
 
@@ -78,6 +88,7 @@ async def test_send_attachment_uploads_png(tmp_path):
         return thread
 
     channel._resolve_channel = _fake_resolve  # type: ignore[method-assign]
+    channel._rate_limiter = limiter  # type: ignore[attr-defined]
 
     msg_id = await channel.send_attachment(
         "thread-1",
@@ -91,7 +102,26 @@ async def test_send_attachment_uploads_png(tmp_path):
 
     assert msg_id == "123"
     assert thread.calls
+    assert limiter.calls == 1
     assert thread.calls[0]["content"] == "QR"
+
+
+@pytest.mark.asyncio
+async def test_send_observes_rate_limiter():
+    channel = DiscordChannel(token="x", channel_id="100")
+    thread = _FakeDiscordThread()
+    limiter = _FakeLimiter()
+
+    async def _fake_resolve(_thread_id: str):
+        return thread
+
+    channel._resolve_channel = _fake_resolve  # type: ignore[method-assign]
+    channel._rate_limiter = limiter  # type: ignore[attr-defined]
+
+    msg_id = await channel.send("thread-1", "hello")
+
+    assert msg_id == "123"
+    assert limiter.calls == 1
 
 
 class _FakeDiscordClient:

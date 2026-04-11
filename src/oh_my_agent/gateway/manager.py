@@ -28,6 +28,7 @@ from oh_my_agent.gateway.session import ChannelSession
 from oh_my_agent.agents.registry import AgentRegistry
 from oh_my_agent.runtime.policy import is_artifact_intent, is_long_task_intent, is_skill_intent
 from oh_my_agent.utils.chunker import chunk_message
+from oh_my_agent.utils.errors import user_safe_agent_error, user_safe_message
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +106,10 @@ class GatewayManager:
         # key: "platform:channel_id" → ChannelSession
         self._sessions: dict[str, ChannelSession] = {}
         self._agent_progress_log_interval_seconds = AGENT_PROGRESS_LOG_INTERVAL_SECONDS
+        self._accepting = True
+        self._stopping = False
+        self._background_tasks: list[asyncio.Task] = []
+        self._inflight_messages: set[asyncio.Task] = set()
 
     def _session_key(self, platform: str, channel_id: str) -> str:
         return f"{platform}:{channel_id}"
@@ -489,7 +494,9 @@ class GatewayManager:
     async def start(self) -> None:
         """Start all platform channels concurrently."""
         await self._refresh_auto_disabled_skills()
-        tasks = []
+        self._accepting = True
+        self._stopping = False
+        self._background_tasks = []
         for channel, registry in self._channels:
             session = self._get_session(channel, registry)
             # Inject memory store if available
@@ -537,13 +544,13 @@ class GatewayManager:
                 return handler
 
             handler = await make_handler(session, registry)
-            tasks.append(asyncio.create_task(channel.start(handler)))
+            self._background_tasks.append(asyncio.create_task(channel.start(handler)))
             logger.info(
                 "Started channel %s:%s", channel.platform, channel.channel_id
             )
 
         if self._scheduler:
-            tasks.append(asyncio.create_task(self._run_scheduler()))
+            self._background_tasks.append(asyncio.create_task(self._run_scheduler()))
             logger.info("Scheduler started with %d job(s)", len(self._scheduler.jobs))
 
         if self._runtime_service:
@@ -551,7 +558,7 @@ class GatewayManager:
 
         if self._short_workspace_enabled and self._short_workspace_root is not None:
             self._short_workspace_root.mkdir(parents=True, exist_ok=True)
-            tasks.append(asyncio.create_task(self._run_short_workspace_janitor()))
+            self._background_tasks.append(asyncio.create_task(self._run_short_workspace_janitor()))
             logger.info(
                 "Short-workspace janitor enabled root=%s ttl=%sh interval=%sm",
                 self._short_workspace_root,
@@ -559,7 +566,76 @@ class GatewayManager:
                 self._short_workspace_cleanup_interval_minutes,
             )
 
-        await asyncio.gather(*tasks)
+        try:
+            await asyncio.gather(*self._background_tasks)
+        finally:
+            self._background_tasks = []
+
+    async def stop(self, *, timeout: float = 10.0) -> None:
+        if self._stopping:
+            return
+        self._stopping = True
+        self._accepting = False
+        logger.info("Gateway shutdown requested; draining in-flight work.")
+
+        if self._scheduler is not None and hasattr(self._scheduler, "stop"):
+            try:
+                self._scheduler.stop()
+            except Exception:
+                logger.warning("Failed to signal scheduler stop", exc_info=True)
+
+        current_task = asyncio.current_task()
+        inflight = [
+            task
+            for task in self._inflight_messages
+            if task is not current_task and not task.done()
+        ]
+        if inflight:
+            logger.info("Waiting for %d in-flight message(s) to finish.", len(inflight))
+            done, pending = await asyncio.wait(inflight, timeout=timeout)
+            if pending:
+                logger.warning("Gateway shutdown timed out with %d in-flight message(s) pending.", len(pending))
+
+        for channel, _ in self._channels:
+            try:
+                await channel.stop()
+            except Exception:
+                logger.warning(
+                    "Channel stop failed for %s:%s",
+                    channel.platform,
+                    channel.channel_id,
+                    exc_info=True,
+                )
+
+        background = [
+            task
+            for task in self._background_tasks
+            if task is not current_task and not task.done()
+        ]
+        if background:
+            done, pending = await asyncio.wait(background, timeout=timeout)
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            if pending:
+                logger.warning("Gateway shutdown cancelled %d lingering background task(s).", len(pending))
+
+    async def _notify_user_error(
+        self,
+        *,
+        channel: BaseChannel,
+        thread_id: str,
+        text: str,
+    ) -> None:
+        try:
+            await channel.send(thread_id, text)
+        except Exception:
+            logger.warning(
+                "Failed to deliver user-facing error message thread=%s",
+                thread_id,
+                exc_info=True,
+            )
 
     async def _run_scheduler(self) -> None:
         if not self._scheduler:
@@ -688,6 +764,43 @@ class GatewayManager:
                 )
 
     async def handle_message(
+        self,
+        session: ChannelSession,
+        registry: AgentRegistry,
+        msg: IncomingMessage,
+    ) -> None:
+        if not self._accepting:
+            logger.info(
+                "Ignoring message during shutdown platform=%s channel=%s thread=%s",
+                msg.platform,
+                msg.channel_id,
+                msg.thread_id or "(new)",
+            )
+            return
+
+        current_task = asyncio.current_task()
+        if current_task is not None:
+            self._inflight_messages.add(current_task)
+        try:
+            await self._handle_message_impl(session, registry, msg)
+        except Exception as exc:
+            logger.exception(
+                "handle_message failed platform=%s channel=%s thread=%s author=%r",
+                msg.platform,
+                msg.channel_id,
+                msg.thread_id or "(new)",
+                msg.author,
+            )
+            await self._notify_user_error(
+                channel=session.channel,
+                thread_id=msg.thread_id or msg.channel_id,
+                text=user_safe_message(exc),
+            )
+        finally:
+            if current_task is not None:
+                self._inflight_messages.discard(current_task)
+
+    async def _handle_message_impl(
         self,
         session: ChannelSession,
         registry: AgentRegistry,
@@ -1111,7 +1224,7 @@ class GatewayManager:
                 elapsed_agent,
                 response.error,
             )
-            await channel.send(thread_id, f"**Error** ({agent_used.name}): {response.error[:1800]}")
+            await channel.send(thread_id, user_safe_agent_error(response.error_kind))
             # Remove the failed user turn so history stays clean
             history = await session.get_history(thread_id)
             if history:

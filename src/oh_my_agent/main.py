@@ -4,7 +4,9 @@ import argparse
 import asyncio
 import logging
 import os
+import signal
 import sys
+from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
 
@@ -365,6 +367,40 @@ def _setup_logging(
     setup_logging(config, runtime_root=runtime_root)
 
 
+def _register_shutdown_signal_handlers(
+    loop: asyncio.AbstractEventLoop,
+    on_signal,
+    logger: logging.Logger,
+) -> None:
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, on_signal, sig)
+        except NotImplementedError:
+            logger.debug("Signal handlers unsupported for %s on this platform.", sig.name)
+
+
+async def _shutdown(
+    gateway_manager,
+    scheduler,
+    runtime_service,
+    memory_store,
+    logger: logging.Logger,
+    *,
+    reason: str,
+) -> None:
+    logger.info("Shutdown started reason=%s", reason)
+    if scheduler:
+        with suppress(Exception):
+            scheduler.stop()
+    if gateway_manager:
+        await gateway_manager.stop()
+    if runtime_service:
+        await runtime_service.stop()
+    if memory_store:
+        await memory_store.close()
+    logger.info("Shutdown complete reason=%s", reason)
+
+
 async def _async_main(config: dict, logger: logging.Logger, *, project_root: Path) -> None:
     """Async entry point — builds agents, memory, and starts gateway."""
 
@@ -634,13 +670,51 @@ async def _async_main(config: dict, logger: logging.Logger, *, project_root: Pat
         gateway.set_memory_store(memory_store)
 
     logger.info("Starting gateway with %d channel(s)...", len(channel_pairs))
+    loop = asyncio.get_running_loop()
+    shutdown_event = asyncio.Event()
+    shutdown_reason = {"value": "gateway_completed"}
+    shutdown_started = False
+
+    def _request_shutdown(sig: signal.Signals) -> None:
+        shutdown_reason["value"] = f"signal:{sig.name}"
+        shutdown_event.set()
+
+    _register_shutdown_signal_handlers(loop, _request_shutdown, logger)
+    gateway_task = asyncio.create_task(gateway.start(), name="gateway:start")
+    shutdown_waiter = asyncio.create_task(shutdown_event.wait(), name="gateway:shutdown-wait")
+
+    async def _shutdown_once(reason: str) -> None:
+        nonlocal shutdown_started
+        if shutdown_started:
+            return
+        shutdown_started = True
+        await _shutdown(
+            gateway,
+            scheduler,
+            runtime_service,
+            memory_store,
+            logger,
+            reason=reason,
+        )
+
     try:
-        await gateway.start()
+        done, _ = await asyncio.wait(
+            {gateway_task, shutdown_waiter},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if shutdown_waiter in done:
+            await _shutdown_once(shutdown_reason["value"])
+            await gateway_task
+        else:
+            await gateway_task
     finally:
-        if runtime_service:
-            await runtime_service.stop()
-        if memory_store:
-            await memory_store.close()
+        shutdown_waiter.cancel()
+        with suppress(asyncio.CancelledError):
+            await shutdown_waiter
+        await _shutdown_once(shutdown_reason["value"])
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            with suppress(NotImplementedError):
+                loop.remove_signal_handler(sig)
 
 
 def main() -> None:

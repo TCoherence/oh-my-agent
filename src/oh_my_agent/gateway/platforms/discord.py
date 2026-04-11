@@ -29,6 +29,8 @@ from oh_my_agent.gateway.services.types import (
     TaskListResult,
 )
 from oh_my_agent.runtime.types import HitlPrompt
+from oh_my_agent.utils.errors import user_safe_message
+from oh_my_agent.utils.rate_limiter import TokenBucketLimiter
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +153,7 @@ class DiscordChannel(BaseChannel):
         self._skill_eval_enabled = True
         self._skill_stats_recent_days = 7
         self._skill_feedback_emojis = {"👍", "👎"}
+        self._rate_limiter = TokenBucketLimiter(rate=5.0, burst=10)
 
     @property
     def platform(self) -> str:
@@ -651,6 +654,18 @@ class DiscordChannel(BaseChannel):
     def supports_buttons(self) -> bool:
         return True
 
+    async def _acquire_outbound_slot(self) -> None:
+        await self._rate_limiter.acquire()
+
+    async def _send_interaction_error(self, interaction: discord.Interaction, text: str) -> None:
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(text[:1900], ephemeral=True)
+            else:
+                await interaction.response.send_message(text[:1900], ephemeral=True)
+        except Exception:
+            logger.warning("Failed to deliver app-command error response", exc_info=True)
+
     async def start(self, handler: MessageHandler) -> None:
         _handler = handler
 
@@ -958,7 +973,8 @@ class DiscordChannel(BaseChannel):
 
                 await interaction.followup.send("\n".join(summary)[:2000])
             except Exception as exc:
-                await interaction.followup.send(f"Skill reload failed: {exc}")
+                logger.exception("Skill reload failed")
+                await self._send_interaction_error(interaction, user_safe_message(exc))
 
         @tree.command(name="automation_status", description="Show automation status")
         @app_commands.describe(name="Optional automation name")
@@ -1631,6 +1647,21 @@ class DiscordChannel(BaseChannel):
             except Exception:
                 logger.debug("Failed to sync skill feedback from reaction remove", exc_info=True)
 
+        @tree.error
+        async def on_app_command_error(
+            interaction: discord.Interaction,
+            error: app_commands.AppCommandError,
+        ) -> None:
+            exc = getattr(error, "original", error)
+            command_name = getattr(getattr(interaction, "command", None), "qualified_name", "unknown")
+            logger.exception(
+                "Discord app command failed command=%s user_id=%s channel_id=%s",
+                command_name,
+                getattr(getattr(interaction, "user", None), "id", None),
+                getattr(interaction, "channel_id", None),
+            )
+            await self._send_interaction_error(interaction, user_safe_message(exc))
+
         await client.start(self._token)
 
     async def send_task_draft(
@@ -1684,6 +1715,7 @@ class DiscordChannel(BaseChannel):
 
     async def send(self, thread_id: str, text: str) -> str | None:
         thread = await self._resolve_channel(thread_id)
+        await self._acquire_outbound_slot()
         msg = await thread.send(text)
         return str(msg.id)
 
@@ -1700,6 +1732,7 @@ class DiscordChannel(BaseChannel):
         attachment: OutgoingAttachment,
     ) -> str | None:
         thread = await self._resolve_channel(thread_id)
+        await self._acquire_outbound_slot()
         msg = await thread.send(
             content=attachment.caption,
             file=discord.File(attachment.local_path, filename=attachment.filename),
@@ -1718,6 +1751,7 @@ class DiscordChannel(BaseChannel):
             discord.File(attachment.local_path, filename=attachment.filename)
             for attachment in attachments
         ]
+        await self._acquire_outbound_slot()
         msg = await thread.send(content=text, files=files)
         return [str(msg.id)]
 
@@ -1734,6 +1768,7 @@ class DiscordChannel(BaseChannel):
         try:
             thread = await self._resolve_channel(thread_id)
             msg = await thread.fetch_message(int(message_id))
+            await self._acquire_outbound_slot()
             await msg.edit(content=text)
         except Exception:
             logger.debug("edit_message failed thread=%s msg=%s", thread_id, message_id, exc_info=True)
@@ -1745,6 +1780,7 @@ class DiscordChannel(BaseChannel):
     ) -> str | None:
         thread = await self._resolve_channel(thread_id)
         view = self._build_interactive_view(prompt)
+        await self._acquire_outbound_slot()
         msg = await thread.send(content=prompt.text, view=view)
         return str(msg.id)
 
@@ -1758,6 +1794,7 @@ class DiscordChannel(BaseChannel):
             thread = await self._resolve_channel(thread_id)
             msg = await thread.fetch_message(int(message_id))
             view = self._build_interactive_view(prompt)
+            await self._acquire_outbound_slot()
             await msg.edit(content=prompt.text, view=view)
         except Exception:
             logger.debug("update_interactive failed thread=%s msg=%s", thread_id, message_id, exc_info=True)
@@ -1779,6 +1816,7 @@ class DiscordChannel(BaseChannel):
             try:
                 existing = await thread.fetch_message(int(message_id))
                 if existing.author == self._client.user:
+                    await self._acquire_outbound_slot()
                     await existing.edit(content=text)
                     return str(existing.id)
             except Exception:
@@ -1793,11 +1831,13 @@ class DiscordChannel(BaseChannel):
                 and latest.author == self._client.user
                 and (latest.content or "").startswith(STATUS_MESSAGE_PREFIX)
             ):
+                await self._acquire_outbound_slot()
                 await latest.edit(content=text)
                 return str(latest.id)
         except Exception:
             logger.debug("Failed to inspect latest thread message for status upsert", exc_info=True)
 
+        await self._acquire_outbound_slot()
         msg = await thread.send(text)
         return str(msg.id)
 

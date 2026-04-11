@@ -145,6 +145,7 @@ class Scheduler:
         self._reload_lock = asyncio.Lock()
         self._on_fire: Callable[[ScheduledJob], Awaitable[None]] | None = None
         self._on_reload: Callable[[], Awaitable[None]] | None = None
+        self._stop_event = asyncio.Event()
         self._load_from_disk(initial=True)
 
     @property
@@ -219,6 +220,7 @@ class Scheduler:
         on_fire: Callable[[ScheduledJob], Awaitable[None]],
     ) -> None:
         """Run active jobs and poll for filesystem changes until cancelled."""
+        self._stop_event.clear()
         self._on_fire = on_fire
         for job in self.jobs:
             self._start_job(job, on_fire)
@@ -231,13 +233,16 @@ class Scheduler:
 
         reload_task = asyncio.create_task(self._reload_loop(on_fire), name="scheduler:reload")
         try:
-            await asyncio.Event().wait()
+            await self._stop_event.wait()
         except asyncio.CancelledError:
             raise
         finally:
             reload_task.cancel()
             await asyncio.gather(reload_task, return_exceptions=True)
             await self._stop_all_jobs()
+
+    def stop(self) -> None:
+        self._stop_event.set()
 
     async def _reload_loop(
         self,
