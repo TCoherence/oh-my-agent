@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
-import logging.handlers
 import os
 import sys
 from datetime import datetime
@@ -356,29 +355,14 @@ def _migrate_legacy_workspace(config: dict, project_root: Path, logger: logging.
     logger.info("Migrated legacy .workspace to external runtime root: %s", runtime_root)
 
 
-def _setup_logging(runtime_root: Path | None = None) -> None:
-    log_format = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-    root = logging.getLogger()
-    root.setLevel(logging.INFO)
-    root.handlers.clear()
+def _setup_logging(
+    config: dict | None = None,
+    runtime_root: Path | None = None,
+) -> None:
+    """Thin wrapper that delegates to ``logging_setup.setup_logging``."""
+    from oh_my_agent.logging_setup import setup_logging
 
-    # Console handler — always on
-    console = logging.StreamHandler(sys.stderr)
-    console.setFormatter(logging.Formatter(log_format))
-    root.addHandler(console)
-
-    # Rotating file handler — one file per day, keep 7 days.
-    runtime_root = runtime_root or Path("~/.oh-my-agent/runtime").expanduser().resolve()
-    log_dir = runtime_root / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    file_handler = logging.handlers.TimedRotatingFileHandler(
-        log_dir / "oh-my-agent.log",
-        when="midnight",
-        backupCount=7,
-        encoding="utf-8",
-    )
-    file_handler.setFormatter(logging.Formatter(log_format))
-    root.addHandler(file_handler)
+    setup_logging(config, runtime_root=runtime_root)
 
 
 async def _async_main(config: dict, logger: logging.Logger, *, project_root: Path) -> None:
@@ -719,7 +703,7 @@ def main() -> None:
         sys.exit(0 if validation.ok else 1)
 
     runtime_root = _runtime_root(config)
-    _setup_logging(runtime_root)
+    _setup_logging(config, runtime_root)
     logger = logging.getLogger(__name__)
 
     if not validation.ok:
