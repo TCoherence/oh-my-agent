@@ -4,16 +4,16 @@ Multi-platform bot that routes messages to CLI-based AI agents (Claude, Gemini, 
 
 Inspired by [OpenClaw](https://openclaw.dev).
 
-## Status Snapshot (2026-04-09)
+## Status Snapshot (2026-04-10)
 
 - `/search` is implemented with SQLite FTS5 across all threads.
 - `SkillSync` reverse sync is implemented and runs on startup.
-- Current branch state is `v0.7.2` baseline plus local follow-up work across routing, HITL, logging, and market/deals workflows.
+- Current branch state is released `v0.7.3`, covering the v0.7.2 baseline plus the v0.7.3 runtime/operator closeout work.
 - v0.5 is runtime-first: durable autonomous task loops (`DRAFT -> RUNNING -> WAITING_MERGE -> MERGED/...`).
 - v0.6 skill-first autonomy + adaptive memory is complete.
 - v0.7.2 extends the v0.7 line with auth-first runtime pause/resume, file-driven automations, generic Discord-first `ask_user` HITL, market briefings, and skill-specific timeout overrides for slow direct skill invocations.
-- `v0.7.3 phase 1` is now implemented: artifact delivery abstraction, thread-scoped unified logs, structured HITL answer binding, and Discord `/doctor`.
-- The remaining `v0.7.3` scope is phase 2 work around operator polish, richer delivery backends, and event-driven/runtime ops follow-up.
+- `v0.7.3` is fully implemented: artifact delivery abstraction, thread-scoped unified logs, structured HITL answer binding, Discord `/doctor`, persisted automation runtime state, improved operator surfaces, automation timeout propagation, and HITL checkpoint closeout.
+- Current next target is deferred items plus `v0.8+` work such as semantic retrieval and hybrid autonomy.
 - Discord approvals use buttons first, slash fallback, reactions as status-only signals.
 - Optional LLM routing is implemented: incoming messages can be classified as `reply_once`, `invoke_existing_skill`, `propose_artifact_task`, `propose_repo_task`, `create_skill`, or `repair_skill`.
 - Runtime observability is implemented: `/task_logs`, sampled progress events in SQLite, a single updatable Discord status message, and Discord `/doctor`.
@@ -535,9 +535,9 @@ author: scheduler
 
 ## Autonomy Direction
 
-- Current branch state should be read as `v0.7.2 baseline + local follow-up work`.
-- The current implementation state is `v0.7.2 baseline + local follow-up work + v0.7.3 phase 1`.
-- The remaining version target is `v0.7.3 phase 2`, centered on operator polish, event-driven triggers, and remaining delivery/runtime gaps.
+- Current branch state should be read as released `v0.7.3`.
+- The v0.7 line now includes the v0.7.2 automation/auth groundwork plus the full v0.7.3 HITL/delivery/operator closeout.
+- The next target is deferred items plus `v0.8+`, including semantic retrieval, hybrid autonomy, and remaining delivery backends.
 - v0.5 establishes the runtime-first baseline: durable task execution, merge gating, and recovery.
 - v0.6 focuses on skill-first autonomy + adaptive memory: skill creation, skill routing, skill validation, reusable capability growth, and cross-session user knowledge.
 - v0.7 delivers date-based memory; v0.7.2 closes the current auth/runtime/video/automation/HITL pass on top of it.

@@ -1,11 +1,11 @@
 # Todo / Roadmap
 
-## Snapshot (2026-04-09)
+## Snapshot (2026-04-10)
 
 - `/search` is implemented.
 - SkillSync reverse sync is implemented.
 - CLI-first foundations are in place.
-- Current branch state is `v0.7.2` baseline plus local follow-up work.
+- Current branch state is released `v0.7.3`.
 - v0.5 runtime-first is complete (including runtime hardening pass).
 - Optional LLM router is implemented.
 - Runtime observability baseline is implemented.

@@ -1,11 +1,11 @@
 # Todo / 路线图
 
-## 当前快照（2026-04-09）
+## 当前快照（2026-04-10）
 
 - `/search` 已实现。
 - SkillSync reverse sync 已实现。
 - CLI-first 基础设施已经到位。
-- 当前分支应视为 `v0.7.2 基线 + 本地后续演进`。
+- 当前分支已发布为 `v0.7.3`。
 - v0.5 runtime-first 已完成（包括 runtime hardening pass）。
 - 可选 LLM router 已实现。
 - Runtime 可观测性基线已实现。

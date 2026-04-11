@@ -49,9 +49,9 @@ Oh My Agent 是一个多平台 bot，执行层直接使用 CLI Agent，而不是
 
 ## 下一阶段产品方向
 
-- 当前分支更准确的版本表述是：`v0.7.2 基线 + 本地后续演进`。
-- 当前实现状态可表述为：`v0.7.2 基线 + 本地后续演进 + v0.7.3 phase 1`。
-- 剩余目标是 `v0.7.3 phase 2`，不是重复规划 phase 1。
+- 当前分支已发布为 `v0.7.3`。
+- v0.7.3 在 v0.7.2 基线之上补齐了 HITL、delivery、operator observability 的闭环。
+- 下一个目标是 deferred items 与 `v0.8+`，不是继续拆 v0.7.3 phase。
 - v0.5 已完成 runtime-first 基线（全部完成）。
 - v0.6 已交付 skill-first autonomy + adaptive memory。
 - v0.7 已交付日期驱动记忆、多类型 runtime、skill 评估，以及当前这轮 auth/HITL/runtime 基础设施。
@@ -69,12 +69,17 @@ Oh My Agent 是一个多平台 bot，执行层直接使用 CLI Agent，而不是
 - runtime live agent logging 和更稳的 Discord 状态消息更新
 - Codex repo/workspace `.agents/skills/` 分发，生成的 workspace `AGENTS.md` 降级为 rules/metadata
 
-### v0.7.3 phase 1
+### v0.7.3
 
 - artifact delivery 抽象：附件优先，失败时回退到本地绝对路径
 - chat / invoke / runtime / HITL resume 统一沉淀到 thread-scoped agent 日志
 - 结构化 HITL answer binding 进入 task/thread resume context
 - Discord `/doctor` 提供 gateway/runtime/HITL/auth/log 健康快照
+- automation runtime state 持久化，并供 `/automation_status` 与 `/doctor` 读取
+- skill `metadata.timeout_seconds` 传播到 automation-backed execution
+- 基于 `ArtifactDeliveryResult` 完成 delivery 收口，不再引入平行结果结构
+- HITL checkpoint/resume 收口：只继承最近一轮 answer，不跨 task 泄漏
+- merge/discard/request changes 与 answered/cancelled 的 Discord view 收敛到稳定终态
 
 ### v0.7.0
 

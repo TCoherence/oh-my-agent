@@ -4,16 +4,16 @@
 
 灵感来自 [OpenClaw](https://openclaw.dev)。
 
-## 当前状态（2026-04-09）
+## 当前状态（2026-04-10）
 
 - `/search` 已通过 SQLite FTS5 实现跨线程检索。
 - `SkillSync` reverse sync 已实现，并在启动时执行。
-- 当前分支应视为 `v0.7.2` 基线之上的本地后续演进，最近主要推进了 routing、HITL、logging 和 market/deals 相关能力。
+- 当前分支已发布为 `v0.7.3`，覆盖 v0.7.2 基线以及后续的 runtime/operator 收口工作。
 - v0.5 runtime-first 已完成（包括 runtime hardening pass）。
 - v0.6 主线是 skill-first autonomy + adaptive memory；全部已完成。
 - v0.7.2 在 v0.7 基线上补齐了 auth-first 暂停/恢复、文件驱动 automation、通用 Discord `ask_user` HITL、market briefing 报告能力，以及慢速 direct skill 调用的 skill-specific timeout override。
-- `v0.7.3 phase 1` 已完成：artifact delivery 抽象、thread-scoped unified logs、结构化 HITL answer binding，以及 Discord `/doctor`。
-- `v0.7.3` 剩余工作收敛为 phase 2：operator 打磨、事件驱动入口和远端 delivery 后端。
+- `v0.7.3` 已全部完成：包括 artifact delivery 抽象、thread-scoped unified logs、结构化 HITL answer binding、Discord `/doctor`、automation runtime state 持久化、operator surface 收口、automation timeout 传播，以及 HITL checkpoint 收口。
+- 当前下一个目标是 deferred items 与 `v0.8+`，例如语义检索和 hybrid autonomy。
 - 更后面的版本继续推进语义记忆检索（向量搜索）和 hybrid autonomy。
 - Discord 审批交互采用按钮优先、slash 兜底，reaction 只做状态信号。
 - 可选的 LLM 路由已实现：消息可被分类为 `reply_once`、`invoke_existing_skill`、`propose_artifact_task`、`propose_repo_task`、`create_skill` 或 `repair_skill`。
@@ -518,9 +518,9 @@ author: scheduler
 
 ## 自主性方向
 
-- 当前分支状态应理解为：`v0.7.2 基线 + 本地后续演进`。
-- 当前实现状态可表述为：`v0.7.2 基线 + 本地后续演进 + v0.7.3 phase 1`。
-- 接下来的目标是 `v0.7.3 phase 2`，重点是 operator 打磨、事件驱动和剩余 delivery/runtime 缺口。
+- 当前分支状态应理解为：已发布 `v0.7.3`。
+- 当前实现状态可表述为：v0.7.2 automation/auth 基线之上，已补齐完整的 v0.7.3 HITL/delivery/operator 收口。
+- 接下来的目标是 deferred items 与 `v0.8+`，包括语义检索、hybrid autonomy 和后续 delivery backend。
 - v0.5 建立 runtime-first 基线：长任务执行、恢复、审批和合并闭环（已完成）。
 - v0.6 聚焦 skill-first autonomy + adaptive memory：skill 创建路由验证、跨 session 用户记忆（已完成）。
 - v0.7 建立日期驱动记忆系统基线（已完成）。

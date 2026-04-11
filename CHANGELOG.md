@@ -6,6 +6,8 @@ The format is intentionally lightweight and release-oriented rather than exhaust
 
 ## Unreleased
 
+## v0.7.3 - 2026-04-10
+
 ### Added
 
 - Discord-first owner notifications for `auth_required`, `ask_user`, `DRAFT`, and `WAITING_MERGE`, with a separate ping message in the same thread plus best-effort owner DMs
@@ -13,6 +15,11 @@ The format is intentionally lightweight and release-oriented rather than exhaust
 - Split SQLite runtime layout with dedicated conversation, runtime-state, and skills-telemetry databases
 - Automatic startup migration from legacy monolithic `memory.db` into `memory.db`, `runtime.db`, and `skills.db`, with preserved `.monolith.bak` backup bundles
 - `market-briefing` AI people-pool helper, curated seed file, runtime candidate queue, and X.com/community signal workflow
+- Attachment-first artifact delivery with local absolute-path fallback and delivery-aware completion summaries
+- Thread-scoped unified logs under `~/.oh-my-agent/runtime/logs/threads/` across direct chat, explicit skill invocation, runtime tasks, and HITL resume flows
+- Structured HITL answer payloads carried through task/thread resume context alongside backward-compatible `[HITL Answer]` prompt blocks
+- Discord `/doctor` operator diagnostics for gateway/runtime/HITL/auth/log health snapshots
+- Persisted automation runtime state (`last_run_at`, `last_success_at`, `last_error`, `last_task_id`, `next_run_at`) surfaced through `/automation_status` and `/doctor`
 
 ### Changed
 
@@ -25,6 +32,10 @@ The format is intentionally lightweight and release-oriented rather than exhaust
 - `deals-scanner` daily scans now use source-specific default lookback windows (`3` days for credit-cards/uscardforum/rakuten, `7` days for slickdeals/dealmoon/summary), expose `lookback_window_days` in daily JSON, and treat older carryover items as `Watchlist`-only instead of mixing them into the main summary buckets
 - `memory.path` now refers to the conversation store only; runtime task/auth/HITL/notification/session state moves to `runtime.state_path`, and skill provenance/telemetry moves to `skills.telemetry_path`
 - Runtime task claiming no longer opens a nested `BEGIN IMMEDIATE` transaction on a shared SQLite connection
+- `artifact`, `repo_change`, and `skill_change` runtime flows are now fully closed out for v0.7.3, with delivery/logging/HITL behavior aligned to task type instead of merge-only assumptions
+- `/automation_status` and `/doctor` now read persisted automation runtime state instead of relying on in-memory scheduler snapshots alone
+- Automation-backed executions now honor skill `metadata.timeout_seconds` the same way direct skill invocations do
+- Live task status, merge/discard/request changes, and answered/cancelled HITL prompts now settle into stable final Discord views instead of lingering in a loading state
 
 ## v0.7.2 - 2026-03-16
 

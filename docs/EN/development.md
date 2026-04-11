@@ -49,9 +49,9 @@ Still missing:
 
 ## Next Product Direction
 
-- Current branch state is best read as `v0.7.2 baseline + local follow-up work`.
-- The current state is `v0.7.2 baseline + local follow-up work + v0.7.3 phase 1`.
-- The remaining target is `v0.7.3 phase 2`, not a repeat of phase 1.
+- Current branch state is released `v0.7.3`.
+- v0.7.3 closes the HITL/delivery/operator loop on top of the v0.7.2 baseline.
+- The next target is deferred items plus `v0.8+`, not another v0.7.3 phase.
 - v0.5 delivered runtime-first foundations (complete).
 - v0.6 delivered skill-first autonomy + adaptive memory.
 - v0.7 delivered date-based memory, multi-type runtime, skill evaluation, and the current auth/HITL/runtime pass.
@@ -69,12 +69,17 @@ Still missing:
 - Runtime live agent logging plus richer Discord status handling
 - Codex repo/workspace `.agents/skills/` delivery with generated workspace `AGENTS.md` reduced to rules/metadata
 
-### v0.7.3 phase 1
+### v0.7.3
 
 - Artifact delivery abstraction with attachment-first delivery and local absolute-path fallback
 - Thread-scoped unified agent logs across chat, invoke, runtime task, and HITL resume flows
 - Structured HITL answer binding carried into task/thread resume context
 - Discord `/doctor` for operator-facing gateway/runtime/HITL/auth/log health snapshots
+- Persisted automation runtime state powering `/automation_status` and `/doctor`
+- Skill `metadata.timeout_seconds` propagation through automation-backed execution
+- Delivery closeout on `ArtifactDeliveryResult` without a parallel result type
+- HITL checkpoint/resume closeout with recent-answer-only inheritance and no cross-task leakage
+- Stable final Discord views for merge/discard/request changes and answered/cancelled HITL prompts
 
 ### v0.7.0
 
