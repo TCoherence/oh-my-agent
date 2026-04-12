@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import logging
 import logging.handlers
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from oh_my_agent.logging_setup import KeyValueFormatter, setup_logging
+from oh_my_agent.logging_setup import KeyValueFormatter, setup_logging, _cleanup_old_logs
 
 
 class TestKeyValueFormatter:
@@ -141,3 +142,61 @@ class TestSetupLogging:
         config = {"logging": {"thread_log_retention_days": 30}}
         # Just verify the value is accessible from config — no special handling needed
         assert config["logging"]["thread_log_retention_days"] == 30
+
+
+class TestStartupLogCleanup:
+    def test_old_logs_deleted(self, tmp_path):
+        """Rotated logs older than retention_days are removed on startup."""
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+
+        today = datetime.now(tz=timezone.utc).date()
+        # Create files: 2 old (beyond 3-day retention) + 1 recent + 1 today
+        old_dates = [today - timedelta(days=10), today - timedelta(days=5)]
+        recent_date = today - timedelta(days=1)
+
+        for d in old_dates:
+            (log_dir / f"service.log.{d}").write_text("old")
+        (log_dir / f"service.log.{recent_date}").write_text("recent")
+        (log_dir / "service.log").write_text("current")
+
+        _cleanup_old_logs(log_dir, "service.log", retention_days=3)
+
+        # Old files gone
+        for d in old_dates:
+            assert not (log_dir / f"service.log.{d}").exists()
+        # Recent + current still there
+        assert (log_dir / f"service.log.{recent_date}").exists()
+        assert (log_dir / "service.log").exists()
+
+    def test_no_crash_on_empty_dir(self, tmp_path):
+        """Cleanup on a directory with no rotated files does not crash."""
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        _cleanup_old_logs(log_dir, "service.log", retention_days=7)
+        # no exception = pass
+
+    def test_non_date_suffixes_ignored(self, tmp_path):
+        """Files like service.log.bak are not touched."""
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        (log_dir / "service.log.bak").write_text("backup")
+        (log_dir / "service.log.tmp").write_text("temp")
+
+        _cleanup_old_logs(log_dir, "service.log", retention_days=0)
+
+        assert (log_dir / "service.log.bak").exists()
+        assert (log_dir / "service.log.tmp").exists()
+
+    def test_cleanup_runs_during_setup_logging(self, tmp_path):
+        """setup_logging() triggers cleanup of stale rotated files."""
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+
+        old_date = datetime.now(tz=timezone.utc).date() - timedelta(days=30)
+        stale_file = log_dir / f"service.log.{old_date}"
+        stale_file.write_text("stale")
+
+        setup_logging(None, runtime_root=tmp_path)
+
+        assert not stale_file.exists()

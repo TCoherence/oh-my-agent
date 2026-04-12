@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import logging
 import logging.handlers
+import re
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -106,3 +107,45 @@ def setup_logging(
     )
     file_handler.setFormatter(formatter)
     root.addHandler(file_handler)
+
+    # Startup cleanup: delete rotated log files older than retention period.
+    # TimedRotatingFileHandler only rotates while running — if the process
+    # restarts before midnight, stale files accumulate.  Clean them eagerly.
+    _cleanup_old_logs(log_dir, "service.log", retention_days)
+
+
+# ── Startup log cleanup ──────────────────────────────────────────────── #
+
+# Matches the date suffix that TimedRotatingFileHandler appends,
+# e.g.  service.log.2026-04-10
+_DATE_SUFFIX_RE = re.compile(r"\.(\d{4}-\d{2}-\d{2})$")
+
+
+def _cleanup_old_logs(
+    log_dir: Path,
+    base_name: str,
+    retention_days: int,
+) -> None:
+    """Remove rotated log files older than *retention_days*."""
+    cutoff = datetime.now(tz=timezone.utc).date() - timedelta(days=retention_days)
+    removed: list[str] = []
+
+    for path in sorted(log_dir.glob(f"{base_name}.*")):
+        m = _DATE_SUFFIX_RE.search(path.name)
+        if not m:
+            continue
+        try:
+            file_date = datetime.strptime(m.group(1), "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        if file_date < cutoff:
+            path.unlink(missing_ok=True)
+            removed.append(path.name)
+
+    if removed:
+        logger = logging.getLogger(__name__)
+        logger.info(
+            "Startup log cleanup: removed %d old log file(s): %s",
+            len(removed),
+            ", ".join(removed),
+        )
