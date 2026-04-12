@@ -4,31 +4,6 @@ Multi-platform bot that routes messages to CLI-based AI agents (Claude, Gemini, 
 
 Inspired by [OpenClaw](https://openclaw.dev).
 
-## Status Snapshot (2026-04-10)
-
-- `/search` is implemented with SQLite FTS5 across all threads.
-- `SkillSync` reverse sync is implemented and runs on startup.
-- Current branch state is released `v0.7.3`, covering the v0.7.2 baseline plus the v0.7.3 runtime/operator closeout work.
-- v0.5 is runtime-first: durable autonomous task loops (`DRAFT -> RUNNING -> WAITING_MERGE -> MERGED/...`).
-- v0.6 skill-first autonomy + adaptive memory is complete.
-- v0.7.2 extends the v0.7 line with auth-first runtime pause/resume, file-driven automations, generic Discord-first `ask_user` HITL, market briefings, and skill-specific timeout overrides for slow direct skill invocations.
-- `v0.7.3` is fully implemented: artifact delivery abstraction, thread-scoped unified logs, structured HITL answer binding, Discord `/doctor`, persisted automation runtime state, improved operator surfaces, automation timeout propagation, and HITL checkpoint closeout.
-- Current next target is deferred items plus `v0.8+` work such as semantic retrieval and hybrid autonomy.
-- Discord approvals use buttons first, slash fallback, reactions as status-only signals.
-- Optional LLM routing is implemented: incoming messages can be classified as `reply_once`, `invoke_existing_skill`, `propose_artifact_task`, `propose_repo_task`, `create_skill`, or `repair_skill`.
-- Runtime observability is implemented: `/task_logs`, sampled progress events in SQLite, a single updatable Discord status message, and Discord `/doctor`.
-- Runtime logging now has a thread-scoped primary view under `~/.oh-my-agent/runtime/logs/threads/`, with service-level logs and live agent spool logs under `~/.oh-my-agent/runtime/logs/`.
-- Gateway/message logs now distinguish direct replies, explicit skill invocations, and router-driven reply paths via `purpose=...`; background memory/compression agent runs inherit the same request ID for traceability.
-- Multi-type runtime is implemented: only `repo_change` and `skill_change` tasks use merge gate; `artifact` tasks complete without merge.
-- Runtime hardening is complete: true subprocess interruption, message-driven control (stop/pause/resume), PAUSED state, completion summaries, metrics.
-- Automations are now file-driven under `~/.oh-my-agent/automations/`, with polling-based hot reload and per-file enable/disable.
-- `market-briefing` adds persisted bootstrap/daily/weekly report workflows under `~/.oh-my-agent/reports/market-briefing/` for politics, finance, and AI trend tracking.
-- AI daily in `market-briefing` now supports a tracked people/community pool, X.com as a signal layer with cross-checking, and a runtime candidate queue under `~/.oh-my-agent/reports/market-briefing/state/`.
-- Adaptive memory is implemented: auto-extraction from conversations, injection into agent prompts, `/memories` and `/forget` commands.
-- CLI session resume is implemented for Claude, Codex, and Gemini, with persisted session IDs restored after restart.
-- Auth-first QR login infrastructure is implemented for Discord owner flows, with local credential persistence and runtime resume hooks.
-- Agent/control cooperation now supports `OMA_CONTROL` envelopes for both `auth_required` and generic `ask_user` challenges, so direct chat runs and runtime tasks can pause for owner input and then resume.
-
 ## Architecture
 
 ```text
@@ -389,10 +364,8 @@ Rebuild the image only when you change container-layer concerns such as `Dockerf
 - If an automation is still running, the next fire for the same automation name is skipped instead of queueing overlapping runs.
 - Completed automation messages now post the final result directly in Discord with the automation name, run ID, and an `_artifacts/<task_id>` locator for the generated files.
 - Invalid or conflicting automation files remain log-visible for now; they are intentionally excluded from `/automation_status`.
-- Runtime state is intentionally in-memory only for now:
-  - restart recomputes the next fire time
-  - there is no persisted `last_run` / `next_run` / `last_error`
-  - missed jobs while the process is down are not replayed
+- Automation runtime state (`last_run_at`, `last_success_at`, `next_run_at`, `last_error`, `last_task_id`) is persisted in SQLite and survives restarts.
+- Missed jobs while the process is down are not replayed (policy: `skip`).
 
 Example automation file:
 
@@ -535,13 +508,12 @@ author: scheduler
 
 ## Autonomy Direction
 
-- Current branch state should be read as released `v0.7.3`.
-- The v0.7 line now includes the v0.7.2 automation/auth groundwork plus the full v0.7.3 HITL/delivery/operator closeout.
-- The next target is deferred items plus `v0.8+`, including semantic retrieval, hybrid autonomy, and remaining delivery backends.
+- Current release: `v0.8.0` — 1.0 hardening complete (service-layer extraction, graceful shutdown, structured logging, markdown chunker, rate-limiting, compose.yaml, operator guides).
 - v0.5 establishes the runtime-first baseline: durable task execution, merge gating, and recovery.
 - v0.6 focuses on skill-first autonomy + adaptive memory: skill creation, skill routing, skill validation, reusable capability growth, and cross-session user knowledge.
-- v0.7 delivers date-based memory; v0.7.2 closes the current auth/runtime/video/automation/HITL pass on top of it.
-- v0.8+ adds semantic memory retrieval (vector search) and broader hybrid autonomy.
+- v0.7 delivers date-based memory; v0.7.2 closes the auth/runtime/automation/HITL pass; v0.7.3 closes HITL/delivery/operator observability.
+- v0.8 adds 1.0 hardening: platform-agnostic service layer, reliability, deployment.
+- v0.9 targets 1.0 RC / contract freeze: end-to-end restart/recovery tests, upgrade validation, and operator-grade docs.
 - Source-code self-modification may exist as a high-risk, strongly gated capability, but it is not the default autonomy path.
 
 ## Current Limits
@@ -556,7 +528,7 @@ author: scheduler
 - HITL completion is now structured for single-choice flows, but free-text HITL, multi-select prompts, and richer checkpoint families are still out of scope.
 - Free-text HITL, multi-select prompts, non-Discord interactive UIs, and prompt expiry policies are still intentionally out of scope.
 - Codex repo/workspace skill discovery now uses official `.agents/skills/`; the generated `AGENTS.md` is no longer used to enumerate workspace skills.
-- Memory retrieval still uses Jaccard word-overlap for similarity; semantic (vector) retrieval remains a v0.8+ item.
+- Memory retrieval still uses Jaccard word-overlap for similarity; semantic (vector) retrieval is a post-1.0 item.
 
 ## Documentation
 
