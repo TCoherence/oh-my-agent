@@ -1,0 +1,4 @@
+interface:
+  display_name: "Seattle Housing Watch"
+  short_description: "Seattle metro housing pulse reports"
+  default_prompt: "Use the seattle-metro-housing-watch skill to produce a Chinese Seattle metro housing report. Default to weekly_pulse, persist Markdown and JSON outputs under ~/.oh-my-agent/reports/seattle-metro-housing-watch/, use only public sources, include a 5-area scoreboard for Seattle/Bellevue/Redmond/Kirkland/Issaquah, and include representative sample listings as secondary evidence rather than the factual spine."
