@@ -2605,6 +2605,11 @@ class SQLiteScopedStore(SQLiteMemoryStore):
                 raise RuntimeError(
                     f"{self._label} store at {self._db_path} has unexpected tables: {sorted(unexpected)}"
                 )
+            # Re-run full schema DDL on existing databases so that
+            # newly added tables (CREATE TABLE IF NOT EXISTS) are
+            # created even when the DB already has older tables.
+            await db.executescript(self.SCHEMA_SQL)
+            await self._drop_unkept_tables()
             await self._migrate_runtime_schema()
             await db.commit()
         logger.info("%s store initialised at %s", self._label, self._db_path)

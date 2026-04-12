@@ -13,6 +13,7 @@ from oh_my_agent.memory.store import (
     RUNTIME_STATE_TABLES,
     SKILLS_TELEMETRY_TABLES,
     SQLiteMemoryStore,
+    SQLiteRuntimeStateStore,
     SplitSQLiteMemoryStore,
     maybe_split_legacy_memory_db,
 )
@@ -386,5 +387,50 @@ async def test_split_migration_backfills_runtime_task_defaults_and_recovers_from
         assert task is not None
         assert task.task_type == "repo_change"
         assert task.completion_mode == "merge"
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_existing_runtime_db_creates_missing_tables_on_init(tmp_path):
+    """Regression: an existing runtime.db missing newly added tables
+    (e.g. automation_runtime_state) must auto-create them on init."""
+    runtime_path = tmp_path / "runtime.db"
+
+    # Create a minimal runtime DB with only agent_sessions
+    with sqlite3.connect(runtime_path) as conn:
+        conn.execute(
+            """CREATE TABLE agent_sessions (
+                platform TEXT, channel_id TEXT, thread_id TEXT,
+                agent TEXT, session_id TEXT,
+                PRIMARY KEY (platform, channel_id, thread_id, agent))"""
+        )
+        conn.execute(
+            "INSERT INTO agent_sessions VALUES ('discord','100','t1','codex','s1')"
+        )
+        conn.commit()
+
+    # Before init: table does NOT exist
+    pre_tables = _tables(runtime_path)
+    assert "automation_runtime_state" not in pre_tables
+
+    store = SQLiteRuntimeStateStore(runtime_path)
+    await store.init()
+    try:
+        # After init: table MUST exist
+        post_tables = _tables(runtime_path)
+        assert "automation_runtime_state" in post_tables
+
+        # And the table is functional
+        await store.upsert_automation_state(
+            name="test-job",
+            platform="discord",
+            channel_id="100",
+            enabled=True,
+            next_run_at="2026-04-12T00:00:00",
+        )
+        state = await store.get_automation_state("test-job")
+        assert state is not None
+        assert state.name == "test-job"
     finally:
         await store.close()
