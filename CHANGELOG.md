@@ -6,6 +6,39 @@ The format is intentionally lightweight and release-oriented rather than exhaust
 
 ## Unreleased
 
+## v0.8.0 - 2026-04-12
+
+### Added
+
+- Service-layer package (`gateway/services/`) with shared result types (`ServiceResult`, `TaskActionResult`, `MemoryResult`, etc.) and a `BaseService` ABC that wires logger, config, channel, and optional registry
+- `TaskService`: extracted all task-control business logic (start, stop, pause, resume, approve, reject, suggest, discard, merge, changes, logs, cleanup, list, status) from `discord.py` into a platform-agnostic service; Discord slash commands are now thin call-through wrappers
+- `AskService`: extracted ask / agent-select / thread-reset / history / search logic from `discord.py`; session state managed cleanly in one place
+- `DoctorService` and `AutomationService`: doctor diagnostics and automation operator commands (status, reload, enable, disable) separated from the Discord adapter
+- `HITLService`: interactive HITL surface (button callbacks, approval/rejection/suggestion/request-changes flows) extracted from the Discord `View` lifecycle into a testable, platform-agnostic layer
+- `BaseChannel` extensions: `edit_message()`, `upload_file()`, and `interactive_prompt()` added to the contract with Discord implementations
+- `--validate-config` CLI flag: startup config schema validation with fail-fast reporting of missing fields and invalid values
+- Schema version tracking in `SQLiteScopedStore`: `schema_versions` table stores per-scope schema version; `migrate_runtime_schema()` applies forward-only migrations without data loss
+- Markdown-aware message chunker (`utils/chunker.py`): fenced code blocks (`` ``` `` / `~~~`) are never split mid-block; oversized blocks split by line with fence close/re-open; plain text chunks respect word boundaries
+- Structured logging (`logging_setup.py`): `KeyValueFormatter` emits `key=value` pairs for machine-parseable log lines; `setup_logging()` wires `TimedRotatingFileHandler` (daily rotation, 7-day retention) alongside console output; startup cleanup removes stale rotated `service.log.YYYY-MM-DD` files older than the retention window
+- Graceful shutdown contract: `GatewayManager.stop()` signals the Discord gateway, drains in-flight runtime workers, cancels agent subprocesses, and flushes SQLite WAL before exit; `main.py` hooks into `SIGINT`/`SIGTERM`
+- User-visible error contract: unhandled exceptions in command handlers and skill dispatch now surface a short, readable message to the user instead of a raw traceback; full traceback is preserved in the log
+- Rate-limit / request queue: per-channel async semaphore limits concurrent agent calls; overflow messages receive a "busy" reply instead of silently queuing indefinitely
+- Concurrent thread/task isolation tests: `tests/test_concurrent_isolation.py` covers simultaneous task creation, per-channel semaphore enforcement, and cross-thread memory isolation
+- `compose.yaml`: first-class Docker Compose config with named `oma-runtime` volume, environment forwarding for API keys and agent overrides, health-check, and restart policy
+- Operator guide (`docs/EN/operator-guide.md` and `docs/CN/operator-guide.md`): covers local install, Docker/Compose install, restart, diagnostics, automation, backup, and upgrade/migration SOPs
+- `seattle-metro-housing-watch` skill: tri-weekly housing market analysis for the Greater Seattle area across five domains (affordability/inventory, luxury/condo, rental, interest-rate/macro, regional/suburb); supports `bootstrap_backfill` and `weekly_digest` modes with persisted report storage
+
+### Fixed
+
+- Existing `runtime.db` databases missing newly added tables (e.g., `automation_runtime_state`) on startup: `SQLiteScopedStore.init()` now re-runs the full `SCHEMA_SQL` DDL (`CREATE TABLE IF NOT EXISTS`) on both new and existing databases before committing
+- Stale rotated log files not cleaned up when the process never ran through midnight: `_cleanup_old_logs()` now runs at startup and removes `service.log.YYYY-MM-DD` files beyond the 7-day retention window
+
+### Changed
+
+- Discord slash command handlers in `discord.py` are now thin wrappers that delegate entirely to the corresponding service; no business logic remains in the adapter
+- `_setup_logging()` in `main.py` delegates to `logging_setup.setup_logging()` and passes runtime config (log level, retention days)
+- `v0.8` items in `docs/EN/todo.md` and `docs/CN/todo.md` marked complete; snapshot date updated to 2026-04-12
+
 ## v0.7.3 - 2026-04-10
 
 ### Added

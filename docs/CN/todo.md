@@ -1,11 +1,12 @@
 # Todo / 路线图
 
-## 当前快照（2026-04-10）
+## 当前快照（2026-04-12）
 
 - `/search` 已实现。
 - SkillSync reverse sync 已实现。
 - CLI-first 基础设施已经到位。
-- 当前分支已发布为 `v0.7.3`。
+- `v0.7.3` 已发布（phase 1–3 完成）。
+- `v0.8.0` 已发布（全部四个 phase 完成）。详见 CHANGELOG。
 - v0.5 runtime-first 已完成（包括 runtime hardening pass）。
 - 可选 LLM router 已实现。
 - Runtime 可观测性基线已实现。
@@ -17,8 +18,10 @@
 - 基于日期的记忆系统已实现（daily/curated 两层架构、自动晋升、MEMORY.md 合成、`/promote`）。
 - 图片附件支持已实现（Discord 下载、per-agent 处理、临时文件生命周期管理）。
 - Codex repo/workspace skill 发现已切到官方 `.agents/skills/`；生成的 workspace `AGENTS.md` 只保留 rules/metadata。
-- `v0.7.3` 已全部实现（phase 1–3）。
-- 当前下一个目标：`v0.8`（1.0 hardening）。详见 `v1.0-plan.md`。
+- Service-layer 提取完成（task、ask、doctor、automation、HITL 服务）。
+- Markdown-aware chunker、结构化日志、graceful shutdown、错误展示契约、速率限制、并发隔离测试均已实现。
+- 首个正式 `compose.yaml` 和运营指南（EN + CN）已发布。
+- 当前下一个目标：`v0.9`（1.0 RC / Contract Freeze）。详见 `v1.0-plan.md`。
 
 ## v0.5 Runtime 加固（已完成）
 
@@ -116,34 +119,34 @@
 - [x] **Resume 语义收尾**：task HITL 恢复到 PENDING 并携带结构化 + 文本 payload；thread HITL 自动恢复并继承 `last_hitl_answer`（仅保留最新，无链式传递）；跨 task 隔离通过 `task_id` 范围的事件查询实现
 - [x] **Operator 可见的 HITL 状态**：`/task_logs` 展示活跃/最近的 HITL checkpoint 问题和已选答案
 
-## v0.8 — 1.0 Hardening
+## v0.8 — 1.0 Hardening（已完成）
 
 详见 [`v1.0-plan.md`](v1.0-plan.md)。
 
 ### 1. 平台抽象（Platform Abstraction）
-- [ ] 从 `discord.py` 提取 service-layer 架构（平台无关的业务逻辑）
-- [ ] task control service（最高优先级 — 命令最多、状态逻辑最重）
-- [ ] ask service（核心入口路径）
-- [ ] doctor / automation / auth / memory services
-- [ ] BaseChannel contract review：message edit、attachment upload、interactive prompt 等
+- [x] 从 `discord.py` 提取 service-layer 架构（平台无关的业务逻辑）
+- [x] task control service（最高优先级 — 命令最多、状态逻辑最重）
+- [x] ask service（核心入口路径）
+- [x] doctor / automation / auth / memory services
+- [x] BaseChannel contract review：message edit、attachment upload、interactive prompt 等
 
 ### 2. 可靠性加固（Reliability Hardening）
-- [ ] graceful shutdown contract（gateway、runtime workers、subprocesses、SQLite/WAL）
-- [ ] startup config validation（schema 校验、fail-fast、CLI binary 检查）
-- [ ] upgrade/migration contract（SQLite schema、config 兼容性、skill/workspace 路径迁移）
-- [ ] markdown-aware chunking
-- [ ] rate-limit / request queue
-- [ ] concurrent thread/task isolation testing
-- [ ] log hygiene（rotation、log-level config、structured logging）
-- [ ] user-visible error contract（readable messages, not tracebacks）
+- [x] graceful shutdown contract（gateway、runtime workers、subprocesses、SQLite/WAL）
+- [x] startup config validation（schema 校验、fail-fast、CLI binary 检查）
+- [x] upgrade/migration contract（SQLite schema、config 兼容性、skill/workspace 路径迁移）
+- [x] markdown-aware chunking
+- [x] rate-limit / request queue
+- [x] concurrent thread/task isolation testing
+- [x] log hygiene（rotation、log-level config、structured logging）
+- [x] user-visible error contract（readable messages, not tracebacks）
 - [x] missed-job policy = `skip`（已实现，需文档化和测试覆盖）
 
 ### 3. 部署加固（Deployment Hardening）
-- [ ] first-class `docker-compose`
-- [ ] local vs Docker 安装/运行文档统一
-- [ ] runtime directories / backup / restore instructions
-- [ ] operator-facing restart and upgrade SOP
-- [ ] health-check for long-running service mode
+- [x] first-class `docker-compose`
+- [x] local vs Docker 安装/运行文档统一
+- [x] runtime directories / backup / restore instructions
+- [x] operator-facing restart and upgrade SOP
+- [x] health-check for long-running service mode
 
 ## v0.9 — 1.0 RC / Contract Freeze
 

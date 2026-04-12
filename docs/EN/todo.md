@@ -1,11 +1,12 @@
 # Todo / Roadmap
 
-## Snapshot (2026-04-10)
+## Snapshot (2026-04-12)
 
 - `/search` is implemented.
 - SkillSync reverse sync is implemented.
 - CLI-first foundations are in place.
-- Current branch state is released `v0.7.3`.
+- `v0.7.3` is released (phases 1–3 complete).
+- `v0.8.0` is released (all four phases complete). See CHANGELOG for full details.
 - v0.5 runtime-first is complete (including runtime hardening pass).
 - Optional LLM router is implemented.
 - Runtime observability baseline is implemented.
@@ -17,8 +18,10 @@
 - Date-based memory is implemented (daily/curated two-tier, auto-promotion, MEMORY.md synthesis, `/promote`).
 - Image attachment support is implemented (Discord download, per-agent handling, temp file lifecycle).
 - Codex repo/workspace skill discovery now uses official `.agents/skills/`; generated workspace `AGENTS.md` is reduced to rules/metadata.
-- `v0.7.3` is now fully implemented (phases 1–3).
-- Current next target: `v0.8` (1.0 hardening). See `v1.0-plan.md` for full roadmap.
+- Service-layer extraction is complete (task, ask, doctor, automation, HITL services).
+- Markdown-aware chunker, structured logging, graceful shutdown, error contract, rate-limiting, and concurrent isolation tests are all implemented.
+- First-class `compose.yaml` and operator guides (EN + CN) are published.
+- Current next target: `v0.9` (1.0 RC / Contract Freeze). See `v1.0-plan.md` for full roadmap.
 
 ## v0.5 Runtime Hardening (complete)
 
@@ -116,34 +119,34 @@ Upgrade adaptive memory from flat YAML to a date-organized, two-tier architectur
 - [x] **Resume semantics closeout**: task HITL resumes to PENDING with structured + text payload; thread HITL auto-resumes with `last_hitl_answer` inheritance (latest only, no chain); cross-task isolation via `task_id`-scoped event queries
 - [x] **Operator-visible HITL status**: `/task_logs` shows active/last HITL checkpoint question and selected answer
 
-## v0.8 — 1.0 Hardening
+## v0.8 — 1.0 Hardening (complete)
 
 Full details in [`v1.0-plan.md`](v1.0-plan.md).
 
 ### 1. Platform Abstraction
-- [ ] Extract service-layer architecture from `discord.py` (platform-agnostic business logic)
-- [ ] Task control service (highest priority — most commands, heaviest state logic)
-- [ ] Ask service (core entry path)
-- [ ] Doctor / automation / auth / memory services
-- [ ] BaseChannel contract review: message edit, attachment upload, interactive prompt, etc.
+- [x] Extract service-layer architecture from `discord.py` (platform-agnostic business logic)
+- [x] Task control service (highest priority — most commands, heaviest state logic)
+- [x] Ask service (core entry path)
+- [x] Doctor / automation / auth / memory services
+- [x] BaseChannel contract review: message edit, attachment upload, interactive prompt, etc.
 
 ### 2. Reliability Hardening
-- [ ] Graceful shutdown contract (gateway, runtime workers, subprocesses, SQLite/WAL)
-- [ ] Startup config validation (schema checks, fail-fast, CLI binary validation)
-- [ ] Upgrade/migration contract (SQLite schema, config compat, skill/workspace path migrations)
-- [ ] Markdown-aware chunking
-- [ ] Rate-limit / request queue
-- [ ] Concurrent thread/task isolation testing
-- [ ] Log hygiene (rotation, log-level config, structured logging)
-- [ ] User-visible error contract (readable messages, not tracebacks)
+- [x] Graceful shutdown contract (gateway, runtime workers, subprocesses, SQLite/WAL)
+- [x] Startup config validation (schema checks, fail-fast, CLI binary validation)
+- [x] Upgrade/migration contract (SQLite schema, config compat, skill/workspace path migrations)
+- [x] Markdown-aware chunking
+- [x] Rate-limit / request queue
+- [x] Concurrent thread/task isolation testing
+- [x] Log hygiene (rotation, log-level config, structured logging)
+- [x] User-visible error contract (readable messages, not tracebacks)
 - [x] Missed-job policy = `skip` (implemented; needs documentation and test coverage)
 
 ### 3. Deployment Hardening
-- [ ] First-class `docker-compose`
-- [ ] Local vs Docker install/run documentation parity
-- [ ] Runtime directories / backup / restore instructions
-- [ ] Operator-facing restart and upgrade SOPs
-- [ ] Health-check for long-running service mode
+- [x] First-class `docker-compose`
+- [x] Local vs Docker install/run documentation parity
+- [x] Runtime directories / backup / restore instructions
+- [x] Operator-facing restart and upgrade SOPs
+- [x] Health-check for long-running service mode
 
 ## v0.9 — 1.0 RC / Contract Freeze
 
