@@ -14,16 +14,23 @@ from pathlib import Path
 import yaml
 
 from oh_my_agent.memory.adaptive import (
+    VALID_DURABILITY,
     VALID_EXPLICITNESS,
+    VALID_SCOPES,
     VALID_STATUS,
     VALID_CATEGORIES,
     MemoryEntry,
+    broadened_scope,
     eviction_score,
     find_duplicate,
     jaccard_similarity,
     lexical_match_kind,
+    memory_bucket,
     memory_entry_from_dict,
     normalized_word_set,
+    scope_matches,
+    scope_score_multiplier,
+    stronger_durability,
     word_set,
 )
 
@@ -220,6 +227,10 @@ class DateBasedMemoryStore:
             entry.explicitness = "inferred"
         if entry.status not in VALID_STATUS:
             entry.status = "active"
+        if entry.scope not in VALID_SCOPES:
+            entry.scope = "global_user"
+        if entry.durability not in VALID_DURABILITY:
+            entry.durability = "medium"
         entry.confidence = max(0.0, min(1.0, entry.confidence))
         entry.tier = "daily"
         if not entry.last_observed_at:
@@ -236,8 +247,15 @@ class DateBasedMemoryStore:
         existing.last_observed_at = now
         if entry.explicitness == "explicit":
             existing.explicitness = "explicit"
+        existing.scope = broadened_scope(existing.scope, entry.scope)
+        existing.durability = stronger_durability(existing.durability, entry.durability)
         if entry.evidence and len(entry.evidence) >= len(existing.evidence):
             existing.evidence = entry.evidence
+        for skill in entry.source_skills:
+            if skill not in existing.source_skills:
+                existing.source_skills.append(skill)
+        if entry.source_workspace and not existing.source_workspace:
+            existing.source_workspace = entry.source_workspace
         for t in entry.source_threads:
             if t not in existing.source_threads:
                 existing.source_threads.append(t)
@@ -451,8 +469,17 @@ class DateBasedMemoryStore:
             await self._promote_eligible(req_id=req_id)
             return added
 
-    async def get_relevant(self, context: str, budget_chars: int = 500) -> list[MemoryEntry]:
-        """Return memories relevant to context. Curated first (60% budget), then daily with decay."""
+    async def get_relevant(
+        self,
+        context: str,
+        budget_chars: int = 500,
+        *,
+        skill_name: str | None = None,
+        thread_id: str | None = None,
+        workspace: str | None = None,
+        thread_topic: str | None = None,
+    ) -> list[MemoryEntry]:
+        """Return memories relevant to context using scope-aware bucketed ranking."""
         all_mems = [m for m in self.memories if m.status == "active"]
         self._last_retrieval_stats = {
             "filtered_superseded_count": len([m for m in self.memories if m.status != "active"]),
@@ -460,46 +487,85 @@ class DateBasedMemoryStore:
         if not all_mems:
             return []
 
-        context_words = normalized_word_set(context)
+        query_text = "\n".join(
+            part for part in [context, thread_topic or "", skill_name or ""] if part
+        ).strip()
+        context_words = normalized_word_set(query_text)
 
         def _score(m: MemoryEntry) -> float:
+            multiplier = scope_score_multiplier(
+                m,
+                skill_name=skill_name,
+                thread_id=thread_id,
+                workspace=workspace,
+            )
+            if multiplier <= 0:
+                return 0.0
             sim = jaccard_similarity(context_words, normalized_word_set(m.summary))
-            if m.category == "preference":
-                sim = max(sim, 0.1)
-            base = sim * m.confidence
+            base = sim * m.confidence * multiplier
             if m.tier == "daily":
                 age = _age_days(m.created_at)
                 base *= _decay_factor(age, self._decay_half_life_days)
             return base
 
-        curated_scored = [(s, m) for m in self._curated if m.status == "active" and (s := _score(m)) > 0]
-        daily_scored = [(s, m) for m in self._all_daily() if m.status == "active" and (s := _score(m)) > 0]
+        buckets = {
+            "skill_scoped": [],
+            "workspace_project": [],
+            "global_preference": [],
+            "recent_daily": [],
+        }
+        for memory in all_mems:
+            score = _score(memory)
+            if score <= 0:
+                continue
+            if memory.scope != "global_user" and not scope_matches(
+                memory,
+                skill_name=skill_name,
+                thread_id=thread_id,
+                workspace=workspace,
+            ):
+                continue
+            buckets[memory_bucket(memory)].append((score, memory))
 
-        curated_scored.sort(key=lambda x: x[0], reverse=True)
-        daily_scored.sort(key=lambda x: x[0], reverse=True)
+        for values in buckets.values():
+            values.sort(key=lambda item: item[0], reverse=True)
 
-        # Curated gets 60% budget
-        curated_budget = int(budget_chars * 0.6)
-        result: list[MemoryEntry] = []
+        bucket_limits = {
+            "skill_scoped": 2,
+            "workspace_project": 2,
+            "global_preference": 2,
+            "recent_daily": 2,
+        }
+        selected: list[MemoryEntry] = []
+        selected_ids: set[str] = set()
         chars_used = 0
+        selected_counts: dict[str, int] = {}
+        for bucket_name in ("skill_scoped", "workspace_project", "global_preference", "recent_daily"):
+            taken = 0
+            for _score_val, memory in buckets[bucket_name]:
+                if taken >= bucket_limits[bucket_name]:
+                    break
+                if memory.id in selected_ids:
+                    continue
+                entry_chars = len(memory.summary) + 10
+                if chars_used + entry_chars > budget_chars and selected:
+                    break
+                selected.append(memory)
+                selected_ids.add(memory.id)
+                chars_used += entry_chars
+                taken += 1
+            selected_counts[bucket_name] = taken
 
-        for _score_val, m in curated_scored:
-            entry_chars = len(m.summary) + 10
-            if chars_used + entry_chars > curated_budget and result:
-                break
-            result.append(m)
-            chars_used += entry_chars
-
-        # Remaining budget goes to daily
-        remaining_budget = budget_chars - chars_used
-        for _score_val, m in daily_scored:
-            entry_chars = len(m.summary) + 10
-            if chars_used + entry_chars > budget_chars and len(result) > len([r for r in result if r.tier == "curated"]):
-                break
-            result.append(m)
-            chars_used += entry_chars
-
-        return result
+        self._last_retrieval_stats.update(
+            {
+                "selected_count": len(selected),
+                "selected_skill_scoped": selected_counts.get("skill_scoped", 0),
+                "selected_workspace_project": selected_counts.get("workspace_project", 0),
+                "selected_global_preference": selected_counts.get("global_preference", 0),
+                "selected_recent_daily": selected_counts.get("recent_daily", 0),
+            }
+        )
+        return selected
 
     @property
     def last_retrieval_stats(self) -> dict[str, int]:
@@ -536,6 +602,8 @@ class DateBasedMemoryStore:
             for d, entries in self._daily_cache.items():
                 for i, m in enumerate(entries):
                     if m.id == memory_id:
+                        if m.scope == "thread" or m.durability == "ephemeral":
+                            return False
                         dup = find_duplicate(m.summary, self._active_curated(), threshold=0.75)
                         if dup is not None:
                             self._merge_into(self._active_curated()[dup], m)
@@ -559,6 +627,8 @@ class DateBasedMemoryStore:
         by_cat: dict[str, list[str]] = {}
         for m in self._curated:
             if m.status != "active":
+                continue
+            if m.scope == "thread" or m.durability == "ephemeral":
                 continue
             by_cat.setdefault(m.category, []).append(m.summary)
 
@@ -632,6 +702,8 @@ class DateBasedMemoryStore:
                 fast_path = (
                     m.explicitness == "explicit"
                     and m.status == "active"
+                    and m.scope != "thread"
+                    and m.durability != "ephemeral"
                     and m.confidence >= 0.85
                     and m.observation_count >= 2
                     and m.category in {"preference", "workflow", "project_knowledge"}
@@ -639,6 +711,8 @@ class DateBasedMemoryStore:
                 slow_path = (
                     m.explicitness == "inferred"
                     and m.status == "active"
+                    and m.scope != "thread"
+                    and m.durability != "ephemeral"
                     and m.confidence >= 0.80
                     and (m.observation_count >= 3 or source_diverse)
                 )

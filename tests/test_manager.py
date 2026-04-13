@@ -263,6 +263,85 @@ async def test_memory_extract_skips_when_no_new_user_turn(caplog):
 
 
 @pytest.mark.asyncio
+async def test_handle_message_passes_memory_context_to_retrieval(tmp_path):
+    channel = MagicMock()
+    channel.platform = "discord"
+    channel.channel_id = "100"
+    channel.create_thread = AsyncMock()
+    channel.send = AsyncMock()
+    channel.typing = MagicMock()
+    channel.typing.return_value.__aenter__ = AsyncMock(return_value=None)
+    channel.typing.return_value.__aexit__ = AsyncMock(return_value=False)
+
+    mock_agent = MagicMock()
+    mock_agent.name = "claude"
+    registry = MagicMock(spec=AgentRegistry)
+    registry.agents = [mock_agent]
+    registry.run = AsyncMock(return_value=(mock_agent, AgentResponse(text="reply")))
+
+    session = _make_session(channel=channel, registry=registry)
+    adaptive_store = MagicMock()
+    adaptive_store.get_relevant = AsyncMock(return_value=[])
+    adaptive_store.last_retrieval_stats = {}
+
+    skills_root = tmp_path / "skills"
+    skill_dir = skills_root / "top-5-daily-news"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("name: top-5-daily-news\n", encoding="utf-8")
+    syncer = MagicMock()
+    syncer._skills_path = skills_root  # noqa: SLF001
+
+    gm = GatewayManager(
+        [],
+        adaptive_memory_store=adaptive_store,
+        repo_root=tmp_path,
+        skill_syncer=syncer,
+    )
+
+    msg = _make_msg(thread_id="thread-1", content="/top-5-daily-news tell me the news")
+    await gm.handle_message(session, registry, msg)
+
+    kwargs = adaptive_store.get_relevant.await_args.kwargs
+    assert kwargs["skill_name"] == "top-5-daily-news"
+    assert kwargs["thread_id"] == "thread-1"
+    assert kwargs["workspace"] == str(tmp_path)
+    assert "top-5-daily-news tell me the news" in kwargs["thread_topic"]
+
+
+@pytest.mark.asyncio
+async def test_memory_extract_passes_skill_and_workspace_context(tmp_path):
+    session = MagicMock()
+    session.platform = "discord"
+    session.channel_id = "100"
+    session.get_history = AsyncMock(
+        return_value=[
+            {"role": "user", "content": "/market-briefing finance please"},
+            {"role": "assistant", "content": "ok"},
+            {"role": "user", "content": "focus on volatility"},
+        ]
+    )
+    registry = MagicMock(spec=AgentRegistry)
+    extractor = MagicMock()
+    extractor.extract = AsyncMock(return_value=[])
+    gm = GatewayManager([], memory_extractor=extractor, repo_root=tmp_path)
+
+    await gm._try_compress_and_extract(
+        session,
+        registry,
+        "thread-1",
+        "req-1",
+        skill_name="market-briefing",
+        source_workspace=str(tmp_path),
+        thread_topic="finance briefing | volatility",
+    )
+
+    kwargs = extractor.extract.await_args.kwargs
+    assert kwargs["skill_name"] == "market-briefing"
+    assert kwargs["source_workspace"] == str(tmp_path)
+    assert kwargs["thread_topic"] == "finance briefing | volatility"
+
+
+@pytest.mark.asyncio
 async def test_handle_message_passes_log_path_for_chat_runs(tmp_path):
     channel = MagicMock()
     channel.platform = "discord"

@@ -30,7 +30,7 @@ def _mock_registry(response_text, error=None):
 
 @pytest.mark.asyncio
 async def test_valid_json_parsing(extractor, store):
-    registry = _mock_registry('[{"summary": "User prefers dark mode", "category": "preference", "confidence": 0.9, "explicitness": "explicit", "evidence": "I always use dark mode"}]')
+    registry = _mock_registry('[{"summary": "User prefers dark mode", "category": "preference", "confidence": 0.9, "explicitness": "explicit", "scope": "global_user", "durability": "long", "evidence": "I always use dark mode"}]')
     turns = [
         {"role": "user", "content": "I always use dark mode"},
         {"role": "assistant", "content": "Noted!"},
@@ -41,6 +41,8 @@ async def test_valid_json_parsing(extractor, store):
     assert result[0].summary == "User prefers dark mode"
     assert result[0].category == "preference"
     assert result[0].explicitness == "explicit"
+    assert result[0].scope == "global_user"
+    assert result[0].durability == "long"
     assert result[0].evidence == "I always use dark mode"
     assert len(store.memories) == 1
     assert registry.run.call_args.kwargs["run_label"] == "memory_extract req=req123 thread=t1"
@@ -150,7 +152,7 @@ async def test_extract_triggers_memory_synthesis_when_needed():
 @pytest.mark.asyncio
 async def test_parse_response_static():
     entries, rejected, parse_failure = MemoryExtractor._parse_response(
-        '```\n[{"summary": "test", "category": "fact", "confidence": 0.5, "explicitness": "inferred", "evidence": "test"}]\n```',
+        '```\n[{"summary": "test", "category": "fact", "confidence": 0.5, "explicitness": "inferred", "scope": "workspace", "durability": "medium", "evidence": "test"}]\n```',
         thread_id="t1",
     )
     assert len(entries) == 1
@@ -158,6 +160,8 @@ async def test_parse_response_static():
     assert parse_failure is False
     assert entries[0].summary == "test"
     assert entries[0].source_threads == ["t1"]
+    assert entries[0].scope == "workspace"
+    assert entries[0].durability == "medium"
 
 
 def test_build_recent_window_keeps_recent_user_turns_and_truncates_assistant():
@@ -203,3 +207,29 @@ async def test_extract_retries_with_simplified_schema_on_parse_failure(store):
 
     assert len(result) == 1
     assert registry.run.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_extract_applies_context_defaults_for_scope_and_sources(store):
+    extractor = MemoryExtractor(store)
+    registry = _mock_registry(
+        '[{"summary": "The project uses a strict changelog workflow", "category": "project_knowledge", "confidence": 0.82, "explicitness": "explicit", "evidence": "keep changelog updated"}]'
+    )
+
+    result = await extractor.extract(
+        [
+            {"role": "user", "content": "Please keep changelog updated for this repo"},
+            {"role": "assistant", "content": "ok"},
+        ],
+        registry,
+        thread_id="t-scope",
+        skill_name="market-briefing",
+        source_workspace="/repo/root",
+        thread_topic="repo maintenance",
+    )
+
+    assert len(result) == 1
+    assert result[0].scope == "workspace"
+    assert result[0].durability == "long"
+    assert result[0].source_skills == ["market-briefing"]
+    assert result[0].source_workspace == "/repo/root"

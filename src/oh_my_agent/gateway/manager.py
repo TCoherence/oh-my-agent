@@ -1144,15 +1144,25 @@ class GatewayManager:
             agent_prompt = f"/{routed_skill}\n\n{agent_prompt}".strip()
         if self._adaptive_memory_store:
             try:
+                thread_topic = self._memory_thread_topic(history)
                 relevant = await self._adaptive_memory_store.get_relevant(
-                    msg.content, budget_chars=self._adaptive_memory_budget,
+                    msg.content,
+                    budget_chars=self._adaptive_memory_budget,
+                    skill_name=tracked_skill,
+                    thread_id=thread_id,
+                    workspace=str(self._repo_root),
+                    thread_topic=thread_topic,
                 )
                 retrieval_stats = getattr(self._adaptive_memory_store, "last_retrieval_stats", {})
                 logger.info(
-                    "[%s] memory_inject selected_count=%d filtered_superseded_count=%d",
+                    "[%s] memory_inject selected_count=%d filtered_superseded_count=%d skill_scoped=%d workspace_project=%d global_preference=%d recent_daily=%d",
                     req_id,
                     len(relevant),
                     int(retrieval_stats.get("filtered_superseded_count", 0)),
+                    int(retrieval_stats.get("selected_skill_scoped", 0)),
+                    int(retrieval_stats.get("selected_workspace_project", 0)),
+                    int(retrieval_stats.get("selected_global_preference", 0)),
+                    int(retrieval_stats.get("selected_recent_daily", 0)),
                 )
                 if relevant:
                     mem_lines = [f"- {m.summary}" for m in relevant]
@@ -1297,7 +1307,15 @@ class GatewayManager:
         # Async: check compression + memory extraction (don't block the response)
         if self._compressor or self._memory_extractor:
             asyncio.create_task(
-                self._try_compress_and_extract(session, registry, thread_id, req_id)
+                self._try_compress_and_extract(
+                    session,
+                    registry,
+                    thread_id,
+                    req_id,
+                    skill_name=tracked_skill,
+                    source_workspace=str(self._repo_root),
+                    thread_topic=self._memory_thread_topic(history),
+                )
             )
 
         # Async: detect and hot-reload new skills created by agents
@@ -1401,6 +1419,10 @@ class GatewayManager:
         registry: AgentRegistry,
         thread_id: str,
         req_id: str,
+        *,
+        skill_name: str | None = None,
+        source_workspace: str | None = None,
+        thread_topic: str | None = None,
     ) -> None:
         """Extract memories first (pre-compaction flush), then compress."""
         # 1. Extract memories from the full (uncompressed) history
@@ -1432,7 +1454,13 @@ class GatewayManager:
                     )
                 else:
                     entries = await self._memory_extractor.extract(
-                        history, registry, thread_id=thread_id, req_id=req_id,
+                        history,
+                        registry,
+                        thread_id=thread_id,
+                        req_id=req_id,
+                        skill_name=skill_name or self._recent_thread_skill(session.platform, session.channel_id, thread_id),
+                        source_workspace=source_workspace or str(self._repo_root),
+                        thread_topic=thread_topic or self._memory_thread_topic(history),
                     )
                     self._memory_last_extracted_user_turn_count[thread_id] = user_turn_count
                     self._memory_last_extraction_empty[thread_id] = not bool(entries)
@@ -1895,6 +1923,20 @@ class GatewayManager:
             if skill_name in known:
                 return skill_name
         return None
+
+    @staticmethod
+    def _memory_thread_topic(history: list[dict]) -> str:
+        lines: list[str] = []
+        for turn in reversed(history):
+            if turn.get("role") != "user":
+                continue
+            content = str(turn.get("content", "")).strip()
+            if not content:
+                continue
+            lines.append(content[:200])
+            if len(lines) >= 2:
+                break
+        return " | ".join(reversed(lines))
 
     @staticmethod
     def _build_skill_repair_request(skill_name: str, history: list[dict], latest_feedback: str) -> str:

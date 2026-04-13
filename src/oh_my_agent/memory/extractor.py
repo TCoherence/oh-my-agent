@@ -6,7 +6,12 @@ import json
 import logging
 import re
 
-from oh_my_agent.memory.adaptive import MemoryEntry
+from oh_my_agent.memory.adaptive import (
+    MemoryEntry,
+    VALID_DURABILITY,
+    VALID_EXPLICITNESS,
+    VALID_SCOPES,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +32,8 @@ Rules:
 - Each memory must be a single concise sentence.
 - category must be one of: preference, project_knowledge, workflow, fact.
 - explicitness must be one of: explicit, inferred.
+- scope must be one of: global_user, workspace, skill, thread.
+- durability must be one of: ephemeral, medium, long.
 - evidence must be a short user-side evidence snippet (max 140 chars).
 - confidence: 0.0-1.0.
 - If the user explicitly states a stable preference or rule, confidence should usually be 0.85+.
@@ -43,13 +50,16 @@ Do NOT extract:
 If there is nothing worth extracting, output [].
 Output ONLY a JSON array. No markdown, no explanation.
 
+Execution context:
+{execution_context}
+
 {existing_context}
 
 Conversation:
 {conversation}
 
 Output format:
-[{{"summary":"...","category":"preference","confidence":0.9,"explicitness":"explicit","evidence":"..."}}]
+[{{"summary":"...","category":"preference","confidence":0.9,"explicitness":"explicit","scope":"global_user","durability":"long","evidence":"..."}}]
 """
 
 _SIMPLIFIED_EXTRACTION_PROMPT = """\
@@ -81,6 +91,10 @@ class MemoryExtractor:
         registry,
         thread_id: str | None = None,
         req_id: str | None = None,
+        *,
+        skill_name: str | None = None,
+        source_workspace: str | None = None,
+        thread_topic: str | None = None,
     ) -> list[MemoryEntry]:
         """Extract memories from conversation, add to store, return new entries."""
         if not conversation_turns:
@@ -113,6 +127,11 @@ class MemoryExtractor:
         prompt = _EXTRACTION_PROMPT.format(
             conversation=conversation_text,
             existing_context=existing_context,
+            execution_context=self._format_execution_context(
+                skill_name=skill_name,
+                source_workspace=source_workspace,
+                thread_topic=thread_topic,
+            ),
         )
         req_prefix = f"[{req_id}] " if req_id else ""
         run_label = f"memory_extract req={req_id or '-'} thread={thread_id or '-'}"
@@ -135,6 +154,11 @@ class MemoryExtractor:
 
         # Parse JSON from response
         entries, rejected_count, parse_failure = self._parse_response(response.text, thread_id)
+        self._apply_context_defaults(
+            entries,
+            skill_name=skill_name,
+            source_workspace=source_workspace,
+        )
         retry_used = False
         if parse_failure:
             retry_used = True
@@ -167,6 +191,11 @@ class MemoryExtractor:
                 retry_response.text,
                 thread_id,
                 simplified=True,
+            )
+            self._apply_context_defaults(
+                entries,
+                skill_name=skill_name,
+                source_workspace=source_workspace,
             )
             if parse_failure:
                 logger.warning("%sMemory extraction retry parse failed", req_prefix)
@@ -248,6 +277,8 @@ class MemoryExtractor:
                 continue
             category = str(item.get("category", "fact"))
             explicitness = str(item.get("explicitness", "inferred"))
+            scope = str(item.get("scope", ""))
+            durability = str(item.get("durability", ""))
             evidence = str(item.get("evidence", ""))[:140]
             if simplified:
                 item = {k: item.get(k) for k in _SIMPLIFIED_SCHEMA_KEYS}
@@ -258,10 +289,57 @@ class MemoryExtractor:
                 source_threads=[thread_id] if thread_id else [],
                 explicitness=explicitness,
                 evidence=evidence,
+                scope=scope if scope in VALID_SCOPES else "",
+                durability=durability if durability in VALID_DURABILITY else "",
             )
             entries.append(entry)
 
         return entries, rejected, False
+
+    @staticmethod
+    def _format_execution_context(
+        *,
+        skill_name: str | None = None,
+        source_workspace: str | None = None,
+        thread_topic: str | None = None,
+    ) -> str:
+        lines = [
+            f"- current_skill: {skill_name or 'none'}",
+            f"- source_workspace: {source_workspace or 'none'}",
+            f"- thread_topic_hint: {(thread_topic or 'none')[:240]}",
+            "- scope guidance: use global_user for broad preferences/interests, workspace for repo/project constraints, skill for rules tied to the current skill, thread only for thread-local memory.",
+            "- durability guidance: use long for stable durable preferences/constraints, medium for reusable but revisable patterns, ephemeral for near-term thread context.",
+        ]
+        return "\n".join(lines)
+
+    @staticmethod
+    def _apply_context_defaults(
+        entries: list[MemoryEntry],
+        *,
+        skill_name: str | None = None,
+        source_workspace: str | None = None,
+    ) -> None:
+        for entry in entries:
+            if entry.explicitness not in VALID_EXPLICITNESS:
+                entry.explicitness = "inferred"
+            if entry.scope not in VALID_SCOPES:
+                if entry.category == "project_knowledge" and source_workspace:
+                    entry.scope = "workspace"
+                elif entry.category == "workflow" and skill_name:
+                    entry.scope = "skill"
+                else:
+                    entry.scope = "global_user"
+            if entry.durability not in VALID_DURABILITY:
+                if entry.scope == "thread":
+                    entry.durability = "ephemeral"
+                elif entry.category in {"preference", "project_knowledge"}:
+                    entry.durability = "long"
+                else:
+                    entry.durability = "medium"
+            if skill_name:
+                entry.source_skills = [skill_name]
+            if source_workspace:
+                entry.source_workspace = source_workspace
 
     @staticmethod
     def _build_recent_window(conversation_turns: list[dict]) -> str:

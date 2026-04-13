@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 VALID_CATEGORIES = frozenset({"preference", "project_knowledge", "workflow", "fact"})
 VALID_EXPLICITNESS = frozenset({"explicit", "inferred"})
 VALID_STATUS = frozenset({"active", "superseded"})
+VALID_SCOPES = frozenset({"global_user", "workspace", "skill", "thread"})
+VALID_DURABILITY = frozenset({"ephemeral", "medium", "long"})
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 _STOPWORDS = frozenset(
     {
@@ -71,6 +73,10 @@ class MemoryEntry:
     explicitness: str = "inferred"  # "explicit" | "inferred"
     status: str = "active"  # "active" | "superseded"
     evidence: str = ""
+    scope: str = "global_user"  # global_user | workspace | skill | thread
+    durability: str = "medium"  # ephemeral | medium | long
+    source_skills: list[str] = field(default_factory=list)
+    source_workspace: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -154,6 +160,22 @@ def lexical_match_kind(summary_a: str, summary_b: str) -> str:
     return "distinct"
 
 
+_SCOPE_PRIORITY = {"thread": 0, "skill": 1, "workspace": 2, "global_user": 3}
+_DURABILITY_PRIORITY = {"ephemeral": 0, "medium": 1, "long": 2}
+
+
+def broadened_scope(existing_scope: str, new_scope: str) -> str:
+    existing = existing_scope if existing_scope in _SCOPE_PRIORITY else "global_user"
+    new = new_scope if new_scope in _SCOPE_PRIORITY else "global_user"
+    return existing if _SCOPE_PRIORITY[existing] >= _SCOPE_PRIORITY[new] else new
+
+
+def stronger_durability(existing_durability: str, new_durability: str) -> str:
+    existing = existing_durability if existing_durability in _DURABILITY_PRIORITY else "medium"
+    new = new_durability if new_durability in _DURABILITY_PRIORITY else "medium"
+    return existing if _DURABILITY_PRIORITY[existing] >= _DURABILITY_PRIORITY[new] else new
+
+
 def memory_entry_from_dict(data: dict) -> MemoryEntry:
     fields = MemoryEntry.__dataclass_fields__
     payload = {k: v for k, v in data.items() if k in fields}
@@ -163,9 +185,61 @@ def memory_entry_from_dict(data: dict) -> MemoryEntry:
         payload["explicitness"] = "inferred"
     if payload.get("status") not in VALID_STATUS:
         payload["status"] = "active"
+    if payload.get("scope") not in VALID_SCOPES:
+        payload["scope"] = "global_user"
+    if payload.get("durability") not in VALID_DURABILITY:
+        payload["durability"] = "medium"
     if not payload.get("evidence"):
         payload["evidence"] = ""
+    if not isinstance(payload.get("source_skills"), list):
+        payload["source_skills"] = []
+    if not isinstance(payload.get("source_workspace"), str):
+        payload["source_workspace"] = ""
     return MemoryEntry(**payload)
+
+
+def scope_matches(
+    memory: MemoryEntry,
+    *,
+    skill_name: str | None = None,
+    thread_id: str | None = None,
+    workspace: str | None = None,
+) -> bool:
+    if memory.scope == "global_user":
+        return True
+    if memory.scope == "workspace":
+        return bool(workspace and memory.source_workspace and memory.source_workspace == workspace)
+    if memory.scope == "skill":
+        return bool(skill_name and skill_name in memory.source_skills)
+    if memory.scope == "thread":
+        return bool(thread_id and thread_id in memory.source_threads)
+    return False
+
+
+def scope_score_multiplier(
+    memory: MemoryEntry,
+    *,
+    skill_name: str | None = None,
+    thread_id: str | None = None,
+    workspace: str | None = None,
+) -> float:
+    if memory.scope == "thread":
+        return 1.30 if scope_matches(memory, skill_name=skill_name, thread_id=thread_id, workspace=workspace) else 0.0
+    if memory.scope == "skill":
+        return 1.20 if scope_matches(memory, skill_name=skill_name, thread_id=thread_id, workspace=workspace) else 0.0
+    if memory.scope == "workspace":
+        return 1.10 if scope_matches(memory, skill_name=skill_name, thread_id=thread_id, workspace=workspace) else 0.0
+    return 1.0
+
+
+def memory_bucket(memory: MemoryEntry) -> str:
+    if memory.scope == "skill":
+        return "skill_scoped"
+    if memory.scope == "workspace" or memory.category == "project_knowledge":
+        return "workspace_project"
+    if memory.scope == "global_user" and memory.category == "preference":
+        return "global_preference"
+    return "recent_daily"
 
 
 class AdaptiveMemoryStore:
@@ -233,6 +307,10 @@ class AdaptiveMemoryStore:
                     entry.explicitness = "inferred"
                 if entry.status not in VALID_STATUS:
                     entry.status = "active"
+                if entry.scope not in VALID_SCOPES:
+                    entry.scope = "global_user"
+                if entry.durability not in VALID_DURABILITY:
+                    entry.durability = "medium"
                 entry.confidence = max(0.0, min(1.0, entry.confidence))
                 if not entry.last_observed_at:
                     entry.last_observed_at = entry.created_at
@@ -247,8 +325,15 @@ class AdaptiveMemoryStore:
                     existing.last_observed_at = datetime.now(timezone.utc).isoformat()
                     if entry.explicitness == "explicit":
                         existing.explicitness = "explicit"
+                    existing.scope = broadened_scope(existing.scope, entry.scope)
+                    existing.durability = stronger_durability(existing.durability, entry.durability)
                     if entry.evidence and len(entry.evidence) >= len(existing.evidence):
                         existing.evidence = entry.evidence
+                    for skill in entry.source_skills:
+                        if skill not in existing.source_skills:
+                            existing.source_skills.append(skill)
+                    if entry.source_workspace and not existing.source_workspace:
+                        existing.source_workspace = entry.source_workspace
                     for t in entry.source_threads:
                         if t not in existing.source_threads:
                             existing.source_threads.append(t)
@@ -270,7 +355,16 @@ class AdaptiveMemoryStore:
             await self.save()
             return added
 
-    async def get_relevant(self, context: str, budget_chars: int = 500) -> list[MemoryEntry]:
+    async def get_relevant(
+        self,
+        context: str,
+        budget_chars: int = 500,
+        *,
+        skill_name: str | None = None,
+        thread_id: str | None = None,
+        workspace: str | None = None,
+        thread_topic: str | None = None,
+    ) -> list[MemoryEntry]:
         """Return top memories relevant to context, fitting within budget."""
         self._last_retrieval_stats = {
             "filtered_superseded_count": len([m for m in self._memories if m.status != "active"]),
@@ -278,31 +372,62 @@ class AdaptiveMemoryStore:
         if not self._memories:
             return []
 
-        context_words = normalized_word_set(context)
+        query_text = "\n".join(part for part in [context, thread_topic or "", skill_name or ""] if part).strip()
+        context_words = normalized_word_set(query_text)
         scored: list[tuple[float, MemoryEntry]] = []
         for m in self._memories:
             if m.status != "active":
                 continue
+            multiplier = scope_score_multiplier(
+                m,
+                skill_name=skill_name,
+                thread_id=thread_id,
+                workspace=workspace,
+            )
+            if multiplier <= 0:
+                continue
             sim = jaccard_similarity(context_words, normalized_word_set(m.summary))
-            # Preferences always get a minimum score boost
-            if m.category == "preference":
-                sim = max(sim, 0.1)
-            score = sim * m.confidence
+            score = sim * m.confidence * multiplier
             if score > 0:
                 scored.append((score, m))
 
-        scored.sort(key=lambda x: x[0], reverse=True)
+        buckets = {
+            "skill_scoped": [],
+            "workspace_project": [],
+            "global_preference": [],
+            "recent_daily": [],
+        }
+        for score, memory in scored:
+            buckets[memory_bucket(memory)].append((score, memory))
+        for bucket in buckets.values():
+            bucket.sort(key=lambda x: x[0], reverse=True)
 
-        result: list[MemoryEntry] = []
+        bucket_limits = {
+            "skill_scoped": 2,
+            "workspace_project": 2,
+            "global_preference": 2,
+            "recent_daily": 2,
+        }
+        selected: list[MemoryEntry] = []
+        selected_ids: set[str] = set()
         chars_used = 0
-        for _score, m in scored:
-            entry_chars = len(m.summary) + 10  # overhead for formatting
-            if chars_used + entry_chars > budget_chars and result:
-                break
-            result.append(m)
-            chars_used += entry_chars
+        for bucket_name in ("skill_scoped", "workspace_project", "global_preference", "recent_daily"):
+            taken = 0
+            for _score, memory in buckets[bucket_name]:
+                if taken >= bucket_limits[bucket_name]:
+                    break
+                if memory.id in selected_ids:
+                    continue
+                entry_chars = len(memory.summary) + 10
+                if chars_used + entry_chars > budget_chars and selected:
+                    break
+                selected.append(memory)
+                selected_ids.add(memory.id)
+                chars_used += entry_chars
+                taken += 1
 
-        return result
+        self._last_retrieval_stats["selected_count"] = len(selected)
+        return selected
 
     @property
     def last_retrieval_stats(self) -> dict[str, int]:

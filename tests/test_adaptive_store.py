@@ -115,16 +115,15 @@ async def test_budget_limit(store):
 
 
 @pytest.mark.asyncio
-async def test_preference_always_included(store):
+async def test_preference_not_unconditionally_included(store):
     await store.add_memories([
         MemoryEntry(summary="user prefers vim keybindings", category="preference", confidence=0.9),
         MemoryEntry(summary="database uses postgres", category="project_knowledge", confidence=0.9),
     ])
 
-    # Query unrelated to preferences — preference should still appear
+    # Query unrelated to preferences — preference should not appear by default
     results = await store.get_relevant("tell me about the weather", budget_chars=1000)
-    summaries = [m.summary for m in results]
-    assert any("vim" in s for s in summaries)
+    assert results == []
 
 
 @pytest.mark.asyncio

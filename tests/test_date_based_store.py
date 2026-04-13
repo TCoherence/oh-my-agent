@@ -26,6 +26,10 @@ def _entry(
     explicitness="inferred",
     status="active",
     evidence="",
+    scope="global_user",
+    durability="medium",
+    source_skills=None,
+    source_workspace="",
 ) -> MemoryEntry:
     return MemoryEntry(
         summary=summary,
@@ -38,6 +42,10 @@ def _entry(
         explicitness=explicitness,
         status=status,
         evidence=evidence,
+        scope=scope,
+        durability=durability,
+        source_skills=source_skills or [],
+        source_workspace=source_workspace,
     )
 
 
@@ -509,7 +517,103 @@ async def test_budget_constraint(store):
 async def test_preference_minimum_score(store):
     await store.add_memories([_entry(summary="prefers vim", category="preference", confidence=0.8)])
     relevant = await store.get_relevant("completely unrelated query", budget_chars=500)
-    assert len(relevant) >= 1
+    assert relevant == []
+
+
+@pytest.mark.asyncio
+async def test_skill_scoped_memory_only_injected_for_matching_skill(store):
+    await store.add_memories([
+        _entry(
+            summary="The user wants finance briefings to focus on US market volatility.",
+            category="workflow",
+            confidence=0.9,
+            scope="skill",
+            durability="medium",
+            source_skills=["market-briefing"],
+        )
+    ])
+
+    relevant = await store.get_relevant(
+        "cover volatility",
+        budget_chars=500,
+        skill_name="market-briefing",
+        thread_id="t1",
+        workspace="/repo",
+        thread_topic="finance daily",
+    )
+    assert len(relevant) == 1
+
+    unrelated = await store.get_relevant(
+        "cover volatility",
+        budget_chars=500,
+        skill_name="seattle-metro-housing-watch",
+        thread_id="t1",
+        workspace="/repo",
+        thread_topic="housing watch",
+    )
+    assert unrelated == []
+
+
+@pytest.mark.asyncio
+async def test_thread_scoped_memory_does_not_leak(store):
+    await store.add_memories([
+        _entry(
+            summary="In this thread, the user wants the Seattle report in Chinese only.",
+            category="workflow",
+            confidence=0.9,
+            scope="thread",
+            durability="ephemeral",
+            source_threads=["thread-a"],
+        )
+    ])
+
+    same_thread = await store.get_relevant(
+        "Seattle report",
+        budget_chars=500,
+        thread_id="thread-a",
+        workspace="/repo",
+        thread_topic="Seattle report",
+    )
+    assert len(same_thread) == 1
+
+    other_thread = await store.get_relevant(
+        "Seattle report",
+        budget_chars=500,
+        thread_id="thread-b",
+        workspace="/repo",
+        thread_topic="Seattle report",
+    )
+    assert other_thread == []
+
+
+@pytest.mark.asyncio
+async def test_workspace_memory_only_matches_same_workspace(store):
+    await store.add_memories([
+        _entry(
+            summary="The project uses a strict changelog policy.",
+            category="project_knowledge",
+            confidence=0.9,
+            scope="workspace",
+            durability="long",
+            source_workspace="/repo-a",
+        )
+    ])
+
+    same_workspace = await store.get_relevant(
+        "changelog policy",
+        budget_chars=500,
+        workspace="/repo-a",
+        thread_topic="release work",
+    )
+    assert len(same_workspace) == 1
+
+    different_workspace = await store.get_relevant(
+        "changelog policy",
+        budget_chars=500,
+        workspace="/repo-b",
+        thread_topic="release work",
+    )
+    assert different_workspace == []
 
 
 # ---------------------------------------------------------------------------
