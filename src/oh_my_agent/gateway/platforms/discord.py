@@ -1487,8 +1487,12 @@ class DiscordChannel(BaseChannel):
             for m in all_memories[:20]:
                 conf_bar = "█" * int(m.confidence * 5) + "░" * (5 - int(m.confidence * 5))
                 tier_tag = "[C]" if getattr(m, "tier", "daily") == "curated" else "[D]"
+                explicitness = getattr(m, "explicitness", "inferred")
+                status = getattr(m, "status", "active")
+                observed_at = str(getattr(m, "last_observed_at", getattr(m, "created_at", "-")))[:10]
                 lines.append(
-                    f"`{m.id}` {tier_tag} [{conf_bar}] **[{m.category}]** {m.summary}"
+                    f"`{m.id}` {tier_tag} [{conf_bar}] **[{m.category}]** [{explicitness}/{status}]"
+                    f" obs={m.observation_count} seen={observed_at} {m.summary}"
                 )
             if len(all_memories) > 20:
                 lines.append(f"_…and {len(all_memories) - 20} more_")

@@ -110,6 +110,8 @@ class GatewayManager:
         self._stopping = False
         self._background_tasks: list[asyncio.Task] = []
         self._inflight_messages: set[asyncio.Task] = set()
+        self._memory_last_extracted_user_turn_count: dict[str, int] = {}
+        self._memory_last_extraction_empty: dict[str, bool] = {}
 
     def _session_key(self, platform: str, channel_id: str) -> str:
         return f"{platform}:{channel_id}"
@@ -1145,6 +1147,13 @@ class GatewayManager:
                 relevant = await self._adaptive_memory_store.get_relevant(
                     msg.content, budget_chars=self._adaptive_memory_budget,
                 )
+                retrieval_stats = getattr(self._adaptive_memory_store, "last_retrieval_stats", {})
+                logger.info(
+                    "[%s] memory_inject selected_count=%d filtered_superseded_count=%d",
+                    req_id,
+                    len(relevant),
+                    int(retrieval_stats.get("filtered_superseded_count", 0)),
+                )
                 if relevant:
                     mem_lines = [f"- {m.summary}" for m in relevant]
                     agent_prompt = (
@@ -1398,10 +1407,35 @@ class GatewayManager:
         if self._memory_extractor:
             try:
                 history = await session.get_history(thread_id)
-                if len(history) >= 4:
+                user_turn_count = sum(1 for turn in history if turn.get("role") == "user")
+                if user_turn_count == 0:
+                    logger.info(
+                        "[%s] memory_extract thread_id=%s turn_count=%d extracted_count=0 rejected_count=0 retry_used=false skip_reason=no_user_turn parse_failure=false",
+                        req_id,
+                        thread_id,
+                        len(history),
+                    )
+                elif (
+                    self._memory_last_extracted_user_turn_count.get(thread_id, -1) == user_turn_count
+                ):
+                    skip_reason = (
+                        "no_new_user_turn_after_empty"
+                        if self._memory_last_extraction_empty.get(thread_id, False)
+                        else "no_new_user_turn"
+                    )
+                    logger.info(
+                        "[%s] memory_extract thread_id=%s turn_count=%d extracted_count=0 rejected_count=0 retry_used=false skip_reason=%s parse_failure=false",
+                        req_id,
+                        thread_id,
+                        len(history),
+                        skip_reason,
+                    )
+                else:
                     entries = await self._memory_extractor.extract(
                         history, registry, thread_id=thread_id, req_id=req_id,
                     )
+                    self._memory_last_extracted_user_turn_count[thread_id] = user_turn_count
+                    self._memory_last_extraction_empty[thread_id] = not bool(entries)
                     if entries:
                         logger.info(
                             "[%s] MEMORY_EXTRACT (pre-compaction) thread=%s extracted=%d",

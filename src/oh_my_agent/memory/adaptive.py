@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import uuid
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
@@ -15,6 +16,38 @@ import yaml
 logger = logging.getLogger(__name__)
 
 VALID_CATEGORIES = frozenset({"preference", "project_knowledge", "workflow", "fact"})
+VALID_EXPLICITNESS = frozenset({"explicit", "inferred"})
+VALID_STATUS = frozenset({"active", "superseded"})
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
+_STOPWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "by",
+        "for",
+        "from",
+        "in",
+        "is",
+        "it",
+        "of",
+        "on",
+        "or",
+        "that",
+        "the",
+        "this",
+        "to",
+        "uses",
+        "using",
+        "user",
+        "with",
+        "your",
+    }
+)
 
 
 @dataclass
@@ -30,8 +63,14 @@ class MemoryEntry:
     last_referenced: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
+    last_observed_at: str = field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
     observation_count: int = 1
     tier: str = "daily"  # "daily" | "curated"
+    explicitness: str = "inferred"  # "explicit" | "inferred"
+    status: str = "active"  # "active" | "superseded"
+    evidence: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -41,6 +80,30 @@ class MemoryEntry:
 def word_set(text: str) -> set[str]:
     """Split text into a lowercase word set."""
     return set(text.lower().split())
+
+
+def normalized_tokens(text: str) -> list[str]:
+    """Return normalized lexical tokens for lightweight similarity checks."""
+    tokens = []
+    for token in _TOKEN_RE.findall(text.lower()):
+        if token in _STOPWORDS:
+            continue
+        if token.endswith("ies") and len(token) > 4:
+            token = token[:-3] + "y"
+        elif token.endswith("es") and len(token) > 4:
+            token = token[:-2]
+        elif token.endswith("s") and len(token) > 3:
+            token = token[:-1]
+        tokens.append(token)
+    return tokens
+
+
+def normalized_text(text: str) -> str:
+    return " ".join(normalized_tokens(text))
+
+
+def normalized_word_set(text: str) -> set[str]:
+    return set(normalized_tokens(text))
 
 
 def jaccard_similarity(words_a: set[str], words_b: set[str]) -> float:
@@ -67,11 +130,42 @@ def find_duplicate(
     threshold: float = 0.6,
 ) -> int | None:
     """Find index of existing memory with high Jaccard overlap, or None."""
-    words_new = word_set(summary)
+    words_new = normalized_word_set(summary)
     for i, existing in enumerate(memories):
-        if jaccard_similarity(words_new, word_set(existing.summary)) >= threshold:
+        existing_norm = normalized_text(existing.summary)
+        if existing_norm and existing_norm == normalized_text(summary):
+            return i
+        if jaccard_similarity(words_new, normalized_word_set(existing.summary)) >= threshold:
             return i
     return None
+
+
+def lexical_match_kind(summary_a: str, summary_b: str) -> str:
+    """Classify lexical similarity into same/candidate/distinct buckets."""
+    norm_a = normalized_text(summary_a)
+    norm_b = normalized_text(summary_b)
+    if norm_a and norm_a == norm_b:
+        return "same_memory"
+    score = jaccard_similarity(set(norm_a.split()), set(norm_b.split()))
+    if score >= 0.75:
+        return "same_memory"
+    if score >= 0.35:
+        return "candidate"
+    return "distinct"
+
+
+def memory_entry_from_dict(data: dict) -> MemoryEntry:
+    fields = MemoryEntry.__dataclass_fields__
+    payload = {k: v for k, v in data.items() if k in fields}
+    if "last_observed_at" not in payload and payload.get("created_at"):
+        payload["last_observed_at"] = payload["created_at"]
+    if payload.get("explicitness") not in VALID_EXPLICITNESS:
+        payload["explicitness"] = "inferred"
+    if payload.get("status") not in VALID_STATUS:
+        payload["status"] = "active"
+    if not payload.get("evidence"):
+        payload["evidence"] = ""
+    return MemoryEntry(**payload)
 
 
 class AdaptiveMemoryStore:
@@ -88,6 +182,7 @@ class AdaptiveMemoryStore:
         self._min_confidence = min_confidence
         self._memories: list[MemoryEntry] = []
         self._lock = asyncio.Lock()
+        self._last_retrieval_stats: dict[str, int] = {}
 
     @property
     def memories(self) -> list[MemoryEntry]:
@@ -105,7 +200,7 @@ class AdaptiveMemoryStore:
                 self._memories = []
                 return
             self._memories = [
-                MemoryEntry(**{k: v for k, v in item.items() if k in MemoryEntry.__dataclass_fields__})
+                memory_entry_from_dict(item)
                 for item in data
                 if isinstance(item, dict)
             ]
@@ -126,14 +221,21 @@ class AdaptiveMemoryStore:
             if tmp.exists():
                 tmp.unlink(missing_ok=True)
 
-    async def add_memories(self, entries: list[MemoryEntry]) -> int:
+    async def add_memories(self, entries: list[MemoryEntry], registry=None, req_id: str | None = None) -> int:
         """Deduplicate, merge, insert, prune. Returns count of new entries added."""
+        del registry, req_id
         async with self._lock:
             added = 0
             for entry in entries:
                 if entry.category not in VALID_CATEGORIES:
                     entry.category = "fact"
+                if entry.explicitness not in VALID_EXPLICITNESS:
+                    entry.explicitness = "inferred"
+                if entry.status not in VALID_STATUS:
+                    entry.status = "active"
                 entry.confidence = max(0.0, min(1.0, entry.confidence))
+                if not entry.last_observed_at:
+                    entry.last_observed_at = entry.created_at
 
                 match = find_duplicate(entry.summary, self._memories)
                 if match is not None:
@@ -142,6 +244,11 @@ class AdaptiveMemoryStore:
                     existing.confidence = min(1.0, existing.confidence + 0.15)
                     existing.observation_count += 1
                     existing.last_referenced = datetime.now(timezone.utc).isoformat()
+                    existing.last_observed_at = datetime.now(timezone.utc).isoformat()
+                    if entry.explicitness == "explicit":
+                        existing.explicitness = "explicit"
+                    if entry.evidence and len(entry.evidence) >= len(existing.evidence):
+                        existing.evidence = entry.evidence
                     for t in entry.source_threads:
                         if t not in existing.source_threads:
                             existing.source_threads.append(t)
@@ -150,7 +257,10 @@ class AdaptiveMemoryStore:
                     added += 1
 
             # Prune below min_confidence
-            self._memories = [m for m in self._memories if m.confidence >= self._min_confidence]
+            self._memories = [
+                m for m in self._memories
+                if m.confidence >= self._min_confidence and m.status == "active"
+            ]
 
             # Cap at max_memories by evicting lowest score
             if len(self._memories) > self._max_memories:
@@ -162,13 +272,18 @@ class AdaptiveMemoryStore:
 
     async def get_relevant(self, context: str, budget_chars: int = 500) -> list[MemoryEntry]:
         """Return top memories relevant to context, fitting within budget."""
+        self._last_retrieval_stats = {
+            "filtered_superseded_count": len([m for m in self._memories if m.status != "active"]),
+        }
         if not self._memories:
             return []
 
-        context_words = word_set(context)
+        context_words = normalized_word_set(context)
         scored: list[tuple[float, MemoryEntry]] = []
         for m in self._memories:
-            sim = jaccard_similarity(context_words, word_set(m.summary))
+            if m.status != "active":
+                continue
+            sim = jaccard_similarity(context_words, normalized_word_set(m.summary))
             # Preferences always get a minimum score boost
             if m.category == "preference":
                 sim = max(sim, 0.1)
@@ -188,6 +303,10 @@ class AdaptiveMemoryStore:
             chars_used += entry_chars
 
         return result
+
+    @property
+    def last_retrieval_stats(self) -> dict[str, int]:
+        return dict(self._last_retrieval_stats)
 
     async def list_all(self) -> list[MemoryEntry]:
         return list(self._memories)

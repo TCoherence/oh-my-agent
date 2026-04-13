@@ -241,6 +241,28 @@ async def test_handle_message_logs_explicit_skill_purpose(caplog, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_memory_extract_skips_when_no_new_user_turn(caplog):
+    session = MagicMock()
+    session.get_history = AsyncMock(
+        return_value=[
+            {"role": "user", "content": "remember this"},
+            {"role": "assistant", "content": "ok"},
+        ]
+    )
+    registry = MagicMock(spec=AgentRegistry)
+    extractor = MagicMock()
+    extractor.extract = AsyncMock(return_value=[])
+    gm = GatewayManager([], memory_extractor=extractor)
+
+    with caplog.at_level("INFO"):
+        await gm._try_compress_and_extract(session, registry, "thread-1", "req-1")
+        await gm._try_compress_and_extract(session, registry, "thread-1", "req-2")
+
+    assert extractor.extract.await_count == 1
+    assert "skip_reason=no_new_user_turn" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_handle_message_passes_log_path_for_chat_runs(tmp_path):
     channel = MagicMock()
     channel.platform = "discord"

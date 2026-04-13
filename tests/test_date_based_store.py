@@ -8,7 +8,7 @@ import pytest
 import yaml
 
 from oh_my_agent.memory.adaptive import MemoryEntry
-from oh_my_agent.memory.date_based import DateBasedMemoryStore, _today
+from oh_my_agent.memory.date_based import DateBasedMemoryStore, _dicts_to_entries, _today
 
 
 # ---------------------------------------------------------------------------
@@ -23,6 +23,9 @@ def _entry(
     tier="daily",
     created_at=None,
     source_threads=None,
+    explicitness="inferred",
+    status="active",
+    evidence="",
 ) -> MemoryEntry:
     return MemoryEntry(
         summary=summary,
@@ -32,6 +35,9 @@ def _entry(
         tier=tier,
         created_at=created_at or datetime.now(timezone.utc).isoformat(),
         source_threads=source_threads or [],
+        explicitness=explicitness,
+        status=status,
+        evidence=evidence,
     )
 
 
@@ -322,22 +328,24 @@ async def test_no_promote_low_confidence(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_no_promote_too_recent(tmp_path):
+async def test_fast_promote_explicit_high_confidence(tmp_path):
     mem_dir = tmp_path / "memory"
     s = DateBasedMemoryStore(memory_dir=mem_dir)
     await s.load()
 
-    # Add today — should NOT be promoted even with high count/confidence
     await s.add_memories([
         _entry(
-            summary="brand new observation",
-            confidence=0.95,
-            observation_count=10,
+            summary="user prefers concise summaries",
+            category="preference",
+            confidence=0.92,
+            observation_count=2,
+            explicitness="explicit",
         )
     ])
 
     curated = [m for m in s.memories if m.tier == "curated"]
-    assert len(curated) == 0
+    assert len(curated) == 1
+    assert curated[0].summary == "user prefers concise summaries"
 
 
 @pytest.mark.asyncio
@@ -359,6 +367,106 @@ async def test_manual_promote(store):
 async def test_manual_promote_nonexistent(store):
     result = await store.promote_memory("nonexistent")
     assert result is False
+
+
+@pytest.mark.asyncio
+async def test_merge_into_old_daily_persists_to_disk(tmp_path):
+    mem_dir = tmp_path / "memory"
+    daily_dir = mem_dir / "daily"
+    daily_dir.mkdir(parents=True)
+    old_date = (datetime.now(timezone.utc) - timedelta(days=5)).date()
+    old_entry = _entry(summary="user prefers concise summaries", confidence=0.7)
+    _write_yaml(daily_dir / f"{old_date.isoformat()}.yaml", [old_entry])
+
+    s = DateBasedMemoryStore(memory_dir=mem_dir)
+    await s.load()
+    await s.add_memories([
+        _entry(summary="user prefers concise summary style", confidence=0.8)
+    ])
+
+    reloaded = _dicts_to_entries(yaml.safe_load((daily_dir / f"{old_date.isoformat()}.yaml").read_text(encoding="utf-8")))
+    assert len(reloaded) == 1
+    assert reloaded[0].observation_count >= 2
+
+
+@pytest.mark.asyncio
+async def test_contradictory_memory_supersedes_old_entry(tmp_path):
+    mem_dir = tmp_path / "memory"
+    s = DateBasedMemoryStore(memory_dir=mem_dir)
+    await s.load()
+    old_entry = _entry(
+        summary="The user prefers detailed answers with long explanations.",
+        category="preference",
+        confidence=0.9,
+        explicitness="explicit",
+    )
+    await s.add_memories([old_entry])
+
+    agent = MagicMock()
+    agent.name = "claude"
+    response = MagicMock()
+    response.error = None
+    response.text = '[{"pair_id":"p0-%s","decision":"contradictory"}]' % s.memories[0].id
+    registry = MagicMock()
+    registry.run = AsyncMock(return_value=(agent, response))
+
+    await s.add_memories(
+        [_entry(
+            summary="The user prefers concise answers with minimal explanation.",
+            category="preference",
+            confidence=0.92,
+            explicitness="explicit",
+        )],
+        registry=registry,
+    )
+
+    all_memories = await s.list_all()
+    assert any(m.status == "superseded" for m in all_memories)
+    assert any("concise answers" in m.summary and m.status == "active" for m in all_memories)
+
+
+@pytest.mark.asyncio
+async def test_superseded_entries_are_excluded_from_retrieval_and_synthesis(tmp_path):
+    mem_dir = tmp_path / "memory"
+    curated_entries = [
+        _entry(summary="user prefers concise answers", tier="curated", category="preference"),
+        _entry(
+            summary="user prefers long answers",
+            tier="curated",
+            category="preference",
+            status="superseded",
+        ),
+    ]
+    _write_yaml(mem_dir / "curated.yaml", curated_entries)
+
+    s = DateBasedMemoryStore(memory_dir=mem_dir)
+    await s.load()
+    relevant = await s.get_relevant("answer style", budget_chars=500)
+    assert all(m.status == "active" for m in relevant)
+
+    agent = MagicMock()
+    agent.name = "claude"
+    response = MagicMock()
+    response.text = "# User Memories\n\nYou prefer concise answers."
+    response.error = None
+    registry = MagicMock()
+    registry.run = AsyncMock(return_value=(agent, response))
+    await s.synthesize_memory_md(registry)
+    prompt = registry.run.call_args.args[0]
+    assert "user prefers long answers" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_max_memories_prunes_total_entries(tmp_path):
+    s = DateBasedMemoryStore(memory_dir=tmp_path / "memory", max_memories=3)
+    await s.load()
+
+    for i in range(5):
+        await s.add_memories([
+            _entry(summary=f"user preference number {i}", confidence=0.8 + i * 0.01)
+        ])
+
+    assert len(await s.list_all()) <= 3
 
 
 # ---------------------------------------------------------------------------

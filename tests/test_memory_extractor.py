@@ -30,7 +30,7 @@ def _mock_registry(response_text, error=None):
 
 @pytest.mark.asyncio
 async def test_valid_json_parsing(extractor, store):
-    registry = _mock_registry('[{"summary": "User prefers dark mode", "category": "preference", "confidence": 0.9}]')
+    registry = _mock_registry('[{"summary": "User prefers dark mode", "category": "preference", "confidence": 0.9, "explicitness": "explicit", "evidence": "I always use dark mode"}]')
     turns = [
         {"role": "user", "content": "I always use dark mode"},
         {"role": "assistant", "content": "Noted!"},
@@ -40,6 +40,8 @@ async def test_valid_json_parsing(extractor, store):
     assert len(result) == 1
     assert result[0].summary == "User prefers dark mode"
     assert result[0].category == "preference"
+    assert result[0].explicitness == "explicit"
+    assert result[0].evidence == "I always use dark mode"
     assert len(store.memories) == 1
     assert registry.run.call_args.kwargs["run_label"] == "memory_extract req=req123 thread=t1"
 
@@ -136,7 +138,7 @@ async def test_extract_triggers_memory_synthesis_when_needed():
     store.clear_synthesis_flag = MagicMock()
 
     extractor = MemoryExtractor(store)
-    registry = _mock_registry('[{"summary": "User prefers concise summaries", "category": "preference", "confidence": 0.9}]')
+    registry = _mock_registry('[{"summary": "User prefers concise summaries", "category": "preference", "confidence": 0.9, "explicitness": "explicit", "evidence": "Keep it concise"}]')
     turns = [{"role": "user", "content": "Keep it concise"}]
 
     await extractor.extract(turns, registry, thread_id="thread-1")
@@ -147,10 +149,57 @@ async def test_extract_triggers_memory_synthesis_when_needed():
 
 @pytest.mark.asyncio
 async def test_parse_response_static():
-    entries = MemoryExtractor._parse_response(
-        '```\n[{"summary": "test", "category": "fact", "confidence": 0.5}]\n```',
+    entries, rejected, parse_failure = MemoryExtractor._parse_response(
+        '```\n[{"summary": "test", "category": "fact", "confidence": 0.5, "explicitness": "inferred", "evidence": "test"}]\n```',
         thread_id="t1",
     )
     assert len(entries) == 1
+    assert rejected == 0
+    assert parse_failure is False
     assert entries[0].summary == "test"
     assert entries[0].source_threads == ["t1"]
+
+
+def test_build_recent_window_keeps_recent_user_turns_and_truncates_assistant():
+    turns = [
+        {"role": "user", "content": "old preference"},
+        {"role": "assistant", "content": "x" * 1200},
+        {"role": "assistant", "content": "y" * 1200},
+        {"role": "user", "content": "recent user one"},
+        {"role": "assistant", "content": "short reply"},
+        {"role": "user", "content": "recent user two"},
+        {"role": "assistant", "content": "z" * 1200},
+    ]
+
+    window = MemoryExtractor._build_recent_window(turns)
+
+    assert "[user] recent user one" in window
+    assert "[user] recent user two" in window
+    assert "z" * 900 not in window
+
+
+@pytest.mark.asyncio
+async def test_extract_retries_with_simplified_schema_on_parse_failure(store):
+    extractor = MemoryExtractor(store)
+    agent = MagicMock()
+    agent.name = "claude"
+    bad = MagicMock(text="not json", error=None)
+    good = MagicMock(
+        text='[{"summary": "User prefers concise answers", "category": "preference", "confidence": 0.9, "explicitness": "explicit", "evidence": "keep it short"}]',
+        error=None,
+    )
+    registry = MagicMock()
+    registry.run = AsyncMock(return_value=(agent, bad))
+    registry.run.side_effect = [(agent, bad), (agent, good)]
+
+    result = await extractor.extract(
+        [
+            {"role": "user", "content": "keep it short"},
+            {"role": "assistant", "content": "ok"},
+        ],
+        registry,
+        thread_id="t-retry",
+    )
+
+    assert len(result) == 1
+    assert registry.run.await_count == 2

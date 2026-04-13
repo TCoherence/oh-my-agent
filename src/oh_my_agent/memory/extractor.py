@@ -10,29 +10,62 @@ from oh_my_agent.memory.adaptive import MemoryEntry
 
 logger = logging.getLogger(__name__)
 
+_MAX_TURNS = 6
+_MAX_ASSISTANT_TURN_CHARS = 800
+_MAX_WINDOW_CHARS = 3600
+_SIMPLIFIED_SCHEMA_KEYS = ("summary", "category", "confidence", "explicitness", "evidence")
+
 _EXTRACTION_PROMPT = """\
-You are a memory extraction system. Analyze the conversation below and extract \
+You are a memory extraction system. Analyze the conversation below and extract only \
 cross-session-worthy observations about the user: preferences, project knowledge, \
 workflow patterns, and important facts.
 
 Rules:
-- Only extract things useful across future sessions (not task-specific details).
-- Each memory should be a single, concise sentence.
+- Extract only things that are likely useful in future sessions.
+- Only use content marked as [user] as evidence for memory extraction.
+- Content marked as [assistant] is context only and must not be treated as evidence by itself.
+- Each memory must be a single concise sentence.
 - category must be one of: preference, project_knowledge, workflow, fact.
-- confidence: 0.0-1.0 (how confident you are this is a stable, reusable observation).
-- If the user explicitly states a preference, confidence should be 0.85+.
-- If you infer something from context, confidence should be 0.5-0.7.
-- Output ONLY a JSON array. No markdown, no preamble, no explanation.
+- explicitness must be one of: explicit, inferred.
+- evidence must be a short user-side evidence snippet (max 140 chars).
+- confidence: 0.0-1.0.
+- If the user explicitly states a stable preference or rule, confidence should usually be 0.85+.
+- If something is only inferred from context, confidence should usually be 0.5-0.7.
+
+Do NOT extract:
+- one-off task details
+- temporary plans in the current thread
+- slash command or skill invocation habits
+- file paths, commands, or implementation steps
+- speculative future intent like "the user may request..."
+- short-lived runtime facts about the current skill execution
+
+If there is nothing worth extracting, output [].
+Output ONLY a JSON array. No markdown, no explanation.
 
 {existing_context}
 
 Conversation:
 {conversation}
 
-Output format (JSON array):
-[{{"summary": "...", "category": "...", "confidence": 0.8}}]
+Output format:
+[{{"summary":"...","category":"preference","confidence":0.9,"explicitness":"explicit","evidence":"..."}}]
+"""
 
-If there is nothing worth extracting, output: []
+_SIMPLIFIED_EXTRACTION_PROMPT = """\
+You are a memory extraction system. Extract only stable, cross-session user memories.
+
+Rules:
+- Use only [user] lines as evidence.
+- Ignore one-off task details, temporary plans, command usage, and future speculation.
+- Return ONLY JSON.
+- If nothing is worth extracting, return [].
+
+Conversation:
+{conversation}
+
+Output format:
+[{{"summary":"...","category":"preference","confidence":0.9,"explicitness":"explicit","evidence":"..."}}]
 """
 
 
@@ -53,16 +86,21 @@ class MemoryExtractor:
         if not conversation_turns:
             return []
 
-        # Build conversation text
-        conv_lines = []
-        for turn in conversation_turns:
-            role = turn.get("role", "?")
-            content = turn.get("content", "")
-            conv_lines.append(f"{role}: {content}")
-        conversation_text = "\n".join(conv_lines)
+        conversation_text = self._build_recent_window(conversation_turns)
+        if not conversation_text.strip():
+            logger.info(
+                "%smemory_extract thread_id=%s turn_count=%d extracted_count=0 rejected_count=0 retry_used=false skip_reason=no_recent_window parse_failure=false",
+                f"[{req_id}] " if req_id else "",
+                thread_id or "-",
+                len(conversation_turns),
+            )
+            return []
 
         # Include existing memories for dedup guidance
-        existing = await self._store.list_all()
+        existing = [
+            m for m in await self._store.list_all()
+            if getattr(m, "status", "active") == "active"
+        ]
         if existing:
             existing_lines = [f"- {m.summary}" for m in existing[:20]]
             existing_context = (
@@ -73,7 +111,7 @@ class MemoryExtractor:
             existing_context = ""
 
         prompt = _EXTRACTION_PROMPT.format(
-            conversation=conversation_text[:3000],
+            conversation=conversation_text,
             existing_context=existing_context,
         )
         req_prefix = f"[{req_id}] " if req_id else ""
@@ -96,11 +134,63 @@ class MemoryExtractor:
             return []
 
         # Parse JSON from response
-        entries = self._parse_response(response.text, thread_id)
+        entries, rejected_count, parse_failure = self._parse_response(response.text, thread_id)
+        retry_used = False
+        if parse_failure:
+            retry_used = True
+            try:
+                _agent, retry_response = await registry.run(
+                    _SIMPLIFIED_EXTRACTION_PROMPT.format(conversation=conversation_text),
+                    run_label=f"{run_label} retry=1",
+                )
+            except Exception as exc:
+                logger.warning("%sMemory extraction retry failed: %s", req_prefix, exc)
+                logger.info(
+                    "%smemory_extract thread_id=%s turn_count=%d extracted_count=0 rejected_count=%d retry_used=true skip_reason=parse_failure parse_failure=true",
+                    req_prefix,
+                    thread_id or "-",
+                    len(conversation_turns),
+                    rejected_count,
+                )
+                return []
+            if retry_response.error:
+                logger.warning("%sMemory extraction retry returned error: %s", req_prefix, retry_response.error)
+                logger.info(
+                    "%smemory_extract thread_id=%s turn_count=%d extracted_count=0 rejected_count=%d retry_used=true skip_reason=parse_failure parse_failure=true",
+                    req_prefix,
+                    thread_id or "-",
+                    len(conversation_turns),
+                    rejected_count,
+                )
+                return []
+            entries, rejected_count, parse_failure = self._parse_response(
+                retry_response.text,
+                thread_id,
+                simplified=True,
+            )
+            if parse_failure:
+                logger.warning("%sMemory extraction retry parse failed", req_prefix)
+                logger.info(
+                    "%smemory_extract thread_id=%s turn_count=%d extracted_count=0 rejected_count=%d retry_used=true skip_reason=parse_failure parse_failure=true",
+                    req_prefix,
+                    thread_id or "-",
+                    len(conversation_turns),
+                    rejected_count,
+                )
+                return []
+
         if not entries:
+            logger.info(
+                "%smemory_extract thread_id=%s turn_count=%d extracted_count=0 rejected_count=%d retry_used=%s skip_reason=empty_result parse_failure=false",
+                req_prefix,
+                thread_id or "-",
+                len(conversation_turns),
+                rejected_count,
+                str(retry_used).lower(),
+            )
             return entries
 
-        added = await self._store.add_memories(entries)
+        added = await self._store.add_memories(entries, registry=registry, req_id=req_id)
         if getattr(self._store, "needs_synthesis", False) and hasattr(self._store, "synthesize_memory_md"):
             try:
                 await self._store.synthesize_memory_md(registry)
@@ -108,11 +198,25 @@ class MemoryExtractor:
                     self._store.clear_synthesis_flag()
             except Exception as exc:
                 logger.warning("%sMemory synthesis failed: %s", req_prefix, exc)
-        logger.info("%sMemory extraction: parsed=%d, added=%d", req_prefix, len(entries), added)
+        logger.info(
+            "%smemory_extract thread_id=%s turn_count=%d extracted_count=%d rejected_count=%d retry_used=%s skip_reason=- parse_failure=false added=%d",
+            req_prefix,
+            thread_id or "-",
+            len(conversation_turns),
+            len(entries),
+            rejected_count,
+            str(retry_used).lower(),
+            added,
+        )
         return entries
 
     @staticmethod
-    def _parse_response(text: str, thread_id: str | None = None) -> list[MemoryEntry]:
+    def _parse_response(
+        text: str,
+        thread_id: str | None = None,
+        *,
+        simplified: bool = False,
+    ) -> tuple[list[MemoryEntry], int, bool]:
         """Parse agent response into MemoryEntry list. Handles markdown fences."""
         # Strip markdown code fences
         cleaned = re.sub(r"```(?:json)?\s*", "", text).strip()
@@ -128,24 +232,100 @@ class MemoryExtractor:
                     data = json.loads(match.group())
                 except json.JSONDecodeError:
                     logger.warning("Failed to parse memory extraction response")
-                    return []
+                    return [], 0, True
             else:
                 logger.warning("No JSON array found in memory extraction response")
-                return []
+                return [], 0, True
 
         if not isinstance(data, list):
-            return []
+            return [], 0, True
 
         entries = []
+        rejected = 0
         for item in data:
             if not isinstance(item, dict) or not item.get("summary"):
+                rejected += 1
                 continue
+            category = str(item.get("category", "fact"))
+            explicitness = str(item.get("explicitness", "inferred"))
+            evidence = str(item.get("evidence", ""))[:140]
+            if simplified:
+                item = {k: item.get(k) for k in _SIMPLIFIED_SCHEMA_KEYS}
             entry = MemoryEntry(
                 summary=str(item["summary"]),
-                category=str(item.get("category", "fact")),
+                category=category,
                 confidence=float(item.get("confidence", 0.6)),
                 source_threads=[thread_id] if thread_id else [],
+                explicitness=explicitness,
+                evidence=evidence,
             )
             entries.append(entry)
 
-        return entries
+        return entries, rejected, False
+
+    @staticmethod
+    def _build_recent_window(conversation_turns: list[dict]) -> str:
+        raw_turns = [
+            {"role": str(turn.get("role", "?")), "content": str(turn.get("content", "") or "")}
+            for turn in conversation_turns
+            if str(turn.get("content", "") or "").strip()
+        ]
+        if not raw_turns:
+            return ""
+
+        selected = raw_turns[-_MAX_TURNS:]
+        selected_user_count = sum(1 for turn in selected if turn["role"] == "user")
+        if selected_user_count < 2:
+            older_user_turns = [
+                turn for turn in raw_turns[:-len(selected)] if turn["role"] == "user"
+            ]
+            while selected_user_count < 2 and older_user_turns:
+                user_turn = older_user_turns.pop()
+                replaced = False
+                for idx, turn in enumerate(selected):
+                    if turn["role"] != "user":
+                        selected[idx] = user_turn
+                        replaced = True
+                        selected_user_count += 1
+                        break
+                if not replaced:
+                    break
+
+        normalized = []
+        for turn in selected:
+            content = turn["content"]
+            if turn["role"] == "assistant" and len(content) > _MAX_ASSISTANT_TURN_CHARS:
+                content = content[:_MAX_ASSISTANT_TURN_CHARS].rstrip() + "..."
+            normalized.append({"role": turn["role"], "content": content})
+
+        def _render(turns: list[dict]) -> str:
+            return "\n".join(f"[{turn['role']}] {turn['content']}" for turn in turns if turn["content"].strip())
+
+        rendered = _render(normalized)
+        if len(rendered) <= _MAX_WINDOW_CHARS:
+            return rendered
+
+        assistant_indexes = [idx for idx, turn in enumerate(normalized) if turn["role"] == "assistant"]
+        for idx in assistant_indexes:
+            if len(_render(normalized)) <= _MAX_WINDOW_CHARS:
+                break
+            content = normalized[idx]["content"]
+            if len(content) > 160:
+                normalized[idx]["content"] = content[:160].rstrip() + "..."
+
+        rendered = _render(normalized)
+        if len(rendered) <= _MAX_WINDOW_CHARS:
+            return rendered
+
+        user_indexes = [idx for idx, turn in enumerate(normalized) if turn["role"] == "user"]
+        protected_user_indexes = set(user_indexes[-2:])
+        for idx in user_indexes:
+            if len(_render(normalized)) <= _MAX_WINDOW_CHARS:
+                break
+            if idx in protected_user_indexes:
+                continue
+            content = normalized[idx]["content"]
+            if len(content) > 200:
+                normalized[idx]["content"] = content[:200].rstrip() + "..."
+
+        return _render(normalized)
