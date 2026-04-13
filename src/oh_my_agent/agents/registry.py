@@ -56,6 +56,35 @@ class AgentRegistry:
         finally:
             setattr(agent, "_timeout", original)
 
+    @staticmethod
+    @contextmanager
+    def _temporary_max_turns(agent: BaseAgent, max_turns_override: int | None):
+        if max_turns_override is None:
+            yield
+            return
+        if not hasattr(agent, "_max_turns"):
+            logger.info(
+                "Agent '%s' does not support max_turns override; ignoring value=%r",
+                agent.name,
+                max_turns_override,
+            )
+            yield
+            return
+        try:
+            override = int(max_turns_override)
+        except (TypeError, ValueError):
+            yield
+            return
+        if override <= 0:
+            yield
+            return
+        original = getattr(agent, "_max_turns")
+        setattr(agent, "_max_turns", override)
+        try:
+            yield
+        finally:
+            setattr(agent, "_max_turns", original)
+
     async def _run_single_agent(
         self,
         agent: BaseAgent,
@@ -67,6 +96,7 @@ class AgentRegistry:
         log_path,
         image_paths: list[Path] | None,
         timeout_override_seconds: int | None,
+        max_turns_override: int | None,
         on_agent_run=None,
     ) -> AgentResponse:
         sig = inspect.signature(agent.run)
@@ -83,7 +113,8 @@ class AgentRegistry:
             kwargs["image_paths"] = image_paths
         started_at = time.perf_counter()
         with self._temporary_timeout(agent, timeout_override_seconds):
-            response = await agent.run(prompt, history, **kwargs)
+            with self._temporary_max_turns(agent, max_turns_override):
+                response = await agent.run(prompt, history, **kwargs)
         if on_agent_run is not None:
             maybe_result = on_agent_run(
                 agent=agent,
@@ -107,6 +138,7 @@ class AgentRegistry:
         image_paths: list[Path] | None = None,
         run_label: str | None = None,
         timeout_override_seconds: int | None = None,
+        max_turns_override: int | None = None,
         on_agent_run=None,
     ) -> tuple[BaseAgent, AgentResponse]:
         """Try each agent in order. Return the first successful (agent, response) pair.
@@ -135,6 +167,7 @@ class AgentRegistry:
                 log_path=log_path,
                 image_paths=image_paths,
                 timeout_override_seconds=timeout_override_seconds,
+                max_turns_override=max_turns_override,
                 on_agent_run=on_agent_run,
             )
             return agent, response
@@ -153,9 +186,18 @@ class AgentRegistry:
                 log_path=log_path,
                 image_paths=image_paths,
                 timeout_override_seconds=timeout_override_seconds,
+                max_turns_override=max_turns_override,
                 on_agent_run=on_agent_run,
             )
             if not response.error:
+                return agent, response
+            if response.error_kind == "max_turns":
+                logger.warning(
+                    "Agent '%s'%s hit max turns: %s — not falling back",
+                    agent.name,
+                    label_suffix,
+                    response.error,
+                )
                 return agent, response
             logger.warning(
                 "Agent '%s'%s failed: %s — trying next", agent.name, label_suffix, response.error

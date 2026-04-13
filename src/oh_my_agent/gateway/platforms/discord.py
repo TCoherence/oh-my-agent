@@ -323,10 +323,15 @@ class DiscordChannel(BaseChannel):
                 f"**Automation** `{record.name}`",
                 f"- State: `{state_label}`",
                 f"- Schedule: {self._format_automation_schedule(record)}",
+                f"- Scheduler timezone: `{result.scheduler_timezone or '—'}`",
                 f"- Delivery: `{record.delivery}`",
                 f"- Target: {self._format_automation_target(record)}",
                 f"- Agent: `{record.agent or 'fallback'}`",
             ]
+            if record.timeout_seconds is not None:
+                lines.append(f"- Timeout override: `{record.timeout_seconds}s`")
+            if record.max_turns is not None:
+                lines.append(f"- Max turns override: `{record.max_turns}`")
             if record.author:
                 lines.append(f"- Author: `{record.author}`")
             if record.source_path:
@@ -353,6 +358,8 @@ class DiscordChannel(BaseChannel):
         disabled_records = [record for record in result.automations if not record.enabled]
         failed_names = [record.name for record in result.automations if record.last_error]
         lines = [f"**Automations** — {len(enabled_records)} enabled, {len(disabled_records)} disabled"]
+        if result.scheduler_timezone:
+            lines.append(f"- Scheduler timezone: `{result.scheduler_timezone}`")
         if failed_names:
             lines.append(
                 f"- Recent failures: `{len(failed_names)}` ({', '.join(f'`{name}`' for name in failed_names[:5])})"

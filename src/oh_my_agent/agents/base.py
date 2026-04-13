@@ -16,6 +16,8 @@ class AgentResponse:
     #       cache_creation_input_tokens, cost_usd (all optional).
     usage: dict | None = None
     error_kind: str | None = None
+    partial_text: str | None = None
+    terminal_reason: str | None = None
 
 
 class BaseAgent(ABC):

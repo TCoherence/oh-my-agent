@@ -10,6 +10,7 @@ from oh_my_agent.agents.base import AgentResponse
 from oh_my_agent.agents.control_prompt import inject_control_protocol
 from oh_my_agent.agents.cli.base import (
     BaseCLIAgent,
+    _bounded_log_excerpt,
     _build_prompt_with_history,
     _extract_cli_error,
     _should_clear_resumed_session,
@@ -181,6 +182,8 @@ class ClaudeAgent(BaseCLIAgent):
                 text="",
                 error=f"{self.name} CLI timed out after {self._timeout}s",
                 error_kind="timeout",
+                partial_text=_bounded_log_excerpt(log_path),
+                terminal_reason="timeout",
             )
         except FileNotFoundError:
             return AgentResponse(
@@ -195,10 +198,37 @@ class ClaudeAgent(BaseCLIAgent):
             # Only discard a stored session when the CLI reports it as invalid/stale.
             if session_id and thread_id and _should_clear_resumed_session(err_msg):
                 self.clear_session(thread_id)
+            partial_text = None
+            terminal_reason = None
+            error_kind = "cli_error"
+            raw_error: dict | None = None
+            stdout_text = stdout.decode(errors="replace").strip()
+            if stdout_text:
+                try:
+                    raw_error = json.loads(stdout_text)
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    raw_error = None
+            if isinstance(raw_error, dict):
+                if str(raw_error.get("subtype", "")).strip() == "error_max_turns":
+                    error_kind = "max_turns"
+                    terminal_reason = "max_turns"
+                    partial_text = (
+                        raw_error.get("result")
+                        if isinstance(raw_error.get("result"), str) and raw_error.get("result", "").strip()
+                        else None
+                    )
+                if terminal_reason is None:
+                    raw_terminal = raw_error.get("terminal_reason")
+                    if isinstance(raw_terminal, str) and raw_terminal.strip():
+                        terminal_reason = raw_terminal.strip()
+            partial_text = partial_text or _bounded_log_excerpt(log_path)
             return AgentResponse(
                 text="",
+                raw=raw_error,
                 error=f"{self.name} exited {returncode}: {err_msg[:400]}",
-                error_kind="cli_error",
+                error_kind=error_kind,
+                partial_text=partial_text,
+                terminal_reason=terminal_reason,
             )
 
         raw = stdout.decode(errors="replace").strip()

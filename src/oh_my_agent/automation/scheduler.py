@@ -3,9 +3,10 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta, tzinfo
+from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Awaitable, Callable
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 
@@ -57,6 +58,8 @@ class ScheduledJob:
     initial_delay_seconds: int = 0
     source_path: Path | None = None
     skill_name: str | None = None
+    timeout_seconds: int | None = None
+    max_turns: int | None = None
 
     @property
     def schedule_kind(self) -> str:
@@ -80,6 +83,8 @@ class AutomationRecord:
     initial_delay_seconds: int = 0
     source_path: Path | None = None
     skill_name: str | None = None
+    timeout_seconds: int | None = None
+    max_turns: int | None = None
 
     @property
     def schedule_kind(self) -> str:
@@ -101,6 +106,8 @@ class AutomationRecord:
             initial_delay_seconds=self.initial_delay_seconds,
             source_path=self.source_path,
             skill_name=self.skill_name,
+            timeout_seconds=self.timeout_seconds,
+            max_turns=self.max_turns,
         )
 
 
@@ -131,12 +138,14 @@ class Scheduler:
         reload_interval_seconds: float,
         default_target_user_id: str | None = None,
         timezone: tzinfo | None = None,
+        timezone_name: str | None = None,
     ) -> None:
         self._storage_dir = storage_dir.expanduser().resolve()
         self._storage_dir.mkdir(parents=True, exist_ok=True)
         self._reload_interval_seconds = float(reload_interval_seconds)
         self._default_target_user_id = default_target_user_id
-        self._timezone = timezone or datetime.now().astimezone().tzinfo
+        self._timezone = timezone or _resolve_local_timezone()
+        self._timezone_name = timezone_name or _describe_timezone(self._timezone)
         self._records_by_name: dict[str, AutomationRecord] = {}
         self._jobs_by_name: dict[str, ScheduledJob] = {}
         self._duplicate_paths_by_name: dict[str, tuple[Path, ...]] = {}
@@ -155,6 +164,10 @@ class Scheduler:
     @property
     def storage_dir(self) -> Path:
         return self._storage_dir
+
+    @property
+    def timezone_name(self) -> str:
+        return self._timezone_name
 
     def compute_next_run_at(self, job: ScheduledJob) -> datetime | None:
         """Return the next fire time for *job* from now, or None for interval jobs on first fire."""
@@ -403,6 +416,16 @@ class Scheduler:
                 raise ValueError("initial_delay_seconds must be >= 0")
 
         skill_name = str(raw["skill_name"]).strip() if raw.get("skill_name") else None
+        timeout_seconds = _parse_positive_optional_int(raw.get("timeout_seconds"), field_name="timeout_seconds")
+        max_turns = _parse_positive_optional_int(raw.get("max_turns"), field_name="max_turns")
+        agent_name = (str(raw["agent"]).strip() if raw.get("agent") else None) or None
+        if max_turns is not None and agent_name is not None and agent_name.lower() != "claude":
+            logger.warning(
+                "Automation %r configured max_turns=%s for agent=%r, but only Claude currently supports max_turns overrides",
+                name,
+                max_turns,
+                agent_name,
+            )
 
         record = AutomationRecord(
                 name=name,
@@ -413,13 +436,15 @@ class Scheduler:
                 delivery=delivery,
                 thread_id=(str(raw["thread_id"]) if raw.get("thread_id") is not None else None),
                 target_user_id=target_user_id,
-                agent=(str(raw["agent"]) if raw.get("agent") else None),
+                agent=agent_name,
                 author=str(raw.get("author", "scheduler")),
                 cron=cron,
                 interval_seconds=interval_value,
                 initial_delay_seconds=initial_delay_seconds,
                 source_path=source_path,
                 skill_name=skill_name,
+                timeout_seconds=timeout_seconds,
+                max_turns=max_turns,
             )
         return _ParsedAutomation(
             record=record,
@@ -597,11 +622,61 @@ def build_scheduler_from_config(
     if reload_interval_seconds <= 0:
         raise ValueError("automations.reload_interval_seconds must be > 0")
 
+    configured_timezone = sched_cfg.get("timezone")
+    timezone_obj, timezone_name = _resolve_configured_timezone(configured_timezone)
+
     return Scheduler(
         storage_dir=storage_dir,
         reload_interval_seconds=reload_interval_seconds,
         default_target_user_id=default_target_user_id,
+        timezone=timezone_obj,
+        timezone_name=timezone_name,
     )
+
+
+def _resolve_local_timezone() -> tzinfo:
+    local_tz = datetime.now().astimezone().tzinfo
+    return local_tz or timezone.utc
+
+
+def _describe_timezone(tz: tzinfo) -> str:
+    key = getattr(tz, "key", None)
+    if isinstance(key, str) and key:
+        return key
+    now = datetime.now(tz)
+    name = now.tzname()
+    if name:
+        return name
+    return str(tz)
+
+
+def _resolve_configured_timezone(raw: object) -> tuple[tzinfo, str]:
+    if raw is None:
+        local_tz = _resolve_local_timezone()
+        return local_tz, f"{_describe_timezone(local_tz)} (local default)"
+
+    value = str(raw).strip()
+    if not value or value.lower() == "local":
+        local_tz = _resolve_local_timezone()
+        return local_tz, f"{_describe_timezone(local_tz)} (local default)"
+
+    try:
+        tz = ZoneInfo(value)
+    except ZoneInfoNotFoundError as exc:
+        raise ValueError(
+            "automations.timezone must be 'local' or a valid IANA timezone such as "
+            "'America/Los_Angeles'"
+        ) from exc
+    return tz, value
+
+
+def _parse_positive_optional_int(raw: object, *, field_name: str) -> int | None:
+    if raw is None:
+        return None
+    value = int(raw)
+    if value <= 0:
+        raise ValueError(f"{field_name} must be > 0")
+    return value
 
 
 def _parse_cron_expression(expr: str) -> _CronSpec:

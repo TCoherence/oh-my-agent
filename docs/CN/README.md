@@ -144,6 +144,7 @@ automations:
   enabled: true
   storage_dir: ~/.oh-my-agent/automations
   reload_interval_seconds: 5
+  timezone: local
 
 runtime:
   enabled: true
@@ -374,6 +375,7 @@ OMA_WORKDIR_IN_CONTAINER=/repo ./scripts/docker-run.sh
 - 调度方式支持：
   - `cron: "0 9 * * *"`：正常的日历时间调度
   - `interval_seconds`：高频本地测试
+- `automations.timezone` 默认是 `local`；如果你希望跨不同宿主机或容器保持稳定时区语义，显式设置 IANA 时区，例如 `America/Los_Angeles`。
 - `cron` 和 `interval_seconds` 互斥。
 - `initial_delay_seconds` 只支持和 `interval_seconds` 一起使用。
 - Discord operator 命令：

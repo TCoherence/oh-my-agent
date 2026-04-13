@@ -192,6 +192,7 @@ def _apply_v052_defaults(config: dict) -> None:
     automations_cfg.setdefault("enabled", True)
     automations_cfg.setdefault("storage_dir", "~/.oh-my-agent/automations")
     automations_cfg.setdefault("reload_interval_seconds", 5)
+    automations_cfg.setdefault("timezone", "local")
 
     memory_cfg = config.setdefault("memory", {})
     memory_cfg.setdefault("backend", "sqlite")

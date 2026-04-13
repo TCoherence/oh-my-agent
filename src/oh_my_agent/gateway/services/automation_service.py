@@ -17,6 +17,7 @@ class AutomationService:
     async def get_status(self, name: str | None = None) -> AutomationStatusResult:
         if self._scheduler is None:
             return AutomationStatusResult(success=False, message="Automation scheduler is not enabled.")
+        scheduler_timezone = getattr(self._scheduler, "timezone_name", None)
         states = await self._load_runtime_states()
         if name:
             record = self._scheduler.get_automation(name.strip())
@@ -26,12 +27,14 @@ class AutomationService:
                 success=True,
                 message=f"Found automation `{record.name}`.",
                 automations=[self._to_info(record, states.get(record.name))],
+                scheduler_timezone=scheduler_timezone,
             )
         records = self._scheduler.list_automations()
         return AutomationStatusResult(
             success=True,
             message=f"Found {len(records)} automation(s).",
             automations=[self._to_info(record, states.get(record.name)) for record in records],
+            scheduler_timezone=scheduler_timezone,
         )
 
     async def reload(self) -> ServiceResult:
@@ -83,6 +86,8 @@ class AutomationService:
             target=AutomationService._format_target(record),
             agent=record.agent or "fallback",
             skill_name=record.skill_name,
+            timeout_seconds=getattr(record, "timeout_seconds", None),
+            max_turns=getattr(record, "max_turns", None),
             last_run_at=getattr(runtime_state, "last_run_at", None),
             last_success_at=getattr(runtime_state, "last_success_at", None),
             last_error=getattr(runtime_state, "last_error", None),

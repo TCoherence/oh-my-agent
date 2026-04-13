@@ -2,6 +2,7 @@ import asyncio
 import textwrap
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -29,6 +30,36 @@ def test_build_scheduler_defaults_to_enabled_when_storage_dir_is_set(tmp_path):
     assert scheduler is not None
     assert scheduler.jobs == []
     assert storage_dir.exists()
+    assert scheduler.timezone_name.endswith("(local default)")
+
+
+def test_build_scheduler_accepts_explicit_iana_timezone(tmp_path):
+    storage_dir = tmp_path / "automations"
+    scheduler = build_scheduler_from_config(
+        {
+            "automations": {
+                "storage_dir": str(storage_dir),
+                "timezone": "America/Los_Angeles",
+            }
+        },
+        project_root=tmp_path,
+    )
+    assert scheduler is not None
+    assert scheduler.timezone_name == "America/Los_Angeles"
+    assert isinstance(scheduler._timezone, ZoneInfo)
+
+
+def test_build_scheduler_rejects_invalid_timezone(tmp_path):
+    with pytest.raises(ValueError, match="automations.timezone"):
+        build_scheduler_from_config(
+            {
+                "automations": {
+                    "storage_dir": str(tmp_path / "automations"),
+                    "timezone": "Mars/Olympus_Mons",
+                }
+            },
+            project_root=tmp_path,
+        )
 
 
 def test_build_scheduler_uses_storage_dir_and_parses_interval_job(tmp_path):
@@ -44,9 +75,11 @@ def test_build_scheduler_uses_storage_dir_and_parses_interval_job(tmp_path):
         thread_id: "456"
         delivery: channel
         prompt: summarize
-        agent: codex
+        agent: claude
         interval_seconds: 60
         initial_delay_seconds: 5
+        timeout_seconds: 900
+        max_turns: 40
         author: scheduler
         """,
     )
@@ -69,10 +102,73 @@ def test_build_scheduler_uses_storage_dir_and_parses_interval_job(tmp_path):
     assert job.thread_id == "456"
     assert job.delivery == "channel"
     assert job.prompt == "summarize"
-    assert job.agent == "codex"
+    assert job.agent == "claude"
     assert job.interval_seconds == 60
     assert job.initial_delay_seconds == 5
+    assert job.timeout_seconds == 900
+    assert job.max_turns == 40
     assert job.cron is None
+
+
+def test_build_scheduler_rejects_invalid_timeout_or_max_turns(tmp_path, caplog):
+    storage_dir = tmp_path / "automations"
+    storage_dir.mkdir()
+    _write_yaml(
+        storage_dir / "bad.yaml",
+        """
+        name: bad
+        enabled: true
+        platform: discord
+        channel_id: "123"
+        prompt: summarize
+        interval_seconds: 60
+        timeout_seconds: 0
+        """,
+    )
+    scheduler = build_scheduler_from_config(
+        {
+            "automations": {
+                "enabled": True,
+                "storage_dir": str(storage_dir),
+                "reload_interval_seconds": 5,
+            }
+        },
+        project_root=tmp_path,
+    )
+    assert scheduler is not None
+    assert scheduler.jobs == []
+    assert "timeout_seconds must be > 0" in caplog.text
+
+
+def test_build_scheduler_warns_when_non_claude_agent_uses_max_turns(tmp_path, caplog):
+    storage_dir = tmp_path / "automations"
+    storage_dir.mkdir()
+    _write_yaml(
+        storage_dir / "warn.yaml",
+        """
+        name: warn
+        enabled: true
+        platform: discord
+        channel_id: "123"
+        prompt: summarize
+        interval_seconds: 60
+        agent: gemini
+        max_turns: 50
+        """,
+    )
+    scheduler = build_scheduler_from_config(
+        {
+            "automations": {
+                "enabled": True,
+                "storage_dir": str(storage_dir),
+                "reload_interval_seconds": 5,
+            }
+        },
+        project_root=tmp_path,
+    )
+    assert scheduler is not None
+    assert len(scheduler.jobs) == 1
+    assert "only Claude currently supports max_turns overrides" in caplog.text
 
 
 def test_build_scheduler_includes_disabled_automation_in_operator_snapshot(tmp_path):

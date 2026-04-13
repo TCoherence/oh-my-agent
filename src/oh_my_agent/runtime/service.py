@@ -13,10 +13,9 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 from oh_my_agent.auth.types import AuthFlow, CredentialHandle
 from oh_my_agent.agents.base import AgentResponse
+from oh_my_agent.agents.cli.base import _bounded_log_excerpt
 from oh_my_agent.agents.registry import AgentRegistry
 from oh_my_agent.control.protocol import (
     AskUserChoice,
@@ -29,6 +28,7 @@ from oh_my_agent.control.protocol import (
 )
 from oh_my_agent.gateway.base import BaseChannel, IncomingMessage, OutgoingAttachment
 from oh_my_agent.gateway.session import ChannelSession
+from oh_my_agent.skills.frontmatter import read_skill_frontmatter, resolve_skill_frontmatter, skill_execution_limits
 from oh_my_agent.runtime.notifications import NotificationManager
 from oh_my_agent.runtime.policy import (
     is_artifact_intent,
@@ -73,6 +73,7 @@ from oh_my_agent.runtime.types import (
 )
 from oh_my_agent.runtime.worktree import WorktreeError, WorktreeManager
 from oh_my_agent.utils.chunker import chunk_message
+from oh_my_agent.utils.errors import user_safe_agent_error
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +113,8 @@ _TASK_LIVE_STATUSES = {
     TASK_STATUS_BLOCKED,
     TASK_STATUS_PAUSED,
 }
+
+_PARTIAL_EXCERPT_MAX_CHARS = 2000
 
 
 @dataclass(frozen=True)
@@ -228,17 +231,7 @@ class RuntimeService:
 
     @staticmethod
     def _extract_skill_frontmatter(skill_md: Path) -> dict[str, Any]:
-        try:
-            content = skill_md.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            return {}
-        if not content.startswith("---"):
-            return {}
-        parts = content.split("---", 2)
-        if len(parts) < 3:
-            return {}
-        meta = yaml.safe_load(parts[1]) or {}
-        return meta if isinstance(meta, dict) else {}
+        return read_skill_frontmatter(skill_md)
 
     @staticmethod
     def _skill_description_from_dir(skill_dir: Path) -> str:
@@ -246,37 +239,37 @@ class RuntimeService:
         return str(meta.get("description") or "").strip()
 
     def _skill_frontmatter_by_name(self, skill_name: str | None) -> dict[str, Any]:
-        if not skill_name:
-            return {}
-        candidates: list[Path] = []
-        if isinstance(self._skills_path, Path):
-            candidates.append(self._skills_path / skill_name / "SKILL.md")
-        candidates.append(self._repo_root / "skills" / skill_name / "SKILL.md")
-        seen: set[Path] = set()
-        for candidate in candidates:
-            candidate = candidate.resolve()
-            if candidate in seen:
-                continue
-            seen.add(candidate)
-            if candidate.exists():
-                return self._extract_skill_frontmatter(candidate)
-        return {}
+        return resolve_skill_frontmatter(
+            skill_name,
+            repo_root=self._repo_root,
+            skills_path=self._skills_path if isinstance(self._skills_path, Path) else None,
+        )
 
     def _skill_timeout_seconds_by_name(self, skill_name: str | None) -> int | None:
-        meta = self._skill_frontmatter_by_name(skill_name)
-        metadata = meta.get("metadata")
-        value = None
-        if isinstance(metadata, dict):
-            value = metadata.get("timeout_seconds")
-        if value is None:
-            value = meta.get("timeout_seconds")
-        if value is None:
-            return None
-        try:
-            timeout = int(value)
-        except (TypeError, ValueError):
-            return None
-        return timeout if timeout > 0 else None
+        return skill_execution_limits(self._skill_frontmatter_by_name(skill_name)).timeout_seconds
+
+    def _skill_max_turns_by_name(self, skill_name: str | None) -> int | None:
+        return skill_execution_limits(self._skill_frontmatter_by_name(skill_name)).max_turns
+
+    @staticmethod
+    def _format_agent_failure_text(response: AgentResponse, *, prefix: str) -> str:
+        lines = [prefix, user_safe_agent_error(response.error_kind)]
+        partial = str(getattr(response, "partial_text", "") or "").strip()
+        if partial:
+            if response.error_kind == "max_turns":
+                label = "Partial result before max turns"
+            elif response.error_kind == "timeout":
+                label = "Partial result before timeout"
+            else:
+                label = "Partial result before stop"
+            lines.extend(
+                [
+                    "",
+                    f"**{label}**",
+                    f"```text\n{partial[-_PARTIAL_EXCERPT_MAX_CHARS:]}\n```",
+                ]
+            )
+        return "\n".join(lines)[:1900]
 
     @staticmethod
     def _normalize_similarity_tokens(text: str) -> set[str]:
@@ -817,6 +810,8 @@ class RuntimeService:
         artifact_manifest: list[str] | None = None,
         skill_name: str | None = None,
         automation_name: str | None = None,
+        agent_timeout_seconds: int | None = None,
+        agent_max_turns: int | None = None,
     ) -> RuntimeTask:
         self.register_session(session, registry)
 
@@ -854,6 +849,8 @@ class RuntimeService:
             automation_name=automation_name,
             task_type=task_type,
             skill_name=skill_name,
+            agent_timeout_seconds=agent_timeout_seconds,
+            agent_max_turns=agent_max_turns,
         )
         await self._store.add_runtime_event(
             task.id,
@@ -953,6 +950,9 @@ class RuntimeService:
         source: str,
         force_draft: bool = False,
         automation_name: str | None = None,
+        skill_name: str | None = None,
+        agent_timeout_seconds: int | None = None,
+        agent_max_turns: int | None = None,
     ) -> RuntimeTask:
         return await self.create_task(
             session=session,
@@ -970,6 +970,9 @@ class RuntimeService:
             task_type=TASK_TYPE_ARTIFACT,
             completion_mode=TASK_COMPLETION_REPLY,
             automation_name=automation_name,
+            skill_name=skill_name,
+            agent_timeout_seconds=agent_timeout_seconds,
+            agent_max_turns=agent_max_turns,
         )
 
     async def create_skill_task(
@@ -992,6 +995,8 @@ class RuntimeService:
         )
         resolved_name, is_update = extract_skill_name(skill_name or goal, existing)
         effective_goal = f"Update existing skill '{resolved_name}': {goal}" if is_update else goal
+        skill_timeout = self._skill_timeout_seconds_by_name(resolved_name)
+        skill_max_turns = self._skill_max_turns_by_name(resolved_name)
         return await self.create_task(
             session=session,
             registry=registry,
@@ -1008,6 +1013,8 @@ class RuntimeService:
             task_type=TASK_TYPE_SKILL_CHANGE,
             completion_mode=TASK_COMPLETION_MERGE,
             skill_name=resolved_name,
+            agent_timeout_seconds=skill_timeout,
+            agent_max_turns=skill_max_turns,
         )
 
     async def enqueue_scheduler_task(
@@ -1021,6 +1028,8 @@ class RuntimeService:
         author: str,
         preferred_agent: str | None,
         skill_name: str | None = None,
+        timeout_seconds: int | None = None,
+        max_turns: int | None = None,
     ) -> RuntimeTask | None:
         tasks = await self._store.list_runtime_tasks(
             platform=session.platform,
@@ -1039,10 +1048,12 @@ class RuntimeService:
                 )
                 return None
 
+        effective_timeout_seconds = timeout_seconds or self._skill_timeout_seconds_by_name(skill_name)
+        effective_max_turns = max_turns or self._skill_max_turns_by_name(skill_name)
+
         max_minutes = 10
-        skill_timeout = self._skill_timeout_seconds_by_name(skill_name)
-        if skill_timeout is not None:
-            max_minutes = max(1, (skill_timeout + 59) // 60)
+        if effective_timeout_seconds is not None:
+            max_minutes = max(1, (effective_timeout_seconds + 59) // 60)
 
         return await self.create_artifact_task(
             session=session,
@@ -1057,6 +1068,9 @@ class RuntimeService:
             max_minutes=max_minutes,
             source="scheduler",
             automation_name=automation_name,
+            skill_name=skill_name,
+            agent_timeout_seconds=effective_timeout_seconds,
+            agent_max_turns=effective_max_turns,
         )
 
     async def get_task(self, task_id: str) -> RuntimeTask | None:
@@ -1831,6 +1845,9 @@ class RuntimeService:
         skill_timeout_override = self._skill_timeout_seconds_by_name(
             str(resume_context.get("skill_name") or "") or None
         )
+        skill_max_turns_override = self._skill_max_turns_by_name(
+            str(resume_context.get("skill_name") or "") or None
+        )
         prompt = self._build_suspended_run_resume_prompt(run, include_original_request=True)
         log_path = self.chat_agent_log_base_path(
             thread_id=run.thread_id,
@@ -1847,8 +1864,9 @@ class RuntimeService:
             purpose="resume",
             skill_name=str(resume_context.get("skill_name") or "") or None,
             timeout_override_seconds=skill_timeout_override,
+            max_turns_override=skill_max_turns_override,
         )
-        if response.error and getattr(agent, "get_session_id", None):
+        if response.error and response.error_kind != "max_turns" and getattr(agent, "get_session_id", None):
             logger.warning(
                 "SUSPENDED_RESUME_PRIMARY_FAILED run=%s thread=%s agent=%s error=%s",
                 run.id,
@@ -1872,6 +1890,7 @@ class RuntimeService:
                 purpose="resume_fresh",
                 skill_name=str(resume_context.get("skill_name") or "") or None,
                 timeout_override_seconds=skill_timeout_override,
+                max_turns_override=skill_max_turns_override,
             )
 
         await self._sync_thread_agent_session(session=session, thread_id=run.thread_id, agent=agent)
@@ -1887,7 +1906,10 @@ class RuntimeService:
             await self._store.update_suspended_agent_run(run.id, status="failed", completed_at_now=True)
             await session.channel.send(
                 run.thread_id,
-                f"Login completed, but resuming `{run.agent_name}` failed: {response.error[:500]}",
+                self._format_agent_failure_text(
+                    response,
+                    prefix=f"Login completed, but resuming `{run.agent_name}` failed.",
+                ),
             )
             return f"Suspended run `{run.id}` failed to resume."
 
@@ -2463,7 +2485,7 @@ class RuntimeService:
                 current_after = await self._store.get_runtime_task(task.id)
                 if current_after and current_after.status in {TASK_STATUS_STOPPED, TASK_STATUS_PAUSED}:
                     return
-                await self._fail(task, f"{agent_name}: {response.error}")
+                await self._fail(task, f"{agent_name}: {response.error}", response=response)
                 return
 
             envelope = None
@@ -2921,6 +2943,8 @@ class RuntimeService:
             response = await self._invoke_agent(agent, prompt, workspace, task.id, task, step)
             if not response.error:
                 return agent.name, response
+            if response.error_kind == "max_turns":
+                return agent.name, response
             last_name = agent.name
             last_response = response
         return last_name, last_response
@@ -2943,7 +2967,12 @@ class RuntimeService:
         log_path = self._agent_log_path(task, step, agent.name)
         if "log_path" in sig.parameters:
             kwargs["log_path"] = log_path
-        run_task = asyncio.create_task(agent.run(prompt, [], **kwargs))
+        async def _run_with_overrides() -> AgentResponse:
+            with AgentRegistry._temporary_timeout(agent, task.agent_timeout_seconds):
+                with AgentRegistry._temporary_max_turns(agent, task.agent_max_turns):
+                    return await agent.run(prompt, [], **kwargs)
+
+        run_task = asyncio.create_task(_run_with_overrides())
         self._running_tasks[task.id] = run_task
         self._live_agent_logs[task.id] = log_path
         started = asyncio.get_running_loop().time()
@@ -2996,6 +3025,10 @@ class RuntimeService:
                         result = run_result
                 except Exception:
                     result = None
+            if result is not None and result.error and not result.partial_text:
+                result.partial_text = _bounded_log_excerpt(log_path, max_chars=_PARTIAL_EXCERPT_MAX_CHARS)
+                if not result.terminal_reason and result.error_kind in {"timeout", "max_turns"}:
+                    result.terminal_reason = result.error_kind
             if result is not None:
                 await self._record_thread_agent_run(
                     thread_id=task.thread_id,
@@ -3242,7 +3275,7 @@ class RuntimeService:
         await self._store.add_runtime_event(task.id, "task.workspace_cleaned", {"workspace": str(workspace)})
         return True
 
-    async def _fail(self, task: RuntimeTask, error: str) -> None:
+    async def _fail(self, task: RuntimeTask, error: str, *, response: AgentResponse | None = None) -> None:
         await self._store.update_runtime_task(
             task.id,
             status=TASK_STATUS_FAILED,
@@ -3258,9 +3291,15 @@ class RuntimeService:
                 channel_id=task.channel_id,
                 last_error=error[:1000],
             )
+        notify_text = f"Task `{task.id}` failed: {error[:400]}"
+        if response is not None:
+            notify_text = self._format_agent_failure_text(
+                response,
+                prefix=f"Task `{task.id}` failed.",
+            )
         await self._notify(
             task,
-            f"Task `{task.id}` failed: {error[:400]}",
+            notify_text,
             record_history=True,
             terminal=True,
         )
@@ -4022,6 +4061,7 @@ class RuntimeService:
         purpose: str,
         skill_name: str | None = None,
         timeout_override_seconds: int | None = None,
+        max_turns_override: int | None = None,
     ) -> AgentResponse:
         history = await session.get_history(thread_id)
         logger.info(
@@ -4041,6 +4081,7 @@ class RuntimeService:
                 log_path=log_path,
                 run_label=f"{purpose} thread={thread_id}",
                 timeout_override_seconds=timeout_override_seconds,
+                max_turns_override=max_turns_override,
             )
         )
         started_at = time.perf_counter()
@@ -4051,6 +4092,13 @@ class RuntimeService:
                     agent_used, response = await asyncio.wait_for(asyncio.shield(run_task), timeout=interval)
                     elapsed = time.perf_counter() - started_at
                     effective_log_path = self._agent_specific_log_path(log_path, agent_used.name)
+                    if response.error and not response.partial_text:
+                        response.partial_text = _bounded_log_excerpt(
+                            effective_log_path,
+                            max_chars=_PARTIAL_EXCERPT_MAX_CHARS,
+                        )
+                        if not response.terminal_reason and response.error_kind in {"timeout", "max_turns"}:
+                            response.terminal_reason = response.error_kind
                     await self._record_thread_agent_run(
                         thread_id=thread_id,
                         mode=purpose,
@@ -4419,6 +4467,9 @@ class RuntimeService:
         skill_timeout_override = self._skill_timeout_seconds_by_name(
             str(prompt.resume_context.get("skill_name") or "") or None
         )
+        skill_max_turns_override = self._skill_max_turns_by_name(
+            str(prompt.resume_context.get("skill_name") or "") or None
+        )
         response = await self._invoke_thread_agent(
             registry=registry,
             session=session,
@@ -4433,8 +4484,9 @@ class RuntimeService:
             purpose="hitl_resume",
             skill_name=str(prompt.resume_context.get("skill_name") or "") or None,
             timeout_override_seconds=skill_timeout_override,
+            max_turns_override=skill_max_turns_override,
         )
-        if response.error and getattr(agent, "get_session_id", None):
+        if response.error and response.error_kind != "max_turns" and getattr(agent, "get_session_id", None):
             self._clear_thread_agent_session(agent, prompt.thread_id)
             response = await self._invoke_thread_agent(
                 registry=registry,
@@ -4450,6 +4502,7 @@ class RuntimeService:
                 purpose="hitl_resume_fresh",
                 skill_name=str(prompt.resume_context.get("skill_name") or "") or None,
                 timeout_override_seconds=skill_timeout_override,
+                max_turns_override=skill_max_turns_override,
             )
 
         await self._sync_thread_agent_session(session=session, thread_id=prompt.thread_id, agent=agent)
@@ -4457,7 +4510,10 @@ class RuntimeService:
             await self._store.update_hitl_prompt(prompt.id, status="failed", completed_at_now=True)
             await session.channel.send(
                 prompt.thread_id,
-                f"Input recorded, but resuming `{prompt.agent_name}` failed: {response.error[:500]}",
+                self._format_agent_failure_text(
+                    response,
+                    prefix=f"Input recorded, but resuming `{prompt.agent_name}` failed.",
+                ),
             )
             return f"Interactive prompt `{prompt.id}` failed to resume."
 

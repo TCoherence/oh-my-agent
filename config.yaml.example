@@ -75,6 +75,7 @@ automations:
   enabled: true
   storage_dir: ~/.oh-my-agent/automations
   reload_interval_seconds: 5       # polling-based hot reload for automation files
+  timezone: local                  # 'local' or an IANA zone like 'America/Los_Angeles'
 
 runtime:
   enabled: true

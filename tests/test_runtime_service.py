@@ -978,6 +978,39 @@ async def test_enqueue_scheduler_task_uses_reply_artifact_shape(runtime_env):
 
 
 @pytest.mark.asyncio
+async def test_enqueue_scheduler_task_uses_automation_execution_overrides(runtime_env):
+    runtime: RuntimeService = runtime_env["runtime"]
+    channel: _FakeChannel = runtime_env["channel"]
+    store: SQLiteMemoryStore = runtime_env["store"]
+    registry = AgentRegistry([_ArtifactAgent()])
+    session = ChannelSession(
+        platform="discord",
+        channel_id="100",
+        channel=channel,
+        registry=registry,
+    )
+    runtime.register_session(session, registry)
+
+    task = await runtime.enqueue_scheduler_task(
+        session=session,
+        registry=registry,
+        thread_id="thread-scheduler",
+        automation_name="daily-news",
+        prompt="Generate a markdown daily news brief",
+        author="scheduler",
+        preferred_agent="artifact-agent",
+        timeout_seconds=901,
+        max_turns=70,
+    )
+    assert task is not None
+    stored = await store.get_runtime_task(task.id)
+    assert stored is not None
+    assert stored.agent_timeout_seconds == 901
+    assert stored.agent_max_turns == 70
+    assert stored.max_minutes == 16
+
+
+@pytest.mark.asyncio
 async def test_enqueue_scheduler_task_skips_when_same_automation_is_inflight(runtime_env):
     runtime: RuntimeService = runtime_env["runtime"]
     channel: _FakeChannel = runtime_env["channel"]
@@ -2284,6 +2317,7 @@ async def test_thread_hitl_resume_logs_progress_and_honors_skill_timeout_overrid
 name: market-briefing
 metadata:
   timeout_seconds: 900
+  max_turns: 80
 ---
 """,
         encoding="utf-8",
@@ -2357,6 +2391,7 @@ metadata:
 
     assert "resumed successfully" in result
     assert registry.run.await_args.kwargs["timeout_override_seconds"] == 900
+    assert registry.run.await_args.kwargs["max_turns_override"] == 80
     assert "THREAD_AGENT_RUNNING purpose=hitl_resume" in caplog.text
     assert "THREAD_AGENT_DONE purpose=hitl_resume" in caplog.text
 

@@ -21,11 +21,14 @@ class _AutomationRecord:
         self.agent = "codex"
         self.author = "scheduler"
         self.skill_name = "daily-brief"
+        self.timeout_seconds = 900
+        self.max_turns = 40
         self.source_path = Path("/tmp") / f"{name}.yaml"
 
 
 class _SchedulerStub:
     def __init__(self):
+        self.timezone_name = "America/Los_Angeles"
         self.records = {
             "daily": _AutomationRecord("daily", True),
             "paused": _AutomationRecord("paused", False),
@@ -74,6 +77,9 @@ async def test_get_status_supports_single_name_and_all():
 
     assert single.success is True
     assert single.automations[0].last_task_id == "task-1"
+    assert single.scheduler_timezone == "America/Los_Angeles"
+    assert single.automations[0].timeout_seconds == 900
+    assert single.automations[0].max_turns == 40
     assert len(all_rows.automations) == 2
 
 

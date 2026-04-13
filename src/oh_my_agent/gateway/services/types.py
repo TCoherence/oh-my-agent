@@ -87,6 +87,8 @@ class AutomationInfo:
     target: str | None = None
     agent: str | None = None
     skill_name: str | None = None
+    timeout_seconds: int | None = None
+    max_turns: int | None = None
     last_run_at: str | None = None
     last_success_at: str | None = None
     last_error: str | None = None
@@ -101,6 +103,7 @@ class AutomationStatusResult(ServiceResult):
     """Result of querying automation status."""
 
     automations: list[AutomationInfo] = field(default_factory=list)
+    scheduler_timezone: str | None = None
 
 
 # ── Interactive results ─────────────────────────────────────────────── #

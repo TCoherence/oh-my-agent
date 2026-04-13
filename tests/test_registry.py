@@ -76,6 +76,21 @@ class _TimedAgent(BaseAgent):
         return AgentResponse(text="ok")
 
 
+class _TurnLimitedAgent(BaseAgent):
+    def __init__(self, name: str, max_turns: int):
+        self._name = name
+        self._max_turns = max_turns
+        self.seen_max_turns: list[int] = []
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    async def run(self, prompt, history=None):
+        self.seen_max_turns.append(self._max_turns)
+        return AgentResponse(text="ok")
+
+
 def test_registry_requires_at_least_one_agent():
     with pytest.raises(ValueError):
         AgentRegistry([])
@@ -175,3 +190,33 @@ async def test_timeout_override_applies_only_for_single_run():
 
     assert agent.seen_timeouts == [900]
     assert agent._timeout == 300
+
+
+@pytest.mark.asyncio
+async def test_max_turns_override_applies_only_for_single_run():
+    agent = _TurnLimitedAgent("claude", max_turns=25)
+    registry = AgentRegistry([agent])
+
+    await registry.run("q", max_turns_override=80)
+
+    assert agent.seen_max_turns == [80]
+    assert agent._max_turns == 25
+
+
+@pytest.mark.asyncio
+async def test_registry_does_not_fallback_on_max_turns():
+    first = _FailAgent("claude", error="budget hit")
+    second = _OKAgent("gemini", "should-not-run")
+    registry = AgentRegistry([first, second])
+
+    async def _run_with_max_turns(prompt, history=None):
+        first.calls.append((prompt, history))
+        return AgentResponse(text="", error="budget hit", error_kind="max_turns", partial_text="partial")
+
+    first.run = _run_with_max_turns  # type: ignore[method-assign]
+
+    agent, resp = await registry.run("hello")
+
+    assert agent is first
+    assert resp.error_kind == "max_turns"
+    assert len(second.calls) == 0

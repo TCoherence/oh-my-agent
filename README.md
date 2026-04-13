@@ -119,6 +119,7 @@ automations:
   enabled: true
   storage_dir: ~/.oh-my-agent/automations
   reload_interval_seconds: 5
+  timezone: local
 
 runtime:
   enabled: true
@@ -354,6 +355,7 @@ Rebuild the image only when you change container-layer concerns such as `Dockerf
 - Scheduling supports:
   - `cron: "0 9 * * *"` for normal wall-clock schedules
   - `interval_seconds` for high-frequency local testing
+- `automations.timezone` defaults to `local`; set an explicit IANA zone such as `America/Los_Angeles` if you want scheduler behavior to stay stable across different hosts/containers.
 - `cron` and `interval_seconds` are mutually exclusive.
 - `initial_delay_seconds` is supported only with `interval_seconds`.
 - Discord operator commands:

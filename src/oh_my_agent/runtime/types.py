@@ -98,6 +98,8 @@ class RuntimeTask:
     step_no: int
     max_steps: int
     max_minutes: int
+    agent_timeout_seconds: int | None
+    agent_max_turns: int | None
     test_command: str
     workspace_path: str | None
     decision_message_id: str | None
@@ -140,6 +142,12 @@ class RuntimeTask:
             step_no=int(row.get("step_no", 0)),
             max_steps=int(row.get("max_steps", 8)),
             max_minutes=int(row.get("max_minutes", 20)),
+            agent_timeout_seconds=(
+                int(row["agent_timeout_seconds"]) if row.get("agent_timeout_seconds") is not None else None
+            ),
+            agent_max_turns=(
+                int(row["agent_max_turns"]) if row.get("agent_max_turns") is not None else None
+            ),
             test_command=str(row.get("test_command", "pytest -q")),
             workspace_path=row.get("workspace_path"),
             decision_message_id=row.get("decision_message_id"),

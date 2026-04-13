@@ -991,6 +991,39 @@ async def test_scheduler_dispatch_runtime_passes_automation_name():
 
 
 @pytest.mark.asyncio
+async def test_scheduler_dispatch_runtime_passes_timeout_and_max_turns():
+    channel = MagicMock()
+    channel.platform = "discord"
+    channel.channel_id = "100"
+    channel.send = AsyncMock()
+
+    registry = MagicMock(spec=AgentRegistry)
+    session = _make_session(channel=channel, registry=registry)
+
+    runtime = MagicMock()
+    runtime.enabled = True
+    runtime.enqueue_scheduler_task = AsyncMock()
+
+    gm = GatewayManager([], runtime_service=runtime)
+    gm._sessions["discord:100"] = session
+
+    job = ScheduledJob(
+        name="hello-from-codex",
+        platform="discord",
+        channel_id="100",
+        prompt="run",
+        interval_seconds=60,
+        timeout_seconds=900,
+        max_turns=60,
+    )
+    await gm._dispatch_scheduled_job(job)
+
+    kwargs = runtime.enqueue_scheduler_task.call_args.kwargs
+    assert kwargs["timeout_seconds"] == 900
+    assert kwargs["max_turns"] == 60
+
+
+@pytest.mark.asyncio
 async def test_handle_message_uses_short_workspace_override(tmp_path):
     base = tmp_path / "base-workspace"
     base.mkdir(parents=True, exist_ok=True)
@@ -1331,7 +1364,7 @@ async def test_explicit_skill_invocation_passes_skill_timeout_override(tmp_path)
     skill_dir = skills_root / "market-briefing"
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text(
-        "---\nname: market-briefing\ndescription: long report\nmetadata:\n  timeout_seconds: 900\n---\n",
+        "---\nname: market-briefing\ndescription: long report\nmetadata:\n  timeout_seconds: 900\n  max_turns: 80\n---\n",
         encoding="utf-8",
     )
     syncer = MagicMock()
@@ -1350,6 +1383,7 @@ async def test_explicit_skill_invocation_passes_skill_timeout_override(tmp_path)
 
     registry.run.assert_awaited_once()
     assert registry.run.call_args.kwargs["timeout_override_seconds"] == 900
+    assert registry.run.call_args.kwargs["max_turns_override"] == 80
 
 
 @pytest.mark.asyncio
@@ -1662,6 +1696,43 @@ async def test_handle_message_hides_agent_error_text():
     await gm.handle_message(session, registry, _make_msg(thread_id="thread-1", content="trigger"))
 
     channel.send.assert_awaited_once_with("thread-1", USER_MSG_AGENT_CRASH)
+
+
+@pytest.mark.asyncio
+async def test_handle_message_surfaces_partial_excerpt_for_max_turns():
+    channel = MagicMock()
+    channel.platform = "discord"
+    channel.channel_id = "100"
+    channel.create_thread = AsyncMock()
+    channel.send = AsyncMock()
+    channel.typing = MagicMock()
+    channel.typing.return_value.__aenter__ = AsyncMock(return_value=None)
+    channel.typing.return_value.__aexit__ = AsyncMock(return_value=False)
+
+    mock_agent = MagicMock()
+    mock_agent.name = "claude"
+    registry = MagicMock(spec=AgentRegistry)
+    registry.agents = [mock_agent]
+    registry.run = AsyncMock(
+        return_value=(
+            mock_agent,
+            AgentResponse(
+                text="",
+                error="budget hit",
+                error_kind="max_turns",
+                partial_text="partial answer",
+            ),
+        )
+    )
+
+    session = _make_session(channel=channel, registry=registry)
+    gm = GatewayManager([])
+
+    await gm.handle_message(session, registry, _make_msg(thread_id="thread-1", content="trigger"))
+
+    sent = channel.send.await_args.args[1]
+    assert "max turn budget" in sent
+    assert "partial answer" in sent
 
 
 @pytest.mark.asyncio

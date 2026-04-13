@@ -12,7 +12,6 @@ import shutil
 import time
 import uuid
 from pathlib import Path
-import yaml
 
 from oh_my_agent.automation import ScheduledJob, Scheduler
 from oh_my_agent.control.protocol import (
@@ -26,6 +25,7 @@ from oh_my_agent.control.protocol import (
 from oh_my_agent.gateway.base import BaseChannel, IncomingMessage
 from oh_my_agent.gateway.session import ChannelSession
 from oh_my_agent.agents.registry import AgentRegistry
+from oh_my_agent.skills.frontmatter import read_skill_frontmatter, resolve_skill_frontmatter, skill_execution_limits
 from oh_my_agent.runtime.policy import is_artifact_intent, is_long_task_intent, is_skill_intent
 from oh_my_agent.utils.chunker import chunk_message
 from oh_my_agent.utils.errors import user_safe_agent_error, user_safe_message
@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 THREAD_NAME_MAX = 90
 _EXPLICIT_SKILL_CALL_RE = re.compile(r"^/([a-zA-Z0-9][a-zA-Z0-9-_]{0,62})(?:\s|$)")
 AGENT_PROGRESS_LOG_INTERVAL_SECONDS = 20.0
+_PARTIAL_EXCERPT_MAX_CHARS = 2000
 
 
 @dataclass
@@ -285,6 +286,7 @@ class GatewayManager:
         log_path: Path | None,
         image_paths: list[Path] | None,
         timeout_override_seconds: int | None,
+        max_turns_override: int | None,
         on_agent_run=None,
     ):
         run_task = asyncio.create_task(
@@ -297,6 +299,7 @@ class GatewayManager:
                 log_path=log_path,
                 image_paths=image_paths,
                 timeout_override_seconds=timeout_override_seconds,
+                max_turns_override=max_turns_override,
                 on_agent_run=on_agent_run,
             )
         )
@@ -737,6 +740,8 @@ class GatewayManager:
                     author=job.author,
                     preferred_agent=job.agent,
                     skill_name=job.skill_name,
+                    timeout_seconds=job.timeout_seconds,
+                    max_turns=job.max_turns,
                 )
                 if task and store:
                     await store.upsert_automation_state(
@@ -1215,6 +1220,7 @@ class GatewayManager:
                 log_path=log_path,
                 image_paths=image_paths,
                 timeout_override_seconds=skill_timeout_override,
+                max_turns_override=self._skill_max_turns_by_name(tracked_skill),
                 on_agent_run=_record_agent_run,
             )
         elapsed_agent = time.perf_counter() - t_agent
@@ -1243,7 +1249,7 @@ class GatewayManager:
                 elapsed_agent,
                 response.error,
             )
-            await channel.send(thread_id, user_safe_agent_error(response.error_kind))
+            await channel.send(thread_id, self._format_agent_failure_text(response))
             # Remove the failed user turn so history stays clean
             history = await session.get_history(thread_id)
             if history:
@@ -1735,23 +1741,7 @@ class GatewayManager:
 
     @staticmethod
     def _read_skill_frontmatter(skill_md: Path) -> dict:
-        try:
-            content = skill_md.read_text(encoding="utf-8")
-        except OSError:
-            return {}
-        if not content.startswith("---\n"):
-            return {}
-        _, _, rest = content.partition("---\n")
-        frontmatter, sep, _ = rest.partition("\n---")
-        if not sep:
-            return {}
-        try:
-            meta = yaml.safe_load(frontmatter)
-        except yaml.YAMLError:
-            return {}
-        if not isinstance(meta, dict):
-            return {}
-        return meta
+        return read_skill_frontmatter(skill_md)
 
     @classmethod
     def _read_skill_description(cls, skill_md: Path) -> str:
@@ -1784,15 +1774,12 @@ class GatewayManager:
         return self._recent_thread_skills.get(self._thread_skill_key(platform, channel_id, thread_id))
 
     def _skill_frontmatter_by_name(self, skill_name: str | None) -> dict:
-        if not skill_name or not self._skill_syncer:
-            return {}
-        skills_path = getattr(self._skill_syncer, "_skills_path", None)
-        if not isinstance(skills_path, Path) or not skills_path.is_dir():
-            return {}
-        skill_md = skills_path / skill_name / "SKILL.md"
-        if not skill_md.exists():
-            return {}
-        return self._read_skill_frontmatter(skill_md)
+        skills_path = getattr(self._skill_syncer, "_skills_path", None) if self._skill_syncer else None
+        return resolve_skill_frontmatter(
+            skill_name,
+            repo_root=self._repo_root,
+            skills_path=skills_path if isinstance(skills_path, Path) and skills_path.is_dir() else None,
+        )
 
     def _skill_description_by_name(self, skill_name: str | None) -> str:
         meta = self._skill_frontmatter_by_name(skill_name)
@@ -1802,20 +1789,25 @@ class GatewayManager:
         return description.strip().replace("\n", " ")
 
     def _skill_timeout_seconds_by_name(self, skill_name: str | None) -> int | None:
-        meta = self._skill_frontmatter_by_name(skill_name)
-        metadata = meta.get("metadata")
-        value = None
-        if isinstance(metadata, dict):
-            value = metadata.get("timeout_seconds")
-        if value is None:
-            value = meta.get("timeout_seconds")
-        if value is None:
-            return None
-        try:
-            timeout = int(value)
-        except (TypeError, ValueError):
-            return None
-        return timeout if timeout > 0 else None
+        return skill_execution_limits(self._skill_frontmatter_by_name(skill_name)).timeout_seconds
+
+    def _skill_max_turns_by_name(self, skill_name: str | None) -> int | None:
+        return skill_execution_limits(self._skill_frontmatter_by_name(skill_name)).max_turns
+
+    @staticmethod
+    def _format_agent_failure_text(response) -> str:
+        base = user_safe_agent_error(response.error_kind)
+        partial = str(getattr(response, "partial_text", "") or "").strip()
+        if not partial:
+            return base
+        excerpt = partial[-_PARTIAL_EXCERPT_MAX_CHARS:]
+        label = "**Partial result before stop**"
+        if response.error_kind == "max_turns":
+            label = "**Partial result before max turns**"
+        elif response.error_kind == "timeout":
+            label = "**Partial result before timeout**"
+        text = f"{base}\n\n{label}\n```text\n{excerpt}\n```"
+        return text[:1900]
 
     async def _append_user_turn_if_needed(
         self,

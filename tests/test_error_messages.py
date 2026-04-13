@@ -7,6 +7,7 @@ import subprocess
 from oh_my_agent.utils.errors import (
     USER_MSG_AGENT_CRASH,
     USER_MSG_INTERNAL,
+    USER_MSG_MAX_TURNS,
     USER_MSG_STORE_FAILURE,
     USER_MSG_TIMEOUT,
     user_safe_agent_error,
@@ -33,6 +34,10 @@ def test_user_safe_message_maps_generic_exception() -> None:
 
 def test_user_safe_agent_error_maps_timeout() -> None:
     assert user_safe_agent_error("timeout") == USER_MSG_TIMEOUT
+
+
+def test_user_safe_agent_error_maps_max_turns() -> None:
+    assert user_safe_agent_error("max_turns") == USER_MSG_MAX_TURNS
 
 
 def test_user_safe_agent_error_maps_non_timeout_to_agent_crash() -> None:

@@ -102,6 +102,18 @@ def _should_clear_resumed_session(err_msg: str) -> bool:
     )
 
 
+def _bounded_log_excerpt(log_path: Path | None, *, max_chars: int = 2000) -> str | None:
+    if log_path is None or not log_path.exists():
+        return None
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="replace").strip()
+    except Exception:
+        return None
+    if not text:
+        return None
+    return text[-max_chars:]
+
+
 async def _stream_cli_process(
     *cmd: str,
     cwd: str | None,
@@ -253,6 +265,8 @@ class BaseCLIAgent(BaseAgent):
                 text="",
                 error=f"{self.name} CLI timed out after {self._timeout}s",
                 error_kind="timeout",
+                partial_text=_bounded_log_excerpt(log_path),
+                terminal_reason="timeout",
             )
         except FileNotFoundError:
             return AgentResponse(

@@ -571,6 +571,8 @@ CREATE TABLE IF NOT EXISTS runtime_tasks (
     step_no             INTEGER NOT NULL DEFAULT 0,
     max_steps           INTEGER NOT NULL,
     max_minutes         INTEGER NOT NULL,
+    agent_timeout_seconds INTEGER,
+    agent_max_turns    INTEGER,
     test_command        TEXT NOT NULL,
     workspace_path      TEXT,
     decision_message_id TEXT,
@@ -933,6 +935,8 @@ class SQLiteMemoryStore(MemoryStore):
         await self._ensure_column("runtime_tasks", "workspace_cleaned_at", "TIMESTAMP")
         await self._ensure_column("runtime_tasks", "task_type", "TEXT NOT NULL DEFAULT 'repo_change'")
         await self._ensure_column("runtime_tasks", "skill_name", "TEXT")
+        await self._ensure_column("runtime_tasks", "agent_timeout_seconds", "INTEGER")
+        await self._ensure_column("runtime_tasks", "agent_max_turns", "INTEGER")
         await self._ensure_column("auth_credentials", "scope_key", "TEXT NOT NULL DEFAULT 'default'")
         await self._ensure_column("skill_provenance", "auto_disabled", "INTEGER NOT NULL DEFAULT 0")
         await self._ensure_column("skill_provenance", "auto_disabled_reason", "TEXT")
@@ -1180,8 +1184,9 @@ class SQLiteMemoryStore(MemoryStore):
             await db.execute(
                 "INSERT INTO runtime_tasks "
                 "(id, platform, channel_id, thread_id, created_by, goal, original_request, preferred_agent, "
-                " status, max_steps, max_minutes, test_command, completion_mode, output_summary, artifact_manifest, automation_name, task_type, skill_name) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " status, max_steps, max_minutes, agent_timeout_seconds, agent_max_turns, test_command, "
+                " completion_mode, output_summary, artifact_manifest, automation_name, task_type, skill_name) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     kwargs["task_id"],
                     kwargs["platform"],
@@ -1194,6 +1199,8 @@ class SQLiteMemoryStore(MemoryStore):
                     kwargs["status"],
                     int(kwargs["max_steps"]),
                     int(kwargs["max_minutes"]),
+                    kwargs.get("agent_timeout_seconds"),
+                    kwargs.get("agent_max_turns"),
                     kwargs["test_command"],
                     kwargs.get("completion_mode", "merge"),
                     kwargs.get("output_summary"),

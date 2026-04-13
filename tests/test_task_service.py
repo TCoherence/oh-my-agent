@@ -22,6 +22,8 @@ def _task(**overrides) -> RuntimeTask:
         step_no=0,
         max_steps=8,
         max_minutes=20,
+        agent_timeout_seconds=None,
+        agent_max_turns=None,
         test_command="pytest -q",
         workspace_path=None,
         decision_message_id=None,
