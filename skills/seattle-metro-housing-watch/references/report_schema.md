@@ -16,7 +16,7 @@ All reports should include at least:
   "report_date": "",
   "is_first_report": false,
   "data_freshness_note": "",
-  "region_scope": ["seattle", "bellevue", "redmond", "kirkland", "issaquah"],
+  "region_scope": ["seattle", "bellevue", "redmond", "kirkland", "issaquah", "bothell", "lynnwood"],
   "summary": "",
   "key_takeaways": [],
   "rate_context": "",
@@ -59,13 +59,15 @@ Use:
 }
 ```
 
-`area_scoreboard` v1 required areas:
+`area_scoreboard` default areas:
 
 - `seattle`
 - `bellevue`
 - `redmond`
 - `kirkland`
 - `issaquah`
+- `bothell`
+- `lynnwood`
 
 ## `sample_listings[]`
 
@@ -76,19 +78,32 @@ Use:
   "area": "seattle",
   "address_or_label": "",
   "url": "",
+  "source_site": "redfin",
+  "property_type": "single-family",
   "list_price": "",
+  "original_list_price": "",
   "beds_baths_sqft": "",
   "listing_status": "",
+  "listed_at": "",
   "days_on_market": "",
+  "price_history_summary": "",
   "why_it_matters": ""
 }
 ```
 
 Rules:
 
-- default 3-5 items
-- no more than 2 from the same area
+- `weekly_pulse`
+  - all 7 areas get 2 listings first
+  - total cap `18`
+  - remaining 4 slots go to areas with stronger active inventory and better high-price sample availability
+- `market_snapshot`
+  - at most 7 listings total
+  - default 1 per area
+- `area_deep_dive`
+  - target 4-6 listings for the selected area
 - listing samples are supporting evidence, not the main report spine
+- price filtering is based on the **area's own** median baseline, not a metro-wide median
 
 ## Body citation rule
 

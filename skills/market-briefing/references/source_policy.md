@@ -14,13 +14,15 @@ Use a balanced source mix:
   - earnings releases, shareholder letters, SEC filings, investor presentations
 - `media / analysis`
   - reputable reporting and informed analysis
+- `community / social`
+  - community threads, developer signals, X.com posts, open-source maintainer commentary when relevant
 
 Default stance:
 
 - slightly favor primary sources for key conclusions
 - use media/analysis to fill context and interpretation
 - cross-check major claims whenever possible
-- for AI people/community signals, treat X.com and other community posts as early signal, not as the sole basis for high-risk conclusions
+- for AI people/community signals, treat X.com and other community posts as early signal, not the sole basis for high-risk conclusions
 
 ## What to record
 
@@ -45,25 +47,33 @@ Every report should explicitly include:
 
 ## Finance source family requirements
 
-Finance daily should cover three source families:
+Finance daily should cover these source families:
 
 - China macro / policy
   - PBOC, Ministry of Finance, NBS, NDRC, MIIT, CSRC-related signals, State Council / top-level policy
 - US macro / policy
   - Fed, Treasury, BLS, BEA, White House, SEC, other federal agencies where relevant
+- US market volatility / risk appetite
+  - official macro/policy plus high-signal market reporting and volatility context
+- China / Hong Kong market pulse
+  - official signals plus high-signal market reporting
+- China property policy / financing signals
+  - housing policy notices, financing policy, credit, mortgage, property-support measures
 - tracked holdings / market-index lens
   - earnings releases, shareholder letters, 8-K / 10-K / 10-Q, IR pages, conference transcripts, CEO / CFO / IR public remarks
 
 Default finance stance:
 
-- China coverage defaults to macro + policy, not broad China listed-company scanning
+- China coverage includes macro + policy + market pulse + property finance signals
 - tracked holdings use a rolling 7-day window
 - `VOO`, `SPY`, and `S&P 500` should be interpreted as market / allocation lenses rather than pseudo-company events
 
 ## AI source family requirements
 
-AI daily should cover two layers of sources:
+AI daily should cover three layers of sources:
 
+- frontier-lab radar
+  - official lab pages, docs, model cards, release notes, high-quality reporting
 - topic sources
   - company blogs, release notes, model cards, docs, talks, papers, code repos, infrastructure announcements
 - people/community sources
@@ -72,13 +82,14 @@ AI daily should cover two layers of sources:
 Default AI stance:
 
 - tracked people / groups should be consulted first
-- run a bounded discovery sweep for new people strongly tied to the day’s most important AI themes
+- frontier-lab radar is a mandatory section, not an optional aside
+- run a bounded discovery sweep for new people strongly tied to the day's most important AI themes
 - new people enter the candidate queue first
 - X.com is a signal source and normally needs cross-checking before it becomes a five-layer core conclusion
-- if a people/community signal remains unverified, keep it in the people section or candidate queue section rather than promoting it into the main factual spine
+- if a frontier signal remains unverified, keep it in watchlist form or `unverified frontier signals`
 
 ## Section density and degraded sections
 
 - Do not let sections collapse into one sentence of generic filler.
-- If a section has no high-confidence incremental signal, state that explicitly and explain what is still worth watching.
+- If a section has no high-confidence incremental signal, state `no high-confidence incremental signal` explicitly and explain what is still worth watching.
 - Use `coverage_gaps` and `confidence_flags` to record thin-evidence sections instead of pretending the section is complete.

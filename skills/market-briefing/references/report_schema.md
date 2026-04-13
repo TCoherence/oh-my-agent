@@ -60,33 +60,9 @@ All report JSON sidecars should include:
 }
 ```
 
-`coverage_gaps` should record sections or angles with insufficient high-confidence evidence. `confidence_flags` should record uncertainty labels such as `low-signal-day`, `analysis-heavy`, or `single-source-risk`.
-
-`evidence_links` entries should use:
-
-```json
-{
-  "label": "",
-  "url": "",
-  "source_type": "primary / official"
-}
-```
-
 ## Body citation rule
 
 Main-body paragraphs and important bullets should include compact inline source links, not only a final source appendix.
-
-Preferred style:
-
-```md
-某项政策信号正在改变预期管理方式（[中国政府网](https://...), [Reuters](https://...)）。
-```
-
-or:
-
-```md
-- 公司把 2026 财年 capex 指引继续上调（[10-K/8-K](https://...), [Bloomberg](https://...)）
-```
 
 ## Politics daily
 
@@ -99,11 +75,7 @@ Markdown shape:
 
 ## 摘要
 
-<2-4 段，允许在段末加入紧凑来源链接>
-
 ## 中国中央政策与决策信号
-
-<短段落 + 要点，每个关键判断尽量有内联来源>
 
 ## 美国联邦政策与决策信号
 
@@ -125,17 +97,17 @@ Markdown shape:
 
 ## 摘要
 
-<2-4 段，允许在段末加入紧凑来源链接>
-
 ## 中国宏观与政策
-
-<中国央行、财政、产业、监管、增长/通胀/信用/地产/出口相关高信号变化，正文内联来源>
 
 ## 美国宏观与政策
 
-## 重点持仓财报 / 管理层表态 / CEO 公开发言
+## 美国市场波动与风险偏好
 
-<默认跟踪 NVDA / MSFT / AAPL / AMZN / GOOG / TSLA / META / VOO / SPY / S&P 500，滚动 7 天窗口>
+## 中国 / 香港市场脉搏
+
+## 中国房地产政策与融资信号
+
+## 重点持仓财报 / 管理层 / CEO 公开发言
 
 ## 市场与指数基金视角
 
@@ -152,6 +124,9 @@ Finance JSON should also include:
   "holdings_window_days": 7,
   "china_macro_policy_summary": "",
   "us_macro_policy_summary": "",
+  "us_market_volatility_view": "",
+  "china_market_pulse": "",
+  "china_property_policy_view": "",
   "market_index_view": ""
 }
 ```
@@ -162,7 +137,10 @@ Finance sections should use:
 [
   {"slug": "cn-macro-policy", "heading": "中国宏观与政策", "summary": "", "bullets": [], "evidence_links": []},
   {"slug": "us-macro-policy", "heading": "美国宏观与政策", "summary": "", "bullets": [], "evidence_links": []},
-  {"slug": "tracked-holdings", "heading": "重点持仓财报 / 管理层表态 / CEO 公开发言", "summary": "", "bullets": [], "evidence_links": []},
+  {"slug": "us-market-volatility", "heading": "美国市场波动与风险偏好", "summary": "", "bullets": [], "evidence_links": []},
+  {"slug": "china-market-pulse", "heading": "中国 / 香港市场脉搏", "summary": "", "bullets": [], "evidence_links": []},
+  {"slug": "china-property-policy", "heading": "中国房地产政策与融资信号", "summary": "", "bullets": [], "evidence_links": []},
+  {"slug": "tracked-holdings", "heading": "重点持仓财报 / 管理层 / CEO 公开发言", "summary": "", "bullets": [], "evidence_links": []},
   {"slug": "market-index-view", "heading": "市场与指数基金视角", "summary": "", "bullets": [], "evidence_links": []},
   {"slug": "watchlist", "heading": "后续观察点", "summary": "", "bullets": [], "evidence_links": []}
 ]
@@ -179,11 +157,9 @@ Markdown shape:
 
 ## 摘要
 
-<2-4 段，允许在段末加入紧凑来源链接>
+## Frontier Labs / Frontier Model Radar
 
 ## 关键人物与社区信号
-
-<先写 tracked people / groups 的高价值增量，再写 bounded discovery 中发现的新人物；若主要来自 X.com，正文里要明确它只是 signal 还是已 cross-check>
 
 ## Energy
 
@@ -213,6 +189,9 @@ AI JSON should also include:
     "ai-generalists"
   ],
   "tracked_people": [],
+  "frontier_lab_watch": ["OpenAI", "Anthropic", "Google DeepMind", "Meta", "xAI", "Mistral", "Qwen", "DeepSeek"],
+  "frontier_signal_summary": "",
+  "unverified_frontier_signals": [],
   "people_signal_summary": "",
   "new_candidate_people": [],
   "promoted_people": [],
@@ -220,87 +199,12 @@ AI JSON should also include:
 }
 ```
 
-`new_candidate_people` and `promoted_people` should use:
-
-```json
-{
-  "person_id": "",
-  "name": "",
-  "x_handle": "",
-  "group": "ai-generalists",
-  "reason": "",
-  "evidence_urls": [],
-  "cross_checked": false,
-  "promote_recommended": false
-}
-```
-
-## Bootstrap dossier
-
-Markdown shape:
-
-```md
-# <domain> bootstrap dossier｜<date>
-
-一句话结论：...
-
-## 范围与时间窗
-
-## 结构性主线
-
-<允许做更长的历史脉络分析，但关键判断仍要内联来源>
-
-## 关键事件与信号
-
-## 当前状态判断
-
-## 后续跟踪清单
-
-## 来源与交叉验证说明
-```
-
 ## Weekly synthesis
 
-Markdown shape:
+Weekly JSON remains structurally light. Strengthen:
 
-```md
-# 市场情报周报｜<iso-week>
+- `trend_summary`
+- `cross_domain_links`
+- `sections[]`
 
-一句话结论：...
-
-## 本周总览
-
-<2-4 段，摘要不应只是一句话>
-
-## 政治主线
-
-## 财经主线
-
-## AI 五层演进
-
-## 跨域联动与结构性趋势
-
-## 下周观察点
-
-## 来源与交叉验证说明
-```
-
-Weekly JSON should also include:
-
-```json
-{
-  "trend_summary": "",
-  "cross_domain_links": []
-}
-```
-
-Weekly sections should prefer richer prose plus selective bullets rather than only headlines.
-
-## Section density / no-signal rule
-
-For daily reports across politics, finance, and AI:
-
-- each section should normally include at least one analysis paragraph
-- each section should normally include `2-4` meaningful bullets or observations
-- major claims should include inline citations
-- if a section has no high-confidence incremental signal, say that explicitly instead of filling the space with generic prose
+Do not copy all finance/AI daily-only JSON fields into weekly JSON.

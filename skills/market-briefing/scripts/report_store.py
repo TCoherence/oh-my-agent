@@ -197,6 +197,12 @@ def build_markdown_skeleton(*, mode: str, domain: str, report_date: date | None 
                 "",
                 "## 美国宏观与政策",
                 "",
+                "## 美国市场波动与风险偏好",
+                "",
+                "## 中国 / 香港市场脉搏",
+                "",
+                "## 中国房地产政策与融资信号",
+                "",
                 "## 重点持仓财报 / 管理层表态 / CEO 公开发言",
                 "",
                 "## 市场与指数基金视角",
@@ -215,6 +221,8 @@ def build_markdown_skeleton(*, mode: str, domain: str, report_date: date | None 
                 "一句话结论：",
                 "",
                 "## 摘要",
+                "",
+                "## Frontier Labs / Frontier Model Radar",
                 "",
                 "## 关键人物与社区信号",
                 "",
@@ -312,11 +320,17 @@ def build_json_scaffold(
         payload["holdings_window_days"] = HOLDINGS_WINDOW_DAYS
         payload["china_macro_policy_summary"] = ""
         payload["us_macro_policy_summary"] = ""
+        payload["us_market_volatility_view"] = ""
+        payload["china_market_pulse"] = ""
+        payload["china_property_policy_view"] = ""
         payload["market_index_view"] = ""
         payload["sections"] = [
             {"slug": "cn-macro-policy", "heading": "中国宏观与政策", "summary": "", "bullets": [], "evidence_links": []},
             {"slug": "us-macro-policy", "heading": "美国宏观与政策", "summary": "", "bullets": [], "evidence_links": []},
-            {"slug": "tracked-holdings", "heading": "重点持仓财报 / 管理层表态 / CEO 公开发言", "summary": "", "bullets": [], "evidence_links": []},
+            {"slug": "us-market-volatility", "heading": "美国市场波动与风险偏好", "summary": "", "bullets": [], "evidence_links": []},
+            {"slug": "china-market-pulse", "heading": "中国 / 香港市场脉搏", "summary": "", "bullets": [], "evidence_links": []},
+            {"slug": "china-property-policy", "heading": "中国房地产政策与融资信号", "summary": "", "bullets": [], "evidence_links": []},
+            {"slug": "tracked-holdings", "heading": "重点持仓财报 / 管理层 / CEO 公开发言", "summary": "", "bullets": [], "evidence_links": []},
             {"slug": "market-index-view", "heading": "市场与指数基金视角", "summary": "", "bullets": [], "evidence_links": []},
             {"slug": "watchlist", "heading": "后续观察点", "summary": "", "bullets": [], "evidence_links": []},
         ]
@@ -329,11 +343,15 @@ def build_json_scaffold(
             "ai-generalists",
         ]
         payload["tracked_people"] = []
+        payload["frontier_lab_watch"] = ["OpenAI", "Anthropic", "Google DeepMind", "Meta", "xAI", "Mistral", "Qwen", "DeepSeek"]
+        payload["frontier_signal_summary"] = ""
+        payload["unverified_frontier_signals"] = []
         payload["people_signal_summary"] = ""
         payload["new_candidate_people"] = []
         payload["promoted_people"] = []
         payload["candidate_queue_summary"] = ""
         payload["sections"] = [
+            {"slug": "frontier-radar", "heading": "Frontier Labs / Frontier Model Radar", "summary": "", "bullets": [], "evidence_links": []},
             {"slug": "people-signals", "heading": "关键人物与社区信号", "summary": "", "bullets": [], "evidence_links": []},
             {"slug": "energy", "heading": "Energy", "summary": "", "bullets": [], "evidence_links": []},
             {"slug": "chips", "heading": "Chips", "summary": "", "bullets": [], "evidence_links": []},

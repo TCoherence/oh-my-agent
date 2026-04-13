@@ -13,9 +13,10 @@ Use sources in this order:
    - Freddie Mac PMMS / FRED mortgage-rate context
 2. `area trend layer`
    - Redfin city / neighborhood housing market pages when publicly readable
+   - Zillow city / local market pages when publicly readable
 3. `sample listing layer`
    - Redfin public listings first
-   - Zillow only as a fallback
+   - Zillow public listings second
 
 ## Retrieval method expectations
 
@@ -30,7 +31,7 @@ The report cadence is weekly, but the source refresh cadence is mixed.
 
 - NWMLS may be monthly
 - mortgage data may be weekly
-- Redfin market pages may have their own update cadence
+- Redfin / Zillow market pages may have their own update cadence
 
 Every report should explicitly include:
 
@@ -40,17 +41,64 @@ Every report should explicitly include:
 
 If a source is stale relative to report date, say so plainly.
 
+## Mortgage comparison defaults
+
+The default rate block must compare:
+
+- `MORTGAGE30US`
+- `MORTGAGE15US`
+
+The report should explicitly say:
+
+- latest value
+- previous value
+- short direction-of-travel note
+- what the 30Y vs 15Y spread implies for buyers who can afford shorter duration financing
+
 ## Listing samples
 
 Representative listing samples are **secondary illustration**, not the factual spine.
 
 Rules:
 
-- default 3-5 samples
-- do not let sample listings dominate the report
-- if listing pages fail or are too thin, finish the report anyway
-- record sample-layer weakness in `coverage_gaps`
-- explain why each sample matters from a buyer perspective
+- `weekly_pulse`
+  - 7 areas each get 2 listings first
+  - hard cap `18`
+  - 4 extra slots go to areas with better high-price, high-quality sample availability
+- `market_snapshot`
+  - target 1 listing per area
+  - at most `7`
+- `area_deep_dive`
+  - target `4-6` listings for the chosen area
+- allowed property types:
+  - `single-family`
+  - `townhouse`
+- excluded by default:
+  - condo
+  - apartment
+  - multi-family
+  - lot
+  - manufactured
+- sample selection priority:
+  1. `active`
+  2. `pending / contingent`
+  3. `recently sold` only as fallback
+- default price filter is based on the area's own median baseline:
+  1. `median_sale_price`
+  2. fallback `median_list_price`
+  3. fallback Zillow/Redfin public local price metric
+- default expectation is `>=` the area's own median baseline
+- if an area cannot supply 2 above-baseline listings, allow at most 1 below-baseline exception and record it in `coverage_gaps`
+
+Each sample should include, when publicly visible:
+
+- `source_site`
+- `property_type`
+- `listed_at`
+- `days_on_market`
+- `original_list_price`
+- `price_history_summary`
+- buyer-side note on why the sample matters
 
 ## Claim discipline
 

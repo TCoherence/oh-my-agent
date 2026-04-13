@@ -2,7 +2,7 @@
 name: market-briefing
 description: Produce Chinese-first politics, finance, and AI market briefings with persisted Markdown and JSON outputs under ~/.oh-my-agent/reports/market-briefing/. Use this skill for bounded historical bootstrap dossiers, domain daily digests, and cross-domain weekly synthesis that should reuse prior stored reports rather than relying on Discord history.
 metadata:
-  timeout_seconds: 900
+  timeout_seconds: 1200
 ---
 
 # Market Briefing
@@ -61,44 +61,11 @@ The skill is report-centric. It writes durable report files under `~/.oh-my-agen
 ## Required workflow
 
 1. Pick the explicit mode and domain.
-2. Load prior stored context with the helper script:
-
-```bash
-./.venv/bin/python skills/market-briefing/scripts/report_store.py context \
-  --mode daily_digest \
-  --domain politics
-```
-
-For weekly synthesis:
-
-```bash
-./.venv/bin/python skills/market-briefing/scripts/report_store.py context \
-  --mode weekly_synthesis \
-  --domain cross-domain
-```
-
-3. Generate a starter Markdown + JSON scaffold:
-
-```bash
-./.venv/bin/python skills/market-briefing/scripts/report_store.py scaffold \
-  --mode daily_digest \
-  --domain politics \
-  --markdown-file /tmp/politics_daily.md \
-  --json-file /tmp/politics_daily.json
-```
-
+2. Load prior stored context with the helper script.
+3. Generate a starter Markdown + JSON scaffold.
 4. Do external research for the requested mode/domain.
 5. Fill the Markdown + JSON with the researched content.
-6. Persist both files into the canonical report store:
-
-```bash
-./.venv/bin/python skills/market-briefing/scripts/report_store.py persist \
-  --mode daily_digest \
-  --domain politics \
-  --markdown-file /tmp/politics_daily.md \
-  --json-file /tmp/politics_daily.json
-```
-
+6. Persist both files into the canonical report store.
 7. In the final answer, return the report content directly and mention where it was stored.
 
 ## Storage layout
@@ -113,13 +80,15 @@ Use the helper script for path generation and persistence. Do not hand-roll path
 
 ## Report structure
 
-Read the relevant reference before drafting:
+Read the relevant references before drafting:
 
-- Report schemas: `references/report_schema.md`
-- Source policy: `references/source_policy.md`
-- AI people seed: `references/ai_people_seed.yaml`
-- Automation templates: `references/automation_templates.md`
-- Prompt recipes: `references/prompt_recipes.md`
+- `references/report_schema.md`
+- `references/source_policy.md`
+- `references/finance_watchlist.md`
+- `references/ai_frontier_watchlist.md`
+- `references/ai_people_seed.yaml`
+- `references/automation_templates.md`
+- `references/prompt_recipes.md`
 
 ### Daily report structure
 
@@ -131,6 +100,9 @@ Read the relevant reference before drafting:
 - `finance`
   - 中国宏观与政策
   - 美国宏观与政策
+  - 美国市场波动与风险偏好
+  - 中国 / 香港市场脉搏
+  - 中国房地产政策与融资信号
   - 重点持仓财报 / 管理层表态 / CEO 公开发言
   - 市场与指数基金视角
   - 后续观察点
@@ -146,8 +118,8 @@ Read the relevant reference before drafting:
     - `SPY`
     - `S&P 500`
   - 持仓池默认滚动窗口：`7 天`
-  - 中国财经默认只做到宏观 + 政策，不默认扩展到中国上市公司日常扫盘
 - `ai`
+  - Frontier Labs / Frontier Model Radar
   - 关键人物与社区信号
   - 固定五层：
     - `energy`
@@ -155,9 +127,19 @@ Read the relevant reference before drafting:
     - `infra`
     - `model`
     - `application`
-  - 每层关键变化
   - 层间联动影响
   - 候选池变化与后续关注
+
+### Politics vs finance boundary
+
+- `finance`
+  - 关注政策对市场、融资、住房、信用、风险偏好的影响
+- `politics`
+  - 关注政策文本本身、立法/行政背景、地缘/安全/供应链政治含义
+- 同一政策如果两边都提：
+  - finance 写市场影响
+  - politics 写政策与地缘背景
+  - 不允许两边写成重复摘要
 
 ### Weekly synthesis structure
 
@@ -167,11 +149,22 @@ Use:
 - latest bootstrap dossier for each domain
 - a bounded number of previous weekly reports
 
-The weekly report should stay cross-domain and focus on structure, trend, and continuity rather than repeating raw headlines. The finance weekly mainline must explicitly absorb:
+The weekly report should stay cross-domain and focus on structure, trend, and continuity rather than repeating raw headlines.
 
-- the last 7 days of China macro / policy signals
-- the last 7 days of tracked-holdings earnings / management / CEO signal
-- implications for broad-market positioning and index concentration
+Finance weekly must explicitly absorb:
+
+- US market volatility
+- China / Hong Kong market pulse
+- China property policy changes
+- tracked holdings and broad-market implications
+
+AI weekly must explicitly absorb:
+
+- frontier-lab watch
+- people/community signals
+- five-layer developments
+
+Weekly JSON remains structurally light and should not copy all daily-only JSON fields into the weekly sidecar.
 
 ## Source policy
 
@@ -180,6 +173,7 @@ The report must explicitly distinguish source types:
 - `primary / official`
 - `company / filing`
 - `media / analysis`
+- `community / social`
 
 Bias slightly toward primary sources for key conclusions, but do not force a primary-only workflow. Cross-check important claims with at least one additional source family where possible.
 
@@ -189,144 +183,26 @@ Every report should include:
 - a short verification note
 - inline source links in the main body, not only in the final source appendix
 
-For AI daily, `community / social` is also a valid source family, but it should be treated as a signal layer that normally requires cross-checking before it becomes a core conclusion.
-
 Do not treat `/search` as an external news source. In this repo, `/search` is internal conversation-history search only.
+
+## Density rule
+
+- Do not let sections collapse into one sentence of generic filler.
+- If a section has no high-confidence incremental signal, say so explicitly with `no high-confidence incremental signal` and explain what remains worth watching.
+- Use `coverage_gaps` and `confidence_flags` instead of pretending a thin section is complete.
 
 ## AI people-pool workflow
 
 For `daily_digest` with `domain=ai`:
 
 1. Load prior report context with `report_store.py context`.
-2. Load the current people pool:
-
-```bash
-./.venv/bin/python skills/market-briefing/scripts/ai_people_pool.py context
-```
-
+2. Load the current people pool.
 3. Research both:
+   - frontier-lab radar
    - five-layer AI developments
    - tracked people / community / X.com signals plus a bounded discovery sweep for new names
 4. Fill the AI Markdown + JSON.
-5. Record new candidates and promotions:
-
-```bash
-./.venv/bin/python skills/market-briefing/scripts/ai_people_pool.py record \
-  --report-json /tmp/ai_daily.json
-```
-
+5. Record new candidates and promotions with `ai_people_pool.py record`.
 6. Persist the report with `report_store.py persist`.
 
 Only use `sync-repo` for explicit curated maintenance. Do not rewrite the repo seed file during a normal daily run.
-
-## JSON requirements
-
-The JSON sidecar is part of the report contract. Keep these fields present:
-
-- `version`
-- `mode`
-- `domain`
-- `title`
-- `generated_at`
-- `report_timezone`
-- `report_date`
-- `period_start`
-- `period_end`
-- `summary`
-- `key_takeaways`
-- `source_mix_note`
-- `verification_note`
-- `coverage_gaps`
-- `confidence_flags`
-- `sources`
-- `sections`
-
-For finance daily, also keep:
-
-- `tracked_universe`
-- `holdings_window_days`
-- `china_macro_policy_summary`
-- `us_macro_policy_summary`
-- `market_index_view`
-
-For weekly synthesis, also include:
-
-- `trend_summary`
-- `cross_domain_links`
-
-For AI daily, also keep:
-
-- `tracked_people_groups`
-- `tracked_people`
-- `people_signal_summary`
-- `new_candidate_people`
-- `promoted_people`
-- `candidate_queue_summary`
-
-## Output rules
-
-- Default output language is Chinese.
-- Markdown should be readable as a finished report, not just raw bullets.
-- Reports should be richer than a short digest. Prefer:
-  - an executive summary
-  - section-level analysis
-  - explicit implications
-  - a concise watchlist
-- Each daily section should normally contain:
-  - at least one analysis paragraph
-  - `2-4` meaningful bullets or observations
-  - inline links on key claims
-- If a section has no high-confidence incremental signal that day:
-  - do not fill the section with generic prose
-  - explicitly say there is no high-confidence new signal
-  - explain why
-  - state what to keep watching
-- For AI daily, people / community signals should be surfaced explicitly rather than buried inside a generic five-layer summary.
-- JSON should stay compact and structured for later machine reuse.
-- If evidence is incomplete, say so directly and keep the uncertainty localized to the affected section.
-- Weekly trend claims must be grounded in stored report files and current-source cross-checking, not vague memory.
-- AI people discovered in one run should go into the candidate queue first, not become repo seed automatically.
-
-## Inline citation rules
-
-- Do not only dump all sources at the bottom.
-- Important claims in the body should carry compact inline citations.
-- Preferred style:
-  - paragraph ending: `...（[中国政府网](https://...), [Reuters](https://...)）`
-  - bullet ending: `- 关键变化 ...（[NVIDIA](https://...), [FT](https://...)）`
-- For one paragraph or bullet, use 1-2 high-signal citations rather than a long citation chain.
-- Keep the final `来源与交叉验证说明` section as a compact source appendix and confidence note.
-
-## Finance-specific rules
-
-- Normalize `APPL` to `AAPL`.
-- Treat `VOO` / `SPY` / `S&P 500` as market and allocation lenses rather than pseudo-company earnings events.
-- Finance daily must cover:
-  - China macro / policy
-  - US macro / policy
-  - tracked holdings within the last 7 days
-  - market / index implications
-- If a tracked holding has no qualifying 7-day signal, say so explicitly instead of fabricating filler.
-
-## Backfill rules
-
-- `bootstrap_backfill` is bounded and explicit.
-- Do not generate one fake daily file per historical day.
-- Produce one bootstrap dossier per domain and store it under `bootstrap/<domain>/`.
-- The dossier should summarize structural background, recent trajectory, and what future daily reports should track.
-
-## Automation notes
-
-When the user wants automation, use the templates in `references/automation_templates.md` and the file-driven model under `~/.oh-my-agent/automations/*.yaml`.
-
-Do not point users back to inline `config.yaml` automation jobs.
-
-## Prompting notes
-
-- When the user asks for a reusable prompt or automation prompt, do not give only one generic version.
-- Use `references/prompt_recipes.md` and choose the recipe that matches the intended breadth:
-  - broad daily
-  - focused sub-scope daily
-  - bootstrap
-  - weekly synthesis
-- For automation prompts, keep the mode/domain/date-window explicit in the prompt text.

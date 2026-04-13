@@ -12,9 +12,9 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 VALID_MODES = {"weekly_pulse", "market_snapshot", "area_deep_dive"}
-CORE_AREAS = ["seattle", "bellevue", "redmond", "kirkland", "issaquah"]
-OPTIONAL_AREAS = ["bothell", "lynnwood"]
-ALL_AREAS = CORE_AREAS + OPTIONAL_AREAS
+CORE_AREAS = ["seattle", "bellevue", "redmond", "kirkland", "issaquah", "bothell", "lynnwood"]
+OPTIONAL_AREAS: list[str] = []
+ALL_AREAS = CORE_AREAS
 AREA_LABELS = {
     "seattle": "Seattle",
     "bellevue": "Bellevue",
@@ -279,6 +279,7 @@ def build_json_scaffold(
         "metro_context": "",
         "area_scoreboard": _blank_area_scoreboard(CORE_AREAS if mode != "area_deep_dive" else [normalize_area(area)]),
         "sample_listings": [],
+        "sample_listing_contract": {},
         "source_mix_note": "",
         "verification_note": "",
         "coverage_gaps": [],
@@ -288,6 +289,20 @@ def build_json_scaffold(
     if mode == "weekly_pulse":
         payload["period_start"] = (day - timedelta(days=6)).isoformat()
         payload["period_end"] = day.isoformat()
+        payload["sample_listing_contract"] = {
+            "areas": CORE_AREAS,
+            "base_per_area": 2,
+            "hard_cap": 18,
+            "extra_slots": 4,
+            "extra_slot_priority": [
+                "above-median active/pending sample availability",
+                "inventory activity",
+                "Seattle/Bellevue/Redmond/Kirkland tiebreak",
+            ],
+            "allowed_property_types": ["single-family", "townhouse"],
+            "excluded_property_types": ["condo", "apartment", "multi-family", "lot", "manufactured"],
+            "status_priority": ["active", "pending/contingent", "recently sold"],
+        }
         payload["sections"] = [
             _section("rates", "利率与融资环境"),
             _section("metro-pulse", "Seattle Metro 核心市场脉搏"),
@@ -300,6 +315,12 @@ def build_json_scaffold(
     if mode == "market_snapshot":
         payload["period_start"] = day.isoformat()
         payload["period_end"] = day.isoformat()
+        payload["sample_listing_contract"] = {
+            "areas": CORE_AREAS,
+            "target_total": 7,
+            "default_per_area": 1,
+            "allowed_property_types": ["single-family", "townhouse"],
+        }
         payload["sections"] = [
             _section("rates", "利率与融资环境"),
             _section("metro-pulse", "Seattle Metro 核心市场脉搏"),
@@ -311,6 +332,11 @@ def build_json_scaffold(
     if normalized_area is None:
         raise ValueError("area_deep_dive requires area")
     payload["area_focus"] = normalized_area
+    payload["sample_listing_contract"] = {
+        "area": normalized_area,
+        "target_range": [4, 6],
+        "allowed_property_types": ["single-family", "townhouse"],
+    }
     payload["sections"] = [
         _section("area-background", f"{AREA_LABELS[normalized_area]} 市场背景"),
         _section("buyer-observations", f"{AREA_LABELS[normalized_area]} 买方观察"),
