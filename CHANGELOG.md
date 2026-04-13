@@ -6,6 +6,30 @@ The format is intentionally lightweight and release-oriented rather than exhaust
 
 ## Unreleased
 
+### Added
+
+- **Memory extraction hygiene** (Slice A): extraction window rewritten to use the most recent 6 turns (≤800 chars per assistant turn) instead of silently truncating from the front of the full history; ensures recent user evidence always reaches the extractor regardless of thread length
+- **Extraction trigger optimization**: per-thread `last_extracted_user_turn_count` + `last_extraction_empty` in-memory state; extraction is skipped when no new user turns have occurred since the last pass *and* that pass returned empty — eliminates redundant agent calls on idle threads
+- **Extraction prompt hardening**: explicit negative rules block one-off task details, temporary plans, slash command habits, file paths, implementation steps, and future speculation (`"the user may…"`); `[user]` / `[assistant]` role tags guide the model to treat assistant content as context only
+- **Parse-failure retry**: on JSON parse failure the extractor retries once with a simplified schema; on second failure it returns empty and logs `parse_failure=true` with the skip reason — no raw LLM output leaks to the user
+- **`MemoryEntry` schema expansion — Batch 1**: added `explicitness` (`explicit`/`inferred`), `status` (`active`/`superseded`), `evidence` (≤140 char user-side snippet), and `last_observed_at`; old YAML files migrate lazily on load with safe defaults
+- **`MemoryEntry` schema expansion — Batch 2**: added `scope` (`global_user`/`workspace`/`skill`/`thread`), `durability` (`ephemeral`/`medium`/`long`), `source_skills`, and `source_workspace`; `scope_matches()`, `scope_score_multiplier()`, `broadened_scope()`, and `stronger_durability()` helpers added to `adaptive.py`
+- **Two-stage deduplication**: Stage 1 normalises (lowercase, strip punctuation, stopword filter) and classifies pairs as `same_memory` (normalised equality or Jaccard ≥ 0.75), `candidate` (Jaccard 0.35–0.75), or `distinct` (< 0.35); Stage 2 batches all candidates in a single agent call that returns `same_memory` / `related_but_distinct` / `contradictory`; contradictory hits mark the old entry `status=superseded` with a timestamped `last_observed_at`
+- **Fast-path / slow-path promotion**: explicit, high-confidence memories (`explicitness=explicit`, `confidence ≥ 0.85`, `observation_count ≥ 2`, category in preference/workflow/project_knowledge) fast-promote to curated in 1–2 observations; inferred memories slow-promote only after `confidence ≥ 0.80` plus either `observation_count ≥ 3` or ≥ 2 distinct source threads; `fact` category never takes the fast path; `superseded` entries are ineligible for promotion
+- **Scope-aware bucketed retrieval**: `get_relevant()` now accepts `skill_name`, `thread_id`, and `workspace` context and routes memories into four buckets (`skill_scoped`, `workspace_project`, `global_preference`, `recent_daily`) each with a configurable per-bucket limit; scope-match multipliers boost contextually relevant memories without hard-excluding unmatched global preferences
+- **Injection filter**: `superseded` entries are permanently excluded from prompt injection and `MEMORY.md` synthesis; `thread`-scoped and `ephemeral` entries respect their scope boundaries
+- **Structured memory trace logs**: four new log event types — `memory_extract` (thread_id, turn_count, extracted/rejected counts, retry_used, skip_reason, parse_failure), `memory_merge` (candidate/same/distinct/contradictory counts), `memory_promote` (fast/slow path counts, skipped_reason), `memory_inject` (selected/filtered-superseded counts, per-bucket breakdown)
+- **`/memories` view enhanced**: Discord display now shows `explicitness`, `status`, `observation_count`, and `last_observed_at` alongside existing tier and confidence bar
+- **`seattle-metro-housing-watch` skill — coverage and contract update**: Bothell and Lynnwood promoted from optional expansion to default 7-area contract; Zillow added as formal area-trend second source alongside Redfin (no longer listing-only fallback); rate section now explicitly compares 30Y and 15Y fixed (MORTGAGE30US + MORTGAGE15US with direction and relative meaning); listing contract: single-family/townhouse only, per-area baseline 2 + priority-allocated 4 surplus slots (by high-quality sample availability → inventory activity → core-area preference), hard cap 18, price filter vs area-own median; `sample_listings[]` extended with `source_site`, `property_type`, `listed_at`, `original_list_price`, `price_history_summary`; `market_snapshot` stays lightweight (1/area, max 7); `area_deep_dive` gets 4–6 samples
+- **`market-briefing` skill — coverage and structure update**: finance daily expanded to 8 fixed sections (adds 中国/香港市场脉搏, 美国市场波动与风险偏好, 中国房地产政策与融资信号); AI daily expanded to 9 sections with a new Frontier Labs / Frontier Model Radar section before the five-layer stack; frontier watchlist fixed to 8 labs (OpenAI, Anthropic, Google DeepMind, Meta, xAI, Mistral, Qwen, DeepSeek); rumor discipline codified (official source > quality media > social/leak only in `unverified_frontier_signals`); finance/politics boundary rule written into reference docs; `timeout_seconds` raised to 1200; weekly synthesis absorbs new finance and AI sections structurally; new `references/finance_watchlist.md` and `references/ai_frontier_watchlist.md` reference files
+
+### Fixed
+
+- `DateBasedMemoryStore.max_memories` now applies correctly across both daily and curated tiers, respecting status-aware eviction order
+- Merge hits on non-today daily files now write the updated entry back to the originating daily file rather than silently dropping the update
+- `promote_memory()` now deduplicates against the curated tier before writing, preventing identical entries accumulating in `curated.yaml`
+- `last_observed_at` is kept consistent across merge, promotion, and contradiction-supersede paths
+
 ## v0.8.0 - 2026-04-12
 
 ### Added

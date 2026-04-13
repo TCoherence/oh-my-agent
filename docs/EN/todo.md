@@ -21,6 +21,8 @@
 - Service-layer extraction is complete (task, ask, doctor, automation, HITL services).
 - Markdown-aware chunker, structured logging, graceful shutdown, error contract, rate-limiting, and concurrent isolation tests are all implemented.
 - First-class `compose.yaml` and operator guides (EN + CN) are published.
+- Memory system quality pass complete (extraction hygiene, two-stage dedup, fast/slow promotion, scoped bucketed retrieval). See CHANGELOG Unreleased section.
+- `seattle-metro-housing-watch` and `market-briefing` skill contracts updated. See CHANGELOG Unreleased section.
 - Current next target: `v0.9` (1.0 RC / Contract Freeze). See `v1.0-plan.md` for full roadmap.
 
 ## v0.5 Runtime Hardening (complete)
@@ -147,6 +149,26 @@ Full details in [`v1.0-plan.md`](v1.0-plan.md).
 - [x] Runtime directories / backup / restore instructions
 - [x] Operator-facing restart and upgrade SOPs
 - [x] Health-check for long-running service mode
+
+## Post-v0.8 Memory Quality Pass (complete)
+
+- [x] **Extraction window rewrite**: recent 6 turns (≤800 chars/assistant turn) instead of front-truncated full history
+- [x] **Extraction trigger optimization**: skip when no new user turns + last extraction was empty; in-memory per-thread state, no persistence required
+- [x] **Extraction prompt hardening**: user-only evidence rule, explicit negative blocklist (task details, temp plans, file paths, slash commands, speculation)
+- [x] **Parse-failure retry**: simplified schema retry on first failure; graceful empty return + `parse_failure` log on second failure
+- [x] **`MemoryEntry` schema Batch 1**: `explicitness`, `status`, `evidence`, `last_observed_at`; lazy migration for old YAML files
+- [x] **`MemoryEntry` schema Batch 2**: `scope`, `durability`, `source_skills`, `source_workspace`; scope helpers in `adaptive.py`
+- [x] **Two-stage deduplication**: lexical normalization stage + single-batch agent merge pass; contradictory entries marked `superseded`
+- [x] **Fast-path / slow-path promotion**: explicit high-confidence memories promote in 1–2 observations; inferred memories require multi-thread or multi-day evidence; `fact` category excluded from fast path
+- [x] **Scope-aware bucketed retrieval**: four-bucket ranking (skill_scoped, workspace_project, global_preference, recent_daily); scope multipliers; `superseded` permanently excluded from injection and `MEMORY.md`
+- [x] **Structured trace logs**: `memory_extract`, `memory_merge`, `memory_promote`, `memory_inject` events with per-decision fields
+- [x] **`/memories` display enhanced**: shows `explicitness`, `status`, `observation_count`, `last_observed_at`
+- [x] **Implementation bug fixes**: `max_memories` enforcement, cross-file merge persistence, `promote_memory()` curated dedup, `last_observed_at` consistency
+
+## Post-v0.8 Skill Contract Update (complete)
+
+- [x] **`seattle-metro-housing-watch`**: 7-area default contract (Bothell + Lynnwood promoted from optional); Zillow as formal area-trend second source; 30Y + 15Y fixed rate comparison; listing contract (single-family/townhouse only, baseline 2/area + 4 priority slots, hard cap 18, area-own median price filter); `sample_listings[]` extended with source_site, property_type, listed_at, original_list_price, price_history_summary; mode-specific sample budgets (snapshot 1/area, deep-dive 4–6)
+- [x] **`market-briefing`**: finance daily expanded to 8 fixed sections (adds China/HK market, US volatility, China property policy); AI daily expanded to 9 sections with Frontier Labs Radar; frontier watchlist (8 labs) with codified rumor discipline; finance/politics boundary rule; `timeout_seconds: 1200`; new `references/finance_watchlist.md` and `references/ai_frontier_watchlist.md`
 
 ## v0.9 — 1.0 RC / Contract Freeze
 

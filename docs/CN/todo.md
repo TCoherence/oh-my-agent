@@ -21,6 +21,8 @@
 - Service-layer 提取完成（task、ask、doctor、automation、HITL 服务）。
 - Markdown-aware chunker、结构化日志、graceful shutdown、错误展示契约、速率限制、并发隔离测试均已实现。
 - 首个正式 `compose.yaml` 和运营指南（EN + CN）已发布。
+- 记忆系统质量优化已完成（提取窗口修复、两段式去重、快慢晋升路径、scope-aware 分桶检索）。详见 CHANGELOG Unreleased。
+- `seattle-metro-housing-watch` 和 `market-briefing` skill contract 已更新。详见 CHANGELOG Unreleased。
 - 当前下一个目标：`v0.9`（1.0 RC / Contract Freeze）。详见 `v1.0-plan.md`。
 
 ## v0.5 Runtime 加固（已完成）
@@ -147,6 +149,26 @@
 - [x] runtime directories / backup / restore instructions
 - [x] operator-facing restart and upgrade SOP
 - [x] health-check for long-running service mode
+
+## v0.8 后续 — 记忆系统质量优化（已完成）
+
+- [x] **提取窗口重写**：改用最近 6 个 turn（每条 assistant turn ≤800 字符），不再从 full history 头部截断，确保最新 user 证据始终进入提取窗口
+- [x] **提取触发优化**：无新 user turn 且上次提取为空时跳过；进程内 per-thread 状态，无需持久化
+- [x] **提取 prompt 收紧**：user-only 证据规则，明确负面规则（一次性任务细节、临时计划、文件路径、slash command、未来推测）
+- [x] **parse 失败回退**：首次失败用简化 schema 重试；二次失败返回空并写入 `parse_failure` 日志
+- [x] **`MemoryEntry` schema 第一批**：`explicitness`、`status`、`evidence`、`last_observed_at`；老 YAML 文件懒迁移
+- [x] **`MemoryEntry` schema 第二批**：`scope`、`durability`、`source_skills`、`source_workspace`；scope 相关 helper 函数加入 `adaptive.py`
+- [x] **两段式去重**：词法归一化阶段 + 单次 batch agent merge 判定；矛盾条目标记 `superseded`
+- [x] **快慢晋升路径**：显式高置信 memory 1-2 次即可晋升 curated；inferred memory 需要跨 thread 或跨日期重复；`fact` 类不走 fast-path
+- [x] **scope-aware 分桶检索**：四桶排名（skill_scoped / workspace_project / global_preference / recent_daily）；scope 分数乘数；`superseded` 永不注入或进 `MEMORY.md`
+- [x] **结构化 trace 日志**：`memory_extract`、`memory_merge`、`memory_promote`、`memory_inject` 事件，含逐决策字段
+- [x] **`/memories` 展示增强**：新增 `explicitness`、`status`、`observation_count`、`last_observed_at` 字段显示
+- [x] **实现缺口修复**：`max_memories` 生效、跨文件 merge 持久化、`promote_memory()` curated 去重、`last_observed_at` 一致性
+
+## v0.8 后续 — Skill Contract 更新（已完成）
+
+- [x] **`seattle-metro-housing-watch`**：默认 7 区 contract（Bothell + Lynnwood 升为默认覆盖）；Zillow 成为 area trend 正式第二来源；30Y + 15Y 固定利率并列比较；listing contract（仅 single-family/townhouse，每区保底 2 套 + 4 个优先级名额，hard cap 18，按区自身中位价过滤）；`sample_listings[]` 扩展 source_site / property_type / listed_at / original_list_price / price_history_summary；各 mode 样本配额分层（snapshot 1/区，deep-dive 4-6 套）
+- [x] **`market-briefing`**：finance daily 扩为 8 段固定结构（新增中国/港股脉搏、美国波动/风险偏好、中国房地产政策）；AI daily 扩为 9 段，新增 Frontier Labs Radar；frontier watchlist（8 家 lab）含 rumor 纪律规则；finance/politics 边界规则写入 reference；`timeout_seconds: 1200`；新增 `references/finance_watchlist.md` 和 `references/ai_frontier_watchlist.md`
 
 ## v0.9 — 1.0 RC / Contract Freeze
 

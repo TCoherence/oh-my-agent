@@ -15,7 +15,7 @@ oh-my-agent
 
 # Tests
 pip install -e ".[dev]"
-pytest                            # all tests (270 tests)
+pytest                            # all tests (510 tests)
 pytest tests/test_memory_store.py # single file
 pytest -k "test_fallback"         # single test by name
 ```
@@ -58,9 +58,9 @@ The system has seven major subsystems.
 - `agent_sessions` table persists CLI session IDs with primary key `(platform, channel_id, thread_id, agent)`.
 - `GatewayManager` loads persisted session IDs on message handling and upserts/deletes them based on agent outcome.
 - `HistoryCompressor`: when a thread exceeds `max_turns`, compresses old turns into a summary (via agent) or truncates (fallback). Runs asynchronously after each response.
-- `DateBasedMemoryStore` (`memory/date_based.py`): two-tier date-organized memory store. Daily logs in `~/.oh-my-agent/memory/daily/YYYY-MM-DD.yaml` (with exponential time decay); curated long-term in `curated.yaml` (no decay). Auto-promotion on load when entries meet observation count + confidence + age thresholds. Synthesizes `MEMORY.md` (natural-language view) via agent. Loads today + yesterday daily on startup.
-- `AdaptiveMemoryStore` (`memory/adaptive.py`): legacy flat YAML store, kept for reference. `MemoryEntry` dataclass with `id`, `summary`, `category`, `confidence`, `source_threads`, `observation_count`, `tier`. Module-level utility functions: `word_set`, `jaccard_similarity`, `eviction_score`, `find_duplicate`.
-- `MemoryExtractor` (`memory/extractor.py`): uses an agent (via `registry.run()`) to parse JSON memories from conversation turns. Triggered **before** history compression (pre-compaction flush) when history has ≥ 4 turns. Extracted memories are injected as `[Remembered context]` block before agent prompts.
+- `DateBasedMemoryStore` (`memory/date_based.py`): two-tier date-organized memory store. Daily logs in `~/.oh-my-agent/memory/daily/YYYY-MM-DD.yaml` (with exponential time decay); curated long-term in `curated.yaml` (no decay). Auto-promotion uses fast-path (explicit, confidence ≥ 0.85, ≥ 2 observations) and slow-path (inferred, ≥ 3 observations or ≥ 2 source threads). Synthesizes `MEMORY.md` (natural-language view) via agent. Loads today + yesterday daily on startup.
+- `AdaptiveMemoryStore` (`memory/adaptive.py`): flat YAML store (legacy reference) and shared module-level utilities. `MemoryEntry` dataclass fields: `id`, `summary`, `category`, `confidence`, `source_threads`, `observation_count`, `tier`, `explicitness` (`explicit`/`inferred`), `status` (`active`/`superseded`), `evidence`, `last_observed_at`, `scope` (`global_user`/`workspace`/`skill`/`thread`), `durability` (`ephemeral`/`medium`/`long`), `source_skills`, `source_workspace`. Module-level helpers: `word_set`, `jaccard_similarity`, `lexical_match_kind`, `eviction_score`, `find_duplicate`, `scope_matches`, `scope_score_multiplier`, `memory_bucket`.
+- `MemoryExtractor` (`memory/extractor.py`): extracts memories from the most recent 6 turns (≤800 chars/assistant turn) rather than a fixed prefix slice. Trigger skips extraction when no new user turns have occurred and the previous pass returned empty. Prompt enforces user-only evidence and explicit negative rules against task details, temp plans, and speculation. Two-stage dedup: lexical normalization + batch agent merge pass (same_memory / related_but_distinct / contradictory); contradictory old entries are marked `superseded`. Parse failures retry with a simplified schema before giving up. Structured trace logs emitted for extract / merge / promote / inject decisions. Extracted memories are injected as `[Remembered context]` block before agent prompts; scope-aware bucketed retrieval ranks by four buckets (skill_scoped, workspace_project, global_preference, recent_daily); `superseded` entries are never injected.
 
 **Skill system** (`src/oh_my_agent/skills/`)
 
