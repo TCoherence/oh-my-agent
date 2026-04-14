@@ -266,7 +266,16 @@ class _ResumableAuthAgent(BaseAgent):
         self.prompts.append(prompt)
         if thread_id and thread_id not in self._session_ids:
             self._session_ids[thread_id] = "sess-restored"
-        return AgentResponse(text="final resumed answer")
+        return AgentResponse(
+            text="final resumed answer",
+            usage={
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "cache_read_input_tokens": 20,
+                "cache_creation_input_tokens": 3,
+                "cost_usd": 0.1234,
+            },
+        )
 
 
 class _ResumableAskUserAgent(BaseAgent):
@@ -478,7 +487,44 @@ class _AutomationNarrativeAgent(BaseAgent):
             "TASK_STATE: DONE"
         )
         out.write_text(text, encoding="utf-8")
-        return AgentResponse(text=text)
+        return AgentResponse(
+            text=text,
+            usage={
+                "input_tokens": 4321,
+                "output_tokens": 2109,
+                "cache_read_input_tokens": 90000,
+                "cache_creation_input_tokens": 12000,
+                "cost_usd": 0.4821,
+            },
+        )
+
+
+class _AutomationFailureAgent(BaseAgent):
+    @property
+    def name(self) -> str:
+        return "automation-failure"
+
+    async def run(
+        self,
+        prompt: str,
+        history: list[dict] | None = None,
+        *,
+        thread_id: str | None = None,
+        workspace_override: Path | None = None,
+    ) -> AgentResponse:
+        del prompt, history, thread_id, workspace_override
+        return AgentResponse(
+            text="",
+            error="automation-failure timed out",
+            error_kind="timeout",
+            partial_text="partial result before timeout",
+            usage={
+                "input_tokens": 321,
+                "output_tokens": 123,
+                "cache_read_input_tokens": 456,
+                "cost_usd": 0.0456,
+            },
+        )
 
 
 class _SandboxBlockedAgent(BaseAgent):
@@ -1126,8 +1172,46 @@ async def test_scheduler_automation_formats_body_notes_and_done_footer(runtime_e
     assert any("-# artifact: `response.txt`" in text for text in sent_texts)
     assert any(f"-# run dir: `_artifacts/{task.id}`" in text for text in sent_texts)
     assert any(f"automation `hello-from-codex` · run `{task.id}` · via **automation-narrative**" in text for text in sent_texts)
+    assert any("4,321 in / 2,109 out" in text for text in sent_texts)
+    assert any("cache 90,000r/12,000w" in text for text in sent_texts)
+    assert any("$0.4821" in text for text in sent_texts)
     assert any("-# ✅ automation run complete" in text for text in sent_texts)
     assert not any("TASK_STATE: DONE" in text for text in sent_texts)
+
+
+@pytest.mark.asyncio
+async def test_scheduler_automation_failure_includes_usage_audit(runtime_env):
+    store: SQLiteMemoryStore = runtime_env["store"]
+    runtime: RuntimeService = runtime_env["runtime"]
+    channel: _FakeChannel = runtime_env["channel"]
+    registry = AgentRegistry([_AutomationFailureAgent()])
+    session = ChannelSession(
+        platform="discord",
+        channel_id="100",
+        channel=channel,
+        registry=registry,
+    )
+    runtime.register_session(session, registry)
+    await runtime.start()
+
+    task = await runtime.enqueue_scheduler_task(
+        session=session,
+        registry=registry,
+        thread_id="thread-automation-fail",
+        automation_name="daily-failure",
+        prompt="Fail with a timeout.",
+        author="scheduler",
+        preferred_agent="automation-failure",
+    )
+    assert task is not None
+
+    failed = await _wait_for_status(store, task.id, {TASK_STATUS_FAILED})
+    assert failed.status == TASK_STATUS_FAILED
+    sent_texts = [text for _, text in channel.sent]
+    assert any(f"automation `daily-failure` · run `{task.id}` · via **automation-failure**" in text for text in sent_texts)
+    assert any("321 in / 123 out" in text for text in sent_texts)
+    assert any("cache 456r" in text for text in sent_texts)
+    assert any("$0.0456" in text for text in sent_texts)
 
 
 @pytest.mark.asyncio
@@ -2120,6 +2204,9 @@ async def test_mark_thread_auth_required_waits_then_resumes(tmp_path):
     assert run is not None
     assert run.status == "completed"
     assert channel.sent[-1][1].endswith("final resumed answer")
+    assert "10 in / 5 out" in channel.sent[-1][1]
+    assert "cache 20r/3w" in channel.sent[-1][1]
+    assert "$0.1234" in channel.sent[-1][1]
     assert any("--cookies-path '/tmp/cookies.txt'" in prompt for prompt in agent.prompts)
     history = await session.get_history("thread-1")
     assert history[-1]["role"] == "assistant"

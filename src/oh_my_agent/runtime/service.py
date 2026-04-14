@@ -74,6 +74,7 @@ from oh_my_agent.runtime.types import (
 from oh_my_agent.runtime.worktree import WorktreeError, WorktreeManager
 from oh_my_agent.utils.chunker import chunk_message
 from oh_my_agent.utils.errors import user_safe_agent_error
+from oh_my_agent.utils.usage import append_usage_audit
 
 logger = logging.getLogger(__name__)
 
@@ -2899,7 +2900,13 @@ class RuntimeService:
                         test_summary=test_summary,
                         delivery=delivery,
                     )
-                await self._notify(task, completion_text, record_history=True, terminal=True)
+                await self._notify(
+                    task,
+                    completion_text,
+                    record_history=True,
+                    terminal=True,
+                    usage=response.usage,
+                )
                 await self._signal_status_by_id(task, TASK_STATUS_COMPLETED)
                 return
 
@@ -3302,6 +3309,7 @@ class RuntimeService:
             notify_text,
             record_history=True,
             terminal=True,
+            usage=response.usage if response is not None else None,
         )
         await self._signal_status_by_id(task, TASK_STATUS_FAILED)
 
@@ -3914,6 +3922,7 @@ class RuntimeService:
         *,
         record_history: bool = False,
         terminal: bool = False,
+        usage: dict[str, Any] | None = None,
     ) -> None:
         session = self._session_for(task)
         if session is None:
@@ -3922,7 +3931,7 @@ class RuntimeService:
             if record_history:
                 await session.append_assistant(task.thread_id, text[:4000], "runtime")
             if terminal:
-                await self._send_automation_terminal_message(task, text)
+                await self._send_automation_terminal_message(task, text, usage=usage)
             return
         current = await self._store.get_runtime_task(task.id)
         status_message_id = current.status_message_id if current else task.status_message_id
@@ -3946,12 +3955,21 @@ class RuntimeService:
         if terminal:
             await session.channel.send(task.thread_id, self._format_terminal_message(text)[:1900])
 
-    async def _send_automation_terminal_message(self, task: RuntimeTask, text: str) -> None:
+    async def _send_automation_terminal_message(
+        self,
+        task: RuntimeTask,
+        text: str,
+        *,
+        usage: dict[str, Any] | None = None,
+    ) -> None:
         session = self._session_for(task)
         if session is None:
             return
         agent_name = await self._resolve_last_agent_name(task)
-        attribution = f"-# automation `{task.automation_name}` · run `{task.id}` · via **{agent_name}**"
+        attribution = append_usage_audit(
+            f"-# automation `{task.automation_name}` · run `{task.id}` · via **{agent_name}**",
+            usage,
+        )
         first_chunk_budget = max(1, 2000 - len(attribution) - 1)
         chunks = chunk_message(text, max_size=first_chunk_budget)
         if not chunks:
@@ -4182,17 +4200,7 @@ class RuntimeService:
         text: str,
         usage: dict[str, Any] | None,
     ) -> None:
-        attribution = f"-# via **{agent_name}**"
-        if usage:
-            input_tokens = usage.get("input_tokens")
-            output_tokens = usage.get("output_tokens")
-            parts: list[str] = []
-            if input_tokens is not None:
-                parts.append(f"in {input_tokens}")
-            if output_tokens is not None:
-                parts.append(f"out {output_tokens}")
-            if parts:
-                attribution += " · " + " / ".join(parts)
+        attribution = append_usage_audit(f"-# via **{agent_name}**", usage)
         first_chunk_budget = max(1, 2000 - len(attribution) - 1)
         first_chunks = chunk_message(text, max_size=first_chunk_budget)
         if not first_chunks:
@@ -4250,7 +4258,7 @@ class RuntimeService:
             return
         await session.append_assistant(task.thread_id, cleaned, agent_name)
         if task.automation_name:
-            await self._send_automation_terminal_message(task, cleaned)
+            await self._send_automation_terminal_message(task, cleaned, usage=usage)
             return
         await self._send_thread_agent_response(
             session=session,

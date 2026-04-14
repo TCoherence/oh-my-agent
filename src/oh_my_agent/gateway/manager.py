@@ -29,6 +29,7 @@ from oh_my_agent.skills.frontmatter import read_skill_frontmatter, resolve_skill
 from oh_my_agent.runtime.policy import is_artifact_intent, is_long_task_intent, is_skill_intent
 from oh_my_agent.utils.chunker import chunk_message
 from oh_my_agent.utils.errors import user_safe_agent_error, user_safe_message
+from oh_my_agent.utils.usage import append_usage_audit, format_usage_audit
 
 logger = logging.getLogger(__name__)
 
@@ -1647,27 +1648,7 @@ class GatewayManager:
 
     @staticmethod
     def _format_usage(usage: dict) -> str:
-        """Format token usage and cost into a compact string for Discord attribution.
-
-        Example: "1,234 in / 567 out · $0.0042"
-        """
-        parts = []
-        input_tok = usage.get("input_tokens", 0)
-        output_tok = usage.get("output_tokens", 0)
-        if input_tok or output_tok:
-            parts.append(f"{input_tok:,} in / {output_tok:,} out")
-        cache_read = usage.get("cache_read_input_tokens", 0)
-        cache_write = usage.get("cache_creation_input_tokens", 0)
-        if cache_read and cache_write:
-            parts.append(f"cache {cache_read:,}r/{cache_write:,}w")
-        elif cache_read:
-            parts.append(f"cache {cache_read:,}r")
-        elif cache_write:
-            parts.append(f"cache {cache_write:,}w")
-        cost = usage.get("cost_usd")
-        if cost is not None:
-            parts.append(f"${cost:.4f}")
-        return " · ".join(parts)
+        return format_usage_audit(usage)
 
     async def _send_agent_response(
         self,
@@ -1678,9 +1659,7 @@ class GatewayManager:
         text: str,
         usage: dict | None = None,
     ) -> ResponseDelivery:
-        attribution = f"-# via **{agent_name}**"
-        if usage:
-            attribution += f" · {self._format_usage(usage)}"
+        attribution = append_usage_audit(f"-# via **{agent_name}**", usage)
 
         first_chunk_budget = max(1, 2000 - len(attribution) - 1)
         first_chunks = chunk_message(text, max_size=first_chunk_budget)

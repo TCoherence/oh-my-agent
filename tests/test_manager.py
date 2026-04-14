@@ -1404,7 +1404,16 @@ async def test_explicit_skill_invocation_chunks_first_message_with_attribution_b
     registry.run = AsyncMock(
         return_value=(
             mock_agent,
-            AgentResponse(text=long_text, usage={"input_tokens": 1234, "output_tokens": 567}),
+            AgentResponse(
+                text=long_text,
+                usage={
+                    "input_tokens": 1234,
+                    "output_tokens": 567,
+                    "cache_read_input_tokens": 8901,
+                    "cache_creation_input_tokens": 234,
+                    "cost_usd": 0.0123,
+                },
+            ),
         )
     )
 
@@ -1430,6 +1439,9 @@ async def test_explicit_skill_invocation_chunks_first_message_with_attribution_b
     sent_messages = [call.args[1] for call in channel.send.await_args_list]
     assert len(sent_messages) >= 2
     assert sent_messages[0].startswith("-# via **codex**")
+    assert "1,234 in / 567 out" in sent_messages[0]
+    assert "cache 8,901r/234w" in sent_messages[0]
+    assert "$0.0123" in sent_messages[0]
     assert max(len(message) for message in sent_messages) <= 2000
 
 
