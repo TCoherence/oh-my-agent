@@ -215,13 +215,14 @@ All items below move off the `1.0` critical path. See [`v1.0-plan.md`](v1.0-plan
 ## Backlog (no version commitment)
 
 - [ ] Live observability ring buffer + status-card live excerpt
-- [ ] Delivery policy refinement (`inline summary`, attachment, link)
+- [ ] Delivery policy refinement (`inline summary`, attachment, link), including Discord-friendly markdown-heavy output modes: auto-degrade tables to code blocks/lists, optional CSV/HTML/image attachments, and embed/card delivery for scoreboard-style summaries
 - [x] Docker-based agent isolation (host-mounted `/home`, repo-mounted `/repo`, config from repo, editable install on start, preinstalled CLI tools)
 - [ ] Discord `/restart` operator command that triggers a host-managed container restart path (securely scoped, implementation detail TBD)
 - [ ] Adaptive Memory encrypted storage + authenticated plaintext access
 - [ ] Adaptive Memory edit permission control
 - [ ] Revisit whether generated workspace `AGENTS.md` is still needed at all once the `.agents/skills/` migration settles
 - [ ] Revisit agent turn-budget semantics: decide whether `max_turns` should remain exposed, clarify its boundary against `timeout` and runtime `max_steps`, and remove or document provider-specific gaps where the setting is not uniformly enforced
+- [ ] Automation concurrency policy and observability: clarify worker-pool vs queue semantics, expose queued/running jobs and worker occupancy, and evaluate per-automation concurrency controls or priority
 - [x] Codex / Gemini CLI session resume
 - [ ] Add internal CLI agent lifecycle hooks (`pre-run`, `post-run`, `failure`, `resume`) for system-owned follow-up work such as reverse sync, artifact post-processing, and observability; keep this as an internal mechanism rather than a user-facing feature surface
 - [ ] Skill feedback UX follow-up: allow reactions on any chunk of a multi-message skill result, and optionally emit a dedicated feedback prompt/message after a completed skill result; keep feedback scoped to completed skill outputs only, not auth/system/general chat messages

@@ -215,13 +215,14 @@
 ## Backlog（无版本承诺）
 
 - [ ] Live observability ring buffer + 状态卡 live excerpt
-- [ ] 交付策略细化（inline summary / attachment / link）
+- [ ] 交付策略细化（inline summary / attachment / link），包括 Discord 友好的 markdown-heavy 产物展示：表格自动降级为 code block / list、可选 CSV/HTML/图片附件，以及适合 scoreboard 的 embed/card 交付模式
 - [x] Docker 隔离（host 挂载到 `/home`，repo 挂载到 `/repo`，配置从 repo 读取，启动时 editable install，并预装 CLI 工具）
 - [ ] Discord `/restart` 运维命令：触发 host 侧受控容器重启链路（安全边界先定，具体实现后续细化）
 - [ ] Adaptive Memory 加密存储 + 认证后明文访问
 - [ ] Adaptive Memory 编辑权限控制
 - [ ] 在 `.agents/skills/` 迁移稳定后，再评估是否还需要保留生成的 workspace `AGENTS.md`
 - [ ] 重新梳理 agent turn-budget 语义：决定是否继续暴露 `max_turns`，明确它与 `timeout`、runtime `max_steps` 的职责边界，并清理或说明当前不同 provider 上并不一致的实际生效情况
+- [ ] Automation 并发策略与可观测性：明确 runtime worker-pool 与队列语义，暴露 queued/running job 与 worker occupancy，并评估是否需要 per-automation 并发控制或优先级
 - [x] Codex / Gemini CLI session resume
 - [ ] 增加内部 CLI agent 生命周期 hook（`pre-run`、`post-run`、`failure`、`resume`），用于 system-owned 的后处理能力，例如 reverse sync、artifact 后处理和可观测性收尾；这应保持为内部机制，而不是用户可见的新功能面
 - [ ] Skill feedback UX 后续优化：支持对同一次 skill 结果的任意消息分块做 reaction 反馈，并可选在 skill 完成后单独发一条 feedback prompt/message；反馈范围只针对已完成的 skill 输出，不覆盖 auth/system/普通聊天消息
