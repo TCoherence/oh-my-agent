@@ -285,7 +285,7 @@ Rebuild the image only when you change container-layer concerns such as `Dockerf
 - Reply inside the thread to continue with full context.
 - Prefix with `@gemini`, `@claude`, or `@codex` to force an agent for that turn.
 - Explicit installed skill invocation such as `@claude /weather Shanghai` or `@claude /top-5-daily-news` stays in direct chat flow and does not create a runtime task.
-- A skill can optionally set `metadata.timeout_seconds` in its `SKILL.md` frontmatter to override the normal per-agent CLI timeout for that skill invocation only. This is intended for slow report/research skills, not as a global replacement for agent timeouts.
+- A skill can optionally set `metadata.timeout_seconds` and `metadata.max_turns` in its `SKILL.md` frontmatter to override execution limits for that skill invocation only. `timeout_seconds` controls the CLI wall-clock timeout; `max_turns` controls the agent turn budget where supported (currently Claude only). These are intended for slow report/research skills, not as a global replacement for agent defaults.
 - If an agent fails, the next one in the fallback chain takes over.
 - If `access.owner_user_ids` is configured, only those users can trigger the bot.
 
@@ -358,13 +358,17 @@ Rebuild the image only when you change container-layer concerns such as `Dockerf
 - `automations.timezone` defaults to `local`; set an explicit IANA zone such as `America/Los_Angeles` if you want scheduler behavior to stay stable across different hosts/containers.
 - `cron` and `interval_seconds` are mutually exclusive.
 - `initial_delay_seconds` is supported only with `interval_seconds`.
+- For skill-backed automations, explicitly set `skill_name` so the scheduler/runtime can inherit the skill's canonical storage contract plus `metadata.timeout_seconds` / `metadata.max_turns`.
+- Per-automation execution overrides are also supported:
+  - `timeout_seconds`: wall-clock timeout override for this job
+  - `max_turns`: agent turn-budget override for this job where supported
 - Discord operator commands:
   - `/automation_status [name]` shows valid active + disabled automations
   - `/automation_reload` forces an immediate rescan instead of waiting for the polling interval
   - `/automation_enable <name>` and `/automation_disable <name>` update the YAML source file and reload scheduler state immediately
 - Scheduler-fired automations now use the reply/artifact runtime path (`test_command=true`, single-step budget) instead of repo-change validation loops.
 - If an automation is still running, the next fire for the same automation name is skipped instead of queueing overlapping runs.
-- Completed automation messages now post the final result directly in Discord with the automation name, run ID, and an `_artifacts/<task_id>` locator for the generated files.
+- Completed automation messages now post the final result directly in Discord with the automation name, run ID, agent attribution, and unified usage audit (`in/out`, cache, cost) when the agent reports usage.
 - Invalid or conflicting automation files remain log-visible for now; they are intentionally excluded from `/automation_status`.
 - Automation runtime state (`last_run_at`, `last_success_at`, `next_run_at`, `last_error`, `last_task_id`) is persisted in SQLite and survives restarts.
 - Missed jobs while the process is down are not replayed (policy: `skip`).
@@ -372,14 +376,17 @@ Rebuild the image only when you change container-layer concerns such as `Dockerf
 Example automation file:
 
 ```yaml
-name: daily-standup
+name: daily-ai-intel
 enabled: true
 platform: discord
 channel_id: "${DISCORD_CHANNEL_ID}"
 delivery: channel
-prompt: "Summarize open TODOs and suggest top 3 coding tasks."
-agent: codex
-cron: "0 9 * * *"
+skill_name: market-briefing
+prompt: "Use the market-briefing skill in daily_digest mode for ai. Read recent stored reports, persist today's Markdown and JSON report, and post the finished Chinese report with the saved location."
+agent: claude
+cron: "0 17 * * *"
+timeout_seconds: 1200
+max_turns: 80
 author: scheduler
 ```
 

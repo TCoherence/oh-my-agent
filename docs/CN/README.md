@@ -300,7 +300,7 @@ OMA_WORKDIR_IN_CONTAINER=/repo ./scripts/docker-run.sh
 - 在线程内继续回复，bot 会带着完整上下文继续回答。
 - 使用 `@gemini`、`@claude`、`@codex` 前缀可强制本轮指定 agent。
 - 显式调用已安装 skill（例如 `@claude /weather Shanghai`）会直接走普通聊天流，不会创建 runtime task。
-- skill 可以在 `SKILL.md` frontmatter 的 `metadata.timeout_seconds` 里可选声明更长 timeout，仅覆盖该 skill 调用时的 CLI timeout。这个能力适合慢速报告/研究类 skill，不建议拿来替代全局 agent timeout。
+- skill 可以在 `SKILL.md` frontmatter 的 `metadata.timeout_seconds` 和 `metadata.max_turns` 里可选声明执行预算，仅覆盖该 skill 调用本身。`timeout_seconds` 控制 CLI wall-clock timeout；`max_turns` 控制 agent 的 turn budget（当前只有 Claude 真正支持）。这个能力适合慢速报告/研究类 skill，不建议拿来替代全局 agent 默认值。
 - 如果当前 agent 失败，会自动切换到 fallback 链中的下一个 agent。
 - 如果配置了 `access.owner_user_ids`，只有白名单用户可以触发 bot。
 
@@ -378,30 +378,35 @@ OMA_WORKDIR_IN_CONTAINER=/repo ./scripts/docker-run.sh
 - `automations.timezone` 默认是 `local`；如果你希望跨不同宿主机或容器保持稳定时区语义，显式设置 IANA 时区，例如 `America/Los_Angeles`。
 - `cron` 和 `interval_seconds` 互斥。
 - `initial_delay_seconds` 只支持和 `interval_seconds` 一起使用。
+- 如果 automation 是在执行现有 skill，建议显式写 `skill_name`，这样 scheduler/runtime 才能稳定继承该 skill 的 canonical 存储 contract 以及 `metadata.timeout_seconds` / `metadata.max_turns`。
+- 每个 automation job 也可以单独覆盖执行预算：
+  - `timeout_seconds`：该 job 的 wall-clock timeout
+  - `max_turns`：该 job 的 agent turn budget（仅对支持的 agent 生效）
 - Discord operator 命令：
   - `/automation_status [name]`：展示有效 automation 中的 active + disabled 项
   - `/automation_reload`：立刻触发一次目录重扫，而不是等待下一次轮询
   - `/automation_enable <name>` 和 `/automation_disable <name>`：直接修改 YAML 源文件里的 `enabled`，并立刻 reload scheduler 状态
 - Scheduler 触发的 automation 现在走 reply/artifact 风格的 runtime 路径（`test_command=true`、单步预算），不再误用 repo-change 验证循环。
 - 如果同一个 automation 还在运行，下一个同名触发会直接跳过，而不是继续堆叠排队。
-- automation 完成消息现在会直接把最终结果发到 Discord，并附带 automation 名称、run ID，以及生成文件对应的 `_artifacts/<task_id>` 定位信息。
+- automation 完成消息现在会直接把最终结果发到 Discord，并附带 automation 名称、run ID、agent attribution；如果 agent 上报 usage，还会统一追加 `in/out`、cache、cost audit。
 - 无效或冲突的 automation 文件暂时仍然只通过日志暴露，不进入 `/automation_status`。
-- 第一版运行时状态只保存在内存：
-  - 重启后重新计算下一次触发时间
-  - 不持久化 `last_run` / `next_run` / `last_error`
-  - 进程停机期间错过的任务不会补跑
+- automation 运行时状态（`last_run_at`、`last_success_at`、`next_run_at`、`last_error`、`last_task_id`）会持久化到 SQLite，并在重启后恢复。
+- 进程停机期间错过的任务不会补跑（策略：`skip`）。
 
 示例 automation 文件：
 
 ```yaml
-name: daily-standup
+name: daily-ai-intel
 enabled: true
 platform: discord
 channel_id: "${DISCORD_CHANNEL_ID}"
 delivery: channel
-prompt: "Summarize open TODOs and suggest top 3 coding tasks."
-agent: codex
-cron: "0 9 * * *"
+skill_name: market-briefing
+prompt: "Use the market-briefing skill in daily_digest mode for ai. Read recent stored reports, persist today's Markdown and JSON report, and post the finished Chinese report with the saved location."
+agent: claude
+cron: "0 17 * * *"
+timeout_seconds: 1200
+max_turns: 80
 author: scheduler
 ```
 
