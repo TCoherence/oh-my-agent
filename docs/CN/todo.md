@@ -223,6 +223,7 @@
 - [ ] 在 `.agents/skills/` 迁移稳定后，再评估是否还需要保留生成的 workspace `AGENTS.md`
 - [ ] 重新梳理 agent turn-budget 语义：决定是否继续暴露 `max_turns`，明确它与 `timeout`、runtime `max_steps` 的职责边界，并清理或说明当前不同 provider 上并不一致的实际生效情况
 - [ ] Automation 并发策略与可观测性：明确 runtime worker-pool 与队列语义，暴露 queued/running job 与 worker occupancy，并评估是否需要 per-automation 并发控制或优先级
+- [ ] CLI agent credential recovery：统一识别 `claude` / `codex` / `gemini` 的认证失效（401、invalid credentials、login required），避免无意义 fallback；补 owner-facing 提示、可恢复状态，以及按 provider 区分的自动/半自动重新登录链路
 - [x] Codex / Gemini CLI session resume
 - [ ] 增加内部 CLI agent 生命周期 hook（`pre-run`、`post-run`、`failure`、`resume`），用于 system-owned 的后处理能力，例如 reverse sync、artifact 后处理和可观测性收尾；这应保持为内部机制，而不是用户可见的新功能面
 - [ ] Skill feedback UX 后续优化：支持对同一次 skill 结果的任意消息分块做 reaction 反馈，并可选在 skill 完成后单独发一条 feedback prompt/message；反馈范围只针对已完成的 skill 输出，不覆盖 auth/system/普通聊天消息
