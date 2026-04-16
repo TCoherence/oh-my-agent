@@ -78,7 +78,7 @@ def load_subscriptions(
     domain: str = "ai",
     feeds_path: Path | None = None,
 ) -> list[tuple[str, str]]:
-    """Return (name, url) tuples for the given domain + general group."""
+    """Return (name, url) tuples for the given domain group."""
     feeds = _load_feeds(feeds_path)
     entries: list[dict[str, str]] = []
     if domain == "all":
@@ -86,7 +86,6 @@ def load_subscriptions(
             entries.extend(group)
     else:
         entries.extend(feeds.get(domain, []))
-        entries.extend(feeds.get("general", []))
     # Deduplicate by URL, preserving order.
     seen: set[str] = set()
     result: list[tuple[str, str]] = []

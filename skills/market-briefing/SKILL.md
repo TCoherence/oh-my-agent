@@ -223,4 +223,4 @@ The `🎙️ 播客动态` section appears in AI daily reports only.
 - Each item: bold linked `[频道名 — 集名](episode_url)`，followed by 1–2 sentence Chinese summary distilled from the shownotes.
 - If prefetch returned zero episodes, write `今日订阅播客暂无更新` and move on.
 - Do not fabricate episode content. Only summarize what the shownotes contain.
-- Subscribed channels are configured in `references/podcast_feeds.yaml`, grouped by domain (`ai`, `finance`, `general`). AI daily pulls `ai` + `general` groups. To add/remove channels, edit the YAML — no code changes needed.
+- Subscribed channels are configured in `references/podcast_feeds.yaml`, grouped by domain (`ai`, `finance`). AI daily pulls the `ai` group. To add/remove channels, edit the YAML — no code changes needed.

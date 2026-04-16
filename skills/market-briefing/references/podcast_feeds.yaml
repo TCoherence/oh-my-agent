@@ -2,9 +2,8 @@
 # podcast_fetch.py reads this file at runtime.
 # To add/remove podcasts, edit this file directly — no code changes needed.
 #
-# Groups: ai, finance, general (shared across domains).
-# AI daily reports pull: ai + general.
-# Future: finance daily could pull: finance + general.
+# Groups: ai, finance.
+# AI daily reports pull the ai group.
 
 ai:
   - name: 硅谷101
@@ -15,11 +14,9 @@ ai:
     url: https://www.xiaoyuzhoufm.com/podcast/60502e253c92d4f62c2a9577
   - name: elsewhere别处发生
     url: https://www.xiaoyuzhoufm.com/podcast/68ff657d9e7bcd326eb91d88
+  - name: 张小珺Jùn｜商业访谈录
+    url: https://www.xiaoyuzhoufm.com/podcast/626b46ea9cbbf0451cf5a962
 
 finance:
   - name: 锦供参考
     url: https://www.xiaoyuzhoufm.com/podcast/69a6aba3de6dd3793a39e06b
-
-general:
-  - name: 张小珺Jùn｜商业访谈录
-    url: https://www.xiaoyuzhoufm.com/podcast/626b46ea9cbbf0451cf5a962
