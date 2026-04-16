@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file.
 
 The format is intentionally lightweight and release-oriented rather than exhaustive.
 
-## Unreleased
+## v0.8.1 - 2026-04-15
 
 ### Added
 

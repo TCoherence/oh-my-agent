@@ -71,6 +71,9 @@ def test_scaffold_for_finance_ai_and_weekly_has_expected_sections():
     assert "# 财经日报｜2026-03-15" in finance_markdown
     assert "## 中国宏观与政策" in finance_markdown
     assert "## 美国宏观与政策" in finance_markdown
+    assert "## 美国市场波动与风险偏好" in finance_markdown
+    assert "## 中国 / 香港市场脉搏" in finance_markdown
+    assert "## 中国房地产政策与融资信号" in finance_markdown
     assert "## 重点持仓财报 / 管理层表态 / CEO 公开发言" in finance_markdown
     assert "## 市场与指数基金视角" in finance_markdown
 
@@ -89,6 +92,9 @@ def test_scaffold_for_finance_ai_and_weekly_has_expected_sections():
     assert {section["slug"] for section in finance_json["sections"]} == {
         "cn-macro-policy",
         "us-macro-policy",
+        "us-market-volatility",
+        "china-market-pulse",
+        "china-property-policy",
         "tracked-holdings",
         "market-index-view",
         "watchlist",
@@ -100,6 +106,7 @@ def test_scaffold_for_finance_ai_and_weekly_has_expected_sections():
         report_date=date(2026, 3, 15),
     )
     assert "# AI 日报｜2026-03-15" in ai_markdown
+    assert "## Frontier Labs / Frontier Model Radar" in ai_markdown
     assert "## 关键人物与社区信号" in ai_markdown
     assert "## Energy" in ai_markdown
     assert "## Chips" in ai_markdown
@@ -126,6 +133,7 @@ def test_scaffold_for_finance_ai_and_weekly_has_expected_sections():
     assert ai_json["promoted_people"] == []
     assert ai_json["candidate_queue_summary"] == ""
     assert {section["slug"] for section in ai_json["sections"]} == {
+        "frontier-radar",
         "people-signals",
         "energy",
         "chips",
