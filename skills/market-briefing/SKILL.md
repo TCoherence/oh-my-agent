@@ -2,7 +2,7 @@
 name: market-briefing
 description: Produce Chinese-first politics, finance, and AI market briefings with persisted Markdown and JSON outputs under ~/.oh-my-agent/reports/market-briefing/. Use this skill for bounded historical bootstrap dossiers, domain daily digests, and cross-domain weekly synthesis that should reuse prior stored reports rather than relying on Discord history.
 metadata:
-  timeout_seconds: 1200
+  timeout_seconds: 1500
 ---
 
 # Market Briefing
@@ -61,12 +61,18 @@ The skill is report-centric. It writes durable report files under `~/.oh-my-agen
 ## Required workflow
 
 1. Pick the explicit mode and domain.
-2. Load prior stored context with the helper script.
-3. Generate a starter Markdown + JSON scaffold.
-4. Do external research for the requested mode/domain.
-5. Fill the Markdown + JSON with the researched content.
-6. Persist both files into the canonical report store.
-7. In the final answer, return the report content directly and mention where it was stored.
+2. **(AI daily only) Prefetch podcasts** — run the podcast fetch script to get latest episodes from subscribed channels:
+   ```bash
+   ./.venv/bin/python skills/market-briefing/scripts/podcast_fetch.py
+   ```
+   The script outputs a JSON array of episodes updated within the last 48 hours. Use this output directly for the `🎙️ 播客动态` section — do not run a separate web search for podcasts.
+   If the script returns an empty array or fails, write "今日订阅播客暂无更新" in the podcast section and move on.
+3. Load prior stored context with the helper script.
+4. Generate a starter Markdown + JSON scaffold.
+5. Do external research for the requested mode/domain.
+6. Fill the Markdown + JSON with the researched content (include prefetched podcast data for AI daily).
+7. Persist both files into the canonical report store.
+8. In the final answer, return the report content directly and mention where it was stored.
 
 ## Storage layout
 
@@ -87,6 +93,7 @@ Read the relevant references before drafting:
 - `references/finance_watchlist.md`
 - `references/ai_frontier_watchlist.md`
 - `references/ai_people_seed.yaml`
+- `references/podcast_feeds.yaml`
 - `references/automation_templates.md`
 - `references/prompt_recipes.md`
 
@@ -128,6 +135,7 @@ Read the relevant references before drafting:
     - `model`
     - `application`
   - 层间联动影响
+  - 🎙️ 播客动态（from prefetch, 48h freshness window）
   - 候选池变化与后续关注
 
 ### Politics vs finance boundary
@@ -206,3 +214,13 @@ For `daily_digest` with `domain=ai`:
 6. Persist the report with `report_store.py persist`.
 
 Only use `sync-repo` for explicit curated maintenance. Do not rewrite the repo seed file during a normal daily run.
+
+## Podcast section rules
+
+The `🎙️ 播客动态` section appears in AI daily reports only.
+
+- Data comes exclusively from `podcast_fetch.py` output — do not web-search for additional podcasts.
+- Each item: bold linked `[频道名 — 集名](episode_url)`，followed by 1–2 sentence Chinese summary distilled from the shownotes.
+- If prefetch returned zero episodes, write `今日订阅播客暂无更新` and move on.
+- Do not fabricate episode content. Only summarize what the shownotes contain.
+- Subscribed channels are configured in `references/podcast_feeds.yaml`, grouped by domain (`ai`, `finance`, `general`). AI daily pulls `ai` + `general` groups. To add/remove channels, edit the YAML — no code changes needed.

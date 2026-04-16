@@ -15,7 +15,7 @@ oh-my-agent
 
 # Tests
 pip install -e ".[dev]"
-pytest                            # all tests (510 tests)
+pytest                            # all tests (526 tests)
 pytest tests/test_memory_store.py # single file
 pytest -k "test_fallback"         # single test by name
 ```

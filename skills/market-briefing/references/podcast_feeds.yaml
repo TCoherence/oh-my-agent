@@ -1,0 +1,25 @@
+# Podcast subscription list for market-briefing.
+# podcast_fetch.py reads this file at runtime.
+# To add/remove podcasts, edit this file directly — no code changes needed.
+#
+# Groups: ai, finance, general (shared across domains).
+# AI daily reports pull: ai + general.
+# Future: finance daily could pull: finance + general.
+
+ai:
+  - name: 硅谷101
+    url: https://www.xiaoyuzhoufm.com/podcast/5e5c52c9418a84a04625e6cc
+  - name: 晚点聊
+    url: https://www.xiaoyuzhoufm.com/podcast/61933ace1b4320461e91fd55
+  - name: 十字路口 Crossing
+    url: https://www.xiaoyuzhoufm.com/podcast/60502e253c92d4f62c2a9577
+  - name: elsewhere别处发生
+    url: https://www.xiaoyuzhoufm.com/podcast/68ff657d9e7bcd326eb91d88
+
+finance:
+  - name: 锦供参考
+    url: https://www.xiaoyuzhoufm.com/podcast/69a6aba3de6dd3793a39e06b
+
+general:
+  - name: 张小珺Jùn｜商业访谈录
+    url: https://www.xiaoyuzhoufm.com/podcast/626b46ea9cbbf0451cf5a962

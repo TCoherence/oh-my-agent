@@ -1,12 +1,13 @@
 # Todo / 路线图
 
-## 当前快照（2026-04-12）
+## 当前快照（2026-04-15）
 
 - `/search` 已实现。
 - SkillSync reverse sync 已实现。
 - CLI-first 基础设施已经到位。
 - `v0.7.3` 已发布（phase 1–3 完成）。
 - `v0.8.0` 已发布（全部四个 phase 完成）。详见 CHANGELOG。
+- `v0.8.1` 已发布：记忆质量优化、skill contract 加固、播客集成、automation YAML 修复。详见 CHANGELOG。
 - v0.5 runtime-first 已完成（包括 runtime hardening pass）。
 - 可选 LLM router 已实现。
 - Runtime 可观测性基线已实现。
@@ -21,8 +22,8 @@
 - Service-layer 提取完成（task、ask、doctor、automation、HITL 服务）。
 - Markdown-aware chunker、结构化日志、graceful shutdown、错误展示契约、速率限制、并发隔离测试均已实现。
 - 首个正式 `compose.yaml` 和运营指南（EN + CN）已发布。
-- 记忆系统质量优化已完成（提取窗口修复、两段式去重、快慢晋升路径、scope-aware 分桶检索）。详见 CHANGELOG Unreleased。
-- `seattle-metro-housing-watch` 和 `market-briefing` skill contract 已更新。详见 CHANGELOG Unreleased。
+- 记忆系统质量优化已完成（提取窗口修复、两段式去重、快慢晋升路径、scope-aware 分桶检索）。
+- `seattle-metro-housing-watch` 和 `market-briefing` skill contract 已更新；`market-briefing` AI 日报现已支持播客预取。
 - 当前下一个目标：`v0.9`（1.0 RC / Contract Freeze）。详见 `v1.0-plan.md`。
 
 ## v0.5 Runtime 加固（已完成）

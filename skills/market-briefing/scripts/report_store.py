@@ -238,6 +238,8 @@ def build_markdown_skeleton(*, mode: str, domain: str, report_date: date | None 
                 "",
                 "## 层间联动影响",
                 "",
+                "## 🎙️ 播客动态",
+                "",
                 "## 候选池变化与后续关注",
                 "",
                 "## 来源与交叉验证说明",
@@ -359,6 +361,7 @@ def build_json_scaffold(
             {"slug": "model", "heading": "Model", "summary": "", "bullets": [], "evidence_links": []},
             {"slug": "application", "heading": "Application", "summary": "", "bullets": [], "evidence_links": []},
             {"slug": "cross-layer", "heading": "层间联动影响", "summary": "", "bullets": [], "evidence_links": []},
+            {"slug": "podcasts", "heading": "🎙️ 播客动态", "summary": "", "bullets": [], "evidence_links": []},
             {"slug": "candidate-queue", "heading": "候选池变化与后续关注", "summary": "", "bullets": [], "evidence_links": []},
         ]
         return payload

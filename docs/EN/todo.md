@@ -1,12 +1,13 @@
 # Todo / Roadmap
 
-## Snapshot (2026-04-12)
+## Snapshot (2026-04-15)
 
 - `/search` is implemented.
 - SkillSync reverse sync is implemented.
 - CLI-first foundations are in place.
 - `v0.7.3` is released (phases 1–3 complete).
 - `v0.8.0` is released (all four phases complete). See CHANGELOG for full details.
+- `v0.8.1` is released: memory quality pass, skill contract hardening, podcast integration, automation YAML fixes. See CHANGELOG for full details.
 - v0.5 runtime-first is complete (including runtime hardening pass).
 - Optional LLM router is implemented.
 - Runtime observability baseline is implemented.
@@ -21,8 +22,8 @@
 - Service-layer extraction is complete (task, ask, doctor, automation, HITL services).
 - Markdown-aware chunker, structured logging, graceful shutdown, error contract, rate-limiting, and concurrent isolation tests are all implemented.
 - First-class `compose.yaml` and operator guides (EN + CN) are published.
-- Memory system quality pass complete (extraction hygiene, two-stage dedup, fast/slow promotion, scoped bucketed retrieval). See CHANGELOG Unreleased section.
-- `seattle-metro-housing-watch` and `market-briefing` skill contracts updated. See CHANGELOG Unreleased section.
+- Memory system quality pass complete (extraction hygiene, two-stage dedup, fast/slow promotion, scoped bucketed retrieval).
+- `seattle-metro-housing-watch` and `market-briefing` skill contracts updated; `market-briefing` now includes podcast prefetch for AI daily reports.
 - Current next target: `v0.9` (1.0 RC / Contract Freeze). See `v1.0-plan.md` for full roadmap.
 
 ## v0.5 Runtime Hardening (complete)

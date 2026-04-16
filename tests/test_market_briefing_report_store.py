@@ -112,6 +112,7 @@ def test_scaffold_for_finance_ai_and_weekly_has_expected_sections():
     assert "## Chips" in ai_markdown
     assert "## Application" in ai_markdown
     assert "## 层间联动影响" in ai_markdown
+    assert "## 🎙️ 播客动态" in ai_markdown
     assert "## 候选池变化与后续关注" in ai_markdown
 
     ai_json = module.build_json_scaffold(
@@ -141,6 +142,7 @@ def test_scaffold_for_finance_ai_and_weekly_has_expected_sections():
         "model",
         "application",
         "cross-layer",
+        "podcasts",
         "candidate-queue",
     }
 
