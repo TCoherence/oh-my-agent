@@ -1,27 +1,31 @@
-# Documentation Map
-
-This directory holds planning notes, development logs, and language-specific project docs.
+# Documentation
 
 ## Start Here
 
-- English overview: [../README.md](../README.md)
-- Chinese overview: [CN/README.md](CN/README.md)
-- English architecture: [EN/architecture.md](EN/architecture.md)
-- Chinese architecture: [CN/architecture.md](CN/architecture.md)
-- Changelog: [../CHANGELOG.md](../CHANGELOG.md)
+| Document | EN | 中文 |
+|----------|----|------|
+| Project overview | [README.md](../README.md) | [CN/README.md](CN/README.md) |
+| Architecture | [EN/architecture.md](EN/architecture.md) | [CN/architecture.md](CN/architecture.md) |
+| Operator guide | [EN/operator-guide.md](EN/operator-guide.md) | [CN/operator-guide.md](CN/operator-guide.md) |
+| Changelog | [CHANGELOG.md](../CHANGELOG.md) | — |
 
 ## Roadmaps
 
-- English roadmap: [EN/todo.md](EN/todo.md)
-- Chinese roadmap: [CN/todo.md](CN/todo.md)
+| Document | EN | 中文 |
+|----------|----|------|
+| Roadmap | [EN/todo.md](EN/todo.md) | [CN/todo.md](CN/todo.md) |
+| v1.0 plan | [EN/v1.0-plan.md](EN/v1.0-plan.md) | [CN/v1.0-plan.md](CN/v1.0-plan.md) |
 
-## Development Logs
+## Development
 
-- English development log: [EN/development.md](EN/development.md)
-- Chinese development log: [CN/development.md](CN/development.md)
+| Document | EN | 中文 |
+|----------|----|------|
+| Development log | [EN/development.md](EN/development.md) | [CN/development.md](CN/development.md) |
 
-## Operational Notes
+## Reference
 
+- Config reference: [`config.yaml.example`](../config.yaml.example)
+- Automation reference: [`automation.yaml.example`](../automation.yaml.example)
 - Router smoke test: [router_smoke.md](router_smoke.md)
 
 ## Archive

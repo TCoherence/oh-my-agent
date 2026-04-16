@@ -1,14 +1,26 @@
 # Oh My Agent
 
-Multi-platform bot that routes messages to CLI-based AI agents (Claude, Gemini, Codex). Each platform channel maps to an independent agent session with persistent conversation memory and slash commands.
+Multi-platform bot that routes messages to CLI-based AI agents (Claude, Gemini, Codex) with persistent memory, autonomous task execution, and scheduled automations.
 
 Inspired by [OpenClaw](https://openclaw.dev).
+
+## Features
+
+- **Multi-Agent Fallback** — Claude, Gemini, and Codex run as CLI subprocesses; if one fails, the next in line takes over automatically
+- **Persistent Memory** — SQLite conversation history with FTS5 search, plus a date-based adaptive memory system that auto-extracts, promotes, and injects user knowledge across sessions
+- **Autonomous Runtime** — durable task state machine with merge gates, worktree isolation, HITL prompts, and Discord approval buttons
+- **Skill System** — bidirectional skill sync across agent directories, skill evaluation with auto-disable, and agent-driven skill creation
+- **Scheduled Automations** — cron / interval jobs defined as YAML files with hot-reload, per-job `auto_approve`, and `/automation_run` manual trigger
+- **Workspace Isolation** — three-layer sandbox: workspace cwd confinement, env-var whitelisting, and CLI-native sandboxing
+- **Intent Router** — optional LLM-based classification routes messages to reply, skill invocation, task proposal, or skill creation
+- **Image Support** — Discord attachment download, per-agent image handling, and temp file lifecycle management
+- **Platform Adapters** — Discord (full-featured with slash commands), Slack (stub), extensible via `BaseChannel` ABC
 
 ## Architecture
 
 ```text
 User (Discord / Slack / ...)
-         │ message, @agent mention, or /ask command
+         │ message, @agent prefix, or /ask command
          ▼
    GatewayManager
          │ routes to ChannelSession (per channel, isolated)
@@ -17,545 +29,144 @@ User (Discord / Slack / ...)
          │ fallback order, or force specific agent
          ▼
    BaseCLIAgent.run(prompt, history)
-     ├── ClaudeAgent
-     ├── GeminiCLIAgent
-     └── CodexCLIAgent
+     ├── ClaudeAgent      (session resume via --resume)
+     ├── GeminiCLIAgent   (--yolo mode)
+     └── CodexCLIAgent    (--full-auto, JSONL output)
          │
-         ▼   cwd = workspace/ (isolated from dev repo)
-   Response → chunk → thread.send()
+         ▼   cwd = workspace/ (sandbox-isolated)
+   Response → Markdown-aware chunk → thread.send()
 ```
 
-Key layers:
-- Gateway: platform adapters and slash commands
-- Agents: CLI subprocess wrappers with workspace isolation and ordered fallback
-- Memory: SQLite + FTS5 persistent conversation history
-- Skills: sync between `skills/` and CLI-native directories
+Seven subsystems: **Gateway** (platform adapters, slash commands, message routing), **Agents** (CLI subprocess wrappers with fallback), **Memory** (SQLite + date-based adaptive memory), **Skills** (bidirectional sync, evaluation, creation), **Runtime** (autonomous task orchestration), **Router** (LLM intent classification), **Automation** (cron/interval scheduler).
 
-For a fuller architecture walkthrough, see:
+→ Full architecture walkthrough: [EN](docs/EN/architecture.md) · [中文](docs/CN/architecture.md)
 
-- [docs/EN/architecture.md](docs/EN/architecture.md)
-- [docs/CN/architecture.md](docs/CN/architecture.md)
-
-## Setup
+## Quick Start
 
 ### Prerequisites
 
 - Python 3.11+
-- For local host execution, at least one CLI agent installed:
-  - [`claude`](https://docs.anthropic.com/en/docs/claude-code)
-  - [`gemini`](https://github.com/google-gemini/gemini-cli)
-  - [`codex`](https://github.com/openai/codex)
+- At least one CLI agent installed: [`claude`](https://docs.anthropic.com/en/docs/claude-code), [`gemini`](https://github.com/google-gemini/gemini-cli), or [`codex`](https://github.com/openai/codex)
 - A Discord bot token with Message Content Intent enabled
 
 ### Install
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/TCoherence/oh-my-agent.git
 cd oh-my-agent
-python3 -m venv .venv
-source .venv/bin/activate
-./.venv/bin/pip install -e .
-cp .env.example .env
-cp config.yaml.example config.yaml
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e .
 ```
 
-Then:
+### Configure
 
-- put secrets in `.env`
-- keep `config.yaml` limited to `${ENV_VAR}` references
-- update `DISCORD_BOT_TOKEN` and `DISCORD_CHANNEL_ID`
-- optionally set `DEEPSEEK_API_KEY` if router is enabled
-
-### Config Highlights
-
-```yaml
-memory:
-  backend: sqlite
-  path: ~/.oh-my-agent/runtime/memory.db
-  adaptive:
-    enabled: true
-    memory_dir: ~/.oh-my-agent/memory
-
-skills:
-  enabled: true
-  path: skills/
-  telemetry_path: ~/.oh-my-agent/runtime/skills.db
-  evaluation:
-    enabled: true
-    stats_recent_days: 7
-    feedback_emojis: ["👍", "👎"]
-    auto_disable:
-      enabled: true
-      rolling_window: 20
-      min_invocations: 5
-      failure_rate_threshold: 0.60
-    overlap_guard:
-      enabled: true
-      review_similarity_threshold: 0.45
-    source_grounded:
-      enabled: true
-      block_auto_merge: true
-
-workspace: ~/.oh-my-agent/agent-workspace
-
-short_workspace:
-  enabled: true
-  root: ~/.oh-my-agent/agent-workspace/sessions
-  ttl_hours: 24
-  cleanup_interval_minutes: 1440
-
-router:
-  enabled: true
-  provider: openai_compatible
-  base_url: https://api.deepseek.com/v1
-  api_key_env: DEEPSEEK_API_KEY
-  model: deepseek-chat
-  timeout_seconds: 8
-  max_retries: 1
-  confidence_threshold: 0.55
-  require_user_confirm: true
-
-automations:
-  enabled: true
-  storage_dir: ~/.oh-my-agent/automations
-  reload_interval_seconds: 5
-  timezone: local
-
-runtime:
-  enabled: true
-  state_path: ~/.oh-my-agent/runtime/runtime.db
-  worker_concurrency: 3
-  worktree_root: ~/.oh-my-agent/runtime/tasks
-  default_agent: codex
-  default_test_command: "pytest -q"
-  path_policy_mode: allow_all_with_denylist
-  denied_paths: [".env", "config.yaml", ".workspace/**", ".git/**"]
-  agent_heartbeat_seconds: 20
-  test_heartbeat_seconds: 15
-  test_timeout_seconds: 600
-  progress_notice_seconds: 30
-  progress_persist_seconds: 60
-  log_event_limit: 12
-  log_tail_chars: 1200
-  cleanup:
-    enabled: true
-    interval_minutes: 60
-    retention_hours: 168
-    prune_git_worktrees: true
-    merged_immediate: true
-
-auth:
-  enabled: true
-  storage_root: ~/.oh-my-agent/runtime/auth
-  qr_poll_interval_seconds: 3
-  qr_default_timeout_seconds: 180
-  providers:
-    bilibili:
-      enabled: true
-      scope_key: default
+```bash
+cp .env.example .env          # put secrets here (DISCORD_BOT_TOKEN, etc.)
+cp config.yaml.example config.yaml   # adjust channels, agents, features
 ```
 
-Secrets should live in `.env`; `${VAR}` placeholders are substituted automatically.
+Key config sections: `gateway` (platform + agents), `memory`, `skills`, `runtime`, `automations`, `workspace`, `router`. Secrets use `${ENV_VAR}` substitution from `.env`.
 
-`memory.path` now points to the conversation store only: thread history, summaries, and SQLite FTS. Runtime state is stored separately under `runtime.state_path`, and skill telemetry lives under `skills.telemetry_path`.
-
-Runtime cleanup removes old task workspaces and agent log files after the retention window. The default window is 7 days (`168` hours).
-
-Runtime artifacts default to `~/.oh-my-agent/runtime/`:
-- `memory.db`: conversation history + FTS
-- `runtime.db`: runtime/auth/HITL/notification/session state
-- `skills.db`: skill provenance/invocation/feedback/evaluation telemetry
-- `logs/` and `tasks/`: runtime filesystem outputs
-
-Older monolithic `memory.db` files are split automatically on startup into these three stores, with the original bundle preserved as a `.monolith.bak` backup.
-Automation definitions now live under `~/.oh-my-agent/automations/*.yaml`; edits there are picked up automatically without restarting the process.
+→ Full config reference: [`config.yaml.example`](config.yaml.example)
 
 ### Run
 
 ```bash
-./.venv/bin/oh-my-agent
+oh-my-agent           # start the bot
+oh-my-agent --version # check installed version
 ```
 
-Check the installed version:
+### Docker
 
 ```bash
-./.venv/bin/oh-my-agent --version
+./scripts/docker-build.sh                # build image
+./scripts/docker-run.sh                  # dev/foreground mode
+./scripts/docker-start.sh                # long-running/detached mode
+./scripts/docker-logs.sh                 # inspect logs
 ```
 
-### Docker (Host-Isolated Runtime)
+The Docker image preinstalls `claude`, `gemini`, and `codex` CLIs. The host repo is mounted at `/repo` and runtime state at `/home`.
 
-Run the bot inside Docker while keeping two bind mounts:
-
-- runtime/state mount (`/home`) for `~/.oh-my-agent` data and runtime files
-- repo mount (default current repo) so the agent can edit project code directly
-
-Build image:
-
-```bash
-./scripts/docker-build.sh
-```
-
-Development / foreground mode (attached, `--rm`, good for interactive debugging):
-
-```bash
-./scripts/docker-run.sh
-```
-
-Long-running / managed mode (detached, `--restart unless-stopped`, keeps the container for `docker logs` / `docker inspect`):
-
-```bash
-./scripts/docker-start.sh
-```
-
-Inspect and manage the long-running container:
-
-```bash
-./scripts/docker-status.sh
-./scripts/docker-logs.sh
-./scripts/docker-stop.sh
-```
-
-Default config source is `/repo/config.yaml` (`OMA_CONFIG_PATH`).
-Environment substitution is loaded from the config directory (typically `/repo/.env`).
-Container start now expects repo config to be prepared before launch.
-The image installs runtime dependencies only; normal execution does not rely on a second in-image source snapshot.
-On each container start, the entrypoint installs `/repo` as an editable Python package (`pip install -e /repo --no-deps`), so the mounted repo is the runtime source of truth.
-The image preinstalls `claude`, `gemini`, and `codex` CLIs.
-Startup performs a fail-fast check for configured `agents.*.cli_path` binaries (`OMA_FAIL_FAST_CLI=0` to disable).
-CLI login/auth state is still required and should be completed inside the mounted `/home` runtime path.
-`./scripts/docker-run.sh` also applies Docker-only agent permission overrides: Claude runs with `--dangerously-skip-permissions`, and Codex runs with `danger-full-access` plus bypass enabled. Direct host startup keeps the safer config defaults instead.
-
-Override mount paths when needed:
-
-```bash
-OMA_DOCKER_MOUNT=/path/to/your/mount ./scripts/docker-run.sh
-OMA_DOCKER_REPO=/path/to/repo ./scripts/docker-run.sh
-```
-
-The same environment overrides also apply to `docker-start.sh`, `docker-logs.sh`, `docker-stop.sh`, and `docker-status.sh`.
-These helper scripts target the container by exact name, not by fuzzy search. The default name is `oh-my-agent`, and you can override it with `OMA_CONTAINER_NAME` when running multiple copies:
-
-```bash
-OMA_CONTAINER_NAME=oma-prod ./scripts/docker-start.sh
-OMA_CONTAINER_NAME=oma-prod ./scripts/docker-logs.sh
-```
-
-Override the Docker-only permission behavior when needed:
-
-```bash
-OMA_AGENT_CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS=false \
-OMA_AGENT_CODEX_SANDBOX_MODE=workspace-write \
-OMA_AGENT_CODEX_DANGEROUSLY_BYPASS_APPROVALS_AND_SANDBOX=false \
-./scripts/docker-run.sh
-```
-
-By default, the container workdir is `/home`, while the host repo is mounted at `/repo`.
-This keeps day-to-day runtime/config work in `/home`, while still allowing edits and git operations in `/repo`.
-
-If you prefer running from the mounted repo directly:
-
-```bash
-OMA_WORKDIR_IN_CONTAINER=/repo ./scripts/docker-run.sh
-```
-
-Then edit runtime config under the state mount:
-
-- `${HOME}/oh-my-agent-docker-mount/...` (runtime outputs/state only)
-
-Edit source config in repo:
-
-- `/repo/config.yaml` (host path: your mounted repo)
-- `/repo/.env` (host path: your mounted repo)
-
-Run one-off commands in the same image:
-
-```bash
-./scripts/docker-run.sh oh-my-agent --version
-```
-
-For long-running mode, application logs still persist under the mounted runtime path, while `docker-logs.sh` gives you the container stdout/stderr stream. Keeping detached mode non-`--rm` is intentional so `docker logs` and `docker inspect` remain available for postmortem debugging.
-
-Rebuild the image only when you change container-layer concerns such as `Dockerfile`, `docker/entrypoint.sh`, or Python/Node/system dependencies. Pure source edits under `/repo/src` normally only need a restart.
+→ Full Docker & deployment guide: [EN](docs/EN/operator-guide.md) · [中文](docs/CN/operator-guide.md)
 
 ## Usage
 
 ### Messages
 
-- Post a message in the configured channel to create a thread and get a reply.
-- Reply inside the thread to continue with full context.
-- Prefix with `@gemini`, `@claude`, or `@codex` to force an agent for that turn.
-- Explicit installed skill invocation such as `@claude /weather Shanghai` or `@claude /top-5-daily-news` stays in direct chat flow and does not create a runtime task.
-- A skill can optionally set `metadata.timeout_seconds` and `metadata.max_turns` in its `SKILL.md` frontmatter to override execution limits for that skill invocation only. `timeout_seconds` controls the CLI wall-clock timeout; `max_turns` controls the agent turn budget where supported (currently Claude only). These are intended for slow report/research skills, not as a global replacement for agent defaults.
-- If an agent fails, the next one in the fallback chain takes over.
-- If `access.owner_user_ids` is configured, only those users can trigger the bot.
-
-### CLI Session Resume
-
-- Claude, Codex, and Gemini all persist CLI session IDs per thread.
-- On restart, the gateway restores stored session IDs from SQLite and attempts to continue the original CLI conversation instead of flattening full history every turn.
-- If a stored session is clearly stale or invalid, it is cleared automatically so the next turn can start fresh.
-- Persisted stale sessions are also deleted when fallback succeeds through another agent.
-- Important caveat: router skill discovery reads the current canonical `skills/` directory, but an existing resumed CLI session may still answer from older session context and not immediately recognize a newly added skill.
-- In practice, new skills are most reliable in a fresh thread or fresh CLI session. `/reload-skills` refreshes skill directories, but it does not guarantee that an already-resumed Claude/Codex/Gemini session will pick up the new skill immediately.
-
-### Workspace Refresh
-
-- `~/.oh-my-agent/agent-workspace/AGENTS.md` is a generated file, not a hand-maintained source file.
-- It mirrors repo-root `AGENTS.md` with visible generation metadata at the top.
-- The base workspace stores a small source-state manifest and refreshes automatically before short-workspace turns when repo `AGENTS.md` or canonical `skills/` change.
-- Session workspaces inherit the refreshed base workspace, so normal chat turns see updated rules and skills without a manual rebuild.
-
-### Skill Evaluation
-
-- Chat-path skill executions are tracked as structured telemetry with route source, latency, usage, and outcome.
-- Discord `👍` / `👎` reactions on the first attributed skill response are stored as per-invocation feedback.
-- `/skill_stats [skill]` reports recent success rate, usage, latency, feedback, and latest evaluation findings.
-- `/skill_enable <skill>` clears an auto-disabled skill so router-based invocation can use it again.
-- Auto-disable only removes a skill from automatic routing. Explicit `/skill-name` still works.
-- Skill mutation tasks now gate merge approval on:
-  - overlap review for likely duplicate skills
-  - source-grounded review for external repo/tool/reference adaptations
-- External-source skill adaptations should populate `SKILL.md` frontmatter metadata:
-  - `metadata.source_urls`
-  - `metadata.adapted_from`
-  - `metadata.adaptation_notes`
+- Post in the configured channel → auto-creates a thread with an AI reply
+- Reply inside the thread to continue the conversation with full context
+- Prefix with `@claude`, `@gemini`, or `@codex` to force a specific agent for that turn
+- Attach images (≤10 MB) for visual analysis
 
 ### Slash Commands
 
-- `/ask <question> [agent]`
-- `/reset`
-- `/history`
-- `/agent`
-- `/search <query>`
-- `/task_start`
-- `/task_status <task_id>`
-- `/task_list [status]`
-- `/task_approve <task_id>`
-- `/task_reject <task_id>`
-- `/task_suggest <task_id> <suggestion>`
-- `/task_resume <task_id> <instruction>`
-- `/task_stop <task_id>`
-- `/task_merge <task_id>`
-- `/task_discard <task_id>`
-- `/task_changes <task_id>`
-- `/task_logs <task_id>`
-- `/task_cleanup [task_id]`
-- `/auth_login [provider]`
-- `/auth_status [provider]`
-- `/auth_clear [provider]`
-- `/automation_status [name]`
-- `/automation_reload`
-- `/automation_enable <name>`
-- `/automation_disable <name>`
+| Category | Commands |
+|----------|----------|
+| **Conversation** | `/ask`, `/reset`, `/history`, `/agent`, `/search` |
+| **Runtime Tasks** | `/task_start`, `/task_status`, `/task_list`, `/task_approve`, `/task_reject`, `/task_suggest`, `/task_resume`, `/task_stop`, `/task_merge`, `/task_discard`, `/task_changes`, `/task_logs`, `/task_cleanup` |
+| **Skills** | `/reload-skills`, `/skill_stats`, `/skill_enable` |
+| **Automations** | `/automation_status`, `/automation_reload`, `/automation_enable`, `/automation_disable`, `/automation_run` |
+| **Memory** | `/memories`, `/forget`, `/promote` |
+| **Auth** | `/auth_login`, `/auth_status`, `/auth_clear` |
 
 ### Automations
 
-- Automation source of truth is `~/.oh-my-agent/automations/*.yaml`, not `config.yaml`.
-- The scheduler polls that directory and hot-reloads file additions, edits, deletes, and `enabled` flips without restarting the process.
-- Scheduling supports:
-  - `cron: "0 9 * * *"` for normal wall-clock schedules
-  - `interval_seconds` for high-frequency local testing
-- `automations.timezone` defaults to `local`; set an explicit IANA zone such as `America/Los_Angeles` if you want scheduler behavior to stay stable across different hosts/containers.
-- `cron` and `interval_seconds` are mutually exclusive.
-- `initial_delay_seconds` is supported only with `interval_seconds`.
-- For skill-backed automations, explicitly set `skill_name` so the scheduler/runtime can inherit the skill's canonical storage contract plus `metadata.timeout_seconds` / `metadata.max_turns`.
-- Per-automation execution overrides are also supported:
-  - `timeout_seconds`: wall-clock timeout override for this job
-  - `max_turns`: agent turn-budget override for this job where supported
-- Discord operator commands:
-  - `/automation_status [name]` shows valid active + disabled automations
-  - `/automation_reload` forces an immediate rescan instead of waiting for the polling interval
-  - `/automation_enable <name>` and `/automation_disable <name>` update the YAML source file and reload scheduler state immediately
-- Scheduler-fired automations now use the reply/artifact runtime path (`test_command=true`, single-step budget) instead of repo-change validation loops.
-- If an automation is still running, the next fire for the same automation name is skipped instead of queueing overlapping runs.
-- Completed automation messages now post the final result directly in Discord with the automation name, run ID, agent attribution, and unified usage audit (`in/out`, cache, cost) when the agent reports usage.
-- Invalid or conflicting automation files remain log-visible for now; they are intentionally excluded from `/automation_status`.
-- Automation runtime state (`last_run_at`, `last_success_at`, `next_run_at`, `last_error`, `last_task_id`) is persisted in SQLite and survives restarts.
-- Missed jobs while the process is down are not replayed (policy: `skip`).
-
-Example automation file:
+Automation jobs are defined as YAML files in `~/.oh-my-agent/automations/`. The scheduler hot-reloads on file changes — no restart needed.
 
 ```yaml
-name: daily-ai-intel
+name: daily-ai-briefing
 enabled: true
 platform: discord
 channel_id: "${DISCORD_CHANNEL_ID}"
-delivery: channel
-skill_name: market-briefing
-prompt: "Use the market-briefing skill in daily_digest mode for ai. Read recent stored reports, persist today's Markdown and JSON report, and post the finished Chinese report with the saved location."
+prompt: "Run the market-briefing skill for today's AI digest."
 agent: claude
-cron: "0 17 * * *"
-timeout_seconds: 1200
-max_turns: 80
-author: scheduler
+skill_name: market-briefing
+cron: "0 9 * * *"
+auto_approve: true
 ```
 
-Local testing example:
+→ Full automation reference: [`automation.yaml.example`](automation.yaml.example)
 
-```yaml
-name: hello-from-codex
-enabled: false
-platform: discord
-channel_id: "${DISCORD_CHANNEL_ID}"
-delivery: dm
-prompt: "Hello from the other side! Just checking in."
-agent: codex
-interval_seconds: 20
-initial_delay_seconds: 10
-author: scheduler
+### Autonomous Runtime
+
+Long-running tasks are orchestrated through a durable state machine:
+
+```
+DRAFT → RUNNING → VALIDATING → WAITING_MERGE → MERGED / COMPLETED
+                              ↕ PAUSED          ↕ FAILED / STOPPED
 ```
 
-### Market Briefings
+- **Task types**: `artifact` (no merge gate), `repo_change` (merge required), `skill_change` (validate + merge)
+- **Isolation**: each task runs in its own git worktree under `~/.oh-my-agent/runtime/tasks/`
+- **HITL**: tasks can pause for owner approval, QR auth, or custom single-choice questions
+- **Controls**: Discord buttons for approval + slash command fallback + natural language stop/pause/resume
 
-- `market-briefing` is one core skill for:
-  - `bootstrap_backfill`
-  - `daily_digest`
-  - `weekly_synthesis`
-- Reports are persisted under `~/.oh-my-agent/reports/market-briefing/` as both Markdown and JSON:
-  - `bootstrap/<domain>/<date>.md|json`
-  - `daily/<date>/<domain>.md|json`
-  - `weekly/<iso-week>/cross-domain.md|json`
-- Domain model:
-  - daily: `politics`, `finance`, `ai`
-  - weekly: one `cross-domain` synthesis
-- Finance daily defaults:
-  - China macro + policy
-  - US macro + policy
-  - tracked holdings over the last 7 days: `NVDA`, `MSFT`, `AAPL`, `AMZN`, `GOOG`, `TSLA`, `META`, `VOO`, `SPY`, `S&P 500`
-  - market / index-fund implications
-- AI daily defaults:
-  - tracked people groups + bounded discovery sweep
-  - X.com / community signals as early-signal input with cross-checking
-  - runtime candidate queue and explicit curated sync back to repo seed
-- Bounded bootstrap defaults:
-  - politics: 30 days
-  - finance: 30 days
-  - ai: 14 days
-- Trend continuity is expected to come from persisted report files plus current-source research, not just Discord history.
-- The bundled helper script lives at:
-  - `skills/market-briefing/scripts/report_store.py`
-- The `scheduler` skill now validates file-driven automation YAML under `~/.oh-my-agent/automations/` instead of the old inline `config.yaml` job model.
+## Built-in Skills
 
-### Auth QR Login
+| Skill | Description |
+|-------|-------------|
+| `market-briefing` | Daily/weekly briefings for politics, finance, and AI with persisted report storage |
+| `seattle-metro-housing-watch` | Seattle metro area housing market snapshots and deep-dives |
+| `scheduler` | Create and validate automation YAML files |
 
-- Auth flows are owner-only; if `access.owner_user_ids` is empty, `/auth_*` commands stay disabled.
-- Current provider support is intentionally narrow: `bilibili` only.
-- `/auth_login bilibili` sends a QR code image into the current configured channel or thread.
-- Successful scans persist cookies under `~/.oh-my-agent/runtime/auth/providers/bilibili/<owner_user_id>/`.
-- QR PNGs under `~/.oh-my-agent/runtime/auth/qr/` are temporary and are deleted when the flow reaches a terminal state.
-- Runtime tasks can move into `WAITING_USER_INPUT` when an agent emits an `OMA_CONTROL` auth challenge; once the QR flow completes, the linked task is re-queued automatically.
-- Direct chat / explicit skill runs can also suspend on `OMA_CONTROL` auth challenges, store a resumable suspended run record, and continue the same agent session after login when possible.
-- When a thread or task enters `auth_required`, Discord now sends an extra owner-ping message in the same thread and best-effort DMs all configured owners.
-- Generic `ask_user` challenges are now supported on Discord:
-  - direct chat / explicit skill runs can post a visible single-choice prompt, wait for an owner button click, and auto-resume the same run
-  - runtime tasks can enter `WAITING_USER_INPUT`, post a visible single-choice prompt, and resume automatically after selection
-  - each ask_user prompt always includes a built-in `Cancel` action
-- `ask_user`, `DRAFT`, and `WAITING_MERGE` now also emit high-signal owner notifications: one separate ping message in the same thread plus best-effort owner DMs.
-- Active ask_user prompts are persisted in SQLite and Discord button views are rehydrated on bot restart, so pending questions survive process restarts.
-- In a waiting thread, replying `retry login`, `重新登录`, or `重新扫码` reissues the QR flow.
-- `/memories [category]`
-- `/forget <memory_id>`
-- `/reload-skills`
-- `/skill_stats [skill]`
-- `/skill_enable <skill>`
+Skills live in `skills/<name>/SKILL.md`. The `SkillSync` system distributes them to all CLI agent directories automatically.
 
-## Autonomous Runtime
-
-- Long-task intent can create runtime tasks automatically.
-- Runtime now distinguishes task types:
-  - `artifact`: long-running execution that returns a reply or generated artifact and does not use merge gate
-  - `repo_change`: code/docs/test/config changes that run in worktrees and require merge
-  - `skill_change`: canonical `skills/<name>` changes that validate and then require merge
-- `WAITING_USER_INPUT` is the runtime pause state for owner interaction:
-  - QR auth challenges
-  - generic single-choice `ask_user` challenges
-- `DRAFT`, `WAITING_MERGE`, `auth_required`, and `ask_user` are the only states that currently trigger owner notifications; routine runtime progress does not.
-- `repo_change` and `skill_change` execute in isolated git worktrees under `~/.oh-my-agent/runtime/tasks/<task_id>`.
-- `artifact` tasks use runtime orchestration without entering `WAITING_MERGE`; `TASK_STATE: DONE` plus successful validation leads to `COMPLETED`.
-- High-risk tasks go to `DRAFT`; low-risk `artifact` tasks can run without approval by default.
-- `MERGED` tasks clean their worktree immediately after merge; other terminal states are retained for 72 hours before janitor cleanup.
-- Short `/ask` conversations use transient per-thread workspaces under `~/.oh-my-agent/agent-workspace/sessions/`; these are not runtime worktrees and are cleaned by TTL janitor.
-- `/task_logs` exposes recent runtime events plus output tails.
-- Runtime writes two log layers:
-  - service log: `~/.oh-my-agent/runtime/logs/oh-my-agent.log`
-  - underlying agent logs: `~/.oh-my-agent/runtime/logs/agents/<task>-step<step>-<agent>.log`
-- Discord progress prefers updating one status message instead of spamming many messages.
-- Normal reply logs include `purpose=...` on `AGENT starting`, `AGENT_OK`, and `AGENT_ERROR`.
-- Background memory extraction and history compression runs carry the originating request ID in both service logs and registry agent-attempt labels.
-
-## Artifact Delivery
-
-- Artifact delivery is now a runtime/platform capability for `artifact` tasks.
-- Current behavior:
-  - try direct attachment upload first
-  - if upload is unavailable or the artifact exceeds local limits, fall back to absolute filesystem paths
-  - include delivery mode and delivered paths/attachment names in the completion message
-- Remote object storage is still deferred; the future direction remains an S3-compatible adapter, with Cloudflare R2 as the preferred default.
-
-## Codex Integration Notes
-
-- Codex support is currently grounded in CLI execution, official repo/workspace `.agents/skills/`, and platform-level routing/runtime behavior.
-- The practical near-term assumption is:
-  - Claude/Gemini use workspace skill directories refreshed by `SkillSync`
-  - Codex uses repo/workspace `.agents/skills/`
-- The generated workspace `AGENTS.md` remains a derived rules/metadata file; it is no longer the primary mechanism for enumerating Codex workspace skills.
-
-## Workspace Layout
-
-- `~/.oh-my-agent/agent-workspace/` is the base external workspace used by CLI agents.
-- `~/.oh-my-agent/agent-workspace/sessions/` stores per-thread transient workspaces for normal chat turns.
-- `~/.oh-my-agent/memory/` stores date-based memory files:
-  - `daily/YYYY-MM-DD.yaml` for append-only daily observations
-  - `curated.yaml` for promoted long-term memories
-  - `MEMORY.md` for the synthesized natural-language view of curated memory
-- `~/.oh-my-agent/agent-workspace/.agents/skills/` is refreshed so Codex can use official repo/workspace skill discovery in external workspaces too.
-- `~/.oh-my-agent/runtime/tasks/` stores isolated runtime task worktrees and artifact task output directories.
-- `~/.oh-my-agent/runtime/logs/threads/` stores thread-scoped unified agent audit logs across chat, invoke, HITL resume, and runtime tasks.
-- `~/.oh-my-agent/automations/` stores file-driven automation definitions with hot reload.
-- The external workspace now uses a generated `AGENTS.md` as the single injected context document. Repo-root `AGENT.md`, `CLAUDE.md`, and `GEMINI.md` are no longer mirrored into the external workspace or session workspaces.
-- The generated workspace `AGENTS.md` includes visible metadata so it is clear when you are looking at a derived file instead of the repo source file.
-
-## Autonomy Direction
-
-- Current release: `v0.8.0` — 1.0 hardening complete (service-layer extraction, graceful shutdown, structured logging, markdown chunker, rate-limiting, compose.yaml, operator guides).
-- v0.5 establishes the runtime-first baseline: durable task execution, merge gating, and recovery.
-- v0.6 focuses on skill-first autonomy + adaptive memory: skill creation, skill routing, skill validation, reusable capability growth, and cross-session user knowledge.
-- v0.7 delivers date-based memory; v0.7.2 closes the auth/runtime/automation/HITL pass; v0.7.3 closes HITL/delivery/operator observability.
-- v0.8 adds 1.0 hardening: platform-agnostic service layer, reliability, deployment.
-- v0.9 targets 1.0 RC / contract freeze: end-to-end restart/recovery tests, upgrade validation, and operator-grade docs.
-- Source-code self-modification may exist as a high-risk, strongly gated capability, but it is not the default autonomy path.
-
-## Current Limits
-
-- Artifact delivery currently supports `attachment` and local `path` fallback only; remote link/object-storage backends are still pending.
-- Runtime observability still lacks an in-memory live excerpt layer; `/task_logs` can read live agent log tails, but Discord status cards do not yet show the latest agent activity summary.
-- Human-in-the-loop v1 is now implemented for Discord buttons only:
-  - single-choice `ask_user` prompts
-  - owner-only response handling
-  - visible prompt + visible answer/cancel record
-  - auto-resume for direct chat and runtime task paths
-- HITL completion is now structured for single-choice flows, but free-text HITL, multi-select prompts, and richer checkpoint families are still out of scope.
-- Free-text HITL, multi-select prompts, non-Discord interactive UIs, and prompt expiry policies are still intentionally out of scope.
-- Codex repo/workspace skill discovery now uses official `.agents/skills/`; the generated `AGENTS.md` is no longer used to enumerate workspace skills.
-- Memory retrieval still uses Jaccard word-overlap for similarity; semantic (vector) retrieval is a post-1.0 item.
+→ Adding a new skill: create `skills/<name>/SKILL.md` (+ optional `scripts/`); it will be picked up on next startup or `/reload-skills`.
 
 ## Documentation
 
-- Documentation index: [docs/README.md](docs/README.md)
-- Changelog: [CHANGELOG.md](CHANGELOG.md)
-- Chinese README: [docs/CN/README.md](docs/CN/README.md)
-- English roadmap: [docs/EN/todo.md](docs/EN/todo.md)
-- Chinese roadmap: [docs/CN/todo.md](docs/CN/todo.md)
-- English development log: [docs/EN/development.md](docs/EN/development.md)
-- Chinese development log: [docs/CN/development.md](docs/CN/development.md)
-- Router smoke test: [docs/router_smoke.md](docs/router_smoke.md)
-- Archived: [docs/archive/](docs/archive/)
+| Document | EN | 中文 |
+|----------|----|------|
+| Architecture | [architecture.md](docs/EN/architecture.md) | [architecture.md](docs/CN/architecture.md) |
+| Operator Guide | [operator-guide.md](docs/EN/operator-guide.md) | [operator-guide.md](docs/CN/operator-guide.md) |
+| Roadmap | [todo.md](docs/EN/todo.md) | [todo.md](docs/CN/todo.md) |
+| Development Log | [development.md](docs/EN/development.md) | [development.md](docs/CN/development.md) |
+| Changelog | [CHANGELOG.md](CHANGELOG.md) | — |
+| v1.0 Plan | [v1.0-plan.md](docs/EN/v1.0-plan.md) | [v1.0-plan.md](docs/CN/v1.0-plan.md) |
 
 ## Versioning
 
-- The package version is sourced from [`src/oh_my_agent/_version.py`](src/oh_my_agent/_version.py).
-- `oh-my-agent --version` prints the installed version without requiring `config.yaml`.
-- `CHANGELOG.md` is expected to move with the package version; released sections use `vX.Y.Z`.
+The package version is sourced from [`src/oh_my_agent/_version.py`](src/oh_my_agent/_version.py). `CHANGELOG.md` tracks released and unreleased changes.
 
 ## License
 
