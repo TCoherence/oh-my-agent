@@ -76,6 +76,7 @@ def test_scaffold_for_finance_ai_and_weekly_has_expected_sections():
     assert "## 中国房地产政策与融资信号" in finance_markdown
     assert "## 重点持仓财报 / 管理层表态 / CEO 公开发言" in finance_markdown
     assert "## 市场与指数基金视角" in finance_markdown
+    assert "## 🎙️ 播客动态" in finance_markdown
 
     finance_json = module.build_json_scaffold(
         mode="daily_digest",
@@ -97,6 +98,7 @@ def test_scaffold_for_finance_ai_and_weekly_has_expected_sections():
         "china-property-policy",
         "tracked-holdings",
         "market-index-view",
+        "podcasts",
         "watchlist",
     }
 

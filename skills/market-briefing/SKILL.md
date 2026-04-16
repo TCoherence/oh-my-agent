@@ -61,16 +61,17 @@ The skill is report-centric. It writes durable report files under `~/.oh-my-agen
 ## Required workflow
 
 1. Pick the explicit mode and domain.
-2. **(AI daily only) Prefetch podcasts** — run the podcast fetch script to get latest episodes from subscribed channels:
+2. **(AI / finance daily) Prefetch podcasts** — run the podcast fetch script to get latest episodes from subscribed channels:
    ```bash
-   ./.venv/bin/python skills/market-briefing/scripts/podcast_fetch.py
+   ./.venv/bin/python skills/market-briefing/scripts/podcast_fetch.py --domain ai
+   ./.venv/bin/python skills/market-briefing/scripts/podcast_fetch.py --domain finance
    ```
-   The script outputs a JSON array of episodes updated within the last 48 hours. Use this output directly for the `🎙️ 播客动态` section — do not run a separate web search for podcasts.
+   Use `--domain ai` for AI daily, `--domain finance` for finance daily. The script outputs a JSON array of episodes updated within the last 48 hours. Use this output directly for the `🎙️ 播客动态` section — do not run a separate web search for podcasts.
    If the script returns an empty array or fails, write "今日订阅播客暂无更新" in the podcast section and move on.
 3. Load prior stored context with the helper script.
 4. Generate a starter Markdown + JSON scaffold.
 5. Do external research for the requested mode/domain.
-6. Fill the Markdown + JSON with the researched content (include prefetched podcast data for AI daily).
+6. Fill the Markdown + JSON with the researched content (include prefetched podcast data for AI / finance daily).
 7. Persist both files into the canonical report store.
 8. In the final answer, return the report content directly and mention where it was stored.
 
@@ -112,6 +113,7 @@ Read the relevant references before drafting:
   - 中国房地产政策与融资信号
   - 重点持仓财报 / 管理层表态 / CEO 公开发言
   - 市场与指数基金视角
+  - 🎙️ 播客动态（from prefetch, 48h freshness window）
   - 后续观察点
   - 默认持仓池：
     - `NVDA`
@@ -217,10 +219,10 @@ Only use `sync-repo` for explicit curated maintenance. Do not rewrite the repo s
 
 ## Podcast section rules
 
-The `🎙️ 播客动态` section appears in AI daily reports only.
+The `🎙️ 播客动态` section appears in AI and finance daily reports.
 
 - Data comes exclusively from `podcast_fetch.py` output — do not web-search for additional podcasts.
 - Each item: bold linked `[频道名 — 集名](episode_url)`，followed by 1–2 sentence Chinese summary distilled from the shownotes.
 - If prefetch returned zero episodes, write `今日订阅播客暂无更新` and move on.
 - Do not fabricate episode content. Only summarize what the shownotes contain.
-- Subscribed channels are configured in `references/podcast_feeds.yaml`, grouped by domain (`ai`, `finance`). AI daily pulls the `ai` group. To add/remove channels, edit the YAML — no code changes needed.
+- Subscribed channels are configured in `references/podcast_feeds.yaml`, grouped by domain (`ai`, `finance`). AI daily pulls the `ai` group; finance daily pulls the `finance` group. To add/remove channels, edit the YAML — no code changes needed.

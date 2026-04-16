@@ -207,6 +207,8 @@ def build_markdown_skeleton(*, mode: str, domain: str, report_date: date | None 
                 "",
                 "## 市场与指数基金视角",
                 "",
+                "## 🎙️ 播客动态",
+                "",
                 "## 后续观察点",
                 "",
                 "## 来源与交叉验证说明",
@@ -334,6 +336,7 @@ def build_json_scaffold(
             {"slug": "china-property-policy", "heading": "中国房地产政策与融资信号", "summary": "", "bullets": [], "evidence_links": []},
             {"slug": "tracked-holdings", "heading": "重点持仓财报 / 管理层 / CEO 公开发言", "summary": "", "bullets": [], "evidence_links": []},
             {"slug": "market-index-view", "heading": "市场与指数基金视角", "summary": "", "bullets": [], "evidence_links": []},
+            {"slug": "podcasts", "heading": "🎙️ 播客动态", "summary": "", "bullets": [], "evidence_links": []},
             {"slug": "watchlist", "heading": "后续观察点", "summary": "", "bullets": [], "evidence_links": []},
         ]
         return payload
