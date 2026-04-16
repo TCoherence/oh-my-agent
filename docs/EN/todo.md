@@ -1,6 +1,6 @@
 # Todo / Roadmap
 
-## Snapshot (2026-04-15)
+## Snapshot (2026-04-16)
 
 - `/search` is implemented.
 - SkillSync reverse sync is implemented.
@@ -25,6 +25,8 @@
 - Memory system quality pass complete (extraction hygiene, two-stage dedup, fast/slow promotion, scoped bucketed retrieval).
 - `seattle-metro-housing-watch` and `market-briefing` skill contracts updated; `market-briefing` now includes podcast prefetch for AI and finance daily reports.
 - Automation YAML files carry explicit `skill_name` for correct timeout inheritance; prompts reference SKILL.md workflows instead of hardcoded paths.
+- Per-automation `auto_approve` flag (default off); human-readable risk reasons in DRAFT cards and DM notifications; `/automation_run` manual trigger command.
+- `market-briefing` AI people-pool discovery rules codified in SKILL.md; `report_store.py persist` auto-records people pool entries.
 - Current next target: `v0.9` (1.0 RC / Contract Freeze). See `v1.0-plan.md` for full roadmap.
 
 ## v0.5 Runtime Hardening (complete)
@@ -234,3 +236,7 @@ All items below move off the `1.0` critical path. See [`v1.0-plan.md`](v1.0-plan
 - [x] PRIORITY: propagate skill-level `metadata.timeout_seconds` into runtime task / automation execution so long-running automation-backed skills can inherit the same timeout override as direct skill invocations
 - [x] Missed-job policy finalized as `skip` (no replay, no catch-up)
 - [x] Operator-facing automation observability (`/automation_status` shows runtime state, `/doctor` shows recent failures)
+- [x] Per-automation `auto_approve` flag (default `false`): scheduler tasks can bypass risk evaluation when explicitly opted in; conservative default requires manual approval for risky tasks
+- [x] `/automation_run` manual trigger: fire any enabled automation job on demand (owner-only)
+- [x] Human-readable risk reasons in DRAFT notifications: thread cards and owner DMs now show specific risk labels (e.g. "prompt contains sensitive keywords") instead of generic "Reason: draft"
+- [x] `market-briefing` AI people-pool discovery pipeline: detailed discovery rules in SKILL.md, auto-record via `report_store.py persist`

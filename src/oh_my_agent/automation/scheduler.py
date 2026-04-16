@@ -60,6 +60,7 @@ class ScheduledJob:
     skill_name: str | None = None
     timeout_seconds: int | None = None
     max_turns: int | None = None
+    auto_approve: bool = False
 
     @property
     def schedule_kind(self) -> str:
@@ -85,6 +86,7 @@ class AutomationRecord:
     skill_name: str | None = None
     timeout_seconds: int | None = None
     max_turns: int | None = None
+    auto_approve: bool = False
 
     @property
     def schedule_kind(self) -> str:
@@ -108,6 +110,7 @@ class AutomationRecord:
             skill_name=self.skill_name,
             timeout_seconds=self.timeout_seconds,
             max_turns=self.max_turns,
+            auto_approve=self.auto_approve,
         )
 
 
@@ -256,6 +259,19 @@ class Scheduler:
 
     def stop(self) -> None:
         self._stop_event.set()
+
+    async def fire_job_now(self, name: str) -> bool:
+        """Manually trigger a job by name.  Returns True if fired."""
+        job = self._task_job(name)
+        if job is None:
+            return False
+        on_fire = getattr(self, "_on_fire", None)
+        if on_fire is None:
+            logger.warning("Cannot fire job %r: scheduler not running", name)
+            return False
+        logger.info("Manual fire for job %r", name)
+        await on_fire(job)
+        return True
 
     async def _reload_loop(
         self,
@@ -427,6 +443,8 @@ class Scheduler:
                 agent_name,
             )
 
+        auto_approve = bool(raw.get("auto_approve", False))
+
         record = AutomationRecord(
                 name=name,
                 platform=platform,
@@ -445,6 +463,7 @@ class Scheduler:
                 skill_name=skill_name,
                 timeout_seconds=timeout_seconds,
                 max_turns=max_turns,
+                auto_approve=auto_approve,
             )
         return _ParsedAutomation(
             record=record,

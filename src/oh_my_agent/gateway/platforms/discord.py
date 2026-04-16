@@ -1040,6 +1040,19 @@ class DiscordChannel(BaseChannel):
         async def slash_automation_disable(interaction: discord.Interaction, name: str):
             await _set_automation_enabled(interaction, name=name, enabled=False)
 
+        @tree.command(name="automation_run", description="Manually fire an automation job now")
+        @app_commands.describe(name="Automation name to fire")
+        async def slash_automation_run(interaction: discord.Interaction, name: str):
+            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
+                await interaction.response.send_message(
+                    "This command is restricted to the configured owner.",
+                    ephemeral=True,
+                )
+                return
+            await interaction.response.defer()
+            result = await self._automation_service.fire(name)
+            await interaction.followup.send(result.message[:1900])
+
         @tree.command(name="skill_stats", description="Show skill health and evaluation stats")
         @app_commands.describe(skill="Optional skill name")
         async def slash_skill_stats(

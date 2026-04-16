@@ -805,6 +805,7 @@ class RuntimeService:
         max_minutes: int | None = None,
         source: str,
         force_draft: bool = False,
+        auto_approve: bool = False,
         task_type: str = TASK_TYPE_REPO_CHANGE,
         completion_mode: str = TASK_COMPLETION_MERGE,
         output_summary: str | None = None,
@@ -823,7 +824,7 @@ class RuntimeService:
 
         require_approval = False
         reasons: list[str] = []
-        if self._risk_profile == "strict":
+        if not auto_approve and self._risk_profile == "strict":
             risk = evaluate_strict_risk(goal, max_steps=steps, max_minutes=minutes)
             require_approval = risk.require_approval
             reasons = risk.reasons
@@ -856,7 +857,7 @@ class RuntimeService:
         await self._store.add_runtime_event(
             task.id,
             "task.created",
-            {"source": source, "status": status, "risk_reasons": reasons, "force_draft": force_draft},
+            {"source": source, "status": status, "risk_reasons": reasons, "force_draft": force_draft, "auto_approve": auto_approve},
         )
         self._task_sources[task.id] = source
         logger.info(
@@ -891,7 +892,7 @@ class RuntimeService:
                 record_history=True,
             )
             await self._signal_status_by_id(task, TASK_STATUS_DRAFT)
-            await self._notify_task_draft_required(task)
+            await self._notify_task_draft_required(task, reasons=reasons)
         else:
             await self._notify(
                 task,
@@ -950,6 +951,7 @@ class RuntimeService:
         max_minutes: int | None = None,
         source: str,
         force_draft: bool = False,
+        auto_approve: bool = False,
         automation_name: str | None = None,
         skill_name: str | None = None,
         agent_timeout_seconds: int | None = None,
@@ -968,6 +970,7 @@ class RuntimeService:
             max_minutes=max_minutes,
             source=source,
             force_draft=force_draft,
+            auto_approve=auto_approve,
             task_type=TASK_TYPE_ARTIFACT,
             completion_mode=TASK_COMPLETION_REPLY,
             automation_name=automation_name,
@@ -1031,6 +1034,7 @@ class RuntimeService:
         skill_name: str | None = None,
         timeout_seconds: int | None = None,
         max_turns: int | None = None,
+        auto_approve: bool = False,
     ) -> RuntimeTask | None:
         tasks = await self._store.list_runtime_tasks(
             platform=session.platform,
@@ -1068,6 +1072,7 @@ class RuntimeService:
             max_steps=1,
             max_minutes=max_minutes,
             source="scheduler",
+            auto_approve=auto_approve,
             automation_name=automation_name,
             skill_name=skill_name,
             agent_timeout_seconds=effective_timeout_seconds,
@@ -4766,7 +4771,8 @@ class RuntimeService:
             )
         )
 
-    async def _notify_task_draft_required(self, task: RuntimeTask) -> None:
+    async def _notify_task_draft_required(self, task: RuntimeTask, *, reasons: list[str] | None = None) -> None:
+        reason_text = self._human_risk_reasons(reasons or [], task)
         await self._emit_notification(
             NotificationEvent(
                 kind="task_draft",
@@ -4777,7 +4783,7 @@ class RuntimeService:
                 title="Action required",
                 body="Next step: approve, reject, or suggest changes in this thread.",
                 dedupe_key=self._notification_dedupe_key("task_draft", task_id=task.id),
-                payload={"status": task.status},
+                payload={"status": task.status, "reason_text": reason_text},
             )
         )
 
@@ -4903,8 +4909,26 @@ class RuntimeService:
                 interesting.append(f"{key}={payload[key]}")
         return ", ".join(interesting)[:220]
 
+    @staticmethod
+    def _human_risk_reasons(reasons: list[str], task: RuntimeTask) -> str:
+        if not reasons:
+            return "requires explicit approval"
+        labels = []
+        for r in reasons:
+            if r == "minutes_over_20":
+                labels.append(f"estimated runtime {task.max_minutes} min exceeds 20 min threshold")
+            elif r == "steps_over_8":
+                labels.append(f"step budget {task.max_steps} exceeds 8-step threshold")
+            elif r == "contains_sensitive_keywords":
+                labels.append("prompt contains sensitive keywords (network/deploy/database etc.)")
+            elif r == "possible_large_change":
+                labels.append("possible large-scope change")
+            else:
+                labels.append(r)
+        return " · ".join(labels)
+
     def _draft_text(self, task: RuntimeTask, *, reasons: list[str]) -> str:
-        reason_text = ", ".join(reasons) if reasons else "requires explicit approval"
+        reason_text = self._human_risk_reasons(reasons, task)
         return (
             f"### Runtime Task Draft `{task.id}`\n"
             f"Task type: `{task.task_type}` · completion: `{task.completion_mode}`\n"
@@ -4912,7 +4936,7 @@ class RuntimeService:
             f"Agent: `{task.preferred_agent or self._default_agent}`\n"
             f"Budget: {task.max_steps} steps / {task.max_minutes} min\n"
             f"Test command: `{task.test_command}`\n"
-            f"Reason: {reason_text}\n"
+            f"⚠️ Reason: {reason_text}\n"
             "Use Approve / Reject / Suggest."
         )
 

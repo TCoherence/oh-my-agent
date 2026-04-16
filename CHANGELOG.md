@@ -9,7 +9,16 @@ The format is intentionally lightweight and release-oriented rather than exhaust
 ### Added
 
 - **`market-briefing` podcast — finance daily coverage**: `🎙️ 播客动态` section extended from AI-only to both AI and finance daily reports; finance group seeded with 6 channels (锦供参考, 起朱楼宴宾客, 小Lin说, 商业就是这样, 知行小酒馆, 面基); AI group expanded to 8 channels (+42章经, AI局内人, 科技早知道); `general` feed group removed — shared channels merged into their primary domain group
+- **AI people-pool discovery rules**: SKILL.md now specifies concrete discovery sources (X/Twitter, GitHub trending, podcast guests, paper authors), candidate qualification criteria, minimum JSON fields, and a target range of 1–3 candidates per AI daily report; `report_store.py persist` auto-calls `ai_people_pool.py record` for AI daily reports so the state file stays in sync without relying on the agent to remember a manual step
+- **Per-automation `auto_approve` flag**: automation YAML files now accept `auto_approve: true` to skip the runtime risk-evaluation gate (DRAFT → PENDING without manual approval); default is `false` (safe); all existing automations updated to `auto_approve: true`
+- **`/automation_run` slash command**: manually fire any enabled automation job on demand — useful for retrying failed cron jobs without waiting for the next schedule
+- **Human-readable risk reasons**: DRAFT task cards and DM notifications now show descriptive reason text (e.g. "estimated runtime 26 min exceeds 20 min threshold") instead of raw labels like `minutes_over_20` or `draft`
+- **`automation.yaml.example`**: annotated reference template for all automation YAML fields including the new `auto_approve` flag
+
+### Fixed
+
 - **Automation YAML `skill_name` fix**: all 7 automation YAML files now carry explicit `skill_name`, enabling correct `timeout_seconds` inheritance from skill metadata (e.g. deals-scanner 900s, market-briefing 1500s instead of falling back to agent default 300s); automation prompts rewritten to reference SKILL.md workflows and helper scripts instead of hardcoding output paths
+- **Scheduler tasks stuck in DRAFT**: scheduler-fired tasks with `timeout_seconds > 1200` (market-briefing, deals-scanner) were blocked by `evaluate_strict_risk()` producing `minutes_over_20`; scheduler tasks now respect per-automation `auto_approve` flag to bypass the risk gate
 
 ## v0.8.1 - 2026-04-15
 

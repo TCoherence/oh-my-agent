@@ -667,6 +667,15 @@ class GatewayManager:
                 next_run_at=next_run_iso,
             )
 
+    async def fire_automation(self, name: str) -> str:
+        """Manually fire a named automation job.  Returns a status message."""
+        if not self._scheduler:
+            return "Scheduler not configured."
+        fired = await self._scheduler.fire_job_now(name)
+        if fired:
+            return f"Automation `{name}` fired."
+        return f"Automation `{name}` not found or scheduler not running."
+
     async def _dispatch_scheduled_job(self, job: ScheduledJob) -> None:
         store = getattr(self, "_memory_store_ref", None)
         key = self._session_key(job.platform, job.channel_id)
@@ -743,6 +752,7 @@ class GatewayManager:
                     skill_name=job.skill_name,
                     timeout_seconds=job.timeout_seconds,
                     max_turns=job.max_turns,
+                    auto_approve=job.auto_approve,
                 )
                 if task and store:
                     await store.upsert_automation_state(

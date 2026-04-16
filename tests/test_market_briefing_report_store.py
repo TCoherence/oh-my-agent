@@ -321,3 +321,69 @@ def test_context_uses_recent_daily_reports_bootstrap_and_weekly_history(tmp_path
     assert weekly_context["bootstrap"]["politics"]["title"] == "政治 bootstrap"
     assert len(weekly_context["recent_daily"]["politics"]) == 7
     assert weekly_context["recent_weekly"][0]["title"] == "week 10"
+
+
+def test_persist_ai_daily_auto_records_people_pool(tmp_path):
+    """persist_report for AI daily should auto-record candidates into the people pool state."""
+    module = _load_module()
+
+    seed_path = tmp_path / "references" / "ai_people_seed.yaml"
+    seed_path.parent.mkdir(parents=True, exist_ok=True)
+    seed_path.write_text(
+        "version: 1\ngroups:\n  ai-generalists:\n    label: AI generalists\n"
+        "    description: ''\n    people: []\n",
+        encoding="utf-8",
+    )
+
+    result = module._try_record_ai_pool(
+        # We need to create a valid AI daily JSON file first
+        _make_ai_json_with_candidate(tmp_path),
+        root=tmp_path,
+        as_of=date(2026, 4, 15),
+    )
+
+    # auto-record should succeed and find the candidate
+    assert result is not None
+    assert "new-person" in result["new_candidate_ids"]
+    assert result["candidate_count"] == 1
+
+    # verify state file was written
+    state_path = tmp_path / "state" / "ai_people_pool.json"
+    assert state_path.exists()
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert "new-person" in state["candidates"]
+
+
+def _make_ai_json_with_candidate(tmp_path: Path) -> Path:
+    """Helper: write a minimal AI daily JSON with one new candidate and return its path."""
+    json_path = tmp_path / "daily" / "2026-04-15" / "ai.json"
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "version": 1,
+        "mode": "daily_digest",
+        "domain": "ai",
+        "title": "AI test",
+        "generated_at": "2026-04-15T00:00:00+00:00",
+        "report_timezone": "UTC",
+        "report_date": "2026-04-15",
+        "period_start": "2026-04-15",
+        "period_end": "2026-04-15",
+        "summary": "",
+        "key_takeaways": [],
+        "source_mix_note": "",
+        "verification_note": "",
+        "sources": [],
+        "sections": [],
+        "new_candidate_people": [
+            {
+                "person_id": "new-person",
+                "name": "New Person",
+                "group": "ai-generalists",
+                "reason": "released notable open-source AI tool",
+                "evidence_urls": ["https://github.com/new-person/tool"],
+            }
+        ],
+        "promoted_people": [],
+    }
+    json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return json_path

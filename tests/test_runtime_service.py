@@ -683,10 +683,10 @@ async def test_runtime_message_intent_draft_to_merge(runtime_env):
     )
     assert len(draft_notifications) == 1
     assert any(
-        text.startswith("<@owner-1> **Action required**") and "Reason: draft" in text
+        text.startswith("<@owner-1> **Action required**") and "Reason:" in text
         for _, text in channel.sent
     )
-    assert any(user_id == "owner-1" and "Reason: draft" in text for user_id, text in channel.dms)
+    assert any(user_id == "owner-1" and "Reason:" in text for user_id, text in channel.dms)
 
     approve_event = await runtime.build_slash_decision_event(
         platform="discord",

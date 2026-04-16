@@ -89,7 +89,7 @@ class NotificationManager:
         if not callable(render_user_mention):
             render_user_mention = lambda user_id: f"`{user_id}`"
         mentions = " ".join(render_user_mention(owner_id) for owner_id in sorted(self._owner_user_ids))
-        lines = [f"{mentions} **{event.title}**", f"Reason: {self._reason_label(event.kind)}"]
+        lines = [f"{mentions} **{event.title}**", f"Reason: {self._reason_label(event.kind, event.payload)}"]
         if event.task_id:
             lines.append(f"Task: `{event.task_id}`")
         if event.body:
@@ -115,7 +115,7 @@ class NotificationManager:
         sender = getattr(session.channel, "send_dm", None)
         if not callable(sender):
             return None
-        lines = [f"**{event.title}**", f"Reason: {self._reason_label(event.kind)}"]
+        lines = [f"**{event.title}**", f"Reason: {self._reason_label(event.kind, event.payload)}"]
         if event.task_id:
             lines.append(f"Task: `{event.task_id}`")
         lines.append(f"Thread: `{event.thread_id}`")
@@ -134,7 +134,9 @@ class NotificationManager:
             return None
 
     @staticmethod
-    def _reason_label(kind: str) -> str:
+    def _reason_label(kind: str, payload: dict | None = None) -> str:
+        if payload and payload.get("reason_text"):
+            return str(payload["reason_text"])
         if kind == "task_draft":
             return "draft"
         if kind == "task_waiting_merge":

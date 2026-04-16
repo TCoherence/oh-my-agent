@@ -1,0 +1,45 @@
+# Automation YAML reference
+#
+# Place automation files in ~/.oh-my-agent/automations/*.yaml
+# Each file defines one scheduled job.  The scheduler hot-reloads on file changes.
+#
+# ────────────────────────────────────────────────────────
+# Required fields
+# ────────────────────────────────────────────────────────
+name: my-automation-name          # unique, matches filename (without .yaml)
+enabled: true                     # false to pause without deleting the file
+platform: discord                 # must match a configured gateway channel
+channel_id: "${DISCORD_CHANNEL_ID}" # env-var substitution supported
+prompt: "Your prompt to the agent here."
+
+# Schedule — exactly one of cron or interval_seconds
+cron: "0 9 * * *"                 # standard 5-field cron (minute hour day month weekday)
+# interval_seconds: 3600          # alternative: fire every N seconds
+
+# ────────────────────────────────────────────────────────
+# Optional fields
+# ────────────────────────────────────────────────────────
+
+# Agent selection
+agent: claude                     # claude | gemini | codex (default: fallback order)
+
+# Skill binding — enables timeout inheritance from SKILL.md metadata
+skill_name: market-briefing       # must match a skills/<name>/SKILL.md
+
+# Delivery
+delivery: channel                 # "channel" (default) or "dm"
+# thread_id: "123456"             # post to a specific thread (channel delivery only)
+# target_user_id: "789"           # required when delivery=dm
+
+# Execution overrides (override skill metadata or agent defaults)
+# timeout_seconds: 1500           # agent subprocess timeout
+# max_turns: 3                    # Claude max_turns (Claude only)
+
+# Risk gate bypass
+# When the runtime system is enabled, tasks go through risk evaluation.
+# Scheduler tasks with auto_approve: true skip the risk check and start
+# immediately — no manual approval needed.  Default is false (safe).
+auto_approve: true                # true to skip DRAFT approval gate
+
+# Metadata
+author: scheduler                 # shown in task audit logs

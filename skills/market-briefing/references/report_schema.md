@@ -204,6 +204,22 @@ AI JSON should also include:
 }
 ```
 
+`new_candidate_people` entries should use:
+
+```json
+{
+  "person_id": "lowercase-hyphenated",
+  "name": "Full Name",
+  "group": "claude-code-builders | openai-builders | oss-ai-builders | ai-generalists",
+  "reason": "one sentence: what they did today and why it matters",
+  "evidence_urls": ["https://..."]
+}
+```
+
+Optional fields: `x_handle`, `role`, `search_terms`, `aliases`, `cross_checked`, `promote_recommended`.
+
+`promoted_people` uses the same shape. Set `cross_checked: true` and `promote_recommended: true` when a candidate has multi-source evidence and warrants immediate promotion.
+
 ## Weekly synthesis
 
 Weekly JSON remains structurally light. Strengthen:

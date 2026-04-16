@@ -1,6 +1,6 @@
 # Todo / 路线图
 
-## 当前快照（2026-04-15）
+## 当前快照（2026-04-16）
 
 - `/search` 已实现。
 - SkillSync reverse sync 已实现。
@@ -25,6 +25,8 @@
 - 记忆系统质量优化已完成（提取窗口修复、两段式去重、快慢晋升路径、scope-aware 分桶检索）。
 - `seattle-metro-housing-watch` 和 `market-briefing` skill contract 已更新；`market-briefing` AI 和财经日报均已支持播客预取。
 - Automation YAML 文件已补全 `skill_name` 字段，确保 timeout 正确继承 skill metadata；prompt 改为引用 SKILL.md workflow，不再硬编码输出路径。
+- 按 automation 配置 `auto_approve` 标志（默认关闭）；DRAFT 卡片和 DM 通知展示人类可读的风险原因；新增 `/automation_run` 手动触发命令。
+- `market-briefing` AI people-pool 发现规则已写入 SKILL.md；`report_store.py persist` 自动记录 people pool 条目。
 - 当前下一个目标：`v0.9`（1.0 RC / Contract Freeze）。详见 `v1.0-plan.md`。
 
 ## v0.5 Runtime 加固（已完成）
@@ -234,3 +236,7 @@
 - [x] PRIORITY：把 skill 级别的 `metadata.timeout_seconds` 继续传递到 runtime task / automation 执行链路里，让长耗时的 automation-backed skill 也能继承和直接 skill 调用一致的 timeout override
 - [x] missed-job policy 已定为 `skip`（不补跑、不追赶）
 - [x] 面向 operator 的 automation 可观测性（`/automation_status` 显示运行时状态，`/doctor` 显示近期失败）
+- [x] 按 automation 配置 `auto_approve` 标志（默认 `false`）：scheduler 任务可在显式开启时跳过风险评估；保守默认值下高风险任务仍需手动审批
+- [x] `/automation_run` 手动触发：按需执行任意已启用的 automation job（owner-only）
+- [x] DRAFT 通知展示人类可读的风险原因：thread 状态卡和 owner DM 现在展示具体风险标签（如"prompt 包含敏感关键词"），而非笼统的"Reason: draft"
+- [x] `market-briefing` AI people-pool 发现流水线：SKILL.md 中写入详细发现规则，`report_store.py persist` 自动调用 people pool 记录

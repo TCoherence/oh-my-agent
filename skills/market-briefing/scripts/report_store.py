@@ -539,6 +539,31 @@ def build_context(
     raise ValueError(f"unsupported mode: {mode}")
 
 
+def _try_record_ai_pool(
+    json_path: Path,
+    *,
+    root: str | Path | None = None,
+    as_of: date | None = None,
+) -> dict[str, Any] | None:
+    """Auto-record AI people pool after persisting an AI daily report.
+
+    Returns the record result dict on success, or ``None`` if the
+    people-pool module is unavailable or the recording fails.
+    """
+    try:
+        import importlib.util
+
+        pool_path = Path(__file__).resolve().parent / "ai_people_pool.py"
+        spec = importlib.util.spec_from_file_location("ai_people_pool", pool_path)
+        if spec is None or spec.loader is None:
+            return None
+        pool_mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(pool_mod)
+        return pool_mod.record_report(report_json=str(json_path), root=root, as_of=as_of)
+    except Exception:
+        return None
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Persist and query market briefing report files")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -621,16 +646,16 @@ def main() -> int:
             report_date=report_day,
             iso_week=args.iso_week,
         )
-        print(
-            json.dumps(
-                {
-                    "status": "ok",
-                    "markdown_path": str(md_path),
-                    "json_path": str(json_path),
-                },
-                ensure_ascii=False,
+        output: dict[str, Any] = {
+            "status": "ok",
+            "markdown_path": str(md_path),
+            "json_path": str(json_path),
+        }
+        if args.mode == "daily_digest" and args.domain == "ai":
+            output["people_pool_update"] = _try_record_ai_pool(
+                json_path, root=args.root, as_of=report_day,
             )
-        )
+        print(json.dumps(output, ensure_ascii=False))
         return 0
 
     if args.command == "context":

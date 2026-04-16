@@ -206,16 +206,58 @@ Do not treat `/search` as an external news source. In this repo, `/search` is in
 For `daily_digest` with `domain=ai`:
 
 1. Load prior report context with `report_store.py context`.
-2. Load the current people pool.
-3. Research both:
+2. Load the current people pool with `ai_people_pool.py context`.
+3. Research:
    - frontier-lab radar
    - five-layer AI developments
-   - tracked people / community / X.com signals plus a bounded discovery sweep for new names
-4. Fill the AI Markdown + JSON.
-5. Record new candidates and promotions with `ai_people_pool.py record`.
-6. Persist the report with `report_store.py persist`.
+   - tracked people / community / X.com signals
+   - **people discovery sweep** (see rules below)
+4. Fill the AI Markdown + JSON — include `new_candidate_people` and `promoted_people` arrays.
+5. Persist the report with `report_store.py persist`. The persist command **automatically calls `ai_people_pool.py record`** for AI daily reports — no separate manual step needed.
 
 Only use `sync-repo` for explicit curated maintenance. Do not rewrite the repo seed file during a normal daily run.
+
+### People discovery rules
+
+Each AI daily report must include a **bounded discovery sweep** for new people beyond the current tracked pool. Aim for **1–3 candidates per report** when signal exists.
+
+**Where to look:**
+
+- X/Twitter threads with high engagement from AI practitioners (especially replies/quotes by existing tracked people)
+- Notable podcast guests from the `podcast_fetch.py` output
+- Authors of significant papers, tools, or open-source releases cited in the report
+- People making verifiable frontier-AI claims or predictions that day
+- GitHub trending AI repo authors
+- Conference keynote speakers or panelists mentioned in news
+
+**What qualifies as a candidate (`new_candidate_people` entry):**
+
+- Published a concrete artifact (tool, paper, blog post, significant thread) in the last 48h, OR
+- Made a verifiable claim about frontier AI backed by evidence, OR
+- Was independently mentioned by 2+ tracked people or sources in the same day
+
+**What does NOT qualify:**
+
+- Historical references ("Karpathy once said…")
+- Passing mentions without context
+- People already in the seed file or tracked pool
+- Celebrities/executives mentioned only in market-cap headlines
+
+**Minimum fields per candidate:**
+
+```json
+{
+  "person_id": "lowercase-hyphenated",
+  "name": "Full Name",
+  "group": "one of the four groups",
+  "reason": "one sentence: what they did and why it matters",
+  "evidence_urls": ["at least one URL proving the signal"]
+}
+```
+
+Optional but valuable: `x_handle`, `role`, `search_terms`, `cross_checked`, `promote_recommended`.
+
+**If no candidates found:** write `本日发现扫描未发现达标候选人` in `candidate_queue_summary` — do NOT force nominations to fill a quota.
 
 ## Podcast section rules
 

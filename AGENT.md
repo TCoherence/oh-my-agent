@@ -15,7 +15,7 @@ oh-my-agent
 
 # Tests
 pip install -e ".[dev]"
-pytest                            # all tests (526 tests)
+pytest                            # all tests (527 tests)
 pytest tests/test_memory_store.py # single file
 pytest -k "test_fallback"         # single test by name
 ```
@@ -33,6 +33,7 @@ The system has seven major subsystems.
   - Conversation: `/ask`, `/reset`, `/history`, `/agent`, `/search`
   - Runtime tasks: `/task_start`, `/task_status`, `/task_list`, `/task_approve`, `/task_reject`, `/task_suggest`, `/task_resume`, `/task_stop`, `/task_merge`, `/task_discard`, `/task_changes`, `/task_logs`, `/task_cleanup`
   - Skills: `/reload-skills`
+  - Automations: `/automation_status`, `/automation_reload`, `/automation_enable`, `/automation_disable`, `/automation_run`
   - Adaptive memory: `/memories`, `/forget`, `/promote`
 - Agent targeting:
   - `/ask` supports optional `agent` argument for new threads.
@@ -93,8 +94,9 @@ The system has seven major subsystems.
 
 **Automation layer** (`src/oh_my_agent/automation/`)
 
-- `Scheduler`: interval-based recurring job runner.
-- `build_scheduler_from_config()`: parses `automations` from config.
+- `Scheduler`: cron / interval-based recurring job runner. Loads YAML definitions from `~/.oh-my-agent/automations/*.yaml` with hot-reload on file changes.
+- Per-automation `auto_approve: bool` (default `false`): when `true`, scheduler-fired runtime tasks skip risk evaluation and start immediately; when `false`, tasks go through normal `evaluate_strict_risk()` and may land in DRAFT.
+- `fire_job_now(name)`: programmatic one-shot trigger for manual `/automation_run` command.
 - Jobs dispatch back into `GatewayManager.handle_message()` as system messages.
 
 **Sandbox isolation** (`main.py` + `BaseCLIAgent`)

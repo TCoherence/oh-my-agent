@@ -54,6 +54,20 @@ class AutomationService:
             )[:1900],
         )
 
+    async def fire(self, name: str) -> ServiceResult:
+        """Manually fire an automation job by name."""
+        if self._scheduler is None:
+            return ServiceResult(success=False, message="Automation scheduler is not enabled.")
+        record = self._scheduler.get_automation(name.strip())
+        if record is None:
+            return ServiceResult(success=False, message=f"Automation `{name}` not found.")
+        if not record.enabled:
+            return ServiceResult(success=False, message=f"Automation `{name}` is disabled. Enable it first.")
+        fired = await self._scheduler.fire_job_now(name.strip())
+        if fired:
+            return ServiceResult(success=True, message=f"✅ Automation `{name}` fired manually.")
+        return ServiceResult(success=False, message=f"Automation `{name}` could not be fired (scheduler not running?).")
+
     async def set_enabled(self, name: str, enabled: bool) -> AutomationStatusResult:
         if self._scheduler is None:
             return AutomationStatusResult(success=False, message="Automation scheduler is not enabled.")
