@@ -23,7 +23,8 @@
 - Markdown-aware chunker, structured logging, graceful shutdown, error contract, rate-limiting, and concurrent isolation tests are all implemented.
 - First-class `compose.yaml` and operator guides (EN + CN) are published.
 - Memory system quality pass complete (extraction hygiene, two-stage dedup, fast/slow promotion, scoped bucketed retrieval).
-- `seattle-metro-housing-watch` and `market-briefing` skill contracts updated; `market-briefing` now includes podcast prefetch for AI daily reports.
+- `seattle-metro-housing-watch` and `market-briefing` skill contracts updated; `market-briefing` now includes podcast prefetch for AI and finance daily reports.
+- Automation YAML files carry explicit `skill_name` for correct timeout inheritance; prompts reference SKILL.md workflows instead of hardcoded paths.
 - Current next target: `v0.9` (1.0 RC / Contract Freeze). See `v1.0-plan.md` for full roadmap.
 
 ## v0.5 Runtime Hardening (complete)

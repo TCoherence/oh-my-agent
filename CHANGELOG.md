@@ -4,6 +4,13 @@ All notable changes to this project are documented in this file.
 
 The format is intentionally lightweight and release-oriented rather than exhaustive.
 
+## Unreleased
+
+### Added
+
+- **`market-briefing` podcast — finance daily coverage**: `🎙️ 播客动态` section extended from AI-only to both AI and finance daily reports; finance group seeded with 6 channels (锦供参考, 起朱楼宴宾客, 小Lin说, 商业就是这样, 知行小酒馆, 面基); AI group expanded to 8 channels (+42章经, AI局内人, 科技早知道); `general` feed group removed — shared channels merged into their primary domain group
+- **Automation YAML `skill_name` fix**: all 7 automation YAML files now carry explicit `skill_name`, enabling correct `timeout_seconds` inheritance from skill metadata (e.g. deals-scanner 900s, market-briefing 1500s instead of falling back to agent default 300s); automation prompts rewritten to reference SKILL.md workflows and helper scripts instead of hardcoding output paths
+
 ## v0.8.1 - 2026-04-15
 
 ### Added
@@ -23,7 +30,7 @@ The format is intentionally lightweight and release-oriented rather than exhaust
 - **`seattle-metro-housing-watch` skill — coverage and contract update**: Bothell and Lynnwood promoted from optional expansion to default 7-area contract; Zillow added as formal area-trend second source alongside Redfin (no longer listing-only fallback); rate section now explicitly compares 30Y and 15Y fixed (MORTGAGE30US + MORTGAGE15US with direction and relative meaning); listing contract: single-family/townhouse only, per-area baseline 2 + priority-allocated 4 surplus slots (by high-quality sample availability → inventory activity → core-area preference), hard cap 18, price filter vs area-own median; `sample_listings[]` extended with `source_site`, `property_type`, `listed_at`, `original_list_price`, `price_history_summary`; `market_snapshot` stays lightweight (1/area, max 7); `area_deep_dive` gets 4–6 samples
 - **`market-briefing` skill — coverage and structure update**: finance daily expanded to 8 fixed sections (adds 中国/香港市场脉搏, 美国市场波动与风险偏好, 中国房地产政策与融资信号); AI daily expanded to 9 sections with a new Frontier Labs / Frontier Model Radar section before the five-layer stack; frontier watchlist fixed to 8 labs (OpenAI, Anthropic, Google DeepMind, Meta, xAI, Mistral, Qwen, DeepSeek); rumor discipline codified (official source > quality media > social/leak only in `unverified_frontier_signals`); finance/politics boundary rule written into reference docs; `timeout_seconds` raised to 1500; weekly synthesis absorbs new finance and AI sections structurally; new `references/finance_watchlist.md` and `references/ai_frontier_watchlist.md` reference files
 - **Usage audit attribution unified**: direct chat / explicit skill replies, runtime thread-agent replies, and automation terminal messages now share the same usage audit suffix contract (`in/out`, cache read/write, cost) while preserving each path's own prefix metadata such as automation name, run ID, and agent attribution
-- **`market-briefing` podcast integration**: AI daily reports now include a `🎙️ 播客动态` section sourced from xiaoyuzhoufm.com subscriptions; new `scripts/podcast_fetch.py` prefetches latest episodes (48h freshness window, parallel fetch); subscription list externalized to `references/podcast_feeds.yaml` grouped by domain (`ai`, `finance`, `general`) — editable without code changes; `timeout_seconds` raised from 1200 to 1500 to accommodate the prefetch step
+- **`market-briefing` podcast integration**: AI daily reports now include a `🎙️ 播客动态` section sourced from xiaoyuzhoufm.com subscriptions; new `scripts/podcast_fetch.py` prefetches latest episodes (48h freshness window, parallel fetch); subscription list externalized to `references/podcast_feeds.yaml` grouped by domain — editable without code changes; `timeout_seconds` raised from 1200 to 1500 to accommodate the prefetch step
 
 ### Fixed
 

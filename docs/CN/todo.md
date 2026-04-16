@@ -23,7 +23,8 @@
 - Markdown-aware chunker、结构化日志、graceful shutdown、错误展示契约、速率限制、并发隔离测试均已实现。
 - 首个正式 `compose.yaml` 和运营指南（EN + CN）已发布。
 - 记忆系统质量优化已完成（提取窗口修复、两段式去重、快慢晋升路径、scope-aware 分桶检索）。
-- `seattle-metro-housing-watch` 和 `market-briefing` skill contract 已更新；`market-briefing` AI 日报现已支持播客预取。
+- `seattle-metro-housing-watch` 和 `market-briefing` skill contract 已更新；`market-briefing` AI 和财经日报均已支持播客预取。
+- Automation YAML 文件已补全 `skill_name` 字段，确保 timeout 正确继承 skill metadata；prompt 改为引用 SKILL.md workflow，不再硬编码输出路径。
 - 当前下一个目标：`v0.9`（1.0 RC / Contract Freeze）。详见 `v1.0-plan.md`。
 
 ## v0.5 Runtime 加固（已完成）
