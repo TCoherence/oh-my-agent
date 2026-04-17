@@ -175,21 +175,15 @@ def _parse_caption_file(path: Path) -> list[dict]:
     return []
 
 
-def _build_transcript(segments: list[dict], max_chars: int) -> tuple[str, list[dict]]:
+def _build_transcript(segments: list[dict]) -> tuple[str, list[dict]]:
     transcript_parts: list[str] = []
     kept_segments: list[dict] = []
-    total = 0
-    unlimited = max_chars <= 0
     for segment in segments:
         text = segment["text"]
         if not text:
             continue
-        extra = len(text) + (1 if transcript_parts else 0)
-        if not unlimited and transcript_parts and total + extra > max_chars:
-            break
         transcript_parts.append(text)
         kept_segments.append(segment)
-        total += extra
     return "\n".join(transcript_parts), kept_segments
 
 
@@ -229,12 +223,6 @@ def main() -> None:
         "--sub-langs",
         default="en,zh",
         help="Comma-separated yt-dlp subtitle language preference list",
-    )
-    parser.add_argument(
-        "--max-transcript-chars",
-        type=int,
-        default=200000,
-        help="Maximum transcript characters to return; use 0 for no limit",
     )
     parser.add_argument(
         "--output-dir",
@@ -312,7 +300,7 @@ def main() -> None:
             _emit(payload)
 
         segments = _parse_caption_file(chosen_caption)
-        transcript, kept_segments = _build_transcript(segments, args.max_transcript_chars)
+        transcript, kept_segments = _build_transcript(segments)
 
         if not transcript:
             payload = _metadata_payload(info, args.url, yt_dlp_was_installed=yt_dlp_was_installed)

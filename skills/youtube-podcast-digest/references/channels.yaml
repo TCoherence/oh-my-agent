@@ -1,0 +1,46 @@
+# YouTube 订阅池。channel_fetch.py 读取此文件。
+# 首次运行时 channel_id 留空，脚本解析 @handle 页面后写回（幂等缓存）。
+# 分组：ai / vc / public_markets / china_tech / deep_dive。
+
+ai:
+  - name: Dwarkesh Patel
+    handle: "@DwarkeshPatel"
+    channel_id: "UCXl4i9dYBrFOabk0xGmbkRA"
+  - name: No Priors
+    handle: "@NoPriorsPodcast"
+    channel_id: "UCSI7h9hydQ40K5MJHnCrQvw"
+  - name: Latent Space
+    handle: "@LatentSpaceTV"
+    channel_id: "UCvi5jNRoRVm436TVAXet1kQ"
+
+vc:
+  - name: a16z
+    handle: "@a16z"
+    channel_id: "UC9cn0TuPq4dnbTY-CBsm8XA"
+  - name: Sequoia Capital
+    handle: "@sequoiacapital"
+    channel_id: "UCWrF0oN6unbXrWsTN7RctTw"
+  - name: 20VC
+    handle: "@20VC"
+    channel_id: "UCf0PBRjhf0rF8fWBIxTuoWA"
+
+public_markets:
+  - name: Bg2Pod
+    handle: "@Bg2Pod"
+    channel_id: "UC-yRDvpR99LUc5l7i7jLzew"
+  - name: All-In
+    handle: "@allin"
+    channel_id: "UCESLZhusAkFfsNsApnjF_Cg"
+
+china_tech:
+  - name: xiaojunpodcast
+    handle: "@xiaojunpodcast"
+    channel_id: "UC3Sv1JuKpbOx3csUO8FAo5g"
+  - name: 硅谷101
+    handle: "@sv101"
+    channel_id: "UCYS_TvKWQbN7a5mhagWFEjg"
+
+deep_dive:
+  - name: Acquired
+    handle: "@AcquiredFM"
+    channel_id: "UCyFqFYfTW2VoIQKylJ04Rtw"

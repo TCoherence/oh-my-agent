@@ -27,13 +27,7 @@ Use a transcript-first workflow for YouTube links. Prefer subtitles or auto-gene
   --cookies-path '<path-to-cookies.txt>'
 ```
 
-If you need the full transcript without truncation, set:
-
-```bash
-./.venv/bin/python skills/youtube-video-summary/scripts/extract_youtube.py \
-  --url '<youtube-url>' \
-  --max-transcript-chars 0
-```
+The script always returns the full transcript — there is no truncation option. Downstream callers that need to bound context should summarize incrementally rather than truncating captions up-front.
 
 4. Interpret the script result:
    - `transcript_backed`: summarize the actual spoken content and use timestamps from subtitle segments.
