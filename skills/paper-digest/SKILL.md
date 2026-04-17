@@ -3,6 +3,7 @@ name: paper-digest
 description: 每日抓取 arXiv + HuggingFace Daily Papers + Semantic Scholar 三源候选，生成中文论文雷达日报（Top picks + 分类命中 + 延伸阅读 + 新作者发现），以 Markdown + JSON 双文件落盘到 ~/.oh-my-agent/reports/paper-digest/。与 market-briefing AI daily 正交：本 skill 锚在论文 PDF / 方法 / 结果层，AI daily 锚在 frontier lab 产品发布与宏观事件层。
 metadata:
   timeout_seconds: 1500
+  max_turns: 60
 ---
 
 # Paper Digest
@@ -29,58 +30,84 @@ metadata:
 
 ## Required workflow
 
-**8 步，全部串行**：
+**5 步，目标 ≤ 15 个 agent turns**：
 
-1. **三源抓取候选**
-   ```bash
-   ./.venv/bin/python skills/paper-digest/scripts/paper_fetch.py --source all --output json > /tmp/paper_candidates.json
-   ```
-   - 默认窗口 48h，watchlist 见 `references/paper_watchlist.yaml`
-   - 任一源失败不 abort，会在 stderr 打 WARN，CLI 始终 exit 0
-   - 输出字段见 `references/report_schema.md`
+### 步骤 1：一次 shell 串联准备工作
 
-2. **加载最近上下文**（避免重复推荐）
-   ```bash
-   ./.venv/bin/python skills/paper-digest/scripts/report_store.py context --days 7
-   ```
-   返回最近 7 份日报的 summary / top_picks 精简视图。
+用**单个 Bash 调用**跑完抓取 + 两份 context + scaffold（节省 turns）：
 
-3. **加载 seen-pool**（过去 14 天已出现过的论文）
-   ```bash
-   ./.venv/bin/python skills/paper-digest/scripts/paper_seen_pool.py context
-   ```
-   候选 JSON 里已标注 `seen_before`；此步是额外 context，供 agent 判断「老论文是否应该进延伸阅读而不是 Top picks」。
+```bash
+DATE=$(date +%F) && \
+./.venv/bin/python skills/paper-digest/scripts/paper_fetch.py --source all --output json > /tmp/paper_candidates.json 2>/tmp/paper_fetch.err && \
+./.venv/bin/python skills/paper-digest/scripts/report_store.py context --days 7 > /tmp/paper_context.json && \
+./.venv/bin/python skills/paper-digest/scripts/paper_seen_pool.py context > /tmp/paper_seen.json && \
+./.venv/bin/python skills/paper-digest/scripts/report_store.py scaffold --report-date "$DATE" --markdown-file /tmp/paper-digest.md --json-file /tmp/paper-digest.json && \
+echo "prep done; date=$DATE; candidates_bytes=$(wc -c < /tmp/paper_candidates.json)"
+```
 
-4. **生成 scaffold**
-   ```bash
-   ./.venv/bin/python skills/paper-digest/scripts/report_store.py scaffold \
-     --report-date 2026-04-16 \
-     --markdown-file /tmp/paper-digest.md \
-     --json-file /tmp/paper-digest.json
-   ```
-   scaffold 会生成标准分段的空 Markdown + 全字段占位 JSON。
+任一源失败，`paper_fetch.py` 仍 exit 0，但会在 stderr 打 WARN——看 `/tmp/paper_fetch.err` 判断是否需要在 `coverage_gaps` 写 `arxiv_unavailable` / `hf_daily_unavailable` / `s2_unavailable`。
 
-5. **外部研究 + 整理**
-   对 Top picks 候选做二次验证：
-   - 打开 arXiv abs 页确认 abstract 与候选 JSON 一致
-   - 若 S2 返回了 `similar_papers`，挑 1-2 篇做延伸阅读扩散
-   - 对每条 Top picks 写一句中文速读（≤ 30 字，不翻译标题）
+### 步骤 2：Read 三份 JSON
 
-6. **填写 Markdown + JSON**
-   按 `references/report_schema.md` 的字段契约写。两份文件内容必须一致：JSON 是结构化真相，Markdown 是人类可读视图。
+- Read `/tmp/paper_candidates.json` — 顶层是**数组**（按 `ranking_score` 降序），每个元素是**真相来源**，包含 `title / authors / affiliations / abstract / arxiv_url / hf_url / s2_url / categories / venue / hf_upvotes / s2_tldr / ranking_score / ranking_reasons / seen_before`
+- Read `/tmp/paper_context.json` — 最近 7 天报告精简视图，判断是否需要排除已推荐过的
+- Read `/tmp/paper_seen.json` — seen-pool 视图，候选里 `seen_before=true` 的降级到延伸阅读
 
-7. **落盘 + 自动 record seen-pool**
-   ```bash
-   ./.venv/bin/python skills/paper-digest/scripts/report_store.py persist \
-     --report-date 2026-04-16 \
-     --markdown-file /tmp/paper-digest.md \
-     --json-file /tmp/paper-digest.json
-   ```
-   persist 会：
-   - 原子落到 `~/.oh-my-agent/reports/paper-digest/daily/2026-04-16.md|json`
-   - 动态 import `paper_seen_pool.py record` 把本期论文写入 seen-pool state（**无需单独调用**）
+若候选数组为空（三源全挂或 watchlist 不命中），跳到步骤 3 直接写一份空报告：`summary` 解释原因，`top_picks: []`，`coverage_gaps` 写具体原因，照常 persist。
 
-8. **回帖保存路径** + 直接返回报告正文（Discord 回复要把 Markdown 正文贴出来，别让用户自己去文件里找）。
+### 步骤 3：直接写 Markdown + JSON（**禁止 per-paper WebFetch**）
+
+**硬性约束**：
+- **不要** WebFetch、curl、或 `Bash` 去访问 arxiv / hf / semanticscholar 页面。候选 JSON 里的 `abstract` 和 `s2_tldr` 已经足以写 `tldr_cn`。
+- **不要** 去搜作者主页 / 代码仓补 `evidence_urls`——用候选 JSON 里的 `arxiv_url` / `hf_url` / `s2_url` 即可。
+- **不要** 再次跑 `paper_fetch.py`——候选 JSON 已是本次 ground truth。
+- **不要**对 Top picks 按其他维度重排——`ranking_score` 已排好，直接取前 `top_picks_max` 条。
+
+允许的补充 Bash 只有：快速计算（`wc -l`、`jq` 过滤）、`ls`、读本地文件。
+
+每条 Top picks 写法：
+- `tldr_cn`：一句中文（≤ 30 字），从 `s2_tldr`（若非空）或 `abstract` 第一句浓缩翻译。
+- `reason`：一句中文说明为何入选，引用 `ranking_reasons`（如 `"hf_trending_rank:2 + watchlist_keyword:moe"`）。
+- `evidence_links`：直接用 `arxiv_url`。若 `hf_url` / `s2_url` 非空且提供增量信息，追加；否则留空数组。
+- `tldr_en` 从 `s2_tldr` 拷贝（若有），没有就留空字符串——**不许自行翻译/创作**。
+
+延伸阅读：
+- 候选 JSON 里**可能没**预取 `similar_papers` 字段——**不要**为此单独跑 Bash 查 S2。
+- 若当天某 Top pick 的 S2 条目有 `similar_papers`，挑 1-2 篇放进 `extended_reading`。
+- 若完全没有，写 `coverage_gaps: ["s2_similar_unavailable"]`，`extended_reading: []`，段落正文写 `本段今日无高置信度增量信号（S2 相似论文未返回）`。
+
+新作者发现（`new_authors`）：
+- 只扫候选 JSON 里的 `authors` 字段。命中规则见 `references/discovery_rules.md`。
+- 无候选时写 `new_authors: []` 并在正文写 `本日发现扫描未发现达标候选人`。
+- **不**为了凑数去外部搜索。
+
+Write 两份文件：`/tmp/paper-digest.md` 和 `/tmp/paper-digest.json`。JSON 字段见 `references/report_schema.md`。两份必须内容一致。
+
+### 步骤 4：落盘 + 自动 record seen-pool
+
+```bash
+./.venv/bin/python skills/paper-digest/scripts/report_store.py persist \
+  --report-date "$DATE" \
+  --markdown-file /tmp/paper-digest.md \
+  --json-file /tmp/paper-digest.json
+```
+
+persist 会：
+- 原子落到 `~/.oh-my-agent/reports/paper-digest/daily/<DATE>.md|json`
+- 动态 import `paper_seen_pool.py record`（**无需单独调用**）
+
+### 步骤 5：直接贴 Markdown 正文到 Discord，末尾附一行 `Saved: <path>`
+
+不要让用户自己去文件里找内容。
+
+### Turn budget 目标
+
+- 步骤 1：1 turn（一个 Bash）
+- 步骤 2：3 turn（三次 Read）
+- 步骤 3：2 turn（两次 Write）
+- 步骤 4：1 turn（一个 Bash）
+- 步骤 5：1 turn（final text）
+- **合计 ~8 turns**，`max_turns: 60` 给足安全余量。如果超过 20 turn 说明违反了「步骤 3 硬性约束」——立刻停止额外 fetch，用手头数据完成报告。
 
 ## Storage layout
 
