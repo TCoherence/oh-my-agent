@@ -1,0 +1,126 @@
+version: 1
+
+# arXiv 分类，paper_fetch.py 会用 OR 拼接到 arXiv API 的 search_query
+arxiv_categories:
+  - cs.AI
+  - cs.LG
+  - cs.CL
+  - cs.CV
+  - stat.ML
+  - cs.RO
+  - cs.DC
+  - cs.OS
+
+# 关键词匹配 title + abstract（大小写不敏感，substring match）
+keywords:
+  must_hit_any:
+    - reasoning
+    - agent
+    - long context
+    - mixture of experts
+    - moe
+    - quantization
+    - inference
+    - speculative decoding
+    - kv cache
+    - robot policy
+    - vla
+    - world model
+    - scheduler
+    - distributed training
+    - batch inference
+    - flash attention
+    - rlhf
+    - dpo
+    - preference optimization
+    - test-time compute
+    - diffusion policy
+  nice_to_have:
+    - benchmark
+    - scaling law
+    - sft
+    - fine-tuning
+    - evaluation
+    - embodied
+  exclude_regex:
+    - "^Survey on "
+    - "^A Survey of "
+    - "^A Review of "
+
+# 作者精确匹配（full name，大小写不敏感）— 命中 tracked_author_hit
+tracked_authors:
+  - Jason Wei
+  - Yann LeCun
+  - Ilya Sutskever
+  - Noam Shazeer
+  - Tri Dao
+  - Percy Liang
+  - Sergey Levine
+  - Chelsea Finn
+  - Pieter Abbeel
+  - Jitendra Malik
+  - Jeff Dean
+  - Oriol Vinyals
+  - Quoc V. Le
+  - Andrej Karpathy
+  - Yoshua Bengio
+
+# 机构子串匹配（case-insensitive contains）— 命中 tracked_affiliation_hit
+tracked_affiliations:
+  - Anthropic
+  - OpenAI
+  - Google DeepMind
+  - Google Research
+  - Meta FAIR
+  - Meta AI
+  - Microsoft Research
+  - Stanford
+  - MIT
+  - UC Berkeley
+  - Carnegie Mellon
+  - CMU
+  - Tsinghua
+  - Peking University
+  - Shanghai AI Lab
+  - DeepSeek
+  - Qwen
+  - xAI
+  - Mistral
+  - Hugging Face
+  - NVIDIA
+
+# Semantic Scholar 返回的 venue 字段匹配（substring，case-insensitive）— 命中 venue_hit
+venues_must_read:
+  - NeurIPS
+  - ICML
+  - ICLR
+  - ACL
+  - EMNLP
+  - NAACL
+  - CVPR
+  - ECCV
+  - ICCV
+  - ICRA
+  - RSS
+  - CoRL
+  - OSDI
+  - SOSP
+  - NSDI
+  - MLSys
+
+# 排序权重（线性叠加后得 ranking_score）
+ranking_weights:
+  hf_trending: 3.0
+  watchlist_keyword_hit: 2.0
+  tracked_author_hit: 2.5
+  tracked_affiliation_hit: 1.5
+  venue_hit: 1.5
+  citation_velocity: 1.0
+
+# 上限与窗口
+limits:
+  top_picks_max: 8
+  per_category_max: 4
+  similar_papers_max: 5
+  freshness_window_hours: 48
+  seen_pool_days: 14

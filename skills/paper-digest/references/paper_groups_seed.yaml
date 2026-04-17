@@ -1,0 +1,87 @@
+version: 1
+
+# 被追踪的研究组 / 机构种子。
+# paper_fetch.py 不直接消费此文件（机构命中用 tracked_affiliations 字符串列表），
+# 这里结构化保存是为了后续 paper_seen_pool.py sync-seed 可以把 runtime 发现的新机构
+# 落回种子文件，以及给 report 生成时做分组展示。
+
+groups:
+  frontier-labs:
+    label: "Frontier labs (closed-weights)"
+    description: "闭源前沿实验室，产出偏 scaling / safety / product-tied 研究"
+    labs:
+      - lab_id: anthropic
+        name: Anthropic
+        s2_affiliation_match: ["Anthropic"]
+        aliases: ["anthropic.com"]
+      - lab_id: openai
+        name: OpenAI
+        s2_affiliation_match: ["OpenAI"]
+        aliases: ["openai.com"]
+      - lab_id: google-deepmind
+        name: Google DeepMind
+        s2_affiliation_match: ["Google DeepMind", "DeepMind"]
+        aliases: ["deepmind.com"]
+      - lab_id: xai
+        name: xAI
+        s2_affiliation_match: ["xAI", "x.AI"]
+        aliases: []
+
+  oss-ai-labs:
+    label: "Open-weights / OSS AI labs"
+    description: "开权重模型 / 开源主导的团队"
+    labs:
+      - lab_id: deepseek
+        name: DeepSeek AI
+        s2_affiliation_match: ["DeepSeek"]
+        aliases: []
+      - lab_id: qwen
+        name: Qwen (Alibaba)
+        s2_affiliation_match: ["Qwen", "Alibaba"]
+        aliases: []
+      - lab_id: meta-fair
+        name: Meta FAIR
+        s2_affiliation_match: ["Meta FAIR", "Meta AI", "Facebook AI Research"]
+        aliases: []
+      - lab_id: mistral
+        name: Mistral AI
+        s2_affiliation_match: ["Mistral"]
+        aliases: []
+
+  robotics-labs:
+    label: "Robotics / embodied AI"
+    description: "机器人策略、VLA、具身智能方向"
+    labs:
+      - lab_id: physical-intelligence
+        name: Physical Intelligence
+        s2_affiliation_match: ["Physical Intelligence"]
+        aliases: []
+      - lab_id: berkeley-robotics
+        name: UC Berkeley Robotics
+        s2_affiliation_match: ["UC Berkeley", "Berkeley AI Research"]
+        aliases: []
+      - lab_id: google-robotics
+        name: Google Robotics / RT
+        s2_affiliation_match: ["Google Robotics"]
+        aliases: []
+
+  systems-labs:
+    label: "Systems / ML infra"
+    description: "训练 / 推理 / 分布式 / 编译器 / 调度方向"
+    labs:
+      - lab_id: stanford-cs
+        name: Stanford CS
+        s2_affiliation_match: ["Stanford University"]
+        aliases: []
+      - lab_id: cmu-catalyst
+        name: CMU Catalyst / PDL
+        s2_affiliation_match: ["Carnegie Mellon"]
+        aliases: []
+      - lab_id: mit-csail
+        name: MIT CSAIL
+        s2_affiliation_match: ["MIT CSAIL", "Massachusetts Institute of Technology"]
+        aliases: []
+      - lab_id: nvidia-research
+        name: NVIDIA Research
+        s2_affiliation_match: ["NVIDIA"]
+        aliases: []
