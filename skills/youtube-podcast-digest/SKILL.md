@@ -34,7 +34,14 @@ metadata:
 
 ## Required workflow
 
-1. **确认报告周**：默认用当前本地日历周（由 `OMA_REPORT_TIMEZONE` / `TZ` 或系统时区推导），格式 `YYYY-Www`（例 `2026-W16`）。若用户指定，用用户给的 ISO 周。
+1. **确认报告窗口与 label**：
+   - 默认：当前本地日历周（由 `OMA_REPORT_TIMEZONE` / `TZ` 或系统时区推导），label `YYYY-Www`（例 `2026-W16`），窗口 **7 天**。
+   - 用户显式指定 ISO 周 → 用用户给的 `YYYY-Www`，窗口仍 7 天。
+   - 用户要求补看更长窗口（例如"看过去 30 天"、"catch up last month"、"补一下上个月没看的"）→ 进入 **catch-up 模式**：
+     - label 改为 `catchup-<N>d-<end-date>`，例如 30 天补看报告当日是 2026-04-16 → `catchup-30d-2026-04-16`
+     - step 3 的 `--since-days` 改成用户指定的 N
+     - step 5 的 Markdown 标题用 `# YouTube Podcast 补看 · <start-date> → <end-date> (<N> 天)` 代替"周报"版式；JSON 的 `iso_week` 字段存上面的 `catchup-<N>d-<end-date>` label
+     - 其他步骤（逐集 TL;DR、persist、_episodes/ 结构）完全保持不变
 
 2. **加载历史上下文**（可选但推荐）：
    ```bash
@@ -42,11 +49,11 @@ metadata:
    ```
    读取最近 4 周已存报告的 JSON，作为"跨集主题观察"的参考底。
 
-3. **抓本周新集**：
+3. **抓新集**：
    ```bash
-   ./.venv/bin/python skills/youtube-podcast-digest/scripts/channel_fetch.py --since-days 7
+   ./.venv/bin/python skills/youtube-podcast-digest/scripts/channel_fetch.py --since-days <N>
    ```
-   返回 JSON 数组，每条含 `name / group / video_title / video_url / video_id / published_at / description_snippet` 等字段。若返回空数组，直接写"本周订阅频道暂无新集"并跳到 step 6。
+   `N` 按 step 1 决策（默认周报 `7`；catch-up 模式用用户指定的天数）。返回 JSON 数组，每条含 `name / group / video_title / video_url / video_id / published_at / description_snippet` 等字段。若返回空数组，直接写"该窗口订阅频道暂无新集"并跳到 step 6。
 
 4. **逐集生成 TL;DR**（对 step 3 的每条新集独立执行，**不批处理**）：
    - 抓字幕：

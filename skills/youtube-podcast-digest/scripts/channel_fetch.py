@@ -156,9 +156,12 @@ async def _fetch_feed(
         return []
     entries: list[dict[str, Any]] = []
     for entry in root.findall("atom:entry", ATOM_NS):
+        link_el = entry.find("atom:link", ATOM_NS)
+        href = link_el.get("href") if link_el is not None else ""
+        if "/shorts/" in href:
+            continue
         video_id_el = entry.find("yt:videoId", ATOM_NS)
         title_el = entry.find("atom:title", ATOM_NS)
-        link_el = entry.find("atom:link", ATOM_NS)
         published_el = entry.find("atom:published", ATOM_NS)
         media_group = entry.find("media:group", ATOM_NS)
         description = ""
