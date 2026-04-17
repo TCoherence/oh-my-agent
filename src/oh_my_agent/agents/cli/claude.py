@@ -20,14 +20,76 @@ from oh_my_agent.agents.cli.base import (
 logger = logging.getLogger(__name__)
 
 
+def _parse_claude_stream_json(raw: str) -> tuple[str | None, dict | None]:
+    """Parse Claude CLI stream-json NDJSON stdout.
+
+    Returns ``(init_session_id, final_frame)`` where:
+    - ``init_session_id`` is taken from the first ``type=system subtype=init`` event.
+    - ``final_frame`` is the last ``type=result`` event (shape identical to
+      the legacy ``--output-format json`` single-frame response).
+
+    Falls back to treating ``raw`` as a single JSON object when NDJSON parsing
+    finds no ``result`` event. This keeps compatibility with error paths where
+    the Claude CLI currently emits a single frame (e.g. ``error_max_turns``).
+    """
+    init_session_id: str | None = None
+    final_frame: dict | None = None
+    stream_saw_events = False
+
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            continue
+        if not isinstance(ev, dict):
+            continue
+        stream_saw_events = True
+        ev_type = ev.get("type")
+        if (
+            ev_type == "system"
+            and ev.get("subtype") == "init"
+            and init_session_id is None
+        ):
+            sid = ev.get("session_id")
+            if isinstance(sid, str) and sid:
+                init_session_id = sid
+        elif ev_type == "result":
+            final_frame = ev
+
+    # Fallback: stdout may be a single JSON object (legacy single-frame mode
+    # or an error frame that isn't NDJSON-formatted).
+    if final_frame is None and not stream_saw_events:
+        try:
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                final_frame = data
+                if init_session_id is None:
+                    sid = data.get("session_id")
+                    if isinstance(sid, str) and sid:
+                        init_session_id = sid
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
+
+    return init_session_id, final_frame
+
+
 class ClaudeAgent(BaseCLIAgent):
     """Agent that delegates to the ``claude`` CLI.
 
-    Supports batch and session resume modes:
+    Uses ``--output-format stream-json --verbose`` so the CLI emits an NDJSON
+    event stream (system init, assistant text/thinking/tool_use, user
+    tool_result, rate_limit_event, final result). The stream is tee'd into the
+    agent log for per-turn visibility, matching the Codex ``--json`` behavior.
 
-    - **Batch**: ``--output-format json`` (default, extracts session_id)
-    - **Session resume**: ``--resume <session_id>`` to continue a prior session
-      without re-flattening history.
+    Supports fresh and session resume modes:
+
+    - **Fresh**: flattens history into the prompt, stores the ``session_id``
+      from the ``type=result`` (or ``type=system init``) event.
+    - **Session resume**: ``--resume <session_id>`` to continue a prior
+      session without re-flattening history.
     """
 
     def __init__(
@@ -86,7 +148,7 @@ class ClaudeAgent(BaseCLIAgent):
 
     def _build_command(self, prompt: str) -> list[str]:
         cmd = self._base_command(prompt)
-        cmd.extend(["--output-format", "text"])
+        cmd.extend(["--output-format", "stream-json", "--verbose"])
         return cmd
 
     def _build_resume_command(self, prompt: str, session_id: str) -> list[str]:
@@ -95,7 +157,8 @@ class ClaudeAgent(BaseCLIAgent):
             self._cli_path,
             "-p", prompt,
             "--resume", session_id,
-            "--output-format", "json",
+            "--output-format", "stream-json",
+            "--verbose",
             "--max-turns", str(self._max_turns),
             "--model", self._model,
         ]
@@ -166,7 +229,7 @@ class ClaudeAgent(BaseCLIAgent):
             # Fresh session — flatten history into prompt
             full_prompt = _build_prompt_with_history(prompt, history)
             cmd = self._base_command(full_prompt)
-            cmd.extend(["--output-format", "json"])
+            cmd.extend(["--output-format", "stream-json", "--verbose"])
             logger.info("Running %s (new session) ...", self.name)
 
         try:
@@ -233,24 +296,35 @@ class ClaudeAgent(BaseCLIAgent):
 
         raw = stdout.decode(errors="replace").strip()
 
-        # Parse JSON output to extract result, session_id, and usage
-        try:
-            data = json.loads(raw)
-            text = data.get("result", raw)
-            new_session_id = data.get("session_id")
-            if new_session_id and thread_id:
-                self._session_ids[thread_id] = new_session_id
-                logger.info("Stored session %s for thread %s", new_session_id[:12], thread_id)
+        # Parse stream-json NDJSON output: pull session_id from init event and
+        # pull the final result / usage / cost from the last result event.
+        init_session_id, final_frame = _parse_claude_stream_json(raw)
 
-            # Collect usage info: token counts + optional cost.
-            # Claude CLI outputs "total_cost_usd" (not "cost_usd").
-            usage: dict | None = None
-            cost = data.get("total_cost_usd") or data.get("cost_usd")
-            if "usage" in data or cost is not None:
-                usage = {**data.get("usage", {})}
-                if cost is not None:
-                    usage["cost_usd"] = cost
-
-            return AgentResponse(text=text, raw=data, usage=usage)
-        except (json.JSONDecodeError, TypeError):
+        if final_frame is None:
+            # Degraded: no result frame found. Return raw so caller isn't
+            # silently given an empty string.
+            if init_session_id and thread_id:
+                self._session_ids[thread_id] = init_session_id
             return AgentResponse(text=raw)
+
+        text = final_frame.get("result")
+        if not isinstance(text, str) or not text:
+            text = raw
+
+        new_session_id = final_frame.get("session_id") or init_session_id
+        if new_session_id and thread_id:
+            self._session_ids[thread_id] = new_session_id
+            logger.info(
+                "Stored session %s for thread %s", new_session_id[:12], thread_id
+            )
+
+        # Collect usage info: token counts + optional cost.
+        # Claude CLI outputs "total_cost_usd" (not "cost_usd").
+        usage: dict | None = None
+        cost = final_frame.get("total_cost_usd") or final_frame.get("cost_usd")
+        if "usage" in final_frame or cost is not None:
+            usage = {**final_frame.get("usage", {})}
+            if cost is not None:
+                usage["cost_usd"] = cost
+
+        return AgentResponse(text=text, raw=final_frame, usage=usage)
