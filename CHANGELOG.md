@@ -6,6 +6,14 @@ The format is intentionally lightweight and release-oriented rather than exhaust
 
 ## Unreleased
 
+### Added
+
+- **v0.9 Contract-Freeze Phase A — restart/recovery + upgrade path tests** (toward v1.0 acceptance criteria #3 / #7 / #9 / #10)
+  - `tests/test_restart_recovery.py` (11 tests): in-process close/reopen round-trips for chat thread history, CLI session resume bridge, runtime tasks (DRAFT / RUNNING / WAITING_USER_INPUT) with `event_log`, HITL prompts (DB + Discord `_rehydrate_hitl_prompt_views` view rehydration), auth-wait (runtime task path + direct-chat `suspended_agent_run` path), automation `last_run_at` / `next_run_at`, and `schema_version` idempotence.
+  - `tests/test_upgrade_paths.py` (12 tests): end-to-end `scripts/migrate_memory_to_judge.py` exercise (dry-run + real run + backup dir assertions); `memory.adaptive` → `memory.judge` alias lock-in (compat fallback preserved, not a regression); deprecation warnings for `memory.adaptive` config and for legacy `curated.yaml` / `daily/` layouts; builder-mode runtime.db schema-migration test (no binary fixture — `aiosqlite` constructs a v0.7-era `runtime_tasks` missing the modern columns + `task_type='code'` enum, then asserts `_ensure_column` backfill + enum normalisation to `'repo_change'`); `schema_version` lands at `CURRENT_SCHEMA_VERSION` after `init()` even on legacy DBs lacking the `schema_version` table.
+  - `_warn_if_legacy_memory_config()` and `_warn_if_legacy_memory_layout()` helpers in `main.py` emit deprecation warnings at startup (visible in `service.log`) so `/doctor` and operators notice stale v0.8 state without breaking the boot.
+  - Total tests: 504 → 527.
+
 ## v0.9.0 - 2026-04-17
 
 ### Changed (BREAKING)

@@ -377,6 +377,46 @@ async def _shutdown(
     logger.info("Shutdown complete reason=%s", reason)
 
 
+def _warn_if_legacy_memory_config(memory_cfg: dict, logger: logging.Logger) -> bool:
+    """Emit a deprecation warning when ``memory.adaptive`` is used as fallback.
+
+    The runtime still honours ``memory.adaptive`` as an alias for ``memory.judge``
+    (see the call site below) so v0.8 configs keep working, but operators should
+    rename the key. Returns ``True`` when the warning fired so ``/doctor`` can
+    surface the same signal in its report.
+    """
+    if "judge" in memory_cfg:
+        return False
+    if not isinstance(memory_cfg.get("adaptive"), dict):
+        return False
+    logger.warning(
+        "memory.adaptive is deprecated; rename to memory.judge in config.yaml "
+        "(falling back for now)."
+    )
+    return True
+
+
+def _warn_if_legacy_memory_layout(memory_dir: Path, logger: logging.Logger) -> bool:
+    """Emit a warning when the v0.8 daily/curated tier layout is detected.
+
+    The migration is one-shot and not run automatically (data shape changed);
+    operators must invoke ``scripts/migrate_memory_to_judge.py`` manually.
+    Returns ``True`` when the warning fired.
+    """
+    legacy_curated = memory_dir / "curated.yaml"
+    legacy_daily = memory_dir / "daily"
+    if not legacy_curated.exists() and not legacy_daily.is_dir():
+        return False
+    logger.warning(
+        "Legacy memory layout detected at %s; "
+        "run `python scripts/migrate_memory_to_judge.py %s` to migrate to "
+        "the single-tier JudgeStore (memories.yaml).",
+        memory_dir,
+        memory_dir,
+    )
+    return True
+
+
 async def _async_main(config: dict, logger: logging.Logger, *, project_root: Path) -> None:
     """Async entry point — builds agents, memory, and starts gateway."""
 
@@ -454,6 +494,7 @@ async def _async_main(config: dict, logger: logging.Logger, *, project_root: Pat
     judge_store = None
     memory_judge = None
     idle_tracker = None
+    _warn_if_legacy_memory_config(memory_cfg, logger)
     memory_cfg_block = memory_cfg.get("judge", memory_cfg.get("adaptive", {}))
     memory_inject_limit = int(memory_cfg_block.get("inject_limit", 12))
     memory_keyword_patterns = memory_cfg_block.get("keyword_patterns") or None
@@ -465,6 +506,7 @@ async def _async_main(config: dict, logger: logging.Logger, *, project_root: Pat
         memory_dir = str(
             Path(memory_cfg_block.get("memory_dir", "~/.oh-my-agent/memory")).expanduser().resolve()
         )
+        _warn_if_legacy_memory_layout(Path(memory_dir), logger)
         judge_store = JudgeStore(
             memory_dir=memory_dir,
             synthesize_after_seconds=int(memory_cfg_block.get("synthesize_after_seconds", 6 * 3600)),
