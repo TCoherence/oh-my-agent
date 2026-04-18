@@ -240,6 +240,7 @@
 - [ ] 在 `.agents/skills/` 迁移稳定后，再评估是否还需要保留生成的 workspace `AGENTS.md`
 - [ ] 重新梳理 agent turn-budget 语义：决定是否继续暴露 `max_turns`，明确它与 `timeout`、runtime `max_steps` 的职责边界，并清理或说明当前不同 provider 上并不一致的实际生效情况
 - [ ] Automation 并发策略与可观测性：明确 runtime worker-pool 与队列语义，暴露 queued/running job 与 worker occupancy，并评估是否需要 per-automation 并发控制或优先级
+- [ ] Scheduler liveness watchdog：discord gateway 剧烈抖动（密集 `session invalidated` + `websocket behind`）后，scheduler cron loop 可能静默 stall —— 进程、discord.py、short-workspace janitor 都活着，只有 scheduler tick 停转，直到手动 SIGINT 重启才恢复。观察到的真实案例：2026-04-18 08:30 PDT paper-digest-daily-0830 错过触发，10 小时内零 scheduler 事件。需要给 scheduler 加存活指标（最近 tick 的 mtime 或心跳计数），manager 层周期性检查，stale 时重启内部 loop；不要做 catch-up/backfill（漏跑由 `/automation_run` 补）
 - [ ] CLI agent credential recovery：统一识别 `claude` / `codex` / `gemini` 的认证失效（401、invalid credentials、login required），避免无意义 fallback；补 owner-facing 提示、可恢复状态，以及按 provider 区分的自动/半自动重新登录链路
 - [x] Codex / Gemini CLI session resume
 - [ ] 增加内部 CLI agent 生命周期 hook（`pre-run`、`post-run`、`failure`、`resume`），用于 system-owned 的后处理能力，例如 reverse sync、artifact 后处理和可观测性收尾；这应保持为内部机制，而不是用户可见的新功能面
