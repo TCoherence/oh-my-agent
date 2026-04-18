@@ -105,6 +105,30 @@ class _RuntimeStub:
         self.tasks[task_id] = _task(id=task_id, status="STOPPED")
         return f"Task `{task_id}` stopped."
 
+    async def replace_draft_task(self, task_id: str, *, actor_id: str):
+        task = self.tasks.get(task_id)
+        if task is None:
+            return (f"Task `{task_id}` not found.", None)
+        if task.status != "DRAFT":
+            return (f"Task `{task.id}` is not a DRAFT (status: {task.status}).", None)
+        name = task.automation_name
+        if not name:
+            return (f"Task `{task.id}` has no automation_name; cannot refire.", None)
+        self.tasks[task_id] = _task(
+            id=task_id,
+            status="DISCARDED",
+            automation_name=name,
+            summary="Replaced by user (refired automation).",
+        )
+        return (
+            f"Task `{task_id}` discarded; refiring automation `{name}`.",
+            name,
+        )
+
+    async def consume_decision_nonce(self, *, task_id, nonce, action, actor_id, source):
+        del task_id, action, actor_id, source
+        return nonce == "valid-nonce"
+
 
 @pytest.mark.asyncio
 async def test_create_task_returns_action_result():
@@ -200,6 +224,118 @@ async def test_get_changes_and_logs_passthrough():
 
     assert "README.md" in changes.message
     assert "Task Logs" in logs.message
+
+
+@pytest.mark.asyncio
+async def test_decide_replace_discards_draft_and_refires_automation():
+    runtime = _RuntimeStub()
+    runtime.tasks["task-1"] = _task(id="task-1", status="DRAFT", automation_name="daily-news")
+    fired: list[str] = []
+
+    async def _fire(name: str) -> bool:
+        fired.append(name)
+        return True
+
+    service = TaskService(runtime, fire_automation=_fire)
+
+    result = await service.decide(
+        platform="discord",
+        channel_id="100",
+        thread_id="200",
+        task_id="task-1",
+        action="replace",
+        actor_id="owner-1",
+    )
+
+    assert result.success is True
+    assert fired == ["daily-news"]
+    assert "refired" in result.message
+    assert runtime.tasks["task-1"].status == "DISCARDED"
+
+
+@pytest.mark.asyncio
+async def test_decide_replace_without_fire_callback_returns_error():
+    runtime = _RuntimeStub()
+    runtime.tasks["task-1"] = _task(id="task-1", status="DRAFT", automation_name="daily-news")
+    service = TaskService(runtime)  # no fire_automation
+
+    result = await service.decide(
+        platform="discord",
+        channel_id="100",
+        thread_id="200",
+        task_id="task-1",
+        action="replace",
+        actor_id="owner-1",
+    )
+
+    assert result.success is False
+    assert "automation scheduler is not enabled" in result.message
+
+
+@pytest.mark.asyncio
+async def test_decide_replace_fails_when_task_not_draft():
+    runtime = _RuntimeStub()
+    runtime.tasks["task-1"] = _task(id="task-1", status="RUNNING", automation_name="daily-news")
+    fired: list[str] = []
+
+    async def _fire(name: str) -> bool:
+        fired.append(name)
+        return True
+
+    service = TaskService(runtime, fire_automation=_fire)
+
+    result = await service.decide(
+        platform="discord",
+        channel_id="100",
+        thread_id="200",
+        task_id="task-1",
+        action="replace",
+        actor_id="owner-1",
+    )
+
+    assert result.success is False
+    assert "not a DRAFT" in result.message
+    assert fired == []
+
+
+@pytest.mark.asyncio
+async def test_decide_replace_button_requires_valid_nonce():
+    runtime = _RuntimeStub()
+    runtime.tasks["task-1"] = _task(id="task-1", status="DRAFT", automation_name="daily-news")
+    fired: list[str] = []
+
+    async def _fire(name: str) -> bool:
+        fired.append(name)
+        return True
+
+    service = TaskService(runtime, fire_automation=_fire)
+
+    rejected = await service.decide(
+        platform="discord",
+        channel_id="100",
+        thread_id="200",
+        task_id="task-1",
+        action="replace",
+        actor_id="owner-1",
+        source="button",
+        nonce="expired",
+    )
+    assert rejected.success is False
+    assert "invalid or expired" in rejected.message
+    assert fired == []
+
+    accepted = await service.decide(
+        platform="discord",
+        channel_id="100",
+        thread_id="200",
+        task_id="task-1",
+        action="replace",
+        actor_id="owner-1",
+        source="button",
+        nonce="valid-nonce",
+    )
+    assert accepted.success is True
+    assert fired == ["daily-news"]
 
 
 @pytest.mark.asyncio

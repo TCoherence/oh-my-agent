@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Awaitable, Callable
 
 from oh_my_agent.gateway.services.types import ServiceResult, TaskActionResult, TaskListResult, TaskSummary
 from oh_my_agent.runtime.types import RuntimeTask, TaskDecisionEvent
@@ -11,6 +11,9 @@ if TYPE_CHECKING:
     from oh_my_agent.gateway.session import ChannelSession
     from oh_my_agent.memory.store import MemoryStore
     from oh_my_agent.runtime.service import RuntimeService
+
+
+FireAutomation = Callable[[str], Awaitable[bool]]
 
 
 _ERROR_PREFIXES = (
@@ -23,9 +26,15 @@ _ERROR_PREFIXES = (
 
 
 class TaskService:
-    def __init__(self, runtime_service: RuntimeService | None, memory_store: MemoryStore | None = None):
+    def __init__(
+        self,
+        runtime_service: RuntimeService | None,
+        memory_store: MemoryStore | None = None,
+        fire_automation: FireAutomation | None = None,
+    ):
         self._runtime = runtime_service
         self._store = memory_store
+        self._fire_automation = fire_automation
 
     async def create_task(
         self,
@@ -125,6 +134,13 @@ class TaskService:
     ) -> TaskActionResult:
         if self._runtime is None:
             return TaskActionResult(success=False, message="Runtime service is not enabled.")
+        if action == "replace":
+            return await self._decide_replace(
+                task_id=task_id,
+                actor_id=actor_id,
+                source=source,
+                nonce=nonce,
+            )
         resolved_action = action
         if action == "suggest":
             task = await self._runtime.get_task(task_id)
@@ -165,6 +181,78 @@ class TaskService:
         return TaskActionResult(
             success=not self._looks_like_error(message, task_id),
             message=message,
+            task_id=task_id,
+            task_status=task.status if task else None,
+            task=task,
+        )
+
+    async def _decide_replace(
+        self,
+        *,
+        task_id: str,
+        actor_id: str,
+        source: str,
+        nonce: str | None,
+    ) -> TaskActionResult:
+        if self._runtime is None:
+            return TaskActionResult(success=False, message="Runtime service is not enabled.")
+        if source == "button":
+            if not nonce:
+                return TaskActionResult(
+                    success=False,
+                    message="Decision token is missing.",
+                    task_id=task_id,
+                )
+            consumed = await self._runtime.consume_decision_nonce(
+                task_id=task_id,
+                nonce=nonce,
+                action="replace",
+                actor_id=actor_id,
+                source="button",
+            )
+            if not consumed:
+                return TaskActionResult(
+                    success=False,
+                    message="Decision token is invalid or expired.",
+                    task_id=task_id,
+                )
+        message, automation_name = await self._runtime.replace_draft_task(
+            task_id, actor_id=actor_id
+        )
+        if automation_name is None:
+            task = await self._runtime.get_task(task_id)
+            return TaskActionResult(
+                success=False,
+                message=message,
+                task_id=task_id,
+                task_status=task.status if task else None,
+                task=task,
+            )
+        if self._fire_automation is None:
+            task = await self._runtime.get_task(task_id)
+            return TaskActionResult(
+                success=False,
+                message=f"{message} But automation scheduler is not enabled.",
+                task_id=task_id,
+                task_status=task.status if task else None,
+                task=task,
+            )
+        try:
+            fired = await self._fire_automation(automation_name)
+        except Exception as exc:
+            task = await self._runtime.get_task(task_id)
+            return TaskActionResult(
+                success=False,
+                message=f"{message} Refire failed: {exc}",
+                task_id=task_id,
+                task_status=task.status if task else None,
+                task=task,
+            )
+        task = await self._runtime.get_task(task_id)
+        suffix = "refired" if fired else "refire returned False (no active job?)"
+        return TaskActionResult(
+            success=bool(fired),
+            message=f"{message} ({suffix})",
             task_id=task_id,
             task_status=task.status if task else None,
             task=task,
@@ -221,7 +309,7 @@ class TaskService:
         if suggestion_only:
             return ["approve", "reject"]
         if task.status in {"DRAFT", "BLOCKED"}:
-            return ["approve", "reject", "suggest"]
+            return ["approve", "reject", "suggest", "discard", "replace"]
         if task.status in {"WAITING_MERGE", "APPLIED", "MERGE_FAILED"}:
             return ["merge", "discard", "request_changes"]
         return []

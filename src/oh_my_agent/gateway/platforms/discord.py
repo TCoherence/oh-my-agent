@@ -435,6 +435,7 @@ class DiscordChannel(BaseChannel):
             "merge": ("Merge", "success"),
             "discard": ("Discard", "danger"),
             "request_changes": ("Request Changes", "secondary"),
+            "replace": ("Replace", "secondary"),
         }
         descriptors = [
             ActionDescriptor(
@@ -647,7 +648,12 @@ class DiscordChannel(BaseChannel):
         self._adaptive_memory_store = store
 
     def _refresh_services(self) -> None:
-        self._task_service = TaskService(self._runtime_service, self._memory_store)
+        fire_automation = self._scheduler.fire_job_now if self._scheduler is not None else None
+        self._task_service = TaskService(
+            self._runtime_service,
+            self._memory_store,
+            fire_automation=fire_automation,
+        )
         self._doctor_service = DoctorService(self._runtime_service)
         self._automation_service = AutomationService(self._scheduler, self._memory_store)
 
@@ -1378,6 +1384,11 @@ class DiscordChannel(BaseChannel):
         @app_commands.describe(task_id="Task ID")
         async def slash_task_discard(interaction: discord.Interaction, task_id: str):
             await _slash_decide(interaction, action="discard", task_id=task_id)
+
+        @tree.command(name="task_replace", description="Discard a DRAFT and refire its automation cron")
+        @app_commands.describe(task_id="Task ID")
+        async def slash_task_replace(interaction: discord.Interaction, task_id: str):
+            await _slash_decide(interaction, action="replace", task_id=task_id)
 
         @tree.command(name="task_changes", description="Show file changes for a runtime task")
         @app_commands.describe(task_id="Task ID")

@@ -1051,6 +1051,13 @@ class RuntimeService:
                     task.id,
                     task.status,
                 )
+                if task.status == TASK_STATUS_DRAFT:
+                    await self._remind_blocking_draft(
+                        session=session,
+                        thread_id=thread_id,
+                        task=task,
+                        automation_name=automation_name,
+                    )
                 return None
 
         effective_timeout_seconds = timeout_seconds or self._skill_timeout_seconds_by_name(skill_name)
@@ -2036,6 +2043,58 @@ class RuntimeService:
         await self._notify(task, f"Task `{task.id}` discarded.")
         await self._signal_status_by_id(task, TASK_STATUS_DISCARDED)
         return f"Task `{task.id}` discarded."
+
+    async def consume_decision_nonce(
+        self,
+        *,
+        task_id: str,
+        nonce: str,
+        action: str,
+        actor_id: str,
+        source: str,
+    ) -> bool:
+        """Validate + mark a decision nonce consumed. Public wrapper for the store call."""
+        return await self._store.consume_runtime_decision_nonce(
+            task_id=task_id,
+            nonce=nonce,
+            action=action,
+            actor_id=actor_id,
+            source=source,
+            result="accepted",
+        )
+
+    async def replace_draft_task(self, task_id: str, *, actor_id: str) -> tuple[str, str | None]:
+        """Discard a blocking DRAFT scheduler task so a fresh cron tick can run.
+
+        Returns ``(message, automation_name)``; ``automation_name`` is ``None``
+        when the task wasn't in a replaceable state, so the caller knows not
+        to re-fire.
+        """
+        if not self._is_authorized(actor_id):
+            return "Only configured owners can replace tasks.", None
+        task = await self._store.get_runtime_task(task_id)
+        if task is None:
+            return f"Task `{task_id}` not found.", None
+        if task.status != TASK_STATUS_DRAFT:
+            return f"Task `{task.id}` is not a DRAFT (status: {task.status}).", None
+        if not task.automation_name:
+            return f"Task `{task.id}` has no automation_name; cannot refire.", None
+        await self._store.update_runtime_task(
+            task.id,
+            status=TASK_STATUS_DISCARDED,
+            summary="Replaced by user (refired automation).",
+            ended_at_now=True,
+        )
+        await self._store.add_runtime_event(
+            task.id,
+            "task.replaced",
+            {"actor_id": actor_id, "automation_name": task.automation_name},
+        )
+        await self._signal_status_by_id(task, TASK_STATUS_DISCARDED)
+        return (
+            f"Task `{task.id}` discarded; refiring automation `{task.automation_name}`.",
+            task.automation_name,
+        )
 
     async def get_task_changes(self, task_id: str) -> str:
         task = await self._store.get_runtime_task(task_id)
@@ -3902,6 +3961,40 @@ class RuntimeService:
                 logger.warning("send_task_draft failed, falling back to plain text: %s", exc)
         await session.channel.send(thread_id, text)
         return None
+
+    async def _remind_blocking_draft(
+        self,
+        *,
+        session: ChannelSession,
+        thread_id: str,
+        task: RuntimeTask,
+        automation_name: str,
+    ) -> None:
+        """Re-post a decision surface when a scheduler tick is skipped by an active DRAFT."""
+        try:
+            nonce = await self._store.create_runtime_decision_nonce(
+                task.id,
+                ttl_minutes=self._decision_ttl_minutes,
+            )
+        except Exception as exc:
+            logger.warning("Failed to mint reminder nonce for task %s: %s", task.id, exc)
+            return
+        text = (
+            f"⏰ 定时任务 `{automation_name}` 被跳过：DRAFT task `{task.id}` 还在等审批。\n"
+            f"- **approve / reject / suggest**：决定这个 draft\n"
+            f"- **discard**：扔掉它\n"
+            f"- **replace**：丢弃并立刻用当前 cron 重跑（使用原始 prompt）"
+        )
+        msg_id = await self._send_decision_surface(
+            session,
+            thread_id,
+            text,
+            task.id,
+            nonce,
+            ["approve", "reject", "suggest", "discard", "replace"],
+        )
+        if msg_id:
+            await self._store.update_runtime_task(task.id, decision_message_id=msg_id)
 
     def _latest_activity_for_task(self, task_id: str, max_chars: int = 200) -> str | None:
         """Read a bounded tail from the live agent log for a running task."""

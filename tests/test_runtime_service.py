@@ -1098,6 +1098,189 @@ async def test_enqueue_scheduler_task_skips_when_same_automation_is_inflight(run
 
 
 @pytest.mark.asyncio
+async def test_enqueue_scheduler_task_reminds_when_blocked_by_draft(runtime_env):
+    """When scheduler skip is caused by a DRAFT task, a reminder with 5 buttons is posted."""
+    runtime: RuntimeService = runtime_env["runtime"]
+    store: SQLiteMemoryStore = runtime_env["store"]
+    channel: _FakeChannel = runtime_env["channel"]
+    registry = AgentRegistry([_ArtifactAgent()])
+    session = ChannelSession(
+        platform="discord",
+        channel_id="100",
+        channel=channel,
+        registry=registry,
+    )
+    runtime.register_session(session, registry)
+
+    first = await runtime.enqueue_scheduler_task(
+        session=session,
+        registry=registry,
+        thread_id="thread-scheduler",
+        automation_name="daily-news",
+        prompt="Generate a markdown daily news brief",
+        author="scheduler",
+        preferred_agent="artifact-agent",
+    )
+    assert first is not None
+    await store.update_runtime_task(first.id, status=TASK_STATUS_DRAFT)
+    channel.drafts.clear()
+
+    second = await runtime.enqueue_scheduler_task(
+        session=session,
+        registry=registry,
+        thread_id="thread-scheduler",
+        automation_name="daily-news",
+        prompt="Generate a markdown daily news brief",
+        author="scheduler",
+        preferred_agent="artifact-agent",
+    )
+    assert second is None
+    assert len(channel.drafts) == 1
+    draft = channel.drafts[0]
+    assert draft["task_id"] == first.id
+    assert draft["actions"] == ["approve", "reject", "suggest", "discard", "replace"]
+    assert "被跳过" in draft["draft_text"]
+
+
+@pytest.mark.asyncio
+async def test_enqueue_scheduler_task_does_not_remind_for_non_draft_block(runtime_env):
+    """Scheduler skip for non-DRAFT active states (e.g. RUNNING) stays log-only."""
+    runtime: RuntimeService = runtime_env["runtime"]
+    store: SQLiteMemoryStore = runtime_env["store"]
+    channel: _FakeChannel = runtime_env["channel"]
+    registry = AgentRegistry([_ArtifactAgent()])
+    session = ChannelSession(
+        platform="discord",
+        channel_id="100",
+        channel=channel,
+        registry=registry,
+    )
+    runtime.register_session(session, registry)
+
+    first = await runtime.enqueue_scheduler_task(
+        session=session,
+        registry=registry,
+        thread_id="thread-scheduler",
+        automation_name="daily-news",
+        prompt="Generate a markdown daily news brief",
+        author="scheduler",
+        preferred_agent="artifact-agent",
+    )
+    assert first is not None
+    await store.update_runtime_task(first.id, status=TASK_STATUS_RUNNING)
+    channel.drafts.clear()
+
+    second = await runtime.enqueue_scheduler_task(
+        session=session,
+        registry=registry,
+        thread_id="thread-scheduler",
+        automation_name="daily-news",
+        prompt="Generate a markdown daily news brief",
+        author="scheduler",
+        preferred_agent="artifact-agent",
+    )
+    assert second is None
+    assert channel.drafts == []
+
+
+@pytest.mark.asyncio
+async def test_replace_draft_task_discards_and_returns_automation_name(runtime_env):
+    runtime: RuntimeService = runtime_env["runtime"]
+    store: SQLiteMemoryStore = runtime_env["store"]
+    channel: _FakeChannel = runtime_env["channel"]
+    registry = AgentRegistry([_ArtifactAgent()])
+    session = ChannelSession(
+        platform="discord",
+        channel_id="100",
+        channel=channel,
+        registry=registry,
+    )
+    runtime.register_session(session, registry)
+
+    task = await runtime.enqueue_scheduler_task(
+        session=session,
+        registry=registry,
+        thread_id="thread-scheduler",
+        automation_name="daily-news",
+        prompt="Generate a markdown daily news brief",
+        author="scheduler",
+        preferred_agent="artifact-agent",
+    )
+    assert task is not None
+    await store.update_runtime_task(task.id, status=TASK_STATUS_DRAFT)
+
+    message, name = await runtime.replace_draft_task(task.id, actor_id="owner-1")
+    assert name == "daily-news"
+    assert "discarded" in message
+
+    reloaded = await store.get_runtime_task(task.id)
+    assert reloaded is not None
+    assert reloaded.status == "DISCARDED"
+
+
+@pytest.mark.asyncio
+async def test_replace_draft_task_rejects_non_draft_status(runtime_env):
+    runtime: RuntimeService = runtime_env["runtime"]
+    store: SQLiteMemoryStore = runtime_env["store"]
+    channel: _FakeChannel = runtime_env["channel"]
+    registry = AgentRegistry([_ArtifactAgent()])
+    session = ChannelSession(
+        platform="discord",
+        channel_id="100",
+        channel=channel,
+        registry=registry,
+    )
+    runtime.register_session(session, registry)
+
+    task = await runtime.enqueue_scheduler_task(
+        session=session,
+        registry=registry,
+        thread_id="thread-scheduler",
+        automation_name="daily-news",
+        prompt="Generate a markdown daily news brief",
+        author="scheduler",
+        preferred_agent="artifact-agent",
+    )
+    assert task is not None
+    await store.update_runtime_task(task.id, status=TASK_STATUS_RUNNING)
+
+    message, name = await runtime.replace_draft_task(task.id, actor_id="owner-1")
+    assert name is None
+    assert "not a DRAFT" in message
+
+
+@pytest.mark.asyncio
+async def test_replace_draft_task_requires_authorization(runtime_env):
+    runtime: RuntimeService = runtime_env["runtime"]
+    store: SQLiteMemoryStore = runtime_env["store"]
+    channel: _FakeChannel = runtime_env["channel"]
+    registry = AgentRegistry([_ArtifactAgent()])
+    session = ChannelSession(
+        platform="discord",
+        channel_id="100",
+        channel=channel,
+        registry=registry,
+    )
+    runtime.register_session(session, registry)
+
+    task = await runtime.enqueue_scheduler_task(
+        session=session,
+        registry=registry,
+        thread_id="thread-scheduler",
+        automation_name="daily-news",
+        prompt="Generate a markdown daily news brief",
+        author="scheduler",
+        preferred_agent="artifact-agent",
+    )
+    assert task is not None
+    await store.update_runtime_task(task.id, status=TASK_STATUS_DRAFT)
+
+    message, name = await runtime.replace_draft_task(task.id, actor_id="not-owner")
+    assert name is None
+    assert "Only configured owners" in message
+
+
+@pytest.mark.asyncio
 async def test_scheduler_automation_posts_direct_result_without_status_spam(runtime_env):
     store: SQLiteMemoryStore = runtime_env["store"]
     runtime: RuntimeService = runtime_env["runtime"]
