@@ -15,7 +15,7 @@ oh-my-agent
 
 # Tests
 pip install -e ".[dev]"
-pytest                            # all tests (527 tests)
+pytest                            # all tests (545 tests)
 pytest tests/test_memory_store.py # single file
 pytest -k "test_fallback"         # single test by name
 ```
@@ -31,9 +31,11 @@ The system has seven major subsystems.
 - `ChannelSession`: per-channel state with async API. Loads/persists per-thread conversation histories via `MemoryStore`. In-memory cache avoids repeated DB reads.
 - Discord slash commands via `app_commands.CommandTree`:
   - Conversation: `/ask`, `/reset`, `/history`, `/agent`, `/search`
-  - Runtime tasks: `/task_start`, `/task_status`, `/task_list`, `/task_approve`, `/task_reject`, `/task_suggest`, `/task_resume`, `/task_stop`, `/task_merge`, `/task_discard`, `/task_changes`, `/task_logs`, `/task_cleanup`
-  - Skills: `/reload-skills`
+  - Runtime tasks: `/task_start`, `/task_status`, `/task_list`, `/task_approve`, `/task_reject`, `/task_suggest`, `/task_resume`, `/task_stop`, `/task_merge`, `/task_discard`, `/task_replace`, `/task_changes`, `/task_logs`, `/task_cleanup`
+  - Skills: `/reload-skills`, `/skill_stats`, `/skill_enable`
   - Automations: `/automation_status`, `/automation_reload`, `/automation_enable`, `/automation_disable`, `/automation_run`
+  - Auth: `/auth_login`, `/auth_status`, `/auth_clear`
+  - Operator: `/doctor`
   - Adaptive memory: `/memories`, `/forget`, `/promote`
 - Agent targeting:
   - `/ask` supports optional `agent` argument for new threads.
@@ -51,7 +53,6 @@ The system has seven major subsystems.
 - Concrete CLI agents: `ClaudeAgent` (session resume via `--resume`), `GeminiCLIAgent`, `CodexCLIAgent`.
   - Codex runs `codex exec --full-auto --json --skip-git-repo-check` and extracts assistant text from JSONL events.
   - Image handling: Claude and Gemini copy images to `workspace/_attachments/` and augment the prompt with file-reference instructions; Codex uses `--image` flag natively.
-- `agents/api/` — **deprecated since v0.4.0**. `AnthropicAPIAgent`, `OpenAIAPIAgent` kept for reference only.
 
 **Memory layer** (`src/oh_my_agent/memory/`)
 
@@ -72,7 +73,7 @@ The system has seven major subsystems.
 - When `workspace` is configured, `_setup_workspace()` in `main.py` copies skills into `workspace/.claude/skills/` and `workspace/.gemini/skills/` (real files, not symlinks) so CLI agents find them from the workspace cwd.
 - `SkillValidator` (`skills/validator.py`): validates SKILL.md frontmatter (name+description required), script syntax, and executable permissions.
 - Agent-driven skill creation: `_try_skill_sync()` in `GatewayManager` detects new agent-created skills after each response, runs `full_sync()`, validates, and notifies via Discord.
-- Includes a `scheduler` skill for creating/updating recurring jobs in `config.yaml` and validating job schema.
+- Bundled skills under `skills/` (10): `adapt-community-skill`, `bilibili-video-summary`, `deals-scanner`, `market-briefing`, `paper-digest`, `scheduler`, `seattle-metro-housing-watch`, `skill-creator`, `youtube-podcast-digest`, `youtube-video-summary`. The `scheduler` skill creates/updates recurring jobs in `config.yaml` and validates job schema.
 
 **Runtime layer** (`src/oh_my_agent/runtime/`)
 
