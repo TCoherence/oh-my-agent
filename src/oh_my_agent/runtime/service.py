@@ -3656,7 +3656,7 @@ class RuntimeService:
             lines.append(f"-# delivery: `{delivery.mode}`")
             for path in delivery.delivered_paths[:4]:
                 lines.append(f"-# path: `{path}`")
-        return "\n".join(lines)[:1900]
+        return "\n".join(lines)
 
     def _automation_artifact_preview(
         self,
@@ -3677,7 +3677,7 @@ class RuntimeService:
             return None
         if not content or "\x00" in content:
             return None
-        return rel_path, content[:3500]
+        return rel_path, content[:10000]
 
     @staticmethod
     def _split_automation_output(text: str) -> tuple[str, list[str]]:
