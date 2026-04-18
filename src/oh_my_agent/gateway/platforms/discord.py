@@ -20,11 +20,20 @@ from oh_my_agent.gateway.base import (
     MessageHandler,
     OutgoingAttachment,
 )
-from oh_my_agent.gateway.services import AskService, AutomationService, DoctorService, TaskService
+from oh_my_agent.gateway.services import (
+    AskService,
+    AutomationService,
+    DoctorService,
+    MemoryService,
+    SkillEvalService,
+    TaskService,
+)
 from oh_my_agent.gateway.services.types import (
     AutomationStatusResult,
     DoctorResult,
     InteractiveDecision,
+    MemoryListResult,
+    SkillStatsResult,
     TaskActionResult,
     TaskListResult,
 )
@@ -151,6 +160,8 @@ class DiscordChannel(BaseChannel):
         self._task_service: TaskService | None = None
         self._doctor_service: DoctorService | None = None
         self._automation_service: AutomationService | None = None
+        self._memory_service: MemoryService | None = None
+        self._skill_eval_service: SkillEvalService | None = None
         self._skill_eval_enabled = True
         self._skill_stats_recent_days = 7
         self._skill_feedback_emojis = {"👍", "👎"}
@@ -382,6 +393,63 @@ class DiscordChannel(BaseChannel):
             lines.append(f"_…and {len(result.automations) - 24} more_")
         lines.append("_Invalid or conflicting automation files remain log-visible only._")
         return "\n".join(lines)[:1900]
+
+    @staticmethod
+    def _render_memory_list_result(result: MemoryListResult) -> str:
+        if not result.success or not result.entries:
+            return result.message[:1900]
+        lines = [f"**Memories** — {result.total_active} active"]
+        for entry in result.entries[:25]:
+            conf_bar = "█" * int(entry.confidence * 5) + "░" * (5 - int(entry.confidence * 5))
+            observed_at = entry.last_observed_at[:10]
+            lines.append(
+                f"`{entry.memory_id}` [{conf_bar}] **[{entry.category}/{entry.scope}]**"
+                f" obs={entry.observation_count} seen={observed_at} {entry.summary}"
+            )
+        if len(result.entries) > 25:
+            lines.append(f"_…and {len(result.entries) - 25} more_")
+        return "\n".join(lines)[:2000]
+
+    @staticmethod
+    def _render_skill_stats_result(result: SkillStatsResult) -> str:
+        if not result.success or not result.stats:
+            return result.message[:1900]
+        if result.skill_filter:
+            row = result.stats[0]
+            lines = [
+                f"**Skill** `{row.skill_name}`",
+                f"- State: `{'auto-disabled' if row.auto_disabled else 'enabled'}`",
+                f"- Total invocations: {row.total_invocations}",
+                f"- Recent invocations ({result.recent_days}d): {row.recent_invocations}",
+                f"- Recent success/error/timeout/cancelled: {row.recent_successes}/{row.recent_errors}/{row.recent_timeouts}/{row.recent_cancelled}",
+                f"- Avg latency: {row.recent_avg_latency_ms / 1000:.2f}s",
+                f"- Feedback: 👍 {row.thumbs_up} / 👎 {row.thumbs_down} / net {row.net_feedback:+d}",
+            ]
+            if row.last_invoked_at:
+                lines.append(f"- Last invoked: {row.last_invoked_at}")
+            if row.merged_commit_hash:
+                lines.append(f"- Last merged commit: `{row.merged_commit_hash}`")
+            if row.auto_disabled_reason:
+                lines.append(f"- Auto-disabled reason: {row.auto_disabled_reason}")
+            if row.latest_evaluations:
+                lines.append("**Latest evaluations**")
+                for item in row.latest_evaluations:
+                    lines.append(
+                        f"- `{item['evaluation_type']}` [{item['status']}] {item['summary']}"
+                    )
+            return "\n".join(lines)[:2000]
+        lines = [f"**Skill stats** — last {result.recent_days} day(s)"]
+        for row in result.stats[:15]:
+            recent = row.recent_invocations
+            rate = (row.recent_successes / recent) if recent else 0.0
+            badge = "disabled" if row.auto_disabled else "enabled"
+            lines.append(
+                f"- `{row.skill_name}` [{badge}] "
+                f"success {rate:.0%} · recent {recent} · avg {row.recent_avg_latency_ms / 1000:.2f}s · feedback {row.net_feedback:+d}"
+            )
+        if len(result.stats) > 15:
+            lines.append(f"_…and {len(result.stats) - 15} more_")
+        return "\n".join(lines)[:2000]
 
     @staticmethod
     def _with_selected_choice(prompt: HitlPrompt, choice_id: str | None) -> HitlPrompt:
@@ -649,6 +717,7 @@ class DiscordChannel(BaseChannel):
         self._judge_store = store
         if gateway_manager is not None:
             self._gateway_manager = gateway_manager
+        self._refresh_services()
 
     def _refresh_services(self) -> None:
         fire_automation = self._scheduler.fire_job_now if self._scheduler is not None else None
@@ -659,6 +728,16 @@ class DiscordChannel(BaseChannel):
         )
         self._doctor_service = DoctorService(self._runtime_service)
         self._automation_service = AutomationService(self._scheduler, self._memory_store)
+        self._memory_service = MemoryService(
+            self._judge_store,
+            gateway_manager=self._gateway_manager,
+            registry=self._registry,
+        )
+        self._skill_eval_service = SkillEvalService(
+            self._memory_store,
+            recent_days=self._skill_stats_recent_days,
+            feedback_emojis=self._skill_feedback_emojis,
+        )
 
     def set_skill_evaluation_config(self, cfg: dict | None) -> None:
         cfg = cfg or {}
@@ -666,6 +745,7 @@ class DiscordChannel(BaseChannel):
         self._skill_stats_recent_days = int(cfg.get("stats_recent_days", 7))
         emojis = cfg.get("feedback_emojis", ["👍", "👎"])
         self._skill_feedback_emojis = {str(e) for e in emojis if str(e)}
+        self._refresh_services()
 
     def supports_buttons(self) -> bool:
         return True
@@ -693,40 +773,14 @@ class DiscordChannel(BaseChannel):
 
         target_id = int(self._channel_id)
 
-        def _format_skill_health_row(row: dict) -> str:
-            recent = int(row.get("recent_invocations") or 0)
-            successes = int(row.get("recent_successes") or 0)
-            rate = (successes / recent) if recent else 0.0
-            avg_ms = float(row.get("recent_avg_latency_ms") or 0.0)
-            badge = "disabled" if int(row.get("auto_disabled") or 0) else "enabled"
-            return (
-                f"- `{row['skill_name']}` [{badge}] "
-                f"success {rate:.0%} · recent {recent} · avg {avg_ms/1000:.2f}s · feedback {int(row.get('net_feedback') or 0):+d}"
-            )
-
-        def _format_skill_eval_lines(evals: list[dict]) -> list[str]:
-            lines: list[str] = []
-            for item in evals:
-                lines.append(
-                    f"- `{item['evaluation_type']}` [{item['status']}] {item['summary']}"
-                )
-            return lines
-
         async def _sync_skill_feedback_from_payload(payload: discord.RawReactionActionEvent) -> None:
-            if not self._skill_eval_enabled or not self._memory_store:
+            if not self._skill_eval_enabled or self._skill_eval_service is None:
                 return
-            emoji = str(payload.emoji)
-            if emoji not in self._skill_feedback_emojis:
+            if not self._skill_eval_service.is_feedback_emoji(str(payload.emoji)):
                 return
             if self._owner_user_ids and str(payload.user_id) not in self._owner_user_ids:
                 return
             if hasattr(client, "user") and client.user and payload.user_id == client.user.id:
-                return
-            if not hasattr(self._memory_store, "get_skill_invocation_by_message"):
-                return
-
-            invocation = await self._memory_store.get_skill_invocation_by_message(str(payload.message_id))
-            if not invocation:
                 return
 
             channel_obj = client.get_channel(payload.channel_id)
@@ -737,43 +791,19 @@ class DiscordChannel(BaseChannel):
             active_score = None
             for reaction in message.reactions:
                 reaction_emoji = str(reaction.emoji)
-                if reaction_emoji not in self._skill_feedback_emojis:
+                if not self._skill_eval_service.is_feedback_emoji(reaction_emoji):
                     continue
                 users = [u async for u in reaction.users()]
                 if any(u.id == payload.user_id for u in users):
                     active_score = 1 if reaction_emoji == "👍" else -1
 
-            if active_score is None:
-                await self._memory_store.delete_skill_feedback(
-                    invocation_id=int(invocation["id"]),
-                    actor_id=str(payload.user_id),
-                )
-                logger.info(
-                    "[discord] SKILL_FEEDBACK_CLEAR skill=%s invocation=%s actor=%s message=%s",
-                    invocation.get("skill_name"),
-                    invocation.get("id"),
-                    payload.user_id,
-                    payload.message_id,
-                )
-                return
-
-            await self._memory_store.upsert_skill_feedback(
-                invocation_id=int(invocation["id"]),
+            await self._skill_eval_service.record_reaction(
+                message_id=str(payload.message_id),
                 actor_id=str(payload.user_id),
                 platform=self.platform,
                 channel_id=self._channel_id,
                 thread_id=str(payload.channel_id),
-                score=active_score,
-                source="reaction",
-            )
-            logger.info(
-                "[discord] SKILL_FEEDBACK_RECORDED skill=%s invocation=%s actor=%s score=%+d emoji=%s message=%s",
-                invocation.get("skill_name"),
-                invocation.get("id"),
-                payload.user_id,
-                active_score,
-                emoji,
-                payload.message_id,
+                active_score=active_score,
             )
 
         def _interaction_thread_id(interaction: discord.Interaction) -> str | None:
@@ -1074,53 +1104,17 @@ class DiscordChannel(BaseChannel):
                     ephemeral=True,
                 )
                 return
-            if not self._memory_store or not hasattr(self._memory_store, "get_skill_stats"):
+            if self._skill_eval_service is None:
                 await interaction.response.send_message(
                     "Skill evaluation store is not configured.",
                     ephemeral=True,
                 )
                 return
-
             await interaction.response.defer(ephemeral=True)
-            rows = await self._memory_store.get_skill_stats(
-                skill,
-                recent_days=self._skill_stats_recent_days,
+            result = await self._skill_eval_service.get_stats(skill)
+            await interaction.followup.send(
+                self._render_skill_stats_result(result), ephemeral=True
             )
-            if not rows:
-                label = f" `{skill}`" if skill else ""
-                await interaction.followup.send(f"No skill stats found for{label}.", ephemeral=True)
-                return
-
-            if skill:
-                row = rows[0]
-                lines = [
-                    f"**Skill** `{row['skill_name']}`",
-                    f"- State: `{'auto-disabled' if int(row.get('auto_disabled') or 0) else 'enabled'}`",
-                    f"- Total invocations: {int(row.get('total_invocations') or 0)}",
-                    f"- Recent invocations ({self._skill_stats_recent_days}d): {int(row.get('recent_invocations') or 0)}",
-                    f"- Recent success/error/timeout/cancelled: {int(row.get('recent_successes') or 0)}/{int(row.get('recent_errors') or 0)}/{int(row.get('recent_timeouts') or 0)}/{int(row.get('recent_cancelled') or 0)}",
-                    f"- Avg latency: {float(row.get('recent_avg_latency_ms') or 0.0)/1000:.2f}s",
-                    f"- Feedback: 👍 {int(row.get('thumbs_up') or 0)} / 👎 {int(row.get('thumbs_down') or 0)} / net {int(row.get('net_feedback') or 0):+d}",
-                ]
-                if row.get("last_invoked_at"):
-                    lines.append(f"- Last invoked: {row['last_invoked_at']}")
-                if row.get("merged_commit_hash"):
-                    lines.append(f"- Last merged commit: `{row['merged_commit_hash']}`")
-                if row.get("auto_disabled_reason"):
-                    lines.append(f"- Auto-disabled reason: {row['auto_disabled_reason']}")
-                if hasattr(self._memory_store, "get_latest_skill_evaluations"):
-                    evals = await self._memory_store.get_latest_skill_evaluations(row["skill_name"])
-                    if evals:
-                        lines.append("**Latest evaluations**")
-                        lines.extend(_format_skill_eval_lines(evals))
-                await interaction.followup.send("\n".join(lines)[:2000], ephemeral=True)
-                return
-
-            lines = [f"**Skill stats** — last {self._skill_stats_recent_days} day(s)"]
-            lines.extend(_format_skill_health_row(row) for row in rows[:15])
-            if len(rows) > 15:
-                lines.append(f"_…and {len(rows) - 15} more_")
-            await interaction.followup.send("\n".join(lines)[:2000], ephemeral=True)
 
         @tree.command(name="skill_enable", description="Re-enable an auto-disabled skill")
         @app_commands.describe(skill="Skill name")
@@ -1131,25 +1125,14 @@ class DiscordChannel(BaseChannel):
                     ephemeral=True,
                 )
                 return
-            if not self._memory_store or not hasattr(self._memory_store, "get_skill_provenance"):
+            if self._skill_eval_service is None:
                 await interaction.response.send_message(
                     "Skill evaluation store is not configured.",
                     ephemeral=True,
                 )
                 return
-            row = await self._memory_store.get_skill_provenance(skill)
-            if not row:
-                await interaction.response.send_message(
-                    f"Skill `{skill}` not found.",
-                    ephemeral=True,
-                )
-                return
-            if hasattr(self._memory_store, "set_skill_auto_disabled"):
-                await self._memory_store.set_skill_auto_disabled(skill, disabled=False)
-            await interaction.response.send_message(
-                f"Skill `{skill}` re-enabled for automatic routing.",
-                ephemeral=True,
-            )
+            result = await self._skill_eval_service.enable(skill)
+            await interaction.response.send_message(result.message[:1900], ephemeral=True)
 
         @tree.command(name="task_start", description="Create an autonomous runtime task")
         @app_commands.describe(
@@ -1499,37 +1482,14 @@ class DiscordChannel(BaseChannel):
                     ephemeral=True,
                 )
                 return
-            if not self._judge_store:
+            if self._memory_service is None:
                 await interaction.response.send_message(
                     "Memory subsystem is not enabled.", ephemeral=True,
                 )
                 return
-
             await interaction.response.defer()
-            entries = self._judge_store.get_active()
-            if category:
-                entries = [m for m in entries if m.category == category]
-            entries.sort(key=lambda m: (m.scope, -m.confidence, -m.observation_count))
-
-            if not entries:
-                msg = "No memories stored."
-                if category:
-                    msg = f"No memories in category **{category}**."
-                await interaction.followup.send(msg)
-                return
-
-            lines = [f"**Memories** — {len(entries)} active"]
-            for m in entries[:25]:
-                conf_bar = "█" * int(m.confidence * 5) + "░" * (5 - int(m.confidence * 5))
-                observed_at = str(m.last_observed_at)[:10]
-                lines.append(
-                    f"`{m.id}` [{conf_bar}] **[{m.category}/{m.scope}]**"
-                    f" obs={m.observation_count} seen={observed_at} {m.summary}"
-                )
-            if len(entries) > 25:
-                lines.append(f"_…and {len(entries) - 25} more_")
-
-            await interaction.followup.send("\n".join(lines)[:2000])
+            result = self._memory_service.list_entries(category=category)
+            await interaction.followup.send(self._render_memory_list_result(result))
 
         @tree.command(name="forget", description="Delete a specific memory by ID (marks superseded)")
         @app_commands.describe(memory_id="The memory ID to forget (shown in /memories)")
@@ -1540,26 +1500,13 @@ class DiscordChannel(BaseChannel):
                     ephemeral=True,
                 )
                 return
-            if not self._judge_store:
+            if self._memory_service is None:
                 await interaction.response.send_message(
                     "Memory subsystem is not enabled.", ephemeral=True,
                 )
                 return
-
-            deleted = await self._judge_store.manual_supersede(memory_id)
-            if deleted:
-                if self._gateway_manager is not None and self._registry is not None:
-                    try:
-                        await self._gateway_manager._try_memory_md_synth(self._registry)  # type: ignore[attr-defined]
-                    except Exception:
-                        logger.debug("MEMORY.md synth after /forget failed", exc_info=True)
-                await interaction.response.send_message(
-                    f"Memory `{memory_id}` forgotten.", ephemeral=True,
-                )
-            else:
-                await interaction.response.send_message(
-                    f"Memory `{memory_id}` not found or already inactive.", ephemeral=True,
-                )
+            result = await self._memory_service.forget(memory_id)
+            await interaction.response.send_message(result.message[:1900], ephemeral=True)
 
         @tree.command(name="memorize", description="Trigger the memory judge for the current thread")
         @app_commands.describe(
@@ -1577,47 +1524,27 @@ class DiscordChannel(BaseChannel):
                     ephemeral=True,
                 )
                 return
-            if self._gateway_manager is None or self._judge_store is None:
+            if self._memory_service is None:
                 await interaction.response.send_message(
                     "Memory subsystem is not enabled.", ephemeral=True,
                 )
                 return
-
             channel = interaction.channel
             if channel is None:
                 await interaction.response.send_message(
                     "Cannot resolve current thread.", ephemeral=True,
                 )
                 return
-
             await interaction.response.defer(ephemeral=True)
-            try:
-                result = await self._gateway_manager.request_memorize(
-                    platform="discord",
-                    channel_id=str(self._channel_id),
-                    thread_id=str(channel.id),
-                    explicit_summary=summary,
-                    explicit_scope=scope,
-                )
-            except Exception as exc:
-                logger.warning("/memorize failed: %s", exc)
-                await interaction.followup.send(f"❌ Memorize failed: {exc}", ephemeral=True)
-                return
-
-            if result is None:
-                await interaction.followup.send("Judge not available.", ephemeral=True)
-                return
-            if result.get("error"):
-                await interaction.followup.send(f"❌ {result['error']}", ephemeral=True)
-                return
-            stats = result.get("stats", {})
-            actions = result.get("actions", [])
-            summary_line = (
-                f"✅ Judge ran — actions={len(actions)} "
-                f"add={stats.get('add', 0)} strengthen={stats.get('strengthen', 0)} "
-                f"supersede={stats.get('supersede', 0)} no_op={stats.get('no_op', 0)}"
+            result = await self._memory_service.memorize(
+                platform="discord",
+                channel_id=str(self._channel_id),
+                thread_id=str(channel.id),
+                explicit_summary=summary,
+                explicit_scope=scope,
             )
-            await interaction.followup.send(summary_line, ephemeral=True)
+            prefix = "✅ " if result.success else "❌ "
+            await interaction.followup.send(prefix + result.message[:1900], ephemeral=True)
 
         # ---- Events --------------------------------------------------------
 

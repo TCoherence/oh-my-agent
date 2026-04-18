@@ -3,11 +3,15 @@
 from oh_my_agent.gateway.services.ask_service import AskService
 from oh_my_agent.gateway.services.automation_service import AutomationService
 from oh_my_agent.gateway.services.doctor_service import DoctorService
+from oh_my_agent.gateway.services.memory_service import MemoryService
+from oh_my_agent.gateway.services.skill_eval_service import SkillEvalService
 from oh_my_agent.gateway.services.task_service import TaskService
 
 __all__ = [
     "AskService",
     "AutomationService",
     "DoctorService",
+    "MemoryService",
+    "SkillEvalService",
     "TaskService",
 ]

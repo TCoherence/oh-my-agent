@@ -117,3 +117,77 @@ class InteractiveDecision:
     actor_id: str
     entity_kind: str | None = None
     message_id: str | None = None
+
+
+# ── Memory results ──────────────────────────────────────────────────── #
+
+@dataclass
+class MemoryEntrySummary:
+    """Lightweight memory descriptor for /memories listings."""
+
+    memory_id: str
+    summary: str
+    category: str
+    scope: str
+    confidence: float
+    observation_count: int
+    last_observed_at: str
+
+
+@dataclass
+class MemoryListResult(ServiceResult):
+    """Result of listing user memories."""
+
+    entries: list[MemoryEntrySummary] = field(default_factory=list)
+    total_active: int = 0
+    category_filter: str | None = None
+
+
+@dataclass
+class MemoryActionResult(ServiceResult):
+    """Result of a single-memory action (forget, memorize)."""
+
+    memory_id: str | None = None
+    judge_stats: dict[str, int] | None = None
+    judge_action_count: int = 0
+
+
+# ── Skill evaluation results ────────────────────────────────────────── #
+
+@dataclass
+class SkillStatRow:
+    """Per-skill evaluation snapshot used by /skill_stats."""
+
+    skill_name: str
+    auto_disabled: bool
+    total_invocations: int
+    recent_invocations: int
+    recent_successes: int
+    recent_errors: int
+    recent_timeouts: int
+    recent_cancelled: int
+    recent_avg_latency_ms: float
+    thumbs_up: int
+    thumbs_down: int
+    net_feedback: int
+    last_invoked_at: str | None = None
+    merged_commit_hash: str | None = None
+    auto_disabled_reason: str | None = None
+    latest_evaluations: list[dict] = field(default_factory=list)
+
+
+@dataclass
+class SkillStatsResult(ServiceResult):
+    """Result of querying skill evaluation stats."""
+
+    stats: list[SkillStatRow] = field(default_factory=list)
+    recent_days: int = 7
+    skill_filter: str | None = None
+
+
+@dataclass
+class SkillToggleResult(ServiceResult):
+    """Result of enabling/disabling a skill."""
+
+    skill_name: str = ""
+    now_enabled: bool = False

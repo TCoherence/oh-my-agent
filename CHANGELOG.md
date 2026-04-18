@@ -13,6 +13,13 @@ The format is intentionally lightweight and release-oriented rather than exhaust
   - `tests/test_upgrade_paths.py` (12 tests): end-to-end `scripts/migrate_memory_to_judge.py` exercise (dry-run + real run + backup dir assertions); `memory.adaptive` → `memory.judge` alias lock-in (compat fallback preserved, not a regression); deprecation warnings for `memory.adaptive` config and for legacy `curated.yaml` / `daily/` layouts; builder-mode runtime.db schema-migration test (no binary fixture — `aiosqlite` constructs a v0.7-era `runtime_tasks` missing the modern columns + `task_type='code'` enum, then asserts `_ensure_column` backfill + enum normalisation to `'repo_change'`); `schema_version` lands at `CURRENT_SCHEMA_VERSION` after `init()` even on legacy DBs lacking the `schema_version` table.
   - `_warn_if_legacy_memory_config()` and `_warn_if_legacy_memory_layout()` helpers in `main.py` emit deprecation warnings at startup (visible in `service.log`) so `/doctor` and operators notice stale v0.8 state without breaking the boot.
   - Total tests: 504 → 527.
+- **v0.9 Contract-Freeze Phase B — service-layer extraction: `MemoryService` + `SkillEvalService`** (toward v1.0 acceptance criterion #11 — adapters do not own business logic).
+  - New `MemoryService` (`gateway/services/memory_service.py`) owns `/memories` listing, `/forget` supersede, `/memorize` judge invocation, and the best-effort `MEMORY.md` resynthesis trigger that previously lived inline in `discord.py`.
+  - New `SkillEvalService` (`gateway/services/skill_eval_service.py`) owns `/skill_stats` aggregation, single-skill detail with attached evaluations, `/skill_enable` toggle, and the thumbs-up/down reaction → `upsert_skill_feedback` / `delete_skill_feedback` plumbing.
+  - New result dataclasses in `gateway/services/types.py`: `MemoryListResult`, `MemoryActionResult`, `MemoryEntrySummary`, `SkillStatsResult`, `SkillStatRow`, `SkillToggleResult`. Discord adapter now consumes these via two new render helpers (`_render_memory_list_result`, `_render_skill_stats_result`).
+  - `discord.py` slash handlers slimmed (1992 → 1887 lines, -105). Each remaining handler is owner-check + service call + render. No business logic touches `JudgeStore` or `MemoryStore.{upsert,delete,get}_skill_*` directly anymore — the only remaining `_judge_store` / `_memory_store` references are the setters in `__init__` and the constructor arguments passed into the services in `_refresh_services()`.
+  - `tests/test_memory_service.py` (15 tests) and `tests/test_skill_eval_service.py` (18 tests) cover success / store-missing / unknown-id / synth-failure-swallowed / score-validation paths.
+  - Total tests: 527 → 560.
 
 ## v0.9.0 - 2026-04-17
 
