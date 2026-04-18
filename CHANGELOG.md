@@ -6,6 +6,8 @@ The format is intentionally lightweight and release-oriented rather than exhaust
 
 ## Unreleased
 
+## v0.9.1 - 2026-04-18
+
 ### Added
 
 - **v0.9 Contract-Freeze Phase A — restart/recovery + upgrade path tests** (toward v1.0 acceptance criteria #3 / #7 / #9 / #10)
