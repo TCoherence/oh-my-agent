@@ -116,10 +116,6 @@ def _build_channel(cfg: dict, *, owner_user_ids: set[str] | None = None):
             owner_user_ids=owner_user_ids,
         )
 
-    if platform == "slack":
-        from oh_my_agent.gateway.platforms.slack import SlackChannel
-        return SlackChannel(token=cfg["token"], channel_id=channel_id)
-
     raise ValueError(f"Unknown platform '{platform}'")
 
 

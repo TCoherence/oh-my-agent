@@ -27,7 +27,7 @@ flowchart TD
     GM --> RT["RuntimeService"]
     GM --> SCH["Scheduler"]
     GM --> AUTH["AuthService"]
-    GM --> MEM["DateBasedMemoryStore"]
+    GM --> MEM["JudgeStore + Judge agent"]
     GM --> SS["SkillSync"]
 
     RT --> AR
@@ -41,7 +41,7 @@ flowchart TD
     SCH --> AF["~/.oh-my-agent/automations/*.yaml"]
 
     AUTH --> AUTHFS["runtime/auth/*"]
-    MEM --> MEMFS["memory/daily + curated.yaml + MEMORY.md"]
+    MEM --> MEMFS["memory/memories.yaml + MEMORY.md"]
     SS --> SK["skills/ + .claude/.gemini/.agents"]
 ```
 

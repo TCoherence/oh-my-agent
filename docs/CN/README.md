@@ -106,7 +106,7 @@ oh-my-agent --version # 查看版本
 | **Runtime 任务** | `/task_start`, `/task_status`, `/task_list`, `/task_approve`, `/task_reject`, `/task_suggest`, `/task_resume`, `/task_stop`, `/task_merge`, `/task_discard`, `/task_changes`, `/task_logs`, `/task_cleanup` |
 | **Skills** | `/reload-skills`, `/skill_stats`, `/skill_enable` |
 | **Automations** | `/automation_status`, `/automation_reload`, `/automation_enable`, `/automation_disable`, `/automation_run` |
-| **记忆** | `/memories`, `/forget`, `/promote` |
+| **记忆** | `/memories`, `/forget`, `/memorize` |
 | **认证** | `/auth_login`, `/auth_status`, `/auth_clear` |
 
 ### 定时自动化

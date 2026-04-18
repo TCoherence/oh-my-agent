@@ -13,7 +13,13 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_PLATFORMS = {"discord", "slack"}
+SUPPORTED_PLATFORMS = {"discord"}
+UNSUPPORTED_PLATFORMS = {
+    "slack": (
+        '"slack" is not supported in 1.0; see docs/EN/upgrade-guide.md '
+        "(v0.9.x → v1.0 section) for the rationale and post-1.0 plans"
+    ),
+}
 SUPPORTED_AGENT_TYPES = {"cli", "api"}
 VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 
@@ -91,6 +97,12 @@ def _check_gateway(config: dict, result: ValidationResult) -> None:
         platform = ch.get("platform")
         if not platform:
             result.errors.append(ConfigError(f"{prefix}.platform", "is required", "error"))
+        elif str(platform) in UNSUPPORTED_PLATFORMS:
+            result.errors.append(ConfigError(
+                f"{prefix}.platform",
+                UNSUPPORTED_PLATFORMS[str(platform)],
+                "error",
+            ))
         elif str(platform) not in SUPPORTED_PLATFORMS:
             result.errors.append(ConfigError(
                 f"{prefix}.platform",

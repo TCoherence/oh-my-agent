@@ -20,6 +20,20 @@ The format is intentionally lightweight and release-oriented rather than exhaust
   - `discord.py` slash handlers slimmed (1992 → 1887 lines, -105). Each remaining handler is owner-check + service call + render. No business logic touches `JudgeStore` or `MemoryStore.{upsert,delete,get}_skill_*` directly anymore — the only remaining `_judge_store` / `_memory_store` references are the setters in `__init__` and the constructor arguments passed into the services in `_refresh_services()`.
   - `tests/test_memory_service.py` (15 tests) and `tests/test_skill_eval_service.py` (18 tests) cover success / store-missing / unknown-id / synth-failure-swallowed / score-validation paths.
   - Total tests: 527 → 560.
+- **v0.9 Contract-Freeze Phase C — operator documentation + experimental-surface trim** (toward v1.0 acceptance criterion #5 — `/doctor` + docs sufficient to localise faults; and the explicit-rejection half of criterion #11 — no surfaces that "validate but do nothing").
+  - **4 new operator-grade docs** (bilingual, EN + CN):
+    - `docs/{EN,CN}/troubleshooting.md` — 15 fault patterns (bot silent, task stuck in DRAFT, RUNNING hang, agent fallback loop, automation never fires, memory not injected, HITL buttons dead, merge gate blocked, skill auto-disabled, rate-limiter saturation, config validation failure, CLI session no-resume, image attachment ignored, skill changes invisible, `/doctor` red status), each with **Symptom → Diagnose → Resolve** + escalation guidance.
+    - `docs/{EN,CN}/monitoring.md` — service-log location/format, P0 alert table (5 patterns), P1 threshold table (8 patterns), `/doctor` section-by-section glossary, disk usage paths, cost signals.
+    - `docs/{EN,CN}/config-reference.md` — every `config.yaml.example` field documented, plus a cross-field cheatsheet for the three timeouts (`agents.<name>.timeout` vs `runtime.default_max_minutes` vs `skills.evaluation.<skill>.timeout`).
+    - `docs/{EN,CN}/upgrade-guide.md` — general SOP + per-version sections (v0.7.x→v0.8.0 through v0.9.x→v1.0), with the **v0.8.2→v0.9.0 memory rewrite** and **v0.9.x→v1.0 Slack removal** marked as breaking.
+  - **Stale-reference cleanup**: `daily/curated`, `MemoryExtractor`, `AdaptiveMemoryStore`, `DateBasedMemoryStore`, `/promote` removed from `README.md`, `AGENT.md`, `docs/{EN,CN}/{architecture,development,todo,README,v1.0-plan}.md` (the upgrade-guide retains the literal terms in their proper "this is what was removed" context). Verified by `grep -rn` against the same target set.
+  - **Slack stub removed (BREAKING)** — explicit `1.0` contract: single supported platform.
+    - `src/oh_my_agent/gateway/platforms/slack.py` deleted.
+    - `_build_channel()` in `main.py` no longer accepts `platform: slack`.
+    - `config_validator` now emits a specific error pointing to the upgrade guide when `platform: slack` is configured (no more silent skip at startup, no more generic "expected one of" message). New `UNSUPPORTED_PLATFORMS` map carries per-platform rejection text.
+    - `config.yaml.example` slack stub block removed.
+    - New `tests/test_v08_session1.py::TestConfigValidator::test_slack_rejected_with_specific_message` locks the rejection contract.
+  - Total tests: 560 → 561.
 
 ## v0.9.0 - 2026-04-17
 

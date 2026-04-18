@@ -83,8 +83,8 @@ Oh My Agent 是一个多平台 bot，执行层直接使用 CLI Agent，而不是
 
 ### v0.7.0
 
-- 日期驱动的两层记忆系统（`daily/` + `curated.yaml` + `MEMORY.md`）正式交付
-- 手动 `/promote` 命令和 daily 到 curated 的晋升生命周期
+- 日期驱动的两层记忆系统正式交付（v0.9.0 已重写为 Judge）
+- 手动晋升命令和层级晋升生命周期（v0.9.0 已移除）
 - Discord 图片附件支持，以及 Claude/Gemini/Codex 的对应处理链路
 - workspace refresh 现在会一起重建同步后的 skills 和生成的 `AGENTS.md`
 - Codex 的 repo/workspace skill 分发切到官方 `.agents/skills/`
@@ -100,7 +100,7 @@ Oh My Agent 是一个多平台 bot，执行层直接使用 CLI Agent，而不是
 ### v0.6.0
 
 - Adaptive Memory：YAML 存储 + Jaccard 去重 + confidence 评分 + 淘汰策略
-- `MemoryExtractor`：对话压缩后由 agent 驱动提取记忆
+- 对话压缩后由 agent 驱动提取记忆（v0.9.0 已被事件驱动 Judge 替代）
 - 记忆注入：`[Remembered context]` 前置到 agent prompt
 - Discord `/memories`（列表 + 类别筛选）和 `/forget`（按 ID 删除）
 - Skill task 的早期自动审批 + 自动合并原型

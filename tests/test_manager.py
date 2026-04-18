@@ -870,7 +870,7 @@ async def test_scheduler_dispatch_dm_uses_dm_channel_id():
 @pytest.mark.asyncio
 async def test_scheduler_dispatch_dm_skips_when_channel_unsupported():
     channel = MagicMock()
-    channel.platform = "slack"
+    channel.platform = "telegram"
     channel.channel_id = "100"
     channel.create_thread = AsyncMock(return_value="t1")
     channel.send = AsyncMock()

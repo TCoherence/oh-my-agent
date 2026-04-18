@@ -7,19 +7,19 @@ Inspired by [OpenClaw](https://openclaw.dev).
 ## Features
 
 - **Multi-Agent Fallback** — Claude, Gemini, and Codex run as CLI subprocesses; if one fails, the next in line takes over automatically
-- **Persistent Memory** — SQLite conversation history with FTS5 search, plus a date-based adaptive memory system that auto-extracts, promotes, and injects user knowledge across sessions
+- **Persistent Memory** — SQLite conversation history with FTS5 search, plus an event-driven Judge that maintains a single-tier `memories.yaml` and injects scoped context across sessions
 - **Autonomous Runtime** — durable task state machine with merge gates, worktree isolation, HITL prompts, and Discord approval buttons
 - **Skill System** — bidirectional skill sync across agent directories, skill evaluation with auto-disable, and agent-driven skill creation
 - **Scheduled Automations** — cron / interval jobs defined as YAML files with hot-reload, per-job `auto_approve`, and `/automation_run` manual trigger
 - **Workspace Isolation** — three-layer sandbox: workspace cwd confinement, env-var whitelisting, and CLI-native sandboxing
 - **Intent Router** — optional LLM-based classification routes messages to reply, skill invocation, task proposal, or skill creation
 - **Image Support** — Discord attachment download, per-agent image handling, and temp file lifecycle management
-- **Platform Adapters** — Discord (full-featured with slash commands), Slack (stub), extensible via `BaseChannel` ABC
+- **Platform Adapters** — Discord (full-featured with slash commands); extensible via `BaseChannel` ABC
 
 ## Architecture
 
 ```text
-User (Discord / Slack / ...)
+User (Discord)
          │ message, @agent prefix, or /ask command
          ▼
    GatewayManager
@@ -37,7 +37,7 @@ User (Discord / Slack / ...)
    Response → Markdown-aware chunk → thread.send()
 ```
 
-Seven subsystems: **Gateway** (platform adapters, slash commands, message routing), **Agents** (CLI subprocess wrappers with fallback), **Memory** (SQLite + date-based adaptive memory), **Skills** (bidirectional sync, evaluation, creation), **Runtime** (autonomous task orchestration), **Router** (LLM intent classification), **Automation** (cron/interval scheduler).
+Seven subsystems: **Gateway** (platform adapters, slash commands, message routing), **Agents** (CLI subprocess wrappers with fallback), **Memory** (SQLite history + event-driven Judge writing `memories.yaml`), **Skills** (bidirectional sync, evaluation, creation), **Runtime** (autonomous task orchestration), **Router** (LLM intent classification), **Automation** (cron/interval scheduler).
 
 → Full architecture walkthrough: [EN](docs/EN/architecture.md) · [中文](docs/CN/architecture.md)
 
@@ -106,7 +106,7 @@ The Docker image preinstalls `claude`, `gemini`, and `codex` CLIs. The host repo
 | **Runtime Tasks** | `/task_start`, `/task_status`, `/task_list`, `/task_approve`, `/task_reject`, `/task_suggest`, `/task_resume`, `/task_stop`, `/task_merge`, `/task_discard`, `/task_changes`, `/task_logs`, `/task_cleanup` |
 | **Skills** | `/reload-skills`, `/skill_stats`, `/skill_enable` |
 | **Automations** | `/automation_status`, `/automation_reload`, `/automation_enable`, `/automation_disable`, `/automation_run` |
-| **Memory** | `/memories`, `/forget`, `/promote` |
+| **Memory** | `/memories`, `/forget`, `/memorize` |
 | **Auth** | `/auth_login`, `/auth_status`, `/auth_clear` |
 
 ### Automations
@@ -159,10 +159,14 @@ Skills live in `skills/<name>/SKILL.md`. The `SkillSync` system distributes them
 |----------|----|------|
 | Architecture | [architecture.md](docs/EN/architecture.md) | [architecture.md](docs/CN/architecture.md) |
 | Operator Guide | [operator-guide.md](docs/EN/operator-guide.md) | [operator-guide.md](docs/CN/operator-guide.md) |
-| Roadmap | [todo.md](docs/EN/todo.md) | [todo.md](docs/CN/todo.md) |
+| Config Reference | [config-reference.md](docs/EN/config-reference.md) | [config-reference.md](docs/CN/config-reference.md) |
+| Troubleshooting | [troubleshooting.md](docs/EN/troubleshooting.md) | [troubleshooting.md](docs/CN/troubleshooting.md) |
+| Monitoring | [monitoring.md](docs/EN/monitoring.md) | [monitoring.md](docs/CN/monitoring.md) |
+| Upgrade Guide | [upgrade-guide.md](docs/EN/upgrade-guide.md) | [upgrade-guide.md](docs/CN/upgrade-guide.md) |
 | Development Log | [development.md](docs/EN/development.md) | [development.md](docs/CN/development.md) |
-| Changelog | [CHANGELOG.md](CHANGELOG.md) | — |
+| Roadmap | [todo.md](docs/EN/todo.md) | [todo.md](docs/CN/todo.md) |
 | v1.0 Plan | [v1.0-plan.md](docs/EN/v1.0-plan.md) | [v1.0-plan.md](docs/CN/v1.0-plan.md) |
+| Changelog | [CHANGELOG.md](CHANGELOG.md) | — |
 
 ## Versioning
 

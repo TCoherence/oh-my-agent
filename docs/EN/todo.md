@@ -16,7 +16,7 @@
 - `WAITING_USER_INPUT` and generic single-choice `ask_user` HITL are implemented.
 - `repair_skill` router intent is implemented.
 - Adaptive memory is implemented (auto-extraction, injection, `/memories`, `/forget`).
-- Date-based memory is implemented (daily/curated two-tier, auto-promotion, MEMORY.md synthesis, `/promote`).
+- Memory subsystem rewritten as event-driven Judge in v0.9.0 (single-tier `memories.yaml` + agent-synthesized `MEMORY.md`); the prior two-tier date-based system was removed (see CHANGELOG for the migration script).
 - Image attachment support is implemented (Discord download, per-agent handling, temp file lifecycle).
 - Codex repo/workspace skill discovery now uses official `.agents/skills/`; generated workspace `AGENTS.md` is reduced to rules/metadata.
 - Service-layer extraction is complete (task, ask, doctor, automation, HITL services).
@@ -65,9 +65,9 @@
 - [x] Codex integration: official repo/workspace `.agents/skills/` support plus generated `AGENTS.md` for rules/metadata; reverse sync scans Claude/Gemini/Codex native skill dirs
 - [x] Skill invocation vs mutation: `/skill-name` → normal chat path; "create skill" → `TASK_TYPE_SKILL_CHANGE` runtime task with dedicated prompt, validation, and merge gate
 
-### Adaptive Memory (complete)
+### Adaptive Memory (complete — replaced by Judge in v0.9.0)
 
-- [x] `MemoryExtractor`: auto-extract memories after history compression (reuse existing agents)
+- [x] Memory extractor: auto-extract memories after history compression (reuse existing agents)
 - [x] File-system storage: YAML-backed, each memory = one-line summary + structured metadata (category, confidence, source_thread, observation_count)
 - [x] Memory injection: select relevant memories and inject into agent prompt (token-budget aware, Jaccard similarity scoring)
 - [x] `/memories` command: list extracted memories with confidence bar + category filter
@@ -77,16 +77,16 @@
 
 ## v0.7 - Date-Based Memory + HITL/Ops Foundations
 
-### Date-Based Memory (complete)
+### Date-Based Memory (complete — replaced by Judge in v0.9.0)
 
-Upgrade adaptive memory from flat YAML to a date-organized, two-tier architecture inspired by [OpenClaw's memory system](https://docs.openclaw.ai/concepts/memory).
+Upgraded adaptive memory from flat YAML to a date-organized, two-tier architecture inspired by [OpenClaw's memory system](https://docs.openclaw.ai/concepts/memory). Both tiers and the manual-promotion command were removed in v0.9.0.
 
-- [x] **Daily memory logs** (`memory/daily/YYYY-MM-DD.yaml`): append-only daily records. System loads today + yesterday at session start for recency.
-- [x] **Curated long-term memory** (`memory/curated.yaml` + `memory/MEMORY.md`): promote stable, high-confidence memories into durable long-term storage. MEMORY.md is agent-synthesized natural language.
-- [x] **Temporal decay scoring**: daily entries decay exponentially (configurable half-life). Curated entries are evergreen (no decay).
-- [x] **Promotion lifecycle**: daily → curated when `observation_count ≥ N` and `confidence ≥ threshold` and age ≥ 1 day. Auto-promotion on load + manual `/promote` command.
-- [x] **Pre-compaction memory flush**: memory extraction runs before history compression (order swapped), ensuring no memory loss.
-- [x] **Discord commands**: `/memories` shows `[C]`/`[D]` tier tags, `/promote` for manual promotion.
+- [x] Daily memory logs (`memory/<date>.yaml`): append-only daily records. System loads today + yesterday at session start for recency.
+- [x] Curated long-term memory (`memory/<curated>.yaml` + `memory/MEMORY.md`): promote stable, high-confidence memories into durable long-term storage. MEMORY.md is agent-synthesized natural language.
+- [x] Temporal decay scoring: daily entries decay exponentially (configurable half-life). Curated entries are evergreen (no decay).
+- [x] Promotion lifecycle: daily-tier → curated-tier when `observation_count ≥ N` and `confidence ≥ threshold` and age ≥ 1 day. Auto-promotion on load + manual-promotion command.
+- [x] Pre-compaction memory flush: memory extraction runs before history compression (order swapped), ensuring no memory loss.
+- [x] Discord commands: `/memories` showed `[C]`/`[D]` tier tags, manual-promotion command for explicit tier moves.
 
 ### Human-in-the-Loop Baseline (complete)
 
@@ -178,14 +178,14 @@ Full details in [`v1.0-plan.md`](v1.0-plan.md).
 
 ### Memory Subsystem Rewrite (complete, shipped in v0.9.0)
 
-Replaces the legacy daily/curated tier system + post-turn `MemoryExtractor` (which left the store stuck at `obs=1` due to paraphrase-driven duplication) with a single-tier `JudgeStore` and an event-driven `Judge` agent that sees existing memories as context.
+Replaces the legacy two-tier date-based memory system + post-turn memory extractor (which left the store stuck at `obs=1` due to paraphrase-driven duplication) with a single-tier `JudgeStore` and an event-driven `Judge` agent that sees existing memories as context.
 
 - [x] Single-tier `memories.yaml` schema with `status`/`superseded_by` chain
 - [x] Event-driven triggers: thread idle (15 min), `/memorize` slash command, natural-language keywords (`记一下` / `remember this`)
 - [x] Action-based judgment (`add` / `strengthen` / `supersede` / `no_op`)
 - [x] `MEMORY.md` synthesized on dirty / missing / mtime > 6 h
 - [x] Migration script (`scripts/migrate_memory_to_judge.py`) for existing deployments
-- [x] Removed `/promote` slash command and `memory.adaptive` config section
+- [x] Removed the manual-promotion slash command and `memory.adaptive` config section
 
 ### 1.0 RC / Contract Freeze (pending)
 

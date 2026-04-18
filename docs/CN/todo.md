@@ -16,7 +16,7 @@
 - `WAITING_USER_INPUT` 和通用单选式 `ask_user` HITL 已实现。
 - `repair_skill` router 意图已实现。
 - Adaptive Memory 已实现（自动提取、注入、`/memories`、`/forget`）。
-- 基于日期的记忆系统已实现（daily/curated 两层架构、自动晋升、MEMORY.md 合成、`/promote`）。
+- 记忆子系统已在 v0.9.0 重写为事件驱动 Judge（单层 `memories.yaml` + agent 合成的 `MEMORY.md`）；旧的 daily-tier / curated-tier 双层制度已移除。
 - 图片附件支持已实现（Discord 下载、per-agent 处理、临时文件生命周期管理）。
 - Codex repo/workspace skill 发现已切到官方 `.agents/skills/`；生成的 workspace `AGENTS.md` 只保留 rules/metadata。
 - Service-layer 提取完成（task、ask、doctor、automation、HITL 服务）。
@@ -65,9 +65,9 @@
 - [x] Codex 接入：官方 repo/workspace `.agents/skills/` + 用于 rules/metadata 的生成 `AGENTS.md`；reverse sync 现在扫描 Claude/Gemini/Codex 原生 skill 目录
 - [x] Skill 调用与修改分离：`/skill-name` → 普通对话路径；"创建 skill" → `TASK_TYPE_SKILL_CHANGE` runtime task，专用 prompt、验证和 merge gate
 
-### Adaptive Memory（已完成）
+### Adaptive Memory（已完成 — v0.9.0 已被 Judge 替代）
 
-- [x] `MemoryExtractor`：对话压缩后自动提取记忆（复用现有 agent）
+- [x] 记忆提取器：对话压缩后自动提取记忆（复用现有 agent）
 - [x] 文件系统存储：YAML 格式，每条记忆 = 一句话摘要 + 结构化元数据（category, confidence, source_thread, observation_count）
 - [x] 记忆注入：新对话时，从记忆库中选取相关条目注入 agent prompt（token budget 控制，Jaccard 相似度评分）
 - [x] `/memories` 命令：展示提取的记忆，带置信度条 + 类别筛选
@@ -77,16 +77,16 @@
 
 ## v0.7 - 基于日期的记忆系统 + HITL/Ops 基础
 
-### 基于日期的记忆（已完成）
+### 基于日期的记忆（已完成 — v0.9.0 已被 Judge 替代）
 
-将 adaptive memory 从扁平 YAML 升级为按日期组织的两层架构，参考 [OpenClaw 记忆系统](https://docs.openclaw.ai/concepts/memory)。
+把 adaptive memory 从扁平 YAML 升级为按日期组织的两层架构，灵感来自 [OpenClaw 记忆系统](https://docs.openclaw.ai/concepts/memory)。两层结构与手动晋升命令均已在 v0.9.0 移除。
 
-- [x] **每日记忆日志**（`memory/daily/YYYY-MM-DD.yaml`）：按日追加的观察记录。系统启动时加载今天 + 昨天，保持近期上下文。
-- [x] **长期策展记忆**（`memory/curated.yaml` + `memory/MEMORY.md`）：将稳定记忆提升到持久化长期存储。MEMORY.md 是 agent 合成的自然语言视图。
-- [x] **时间衰减评分**：daily 条目按指数衰减（可配置半衰期）。curated 条目不衰减。
-- [x] **晋升生命周期**：daily → curated，当 `observation_count ≥ N` 且 `confidence ≥ 阈值` 且 age ≥ 1 天。启动时自动晋升 + `/promote` 手动晋升。
-- [x] **压缩前记忆刷写**：记忆提取在历史压缩之前执行（顺序调换），确保不丢失。
-- [x] **Discord 命令**：`/memories` 显示 `[C]`/`[D]` 层级标记，新增 `/promote` 命令。
+- [x] 每日记忆日志（按日追加的 YAML）：系统启动时加载今天 + 昨天，保持近期上下文。
+- [x] 长期策展记忆（curated YAML + `MEMORY.md`）：把稳定记忆提升到持久化长期存储。MEMORY.md 是 agent 合成的自然语言视图。
+- [x] 时间衰减评分：daily-tier 条目指数衰减（可配置半衰期）。curated-tier 条目不衰减。
+- [x] 晋升生命周期：daily-tier → curated-tier，当 `observation_count ≥ N` 且 `confidence ≥ 阈值` 且 age ≥ 1 天。启动时自动晋升 + 手动晋升命令。
+- [x] 压缩前记忆刷写：记忆提取在历史压缩之前执行（顺序调换），确保不丢失。
+- [x] Discord 命令：`/memories` 曾显示 `[C]`/`[D]` 层级标记，手动晋升命令用于显式跨层移动。
 
 ### Human-in-the-Loop 基线（已完成）
 
@@ -178,14 +178,14 @@
 
 ### Memory 子系统重构（已完成，v0.9.0 发布）
 
-替换原 daily/curated 两层架构 + per-turn `MemoryExtractor`（旧实现因 LLM paraphrase 导致 dedup 永远命中不了，整个 store 卡在 `obs=1`），改为单层 `JudgeStore` + 事件驱动的 `Judge` agent，judge 在 prompt 里能看到现有 memory。
+替换原两层 date-based 记忆架构 + per-turn 记忆提取器（旧实现因 LLM paraphrase 导致 dedup 永远命中不了，整个 store 卡在 `obs=1`），改为单层 `JudgeStore` + 事件驱动的 `Judge` agent，judge 在 prompt 里能看到现有 memory。
 
 - [x] 单层 `memories.yaml` schema，带 `status` / `superseded_by` 链路
 - [x] 三路触发：thread idle 15 分钟、`/memorize` slash command、自然语言关键词（`记一下` / `remember this`）
 - [x] action 模型：`add` / `strengthen` / `supersede` / `no_op`
 - [x] `MEMORY.md` 在 dirty / 缺失 / mtime > 6h 时自动 synthesize
 - [x] 数据迁移脚本（`scripts/migrate_memory_to_judge.py`）
-- [x] 删除 `/promote` slash command 和 `memory.adaptive` config 段
+- [x] 删除手动晋升 slash command 和 `memory.adaptive` config 段
 
 ### 1.0 RC / Contract Freeze（待开始）
 

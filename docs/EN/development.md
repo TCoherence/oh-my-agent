@@ -83,8 +83,8 @@ Still missing:
 
 ### v0.7.0
 
-- Date-based two-tier memory (`daily/` + `curated.yaml` + `MEMORY.md`) shipped
-- Manual `/promote` command and daily-to-curated promotion lifecycle
+- Two-tier date-based memory system shipped (rewritten as Judge in v0.9.0)
+- Manual promotion command and tier-promotion lifecycle (removed in v0.9.0)
 - Image attachment support across Discord + Claude/Gemini/Codex
 - Workspace refresh now regenerates synced skills and generated `AGENTS.md` together
 - Codex repo/workspace skill delivery now uses official `.agents/skills/`
@@ -100,7 +100,7 @@ Still missing:
 ### v0.6.0
 
 - Adaptive memory: YAML-backed store with Jaccard dedup, confidence scoring, eviction
-- `MemoryExtractor`: agent-powered extraction from conversation turns after compression
+- Agent-powered memory extraction from conversation turns after compression (replaced by event-driven Judge in v0.9.0)
 - Memory injection: `[Remembered context]` prepended to agent prompts
 - Discord `/memories` (list with category filter) and `/forget` (delete by ID)
 - Initial skill auto-approve and auto-merge prototype for skill tasks

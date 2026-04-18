@@ -37,7 +37,7 @@ class OutgoingAttachment:
 class IncomingMessage:
     """Platform-agnostic representation of a received message."""
 
-    platform: str           # "discord" | "slack" | "telegram"
+    platform: str           # "discord" (other platforms post-1.0)
     channel_id: str         # Platform-specific channel identifier
     thread_id: str | None   # Existing thread ID; None means create a new thread
     author: str             # Display name of the sender

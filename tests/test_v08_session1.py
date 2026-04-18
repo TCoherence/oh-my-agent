@@ -232,6 +232,26 @@ class TestConfigValidator:
         r = validate_config(cfg)
         assert any("unsupported platform" in e.message for e in r.errors)
 
+    def test_slack_rejected_with_specific_message(self):
+        """Slack must be explicitly rejected in 1.0 with a pointer to the upgrade guide."""
+        cfg = {
+            **_MINIMAL_VALID,
+            "gateway": {
+                "channels": [
+                    {"platform": "slack", "token": "t", "channel_id": "1", "agents": ["x"]}
+                ]
+            },
+        }
+        r = validate_config(cfg)
+        assert not r.ok
+        slack_errors = [e for e in r.errors if e.path.endswith(".platform")]
+        assert len(slack_errors) == 1
+        msg = slack_errors[0].message
+        assert "not supported in 1.0" in msg
+        assert "upgrade-guide" in msg
+        # Ensure the generic "unsupported platform" wording isn't also emitted.
+        assert "expected one of" not in msg
+
     def test_missing_token(self):
         cfg = {
             **_MINIMAL_VALID,
