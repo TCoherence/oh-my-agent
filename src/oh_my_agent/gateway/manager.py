@@ -61,9 +61,11 @@ class GatewayManager:
         intent_router=None,
         router_context_turns: int = 6,
         skill_evaluation_config: dict | None = None,
-        adaptive_memory_store=None,
-        memory_extractor=None,
-        adaptive_memory_budget: int = 500,
+        judge_store=None,
+        judge=None,
+        idle_tracker=None,
+        memory_inject_limit: int = 12,
+        memory_keyword_patterns: list[str] | None = None,
     ) -> None:
         self._channels = channels
         self._compressor = compressor
@@ -85,9 +87,17 @@ class GatewayManager:
         self._skill_auto_disable_min_invocations = int(auto_disable_cfg.get("min_invocations", 5))
         self._skill_auto_disable_threshold = float(auto_disable_cfg.get("failure_rate_threshold", 0.60))
         self._skill_stats_recent_days = int(eval_cfg.get("stats_recent_days", 7))
-        self._adaptive_memory_store = adaptive_memory_store
-        self._memory_extractor = memory_extractor
-        self._adaptive_memory_budget = adaptive_memory_budget
+        self._judge_store = judge_store
+        self._judge = judge
+        self._idle_tracker = idle_tracker
+        self._memory_inject_limit = max(1, int(memory_inject_limit))
+        default_keywords = ["记一下", "记下", "记住这个", "记下来", "remember this", "memorize this"]
+        self._memory_keyword_patterns = [
+            kw.lower() for kw in (memory_keyword_patterns or default_keywords) if kw
+        ]
+        if self._idle_tracker is not None:
+            self._idle_tracker._on_fire = self._idle_judge_fire  # type: ignore[attr-defined]
+        self._session_index: dict[str, tuple[ChannelSession, AgentRegistry]] = {}
         short_cfg = short_workspace or {}
         self._short_workspace_enabled = bool(short_cfg.get("enabled", True))
         self._short_workspace_ttl_hours = int(short_cfg.get("ttl_hours", 24))
@@ -112,8 +122,6 @@ class GatewayManager:
         self._stopping = False
         self._background_tasks: list[asyncio.Task] = []
         self._inflight_messages: set[asyncio.Task] = set()
-        self._memory_last_extracted_user_turn_count: dict[str, int] = {}
-        self._memory_last_extraction_empty: dict[str, bool] = {}
 
     def _session_key(self, platform: str, channel_id: str) -> str:
         return f"{platform}:{channel_id}"
@@ -505,6 +513,7 @@ class GatewayManager:
         self._background_tasks = []
         for channel, registry in self._channels:
             session = self._get_session(channel, registry)
+            self._session_index[self._session_key(channel.platform, channel.channel_id)] = (session, registry)
             # Inject memory store if available
             if hasattr(self, "_memory_store"):
                 session.memory_store = self._memory_store
@@ -521,9 +530,9 @@ class GatewayManager:
             if hasattr(channel, "set_skill_syncer") and self._skill_syncer:
                 channel.set_skill_syncer(self._skill_syncer, self._workspace_skills_dirs)
 
-            # Inject adaptive memory store for /memories, /forget (Discord-specific)
-            if hasattr(channel, "set_adaptive_memory_store") and self._adaptive_memory_store:
-                channel.set_adaptive_memory_store(self._adaptive_memory_store)
+            # Inject judge store + manager reference for /memories, /forget, /memorize (Discord)
+            if hasattr(channel, "set_judge_store") and self._judge_store is not None:
+                channel.set_judge_store(self._judge_store, self)
 
             # Inject runtime service for /task_* (Discord-specific)
             if hasattr(channel, "set_runtime_service") and self._runtime_service:
@@ -572,6 +581,13 @@ class GatewayManager:
                 self._short_workspace_cleanup_interval_minutes,
             )
 
+        if self._idle_tracker is not None:
+            await self._idle_tracker.start()
+            logger.info(
+                "Memory idle tracker started idle_seconds=%.0f",
+                self._idle_tracker.idle_seconds,
+            )
+
         try:
             await asyncio.gather(*self._background_tasks)
         finally:
@@ -589,6 +605,12 @@ class GatewayManager:
                 self._scheduler.stop()
             except Exception:
                 logger.warning("Failed to signal scheduler stop", exc_info=True)
+
+        if self._idle_tracker is not None:
+            try:
+                await self._idle_tracker.stop()
+            except Exception:
+                logger.warning("Failed to stop memory idle tracker", exc_info=True)
 
         current_task = asyncio.current_task()
         inflight = [
@@ -1158,27 +1180,19 @@ class GatewayManager:
         agent_prompt = msg.content
         if routed_skill and not explicit_skill:
             agent_prompt = f"/{routed_skill}\n\n{agent_prompt}".strip()
-        if self._adaptive_memory_store:
+        if self._judge_store is not None:
             try:
-                thread_topic = self._memory_thread_topic(history)
-                relevant = await self._adaptive_memory_store.get_relevant(
-                    msg.content,
-                    budget_chars=self._adaptive_memory_budget,
+                relevant = self._judge_store.get_relevant(
                     skill_name=tracked_skill,
                     thread_id=thread_id,
                     workspace=str(self._repo_root),
-                    thread_topic=thread_topic,
+                    limit=self._memory_inject_limit,
                 )
-                retrieval_stats = getattr(self._adaptive_memory_store, "last_retrieval_stats", {})
                 logger.info(
-                    "[%s] memory_inject selected_count=%d filtered_superseded_count=%d skill_scoped=%d workspace_project=%d global_preference=%d recent_daily=%d",
+                    "[%s] memory_inject selected_count=%d store_active=%d",
                     req_id,
                     len(relevant),
-                    int(retrieval_stats.get("filtered_superseded_count", 0)),
-                    int(retrieval_stats.get("selected_skill_scoped", 0)),
-                    int(retrieval_stats.get("selected_workspace_project", 0)),
-                    int(retrieval_stats.get("selected_global_preference", 0)),
-                    int(retrieval_stats.get("selected_recent_daily", 0)),
+                    len(self._judge_store.get_active()),
                 )
                 if relevant:
                     mem_lines = [f"- {m.summary}" for m in relevant]
@@ -1189,7 +1203,7 @@ class GatewayManager:
                         + msg.content
                     )
             except Exception as exc:
-                logger.warning("[%s] Adaptive memory injection failed: %s", req_id, exc)
+                logger.warning("[%s] Memory injection failed: %s", req_id, exc)
 
         # Run agent (with fallback, or targeted if preferred_agent is set)
         workspace_override = await self._resolve_short_workspace(session, thread_id)
@@ -1321,19 +1335,37 @@ class GatewayManager:
             elapsed_total,
         )
 
-        # Async: check compression + memory extraction (don't block the response)
-        if self._compressor or self._memory_extractor:
+        # Idle tracker: reset timer for this thread; judge will fire after idle window.
+        if self._idle_tracker is not None:
+            await self._idle_tracker.touch(
+                self._thread_key(session.platform, session.channel_id, thread_id),
+                metadata={
+                    "platform": session.platform,
+                    "channel_id": session.channel_id,
+                    "thread_id": thread_id,
+                    "skill_name": tracked_skill,
+                },
+            )
+            self._session_index[self._session_key(session.platform, session.channel_id)] = (session, registry)
+
+        # Synchronous keyword-triggered judge (e.g. "记一下", "remember this")
+        if self._judge is not None and self._user_message_has_memory_keyword(msg.content):
             asyncio.create_task(
-                self._try_compress_and_extract(
-                    session,
-                    registry,
-                    thread_id,
-                    req_id,
+                self._run_memory_judge(
+                    session=session,
+                    registry=registry,
+                    thread_id=thread_id,
                     skill_name=tracked_skill,
                     source_workspace=str(self._repo_root),
-                    thread_topic=self._memory_thread_topic(history),
+                    req_id=req_id,
+                    explicit_summary=None,
+                    explicit_scope=None,
                 )
             )
+
+        # Async: history compression
+        if self._compressor:
+            asyncio.create_task(self._try_compress(session, registry, thread_id, req_id))
 
         # Async: detect and hot-reload new skills created by agents
         if self._skill_syncer:
@@ -1430,68 +1462,120 @@ class GatewayManager:
         except Exception as exc:
             logger.warning("[%s] COMPRESS failed: %s", req_id, exc)
 
-    async def _try_compress_and_extract(
+    @staticmethod
+    def _thread_key(platform: str, channel_id: str, thread_id: str) -> str:
+        return f"{platform}|{channel_id}|{thread_id}"
+
+    @staticmethod
+    def _split_thread_key(key: str) -> tuple[str, str, str]:
+        parts = key.split("|", 2)
+        if len(parts) == 3:
+            return parts[0], parts[1], parts[2]
+        return "", "", key
+
+    def _user_message_has_memory_keyword(self, text: str) -> bool:
+        if not text:
+            return False
+        lowered = text.lower()
+        return any(kw in lowered for kw in self._memory_keyword_patterns)
+
+    async def _run_memory_judge(
         self,
+        *,
         session: ChannelSession,
         registry: AgentRegistry,
         thread_id: str,
-        req_id: str,
-        *,
-        skill_name: str | None = None,
-        source_workspace: str | None = None,
-        thread_topic: str | None = None,
-    ) -> None:
-        """Extract memories first (pre-compaction flush), then compress."""
-        # 1. Extract memories from the full (uncompressed) history
-        if self._memory_extractor:
-            try:
-                history = await session.get_history(thread_id)
-                user_turn_count = sum(1 for turn in history if turn.get("role") == "user")
-                if user_turn_count == 0:
-                    logger.info(
-                        "[%s] memory_extract thread_id=%s turn_count=%d extracted_count=0 rejected_count=0 retry_used=false skip_reason=no_user_turn parse_failure=false",
-                        req_id,
-                        thread_id,
-                        len(history),
-                    )
-                elif (
-                    self._memory_last_extracted_user_turn_count.get(thread_id, -1) == user_turn_count
-                ):
-                    skip_reason = (
-                        "no_new_user_turn_after_empty"
-                        if self._memory_last_extraction_empty.get(thread_id, False)
-                        else "no_new_user_turn"
-                    )
-                    logger.info(
-                        "[%s] memory_extract thread_id=%s turn_count=%d extracted_count=0 rejected_count=0 retry_used=false skip_reason=%s parse_failure=false",
-                        req_id,
-                        thread_id,
-                        len(history),
-                        skip_reason,
-                    )
-                else:
-                    entries = await self._memory_extractor.extract(
-                        history,
-                        registry,
-                        thread_id=thread_id,
-                        req_id=req_id,
-                        skill_name=skill_name or self._recent_thread_skill(session.platform, session.channel_id, thread_id),
-                        source_workspace=source_workspace or str(self._repo_root),
-                        thread_topic=thread_topic or self._memory_thread_topic(history),
-                    )
-                    self._memory_last_extracted_user_turn_count[thread_id] = user_turn_count
-                    self._memory_last_extraction_empty[thread_id] = not bool(entries)
-                    if entries:
-                        logger.info(
-                            "[%s] MEMORY_EXTRACT (pre-compaction) thread=%s extracted=%d",
-                            req_id, thread_id, len(entries),
-                        )
-            except Exception as exc:
-                logger.warning("[%s] MEMORY_EXTRACT failed: %s", req_id, exc)
+        skill_name: str | None,
+        source_workspace: str | None,
+        req_id: str | None,
+        explicit_summary: str | None,
+        explicit_scope: str | None,
+    ) -> dict | None:
+        if self._judge is None or self._judge_store is None:
+            return None
+        try:
+            history = await session.get_history(thread_id)
+        except Exception as exc:
+            logger.warning("memory_judge: failed to load history thread=%s: %s", thread_id, exc)
+            return None
+        thread_topic = self._memory_thread_topic(history) if history else None
+        try:
+            result = await self._judge.run(
+                conversation=history,
+                registry=registry,
+                thread_id=thread_id,
+                skill_name=skill_name or self._recent_thread_skill(session.platform, session.channel_id, thread_id),
+                source_workspace=source_workspace or str(self._repo_root),
+                thread_topic=thread_topic,
+                explicit_summary=explicit_summary,
+                explicit_scope=explicit_scope,
+                req_id=req_id,
+            )
+        except Exception as exc:
+            logger.warning("memory_judge crashed thread=%s: %s", thread_id, exc)
+            return None
+        if self._idle_tracker is not None:
+            await self._idle_tracker.mark_judged(
+                self._thread_key(session.platform, session.channel_id, thread_id)
+            )
+        if self._judge_store.should_synthesize():
+            asyncio.create_task(self._try_memory_md_synth(registry))
+        return {"actions": result.actions, "stats": result.stats, "error": result.error}
 
-        # 2. Compress (memories are already safely persisted)
-        if self._compressor:
-            await self._try_compress(session, registry, thread_id, req_id)
+    async def _try_memory_md_synth(self, registry: AgentRegistry) -> None:
+        if self._judge_store is None:
+            return
+        try:
+            await self._judge_store.synthesize_memory_md(registry)
+        except Exception as exc:
+            logger.warning("MEMORY.md synthesis failed: %s", exc)
+
+    async def _idle_judge_fire(self, thread_key: str, metadata: dict) -> None:
+        if self._judge is None or self._judge_store is None:
+            return
+        platform, channel_id, thread_id = self._split_thread_key(thread_key)
+        if not (platform and channel_id and thread_id):
+            return
+        registry_pair = self._session_index.get(self._session_key(platform, channel_id))
+        if registry_pair is None:
+            logger.debug("idle judge fire: no session for %s", thread_key)
+            return
+        session, registry = registry_pair
+        await self._run_memory_judge(
+            session=session,
+            registry=registry,
+            thread_id=thread_id,
+            skill_name=metadata.get("skill_name") if isinstance(metadata, dict) else None,
+            source_workspace=str(self._repo_root),
+            req_id=None,
+            explicit_summary=None,
+            explicit_scope=None,
+        )
+
+    async def request_memorize(
+        self,
+        *,
+        platform: str,
+        channel_id: str,
+        thread_id: str,
+        explicit_summary: str | None = None,
+        explicit_scope: str | None = None,
+    ) -> dict | None:
+        """Public entry point used by Discord /memorize and router intent."""
+        registry_pair = self._session_index.get(self._session_key(platform, channel_id))
+        if registry_pair is None:
+            return {"error": "no active session for this channel"}
+        session, registry = registry_pair
+        return await self._run_memory_judge(
+            session=session,
+            registry=registry,
+            thread_id=thread_id,
+            skill_name=self._recent_thread_skill(platform, channel_id, thread_id),
+            source_workspace=str(self._repo_root),
+            req_id=None,
+            explicit_summary=explicit_summary,
+            explicit_scope=explicit_scope,
+        )
 
     async def _run_short_workspace_janitor(self) -> None:
         while True:

@@ -450,27 +450,41 @@ async def _async_main(config: dict, logger: logging.Logger, *, project_root: Pat
             summary_max_chars=int(memory_cfg.get("summary_max_chars", 500)),
         )
 
-    # Build adaptive memory (optional)
-    adaptive_store = None
-    memory_extractor = None
-    adaptive_cfg = memory_cfg.get("adaptive", {})
-    if adaptive_cfg.get("enabled", False):
-        from oh_my_agent.memory.date_based import DateBasedMemoryStore
-        from oh_my_agent.memory.extractor import MemoryExtractor
+    # Build judge-driven memory (optional, replaces legacy adaptive memory)
+    judge_store = None
+    memory_judge = None
+    idle_tracker = None
+    memory_cfg_block = memory_cfg.get("judge", memory_cfg.get("adaptive", {}))
+    memory_inject_limit = int(memory_cfg_block.get("inject_limit", 12))
+    memory_keyword_patterns = memory_cfg_block.get("keyword_patterns") or None
+    if memory_cfg_block.get("enabled", False):
+        from oh_my_agent.memory.judge_store import JudgeStore
+        from oh_my_agent.memory.judge import Judge
+        from oh_my_agent.memory.idle_trigger import IdleTracker
 
-        memory_dir = str(Path(adaptive_cfg.get("memory_dir", "~/.oh-my-agent/memory")).expanduser().resolve())
-
-        adaptive_store = DateBasedMemoryStore(
-            memory_dir=memory_dir,
-            max_memories=int(adaptive_cfg.get("max_memories", 100)),
-            min_confidence=float(adaptive_cfg.get("min_confidence", 0.3)),
-            decay_half_life_days=float(adaptive_cfg.get("decay_half_life_days", 7.0)),
-            promotion_observation_threshold=int(adaptive_cfg.get("promotion_observation_threshold", 3)),
-            promotion_confidence_threshold=float(adaptive_cfg.get("promotion_confidence_threshold", 0.8)),
+        memory_dir = str(
+            Path(memory_cfg_block.get("memory_dir", "~/.oh-my-agent/memory")).expanduser().resolve()
         )
-        await adaptive_store.load()
-        memory_extractor = MemoryExtractor(adaptive_store)
-        logger.info("Date-based memory enabled: %s (%d memories loaded)", memory_dir, len(adaptive_store.memories))
+        judge_store = JudgeStore(
+            memory_dir=memory_dir,
+            synthesize_after_seconds=int(memory_cfg_block.get("synthesize_after_seconds", 6 * 3600)),
+            max_evidence_per_entry=int(memory_cfg_block.get("max_evidence_per_entry", 8)),
+        )
+        await judge_store.load()
+        memory_judge = Judge(judge_store)
+        idle_seconds = float(memory_cfg_block.get("idle_seconds", 15 * 60))
+        poll_interval = float(memory_cfg_block.get("idle_poll_seconds", 60))
+        idle_tracker = IdleTracker(
+            on_fire=lambda *_args, **_kwargs: asyncio.sleep(0),  # placeholder, manager rebinds
+            idle_seconds=idle_seconds,
+            poll_interval_seconds=poll_interval,
+        )
+        logger.info(
+            "Judge memory enabled: %s active=%d idle=%ss",
+            memory_dir,
+            judge_store.stats()["active"],
+            int(idle_seconds),
+        )
 
     # Sync skills
     skills_cfg = config.get("skills", {})
@@ -614,13 +628,12 @@ async def _async_main(config: dict, logger: logging.Logger, *, project_root: Pat
         logger.error("No channels configured in config.yaml")
         sys.exit(1)
 
-    if adaptive_store and getattr(adaptive_store, "needs_synthesis", False):
+    if judge_store is not None and judge_store.should_synthesize():
         try:
-            await adaptive_store.synthesize_memory_md(channel_pairs[0][1])
-            adaptive_store.clear_synthesis_flag()
-            logger.info("Adaptive memory synthesis refreshed at startup.")
+            await judge_store.synthesize_memory_md(channel_pairs[0][1])
+            logger.info("MEMORY.md refreshed at startup.")
         except Exception as exc:
-            logger.warning("Adaptive memory startup synthesis failed: %s", exc)
+            logger.warning("MEMORY.md startup synthesis failed: %s", exc)
 
     gateway = GatewayManager(
         channel_pairs,
@@ -638,9 +651,11 @@ async def _async_main(config: dict, logger: logging.Logger, *, project_root: Pat
         intent_router=intent_router,
         router_context_turns=int(router_cfg.get("context_turns", 10)),
         skill_evaluation_config=config.get("skills", {}).get("evaluation", {}),
-        adaptive_memory_store=adaptive_store,
-        memory_extractor=memory_extractor,
-        adaptive_memory_budget=int(adaptive_cfg.get("injection_budget_chars", 500)),
+        judge_store=judge_store,
+        judge=memory_judge,
+        idle_tracker=idle_tracker,
+        memory_inject_limit=memory_inject_limit,
+        memory_keyword_patterns=memory_keyword_patterns,
     )
     if memory_store:
         gateway.set_memory_store(memory_store)

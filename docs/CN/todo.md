@@ -174,7 +174,20 @@
 - [x] **`seattle-metro-housing-watch`**：默认 7 区 contract（Bothell + Lynnwood 升为默认覆盖）；Zillow 成为 area trend 正式第二来源；30Y + 15Y 固定利率并列比较；listing contract（仅 single-family/townhouse，每区保底 2 套 + 4 个优先级名额，hard cap 18，按区自身中位价过滤）；`sample_listings[]` 扩展 source_site / property_type / listed_at / original_list_price / price_history_summary；各 mode 样本配额分层（snapshot 1/区，deep-dive 4-6 套）
 - [x] **`market-briefing`**：finance daily 扩为 8 段固定结构（新增中国/港股脉搏、美国波动/风险偏好、中国房地产政策）；AI daily 扩为 9 段，新增 Frontier Labs Radar；frontier watchlist（8 家 lab）含 rumor 纪律规则；finance/politics 边界规则写入 reference；`timeout_seconds: 1200`；新增 `references/finance_watchlist.md` 和 `references/ai_frontier_watchlist.md`
 
-## v0.9 — 1.0 RC / Contract Freeze
+## v0.9 — Memory 子系统重构 + 1.0 RC / Contract Freeze
+
+### Memory 子系统重构（已完成，v0.9.0 发布）
+
+替换原 daily/curated 两层架构 + per-turn `MemoryExtractor`（旧实现因 LLM paraphrase 导致 dedup 永远命中不了，整个 store 卡在 `obs=1`），改为单层 `JudgeStore` + 事件驱动的 `Judge` agent，judge 在 prompt 里能看到现有 memory。
+
+- [x] 单层 `memories.yaml` schema，带 `status` / `superseded_by` 链路
+- [x] 三路触发：thread idle 15 分钟、`/memorize` slash command、自然语言关键词（`记一下` / `remember this`）
+- [x] action 模型：`add` / `strengthen` / `supersede` / `no_op`
+- [x] `MEMORY.md` 在 dirty / 缺失 / mtime > 6h 时自动 synthesize
+- [x] 数据迁移脚本（`scripts/migrate_memory_to_judge.py`）
+- [x] 删除 `/promote` slash command 和 `memory.adaptive` config 段
+
+### 1.0 RC / Contract Freeze（待开始）
 
 - [ ] 完成剩余的 service-layer 抽取
 - [ ] 清除 adapter 中残留的业务逻辑

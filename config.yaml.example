@@ -3,15 +3,21 @@ memory:
   path: ~/.oh-my-agent/runtime/memory.db
   max_turns: 20
   summary_max_chars: 500
-  adaptive:
+  judge:
     enabled: true
-    memory_dir: ~/.oh-my-agent/memory         # date-based memory directory
-    max_memories: 100
-    min_confidence: 0.3
-    injection_budget_chars: 500
-    decay_half_life_days: 7                   # daily entry half-life for relevance decay
-    promotion_observation_threshold: 3        # min observation count to auto-promote
-    promotion_confidence_threshold: 0.8       # min confidence to auto-promote
+    memory_dir: ~/.oh-my-agent/memory         # holds memories.yaml + MEMORY.md
+    inject_limit: 12                          # max active memories injected into agent prompt
+    idle_seconds: 900                         # judge fires after this much silence on a thread
+    idle_poll_seconds: 60                     # how often the idle scanner ticks
+    synthesize_after_seconds: 21600           # rebuild MEMORY.md if older than this and dirty
+    max_evidence_per_entry: 8
+    keyword_patterns:                         # natural-language triggers for /memorize
+      - 记一下
+      - 记下
+      - 记住这个
+      - 记下来
+      - remember this
+      - memorize this
 
 skills:
   enabled: true

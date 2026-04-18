@@ -144,7 +144,8 @@ class DiscordChannel(BaseChannel):
         self._skill_syncer = None  # SkillSync
         self._workspace_skills_dirs = None  # list[Path] | None
         self._runtime_service = None  # RuntimeService
-        self._adaptive_memory_store = None  # AdaptiveMemoryStore
+        self._judge_store = None  # JudgeStore
+        self._gateway_manager = None  # GatewayManager (for /memorize)
         self._scheduler = None  # Scheduler
         self._ask_service = AskService()
         self._task_service: TaskService | None = None
@@ -643,9 +644,11 @@ class DiscordChannel(BaseChannel):
         self._scheduler = scheduler
         self._refresh_services()
 
-    def set_adaptive_memory_store(self, store) -> None:
-        """Inject adaptive memory store for /memories and /forget commands."""
-        self._adaptive_memory_store = store
+    def set_judge_store(self, store, gateway_manager=None) -> None:
+        """Inject the judge memory store + gateway for /memories /forget /memorize commands."""
+        self._judge_store = store
+        if gateway_manager is not None:
+            self._gateway_manager = gateway_manager
 
     def _refresh_services(self) -> None:
         fire_automation = self._scheduler.fire_job_now if self._scheduler is not None else None
@@ -1485,7 +1488,7 @@ class DiscordChannel(BaseChannel):
             )
             await interaction.followup.send(self._render_doctor_result(result)[:1900], ephemeral=True)
 
-        # ---- Adaptive Memory commands --------------------------------------
+        # ---- Memory commands -----------------------------------------------
 
         @tree.command(name="memories", description="Show learned user memories")
         @app_commands.describe(category="Filter by category (preference, project_knowledge, workflow, fact)")
@@ -1496,45 +1499,40 @@ class DiscordChannel(BaseChannel):
                     ephemeral=True,
                 )
                 return
-            if not self._adaptive_memory_store:
+            if not self._judge_store:
                 await interaction.response.send_message(
-                    "Adaptive memory is not enabled.", ephemeral=True,
+                    "Memory subsystem is not enabled.", ephemeral=True,
                 )
                 return
 
             await interaction.response.defer()
-            all_memories = await self._adaptive_memory_store.list_all()
+            entries = self._judge_store.get_active()
             if category:
-                all_memories = [m for m in all_memories if m.category == category]
+                entries = [m for m in entries if m.category == category]
+            entries.sort(key=lambda m: (m.scope, -m.confidence, -m.observation_count))
 
-            if not all_memories:
+            if not entries:
                 msg = "No memories stored."
                 if category:
                     msg = f"No memories in category **{category}**."
                 await interaction.followup.send(msg)
                 return
 
-            lines = [f"**Memories** — {len(all_memories)} total"]
-            for m in all_memories[:20]:
+            lines = [f"**Memories** — {len(entries)} active"]
+            for m in entries[:25]:
                 conf_bar = "█" * int(m.confidence * 5) + "░" * (5 - int(m.confidence * 5))
-                tier_tag = "[C]" if getattr(m, "tier", "daily") == "curated" else "[D]"
-                explicitness = getattr(m, "explicitness", "inferred")
-                status = getattr(m, "status", "active")
-                scope = getattr(m, "scope", "global_user")
-                durability = getattr(m, "durability", "medium")
-                observed_at = str(getattr(m, "last_observed_at", getattr(m, "created_at", "-")))[:10]
+                observed_at = str(m.last_observed_at)[:10]
                 lines.append(
-                    f"`{m.id}` {tier_tag} [{conf_bar}] **[{m.category}]** [{explicitness}/{status}]"
-                    f" [{scope}/{durability}]"
+                    f"`{m.id}` [{conf_bar}] **[{m.category}/{m.scope}]**"
                     f" obs={m.observation_count} seen={observed_at} {m.summary}"
                 )
-            if len(all_memories) > 20:
-                lines.append(f"_…and {len(all_memories) - 20} more_")
+            if len(entries) > 25:
+                lines.append(f"_…and {len(entries) - 25} more_")
 
             await interaction.followup.send("\n".join(lines)[:2000])
 
-        @tree.command(name="forget", description="Delete a specific memory by ID")
-        @app_commands.describe(memory_id="The memory ID to delete (shown in /memories)")
+        @tree.command(name="forget", description="Delete a specific memory by ID (marks superseded)")
+        @app_commands.describe(memory_id="The memory ID to forget (shown in /memories)")
         async def slash_forget(interaction: discord.Interaction, memory_id: str):
             if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
                 await interaction.response.send_message(
@@ -1542,62 +1540,84 @@ class DiscordChannel(BaseChannel):
                     ephemeral=True,
                 )
                 return
-            if not self._adaptive_memory_store:
+            if not self._judge_store:
                 await interaction.response.send_message(
-                    "Adaptive memory is not enabled.", ephemeral=True,
+                    "Memory subsystem is not enabled.", ephemeral=True,
                 )
                 return
 
-            deleted = await self._adaptive_memory_store.delete_memory(memory_id)
+            deleted = await self._judge_store.manual_supersede(memory_id)
             if deleted:
+                if self._gateway_manager is not None and self._registry is not None:
+                    try:
+                        await self._gateway_manager._try_memory_md_synth(self._registry)  # type: ignore[attr-defined]
+                    except Exception:
+                        logger.debug("MEMORY.md synth after /forget failed", exc_info=True)
                 await interaction.response.send_message(
-                    f"Memory `{memory_id}` deleted.", ephemeral=True,
+                    f"Memory `{memory_id}` forgotten.", ephemeral=True,
                 )
             else:
                 await interaction.response.send_message(
-                    f"Memory `{memory_id}` not found.", ephemeral=True,
+                    f"Memory `{memory_id}` not found or already inactive.", ephemeral=True,
                 )
 
-        @tree.command(name="promote", description="Promote a daily memory to curated (long-term)")
-        @app_commands.describe(memory_id="The memory ID to promote (shown in /memories)")
-        async def slash_promote(interaction: discord.Interaction, memory_id: str):
+        @tree.command(name="memorize", description="Trigger the memory judge for the current thread")
+        @app_commands.describe(
+            summary="Optional explicit memory text (skips LLM judgment)",
+            scope="Optional scope: global_user | workspace | skill | thread",
+        )
+        async def slash_memorize(
+            interaction: discord.Interaction,
+            summary: str | None = None,
+            scope: str | None = None,
+        ):
             if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
                 await interaction.response.send_message(
                     "This command is restricted to the configured owner.",
                     ephemeral=True,
                 )
                 return
-            if not self._adaptive_memory_store:
+            if self._gateway_manager is None or self._judge_store is None:
                 await interaction.response.send_message(
-                    "Adaptive memory is not enabled.", ephemeral=True,
-                )
-                return
-            if not hasattr(self._adaptive_memory_store, "promote_memory"):
-                await interaction.response.send_message(
-                    "Memory store does not support promotion.", ephemeral=True,
+                    "Memory subsystem is not enabled.", ephemeral=True,
                 )
                 return
 
-            promoted = await self._adaptive_memory_store.promote_memory(memory_id)
-            if promoted:
-                if (
-                    getattr(self._adaptive_memory_store, "needs_synthesis", False)
-                    and hasattr(self._adaptive_memory_store, "synthesize_memory_md")
-                    and self._registry is not None
-                ):
-                    try:
-                        await self._adaptive_memory_store.synthesize_memory_md(self._registry)
-                        if hasattr(self._adaptive_memory_store, "clear_synthesis_flag"):
-                            self._adaptive_memory_store.clear_synthesis_flag()
-                    except Exception:
-                        logger.warning("MEMORY.md synthesis after /promote failed", exc_info=True)
+            channel = interaction.channel
+            if channel is None:
                 await interaction.response.send_message(
-                    f"Memory `{memory_id}` promoted to curated.", ephemeral=True,
+                    "Cannot resolve current thread.", ephemeral=True,
                 )
-            else:
-                await interaction.response.send_message(
-                    f"Memory `{memory_id}` not found in daily memories.", ephemeral=True,
+                return
+
+            await interaction.response.defer(ephemeral=True)
+            try:
+                result = await self._gateway_manager.request_memorize(
+                    platform="discord",
+                    channel_id=str(self._channel_id),
+                    thread_id=str(channel.id),
+                    explicit_summary=summary,
+                    explicit_scope=scope,
                 )
+            except Exception as exc:
+                logger.warning("/memorize failed: %s", exc)
+                await interaction.followup.send(f"❌ Memorize failed: {exc}", ephemeral=True)
+                return
+
+            if result is None:
+                await interaction.followup.send("Judge not available.", ephemeral=True)
+                return
+            if result.get("error"):
+                await interaction.followup.send(f"❌ {result['error']}", ephemeral=True)
+                return
+            stats = result.get("stats", {})
+            actions = result.get("actions", [])
+            summary_line = (
+                f"✅ Judge ran — actions={len(actions)} "
+                f"add={stats.get('add', 0)} strengthen={stats.get('strengthen', 0)} "
+                f"supersede={stats.get('supersede', 0)} no_op={stats.get('no_op', 0)}"
+            )
+            await interaction.followup.send(summary_line, ephemeral=True)
 
         # ---- Events --------------------------------------------------------
 

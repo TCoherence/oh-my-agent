@@ -174,7 +174,20 @@ Full details in [`v1.0-plan.md`](v1.0-plan.md).
 - [x] **`seattle-metro-housing-watch`**: 7-area default contract (Bothell + Lynnwood promoted from optional); Zillow as formal area-trend second source; 30Y + 15Y fixed rate comparison; listing contract (single-family/townhouse only, baseline 2/area + 4 priority slots, hard cap 18, area-own median price filter); `sample_listings[]` extended with source_site, property_type, listed_at, original_list_price, price_history_summary; mode-specific sample budgets (snapshot 1/area, deep-dive 4–6)
 - [x] **`market-briefing`**: finance daily expanded to 8 fixed sections (adds China/HK market, US volatility, China property policy); AI daily expanded to 9 sections with Frontier Labs Radar; frontier watchlist (8 labs) with codified rumor discipline; finance/politics boundary rule; `timeout_seconds: 1200`; new `references/finance_watchlist.md` and `references/ai_frontier_watchlist.md`
 
-## v0.9 — 1.0 RC / Contract Freeze
+## v0.9 — Memory Subsystem Rewrite + 1.0 RC / Contract Freeze
+
+### Memory Subsystem Rewrite (complete, shipped in v0.9.0)
+
+Replaces the legacy daily/curated tier system + post-turn `MemoryExtractor` (which left the store stuck at `obs=1` due to paraphrase-driven duplication) with a single-tier `JudgeStore` and an event-driven `Judge` agent that sees existing memories as context.
+
+- [x] Single-tier `memories.yaml` schema with `status`/`superseded_by` chain
+- [x] Event-driven triggers: thread idle (15 min), `/memorize` slash command, natural-language keywords (`记一下` / `remember this`)
+- [x] Action-based judgment (`add` / `strengthen` / `supersede` / `no_op`)
+- [x] `MEMORY.md` synthesized on dirty / missing / mtime > 6 h
+- [x] Migration script (`scripts/migrate_memory_to_judge.py`) for existing deployments
+- [x] Removed `/promote` slash command and `memory.adaptive` config section
+
+### 1.0 RC / Contract Freeze (pending)
 
 - [ ] Finish remaining service-layer extraction
 - [ ] Eliminate remaining adapter-owned business logic

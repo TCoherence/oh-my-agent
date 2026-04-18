@@ -6,6 +6,19 @@ The format is intentionally lightweight and release-oriented rather than exhaust
 
 ## Unreleased
 
+## v0.9.0 - 2026-04-17
+
+### Changed (BREAKING)
+
+- **Memory subsystem rewritten as a Judge model**: the legacy daily/curated tier system, post-turn `MemoryExtractor`, and explicit `/promote` workflow are removed and replaced by a single-tier `JudgeStore` plus an event-driven `Judge` agent.
+  - **New on-disk schema**: `~/.oh-my-agent/memory/memories.yaml` (flat list with `id`, `summary`, `category`, `scope`, `confidence`, `observation_count`, `evidence_log[]`, `status`/`superseded_by`); `MEMORY.md` is synthesized from active entries on the same path.
+  - **Triggers**: thread idle (default 15 min), explicit `/memorize` slash command (optionally with literal `summary` + `scope` to short-circuit the LLM), and natural-language keywords (`记一下` / `remember this` / etc.) — extraction no longer runs on every assistant turn.
+  - **Action-based judgment**: the Judge emits `add` / `strengthen` / `supersede` / `no_op` actions against the existing memory list (passed in as context), eliminating the paraphrase-driven duplication that left the old store stuck at `obs=1` for every entry.
+  - **Removed modules**: `oh_my_agent.memory.adaptive`, `oh_my_agent.memory.date_based`, `oh_my_agent.memory.extractor` and their tests are deleted.
+  - **Removed Discord command**: `/promote` (no two-tier system to promote between); `/memories` and `/forget` continue to work against the new store, and `/memorize` is added.
+  - **Config**: `memory.adaptive` is replaced by `memory.judge` (`enabled`, `memory_dir`, `inject_limit`, `idle_seconds`, `idle_poll_seconds`, `synthesize_after_seconds`, `max_evidence_per_entry`, `keyword_patterns`).
+  - **Migration**: run `python scripts/migrate_memory_to_judge.py <memory_dir>` to back up the old layout and write a fresh `memories.yaml` from `curated.yaml` (pass `--include-daily` to also import daily entries). Subsequent startup will rebuild `MEMORY.md` automatically.
+
 ## v0.8.2 - 2026-04-17
 
 ### Added

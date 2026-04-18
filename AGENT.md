@@ -15,7 +15,7 @@ oh-my-agent
 
 # Tests
 pip install -e ".[dev]"
-pytest                            # all tests (545 tests)
+pytest                            # all tests (504 tests)
 pytest tests/test_memory_store.py # single file
 pytest -k "test_fallback"         # single test by name
 ```
@@ -27,7 +27,7 @@ The system has seven major subsystems.
 **Gateway layer** (`src/oh_my_agent/gateway/`)
 
 - `BaseChannel` ABC: platform adapter with `start()`, `create_thread()`, `send()`, `typing()`. Implemented for Discord (with slash commands); Slack is a stub.
-- `GatewayManager`: holds `(BaseChannel, AgentRegistry)` pairs, routes `IncomingMessage` to `handle_message()`. Manages `ChannelSession`s and triggers history compression + adaptive memory extraction in the background.
+- `GatewayManager`: holds `(BaseChannel, AgentRegistry)` pairs, routes `IncomingMessage` to `handle_message()`. Manages `ChannelSession`s, triggers history compression in the background, touches the `IdleTracker` per message, and dispatches `Judge` runs on idle / `/memorize` / keyword triggers.
 - `ChannelSession`: per-channel state with async API. Loads/persists per-thread conversation histories via `MemoryStore`. In-memory cache avoids repeated DB reads.
 - Discord slash commands via `app_commands.CommandTree`:
   - Conversation: `/ask`, `/reset`, `/history`, `/agent`, `/search`
@@ -36,7 +36,7 @@ The system has seven major subsystems.
   - Automations: `/automation_status`, `/automation_reload`, `/automation_enable`, `/automation_disable`, `/automation_run`
   - Auth: `/auth_login`, `/auth_status`, `/auth_clear`
   - Operator: `/doctor`
-  - Adaptive memory: `/memories`, `/forget`, `/promote`
+  - Memory: `/memories`, `/forget`, `/memorize`
 - Agent targeting:
   - `/ask` supports optional `agent` argument for new threads.
   - Thread messages support `@claude` / `@gemini` / `@codex` prefix to force one agent for that turn.
@@ -60,9 +60,10 @@ The system has seven major subsystems.
 - `agent_sessions` table persists CLI session IDs with primary key `(platform, channel_id, thread_id, agent)`.
 - `GatewayManager` loads persisted session IDs on message handling and upserts/deletes them based on agent outcome.
 - `HistoryCompressor`: when a thread exceeds `max_turns`, compresses old turns into a summary (via agent) or truncates (fallback). Runs asynchronously after each response.
-- `DateBasedMemoryStore` (`memory/date_based.py`): two-tier date-organized memory store. Daily logs in `~/.oh-my-agent/memory/daily/YYYY-MM-DD.yaml` (with exponential time decay); curated long-term in `curated.yaml` (no decay). Auto-promotion uses fast-path (explicit, confidence ≥ 0.85, ≥ 2 observations) and slow-path (inferred, ≥ 3 observations or ≥ 2 source threads). Synthesizes `MEMORY.md` (natural-language view) via agent. Loads today + yesterday daily on startup.
-- `AdaptiveMemoryStore` (`memory/adaptive.py`): flat YAML store (legacy reference) and shared module-level utilities. `MemoryEntry` dataclass fields: `id`, `summary`, `category`, `confidence`, `source_threads`, `observation_count`, `tier`, `explicitness` (`explicit`/`inferred`), `status` (`active`/`superseded`), `evidence`, `last_observed_at`, `scope` (`global_user`/`workspace`/`skill`/`thread`), `durability` (`ephemeral`/`medium`/`long`), `source_skills`, `source_workspace`. Module-level helpers: `word_set`, `jaccard_similarity`, `lexical_match_kind`, `eviction_score`, `find_duplicate`, `scope_matches`, `scope_score_multiplier`, `memory_bucket`.
-- `MemoryExtractor` (`memory/extractor.py`): extracts memories from the most recent 6 turns (≤800 chars/assistant turn) rather than a fixed prefix slice. Trigger skips extraction when no new user turns have occurred and the previous pass returned empty. Prompt enforces user-only evidence and explicit negative rules against task details, temp plans, and speculation. Two-stage dedup: lexical normalization + batch agent merge pass (same_memory / related_but_distinct / contradictory); contradictory old entries are marked `superseded`. Parse failures retry with a simplified schema before giving up. Structured trace logs emitted for extract / merge / promote / inject decisions. Extracted memories are injected as `[Remembered context]` block before agent prompts; scope-aware bucketed retrieval ranks by four buckets (skill_scoped, workspace_project, global_preference, recent_daily); `superseded` entries are never injected.
+- `JudgeStore` (`memory/judge_store.py`): single-tier YAML-backed memory store at `~/.oh-my-agent/memory/memories.yaml`. `MemoryEntry` fields: `id`, `summary`, `category` (`preference`/`workflow`/`project_knowledge`/`fact`), `scope` (`global_user`/`workspace`/`skill`/`thread`), `confidence`, `observation_count`, `evidence_log` (list of `EvidenceRecord{thread_id, ts, snippet}`), `source_skills`, `source_workspace`, `status` (`active`/`superseded`), `superseded_by`, `created_at`, `last_observed_at`. Atomic `save()`. `apply_actions()` executes judge-emitted ops (`add` / `strengthen` / `supersede` / `no_op`); `manual_supersede()` powers `/forget`. `get_relevant()` ranks active entries with scope bonus multipliers for injection. `should_synthesize()` returns true on dirty state, missing `MEMORY.md`, or mtime > 6 h; `synthesize_memory_md(registry)` regenerates the natural-language `MEMORY.md` via agent.
+- `Judge` (`memory/judge.py`): event-driven LLM agent that replaces the per-turn `MemoryExtractor`. `run(thread_id, conversation, store, registry)` builds a prompt that includes the full thread plus the current `active` memory list and asks the agent for an `actions` array. `add` creates entries; `strengthen` increments observation_count and appends evidence; `supersede` chains old → new; `no_op` is required when nothing is worth saving. Parse failures fall back to a simplified schema retry. Explicit `/memorize <summary>` short-circuits the LLM step.
+- `IdleTracker` (`memory/idle_trigger.py`): per-thread `last_message_ts` tracker with a background polling task. When a thread is silent for `idle_seconds` (default 900 s = 15 min), invokes the registered `_on_fire` callback, which triggers `Judge.run()`. `touch()` resets the timer; `mark_judged()` prevents re-fire until the next user message; `forget()` drops state.
+- Memory triggers: (1) idle 15 min, (2) Discord `/memorize [summary] [scope]`, (3) natural-language keyword match (configurable via `memory.judge.keyword_patterns`, e.g. `记一下` / `remember this`). All paths converge on `Judge.run()`. Injection still happens as a `[Remembered context]` block before agent prompts; only `status=active` entries are eligible.
 
 **Skill system** (`src/oh_my_agent/skills/`)
 
@@ -115,7 +116,7 @@ Without `workspace` in config, the bot runs in backward-compatible mode (full en
 `load_config()` reads `config.yaml` with `${ENV_VAR}` substitution. Sections:
 
 ```yaml
-memory:         # SQLite backend, max_turns, summary_max_chars, adaptive memory
+memory:         # SQLite backend, max_turns, summary_max_chars, judge (idle_seconds, keyword_patterns, inject_limit)
 access:         # optional owner-only mode: owner_user_ids
 skills:         # enabled, path
 automations:    # optional recurring jobs (interval_seconds)
