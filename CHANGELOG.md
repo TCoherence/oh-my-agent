@@ -6,6 +6,8 @@ The format is intentionally lightweight and release-oriented rather than exhaust
 
 ## Unreleased
 
+## v0.9.3 - 2026-04-19
+
 ### Added
 
 - **Runtime retry by `error_kind` + "Re-run +30 turns" button** (Phase 3 of runtime agent-invocation UX, plan `3-diverge-refactor-snuggly-lerdorf`).
