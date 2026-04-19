@@ -6,6 +6,40 @@ The format is intentionally lightweight and release-oriented rather than exhaust
 
 ## Unreleased
 
+## v0.9.2 - 2026-04-18
+
+### Added
+
+- **Scheduler liveness watchdog + `next_run_at` authority fix** (closes backlog item [docs/EN/todo.md:243](docs/EN/todo.md), addresses the 2026-04-18 08:30 PDT paper-digest-daily-0830 10-hour stall incident).
+  - `Scheduler` now tracks per-job runtime state (`phase`, `next_fire_at`, `fire_started_at`, `last_progress_at`, `last_restart_at`, `last_restart_reason`) and exposes a read-only health API (`list_job_runtime_state()`, `get_job_runtime_state()`, `get_reload_runtime_state()`, `evaluate_job_health(now)`).
+  - `evaluate_job_health(now)` is the single source of truth for stale detection. Two rules: (A) task completed unexpectedly while `_stop_event` not set, and (B) `phase=="sleeping"` past `next_fire_at + grace` without progress. In-flight `firing` jobs are never flagged, so long-running automations like `market-briefing` (`timeout_seconds=1200`) do not trigger false positives.
+  - `GatewayManager._run_scheduler_supervisor()` polls health every 60s and restarts stale jobs or the reload loop via `restart_job(reason)` / `restart_reload_loop(reason)`. Restart calls are rate-limited (`min_restart_interval_seconds=120`, plus `restart_in_progress` re-entry guard) so repeated supervisor ticks do not thrash.
+  - `/doctor` gained a **Scheduler liveness** section: stale findings expanded with reason + `next_fire_at` + `last_progress_at`; when nothing is stale, shows the first 8 active jobs with `phase` + `next_fire_at`, plus `reload_last_progress_at`, plus any supervisor restart history from the last 24h. No catch-up/backfill — missed runs are covered by `/automation_run`.
+  - `GatewayManager._dispatch_scheduled_job` now refreshes `next_run_at` via a shared `_refresh_automation_next_run_at` helper on **every** exit path (normal completion, failure, no-live-session, DM missing target, DM unsupported) via outer try/finally. Refresh helper catches its own exceptions without re-raising so it never masks main-path errors.
+- **Test coverage expansion: 561 → 620 tests** (+59):
+  - `tests/test_scheduler_watchdog.py` (10): health evaluation rules A/B/reverse, restart rate-limiting, restart reload loop, runtime-state snapshot APIs, `compute_job_next_run_at`, reload staleness.
+  - `tests/test_automation_state_refresh.py` (6): all five `_dispatch_scheduled_job` exit branches assert `next_run_at` refresh; refresh helper's own-exception path verified silent.
+  - `tests/test_runtime_worktree.py` (14): `WorktreeManager` against a real git repo fixture — ensure/changed_files/run_shell timeout+heartbeat/create_patch/apply_check/list_changes/remove/prune.
+  - `tests/test_runtime_notifications.py` (9): `NotificationManager.emit` + `resolve` with real SQLite + fake channel — no-owners / success / dedup / missing session / both-fail / no-DM-support / resolve / body content / reason_label.
+  - `tests/test_auth_providers_bilibili.py` (20): mocked OAuth state machine for all QR codes (86101 / 86090 / 86038), header-based cookie extraction, cross-domain URL fallback, persist / validate / invalidate.
+- **Governance files**:
+  - `SECURITY.md` — vulnerability disclosure (tcoherence@gmail.com, 72h ack, 7d substantive follow-up), scope table, supported-versions table, credential handling note, safe-harbor clause.
+  - `CONTRIBUTING.md` — dev setup, test invocation, PR conventions, "discuss first" list for schema/adapter/state-machine changes.
+  - `docs/EN/README.md` — English mirror of `docs/CN/README.md` as the EN docs index.
+  - `docs/EN/release-process.md` + `docs/CN/release-process.md` — release playbook (pre-release checklist, version bump / tag / GitHub-release steps, hotfix flow).
+
+### Changed
+
+- `memory/store.py`: added `logger.warning` / `logger.exception` on two silent except sites (`get_schema_version` swallow, `claim_pending_runtime_task` rollback wrapper). Legacy-compat JSON-parse fallbacks in other sites intentionally left silent to avoid log noise.
+- `docs/{EN,CN}/architecture.md`: removed stale "automation runtime state is not yet persisted" line (persisted since v0.7.3); updated missed-job wording from "not yet finalized" to "policy is fixed to `skip`; manual catch-up via `/automation_run`".
+- `docs/{EN,CN}/todo.md`: flipped v0.9 RC / Contract Freeze items to `[x] shipped in v0.9.1`; flipped post-1.0 scheduler-watchdog backlog item to `[x]`.
+- `docs/CN/README.md`: removed Slack-stub references (stub was removed in v0.9.1); added missing doc-index entries (upgrade-guide, monitoring, troubleshooting, config-reference, release-process) + SECURITY/CONTRIBUTING pointers.
+- `AGENT.md` (`CLAUDE.md`): updated test-count reference from "504 tests" to "full test suite".
+
+### Deferred to post-1.0
+
+- P1.4 "CLI auth silent-401 safety net" — not reproducible locally; remains in [docs/EN/todo.md:244](docs/EN/todo.md) backlog. Main path (`OMA_CONTROL auth_required` control frame) is well-covered.
+
 ## v0.9.1 - 2026-04-18
 
 ### Added
