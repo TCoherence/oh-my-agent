@@ -1393,6 +1393,10 @@ class SQLiteMemoryStore(MemoryStore):
             row = await cursor.fetchone()
             return int(row["version"]) if row else 0
         except Exception:
+            logger.warning(
+                "get_schema_version failed; treating as version 0 (fresh DB or corrupt schema_version table)",
+                exc_info=True,
+            )
             return 0
 
     async def set_schema_version(self, version: int) -> None:
@@ -1459,6 +1463,7 @@ class SQLiteMemoryStore(MemoryStore):
                 )
                 await db.commit()
             except Exception:
+                logger.exception("claim_pending_runtime_task failed; rolling back")
                 await db.rollback()
                 raise
         return await self.get_runtime_task(task_id)
