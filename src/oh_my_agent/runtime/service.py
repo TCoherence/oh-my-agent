@@ -3589,11 +3589,9 @@ class RuntimeService:
         """
         if not self._reports_dir or not paths:
             return []
-        from datetime import datetime, timezone as _tz
-
         try:
-            date_dir = self._reports_dir / datetime.now(_tz.utc).strftime("%Y-%m-%d")
-            date_dir.mkdir(parents=True, exist_ok=True)
+            archive_dir = self._reports_dir / "artifacts"
+            archive_dir.mkdir(parents=True, exist_ok=True)
         except OSError:
             logger.warning("Failed to create reports dir %s", self._reports_dir, exc_info=True)
             return []
@@ -3602,9 +3600,9 @@ class RuntimeService:
         for path in paths:
             try:
                 source = path.resolve()
-                dest = date_dir / path.name
+                dest = archive_dir / path.name
                 if dest.exists() and dest.resolve() != source:
-                    dest = date_dir / f"{dest.stem}-{suffix_tag}{dest.suffix}"
+                    dest = archive_dir / f"{dest.stem}-{suffix_tag}{dest.suffix}"
                 shutil.copy2(source, dest)
                 archived.append(str(dest.resolve()))
             except OSError:

@@ -8,13 +8,13 @@ The format is intentionally lightweight and release-oriented rather than exhaust
 
 ### Added
 
-- **Artifact archive directory** (`runtime.reports_dir`, default `~/.oh-my-agent/reports`). Every `completion_mode=reply` artifact is now also copied to `<reports_dir>/<YYYY-MM-DD>/<filename>` so users can find reports without digging through `_artifacts/<task_id>/`. Filename collisions within a day get a `-<task_id[:8]>` suffix. The completion message surfaces a new `Archived to:` block with the absolute archive path. The isolated task workspace is still cleaned by the janitor per retention policy; the archive copy is not auto-pruned. Set `runtime.reports_dir: ""` (or `false`) to disable archiving and keep pre-v0.9.3 behavior.
+- **Artifact archive directory** (`runtime.reports_dir`, default `~/.oh-my-agent/reports`). Every `completion_mode=reply` artifact is now also copied flat into `<reports_dir>/artifacts/<filename>` so users can find reports without digging through `_artifacts/<task_id>/`. Filename collisions get a `-<task_id[:8]>` suffix. The completion message surfaces a new `Archived to:` block with the absolute archive path. The isolated task workspace is still cleaned by the janitor per retention policy; the archive copy is not auto-pruned. Set `runtime.reports_dir: ""` (or `false`) to disable archiving and keep pre-v0.9.3 behavior.
 - `ArtifactDeliveryResult.archived_paths` (defaults to `[]`) threaded through `RuntimeService._deliver_artifacts` / `deliver_files()` for future non-task callers.
 - **Task-model catalog doc** (`docs/EN/task-model.md` + `docs/CN/task-model.md`): single source of truth for the 3 task types, 3 completion modes, 6 router intents, 17 statuses, message→task flow, artifact delivery path, and known sharp edges (router threshold 0.55, artifact workspace lacking bundled skills, budget defaults, silent attachment-upload fallback, archive retention). Linked from both README TOCs + `CLAUDE.md` Runtime layer.
 - `config-reference.md` (EN + CN): `runtime.reports_dir` row.
 - Tests:
-  - `test_artifact_task_completes_without_merge` now asserts the archived file exists under `<reports_dir>/<YYYY-MM-DD>/` and appears in the completion message's `Archived to:` block.
-  - `test_artifact_task_archive_suffixes_conflicting_filename`: two tasks producing the same filename in the same day → second file gets `-<task_id[:8]>` suffix.
+  - `test_artifact_task_completes_without_merge` now asserts the archived file exists under `<reports_dir>/artifacts/` and appears in the completion message's `Archived to:` block.
+  - `test_artifact_task_archive_suffixes_conflicting_filename`: two tasks producing the same filename → second file gets `-<task_id[:8]>` suffix.
   - `test_artifact_archive_disabled_when_reports_dir_empty`: `reports_dir=None` short-circuits `_archive_artifact_files()`.
 
 ### Changed

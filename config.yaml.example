@@ -88,7 +88,7 @@ runtime:
   state_path: ~/.oh-my-agent/runtime/runtime.db
   worker_concurrency: 3
   worktree_root: ~/.oh-my-agent/runtime/tasks
-  reports_dir: ~/.oh-my-agent/reports     # artifact archive root (grouped by YYYY-MM-DD). Set to "" to disable archiving.
+  reports_dir: ~/.oh-my-agent/reports     # artifact archive root; files land flat in <reports_dir>/artifacts/. Set to "" to disable archiving.
   default_agent: codex
   default_test_command: "pytest -q"
   default_max_steps: 8

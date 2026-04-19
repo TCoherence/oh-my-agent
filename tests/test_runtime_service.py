@@ -917,7 +917,7 @@ async def test_artifact_task_completes_without_merge(runtime_env):
     assert reports_dir is not None
     archived_files = list(reports_dir.rglob("daily-news*.md"))
     assert len(archived_files) == 1
-    assert archived_files[0].parent.name.count("-") == 2  # YYYY-MM-DD subdir
+    assert archived_files[0].parent.name == "artifacts"
     sent_texts = [text for _, text in channel.sent]
     assert any("Archived to:" in text and str(archived_files[0]) in text for text in sent_texts)
 

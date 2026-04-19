@@ -85,7 +85,7 @@ The system has seven major subsystems.
 - Message-driven control: `_parse_control_intent(text)` detects stop/pause/resume from normal thread messages.
 - PAUSED state: non-terminal, workspace preserved, resumable with instruction.
 - Completion summary with goal, files changed, test counts, and timing metrics.
-- Artifact archive: on `completion_mode=reply` each delivered file is also copied to `<runtime.reports_dir>/<YYYY-MM-DD>/<filename>` (default `~/.oh-my-agent/reports/`); filename collisions get a `-<task_id[:8]>` suffix. The completion message renders an `Archived to:` block. Set `runtime.reports_dir: ""` to disable.
+- Artifact archive: on `completion_mode=reply` each delivered file is also copied to `<runtime.reports_dir>/artifacts/<filename>` (default `~/.oh-my-agent/reports/artifacts/`); filename collisions get a `-<task_id[:8]>` suffix. The completion message renders an `Archived to:` block. Set `runtime.reports_dir: ""` to disable.
 - Discord buttons for approval + slash command fallback.
 - Janitor cleanup with configurable retention. Archive dir under `reports_dir/` is **not** auto-pruned.
 

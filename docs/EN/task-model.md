@@ -26,7 +26,7 @@ Legacy aliases `TASK_TYPE_CODE` and `TASK_TYPE_SKILL` exist for backward compati
 | `artifact` | `TASK_COMPLETION_ARTIFACT` | Internal variant; rarely surfaced directly |
 | `merge` | `TASK_COMPLETION_MERGE` | Task transitions to `WAITING_MERGE`; owner approves via Discord button or `/task_merge`, which triggers the merge-gate pipeline |
 
-**Archive behaviour (new in v0.9.3 prep)**: when completion mode is `reply`, every artifact file is also copied to `<reports_dir>/<YYYY-MM-DD>/<filename>`. If the filename already exists in that date bucket, the new copy is suffixed with `-<task_id[:8]>`. Set `runtime.reports_dir: ""` in config to disable archiving.
+**Archive behaviour (new in v0.9.3 prep)**: when completion mode is `reply`, every artifact file is also copied to `<reports_dir>/artifacts/<filename>`. If the filename already exists, the new copy is suffixed with `-<task_id[:8]>`. Set `runtime.reports_dir: ""` in config to disable archiving.
 
 ---
 
@@ -119,7 +119,7 @@ For `artifact` tasks only:
 
 1. Agent writes files under its isolated workspace (`_artifacts/<task_id>/…`).
 2. `_artifact_paths_for_task()` resolves them against `task.artifact_manifest` or fallback `changed_files`.
-3. `_archive_artifact_files()` copies each file to `<reports_dir>/<YYYY-MM-DD>/`. Filename collisions get a `-<task_id[:8]>` suffix. Failures are logged and non-fatal.
+3. `_archive_artifact_files()` copies each file to `<reports_dir>/artifacts/`. Filename collisions get a `-<task_id[:8]>` suffix. Failures are logged and non-fatal.
 4. `deliver_files()` uploads the originals as Discord attachments (file-size guards: `artifact_attachment_max_count`, `artifact_attachment_max_bytes`, `artifact_attachment_max_total_bytes`).
 5. Completion message renders `Attachments:` + `Archived to:`. If upload fails, delivery degrades to `mode="path"` with absolute local paths.
 6. Janitor (`runtime.cleanup.retention_hours`, default 168 h) eventually deletes the task workspace. The archived copy under `reports_dir/` is **not** auto-cleaned.
@@ -133,7 +133,7 @@ For `artifact` tasks only:
 3. **Default budget `max_steps=8 / max_minutes=20`.** Fine for a single-turn report but tight for multi-source research. Override per automation or per skill frontmatter, or call `create_artifact_task(max_steps=…)` from custom code.
 4. **Silent fallback to `mode="path"`.** When attachment upload fails (network, size), the completion message says `Delivery mode: path` with local paths — easy to miss in a busy thread. The archived copy remains in `reports_dir/` regardless.
 5. **Archive retention is manual.** `reports_dir` never auto-prunes. Plan for periodic sweeps (`find ~/.oh-my-agent/reports -mtime +90 -delete`) if disk usage matters.
-6. **Docker volume mapping.** Inside the container artifacts land at `/home/.oh-my-agent/reports/<date>/`; from the host they surface at `${OMA_DOCKER_MOUNT:-~/oh-my-agent-docker-mount}/.oh-my-agent/reports/<date>/`.
+6. **Docker volume mapping.** Inside the container artifacts land at `/home/.oh-my-agent/reports/artifacts/`; from the host they surface at `${OMA_DOCKER_MOUNT:-~/oh-my-agent-docker-mount}/.oh-my-agent/reports/artifacts/`.
 
 ---
 

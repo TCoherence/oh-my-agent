@@ -183,7 +183,7 @@ Autonomous task orchestration.
 | `state_path` | string | `~/.oh-my-agent/runtime/runtime.db` | SQLite DB for task state machine. |
 | `worker_concurrency` | int | `3` | Max concurrent runtime tasks. |
 | `worktree_root` | string | `~/.oh-my-agent/runtime/tasks` | Per-task worktree base. |
-| `reports_dir` | string | `~/.oh-my-agent/reports` | Artifact archive root, grouped by `YYYY-MM-DD/`. Set to `""` or `false` to disable archiving. Not auto-pruned. |
+| `reports_dir` | string | `~/.oh-my-agent/reports` | Artifact archive root. Files land flat in `<reports_dir>/artifacts/`. Set to `""` or `false` to disable archiving. Not auto-pruned. |
 | `default_agent` | string | `codex` | Agent used when a task does not specify one. |
 | `default_test_command` | string | `pytest -q` | Command run during VALIDATING. |
 | `default_max_steps` | int | `8` | Hard agent-step cap per task. |
