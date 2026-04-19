@@ -188,3 +188,68 @@ async def test_claude_error_max_turns_returns_partial(monkeypatch):
     assert response.error_kind == "max_turns"
     assert response.terminal_reason == "max_turns"
     assert response.partial_text == "partial answer"
+
+
+@pytest.mark.asyncio
+async def test_claude_error_max_turns_with_ndjson_stdout(monkeypatch):
+    """Regression: claude emits NDJSON (system.init → assistant → user → result)
+    even on max_turns failure. The failure path must parse the final result
+    frame out of the stream rather than fall back to ``cli_error``.
+
+    Without JSONL-aware parsing, ``error_kind`` silently becomes ``cli_error``
+    and ``AgentRegistry.run()`` fallbacks to the next agent instead of
+    short-circuiting. Observed in prod 2026-04-19.
+    """
+    ndjson = "\n".join([
+        json.dumps({"type": "system", "subtype": "init", "session_id": "sess-mt"}),
+        json.dumps({
+            "type": "assistant",
+            "message": {"content": [{"type": "tool_use", "id": "t1", "name": "Read"}]},
+        }),
+        json.dumps({
+            "type": "user",
+            "message": {"content": [{"type": "tool_result", "tool_use_id": "t1"}]},
+        }),
+        json.dumps({
+            "type": "result",
+            "subtype": "error_max_turns",
+            "result": "partial NDJSON",
+            "terminal_reason": "max_turns",
+            "session_id": "sess-mt",
+            "errors": ["Reached maximum number of turns (2)"],
+        }),
+    ])
+
+    async def _fail(*args, **kwargs):
+        return 1, ndjson.encode(), b""
+
+    monkeypatch.setattr("oh_my_agent.agents.cli.claude._stream_cli_process", _fail)
+
+    agent = ClaudeAgent(cli_path="claude", model="sonnet-test")
+    response = await agent.run("hello")
+
+    assert response.error_kind == "max_turns"
+    assert response.terminal_reason == "max_turns"
+    assert response.partial_text == "partial NDJSON"
+
+
+@pytest.mark.asyncio
+async def test_claude_ndjson_without_result_frame_falls_back_to_cli_error(monkeypatch):
+    """If the stream has no ``result`` event (e.g. CLI killed mid-stream),
+    ``error_kind`` should fall back to ``classify_cli_error_kind`` on stderr —
+    NOT silently stay ``cli_error`` via broken JSON parsing."""
+    ndjson = "\n".join([
+        json.dumps({"type": "system", "subtype": "init", "session_id": "sess-x"}),
+        json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "..."}]}}),
+    ])
+
+    async def _fail(*args, **kwargs):
+        return 1, ndjson.encode(), b"upstream 503: service unavailable"
+
+    monkeypatch.setattr("oh_my_agent.agents.cli.claude._stream_cli_process", _fail)
+
+    agent = ClaudeAgent(cli_path="claude", model="sonnet-test")
+    response = await agent.run("hello")
+
+    assert response.error_kind == "api_5xx"
+    assert response.terminal_reason is None

@@ -265,13 +265,13 @@ class ClaudeAgent(BaseCLIAgent):
             partial_text = None
             terminal_reason = None
             error_kind = "cli_error"
-            raw_error: dict | None = None
+            # The Claude CLI emits NDJSON on stdout (system init → assistant →
+            # user → ... → result) even on failure. Use the shared stream
+            # parser so the last ``type=result`` frame still classifies
+            # ``error_max_turns`` as ``max_turns`` — a plain ``json.loads``
+            # silently fails on multi-line NDJSON and drops the signal.
             stdout_text = stdout.decode(errors="replace").strip()
-            if stdout_text:
-                try:
-                    raw_error = json.loads(stdout_text)
-                except (json.JSONDecodeError, TypeError, ValueError):
-                    raw_error = None
+            _, raw_error = _parse_claude_stream_json(stdout_text) if stdout_text else (None, None)
             if isinstance(raw_error, dict):
                 if str(raw_error.get("subtype", "")).strip() == "error_max_turns":
                     error_kind = "max_turns"
