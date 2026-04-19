@@ -80,6 +80,7 @@ DecisionAction = Literal[
     "merge",
     "discard",
     "request_changes",
+    "rerun_bump_turns",
 ]
 DecisionSource = Literal["button", "slash"]
 

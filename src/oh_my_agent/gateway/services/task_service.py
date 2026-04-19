@@ -312,6 +312,8 @@ class TaskService:
             return ["approve", "reject", "suggest", "discard", "replace"]
         if task.status in {"WAITING_MERGE", "APPLIED", "MERGE_FAILED"}:
             return ["merge", "discard", "request_changes"]
+        if task.status == "FAILED":
+            return ["rerun_bump_turns"]
         return []
 
     @staticmethod

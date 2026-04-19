@@ -117,6 +117,24 @@ _TASK_LIVE_STATUSES = {
 
 _PARTIAL_EXCERPT_MAX_CHARS = 2000
 
+# Retry policy for transient agent failures. Kinds absent from this map are
+# terminal (``max_turns`` / ``auth`` / ``cli_error``). Tuple length = max
+# retries for that kind; each element is the backoff in seconds before the
+# (n+1)th attempt. ``_MAX_TOTAL_RETRIES`` caps the total number of retries
+# across all kinds within a single ``_invoke_agent_with_retry`` call.
+_RETRY_BACKOFF_SECONDS: dict[str, tuple[int, ...]] = {
+    "rate_limit": (10, 30),
+    "api_5xx": (5, 15),
+    "timeout": (0,),
+}
+_MAX_TOTAL_RETRIES = 3
+
+# Default turn budget bump when the user clicks "Re-run +N turns" on a
+# max_turns-failed task. Applied on top of ``parent.agent_max_turns`` (or 25
+# if the parent left it unset, matching ``ClaudeAgent`` default).
+_RERUN_BUMP_TURNS_DEFAULT = 30
+_RERUN_FALLBACK_BASE_TURNS = 25
+
 # After this many days, automation_posts rows are dropped by the janitor —
 # replies older than this stop promoting to follow-up threads. MVP: fixed
 # constant; move to config if users ever complain.
@@ -2325,6 +2343,9 @@ class RuntimeService:
             valid = {TASK_STATUS_WAITING_MERGE, TASK_STATUS_APPLIED, TASK_STATUS_MERGE_FAILED}
             if task.status not in valid:
                 return f"Task `{task.id}` is not waiting merge (status: {task.status})."
+        elif event.action == "rerun_bump_turns":
+            if task.status != TASK_STATUS_FAILED:
+                return f"Task `{task.id}` is not in FAILED state (status: {task.status})."
         else:
             return f"Unsupported decision action: {event.action}"
 
@@ -2406,6 +2427,20 @@ class RuntimeService:
 
         if event.action == "merge":
             return await self._execute_merge(task, actor_id=event.actor_id, source=event.source)
+
+        if event.action == "rerun_bump_turns":
+            logger.info(
+                "rerun_bump_turns dispatch task=%s actor=%s source=%s status=%s",
+                task.id,
+                event.actor_id,
+                event.source,
+                task.status,
+            )
+            return await self._rerun_task_with_bumped_turns(
+                task,
+                actor_id=event.actor_id,
+                source=event.source,
+            )
 
         if event.action == "discard":
             await self._store.update_runtime_task(
@@ -3113,7 +3148,9 @@ class RuntimeService:
             forced = registry.get_agent(task.preferred_agent)
             if forced is not None:
                 logger.info("Trying agent '%s' %s (forced)", forced.name, label)
-                response = await self._invoke_agent(forced, prompt, workspace, task.id, task, step)
+                response = await self._invoke_agent_with_retry(
+                    forced, prompt, workspace, task.id, task, step
+                )
                 if response.error:
                     logger.warning(
                         "Agent '%s' %s failed: %s (error_kind=%s)",
@@ -3128,7 +3165,9 @@ class RuntimeService:
         last_response = AgentResponse(text="", error="No agents available.")
         for agent in registry.agents:
             logger.info("Trying agent '%s' %s", agent.name, label)
-            response = await self._invoke_agent(agent, prompt, workspace, task.id, task, step)
+            response = await self._invoke_agent_with_retry(
+                agent, prompt, workspace, task.id, task, step
+            )
             if not response.error:
                 return agent.name, response
             if response.error_kind == "max_turns":
@@ -3149,6 +3188,79 @@ class RuntimeService:
             last_response = response
         logger.error("All agents failed %s. Last error: %s", label, last_response.error)
         return last_name, last_response
+
+    async def _invoke_agent_with_retry(
+        self,
+        agent,
+        prompt: str,
+        workspace: Path,
+        runtime_thread_id: str,
+        task: RuntimeTask,
+        step: int,
+    ) -> AgentResponse:
+        """Invoke *agent* with ``error_kind``-driven retry.
+
+        Retries transient failures (``rate_limit`` / ``api_5xx`` / ``timeout``)
+        with per-kind backoff, capped at :data:`_MAX_TOTAL_RETRIES` total
+        attempts per call. Terminal kinds (``max_turns`` / ``auth`` /
+        ``cli_error``) return immediately.
+        """
+        label = f"[task={task.id} step={step} agent={agent.name}]"
+        attempts_total = 0
+        used_per_kind: dict[str, int] = {}
+        while True:
+            response = await self._invoke_agent(
+                agent, prompt, workspace, runtime_thread_id, task, step
+            )
+            if not response.error:
+                return response
+            kind = response.error_kind or "cli_error"
+            backoff_seq = _RETRY_BACKOFF_SECONDS.get(kind)
+            if backoff_seq is None:
+                return response
+            if attempts_total >= _MAX_TOTAL_RETRIES:
+                logger.warning(
+                    "%s retry cap reached (%d/%d) — giving up on kind=%s",
+                    label,
+                    attempts_total,
+                    _MAX_TOTAL_RETRIES,
+                    kind,
+                )
+                return response
+            used = used_per_kind.get(kind, 0)
+            if used >= len(backoff_seq):
+                logger.warning(
+                    "%s per-kind retry exhausted (kind=%s used=%d/%d) — giving up",
+                    label,
+                    kind,
+                    used,
+                    len(backoff_seq),
+                )
+                return response
+            backoff = backoff_seq[used]
+            attempts_total += 1
+            used_per_kind[kind] = used + 1
+            logger.info(
+                "%s retry=%d/%d kind=%s backoff=%ds",
+                label,
+                attempts_total,
+                _MAX_TOTAL_RETRIES,
+                kind,
+                backoff,
+            )
+            await self._store.add_runtime_event(
+                task.id,
+                "task.agent_retry",
+                {
+                    "step": step,
+                    "agent": agent.name,
+                    "attempt": attempts_total,
+                    "kind": kind,
+                    "backoff_seconds": backoff,
+                },
+            )
+            if backoff > 0:
+                await asyncio.sleep(backoff)
 
     async def _invoke_agent(
         self,
@@ -3476,6 +3588,89 @@ class RuntimeService:
         await self._store.add_runtime_event(task.id, "task.workspace_cleaned", {"workspace": str(workspace)})
         return True
 
+    async def _rerun_task_with_bumped_turns(
+        self,
+        parent: RuntimeTask,
+        *,
+        actor_id: str,
+        source: str,
+    ) -> str:
+        """Create a sibling runtime task with ``agent_max_turns`` bumped by the
+        configured amount. Triggered by the Discord "Re-run +N turns" button
+        after a ``max_turns`` failure — user acknowledges the overshoot and
+        wants another attempt with more budget.
+        """
+        base_turns = parent.agent_max_turns or _RERUN_FALLBACK_BASE_TURNS
+        new_turns = base_turns + _RERUN_BUMP_TURNS_DEFAULT
+
+        sibling_id = uuid.uuid4().hex[:12]
+        sibling = await self._store.create_runtime_task(
+            task_id=sibling_id,
+            platform=parent.platform,
+            channel_id=parent.channel_id,
+            thread_id=parent.thread_id,
+            created_by=actor_id,
+            goal=parent.goal,
+            original_request=parent.original_request or parent.goal,
+            preferred_agent=parent.preferred_agent,
+            status=TASK_STATUS_PENDING,
+            max_steps=parent.max_steps,
+            max_minutes=parent.max_minutes,
+            test_command=parent.test_command,
+            completion_mode=parent.completion_mode,
+            output_summary=None,
+            artifact_manifest=None,
+            automation_name=parent.automation_name,
+            task_type=parent.task_type,
+            skill_name=parent.skill_name,
+            agent_timeout_seconds=parent.agent_timeout_seconds,
+            agent_max_turns=new_turns,
+        )
+        await self._store.add_runtime_event(
+            sibling.id,
+            "task.created",
+            {
+                "source": f"rerun_bump_turns:{source}",
+                "status": TASK_STATUS_PENDING,
+                "parent_task_id": parent.id,
+                "agent_max_turns": new_turns,
+            },
+        )
+        await self._store.add_runtime_event(
+            parent.id,
+            "task.rerun_sibling_created",
+            {
+                "actor_id": actor_id,
+                "source": source,
+                "sibling_task_id": sibling.id,
+                "agent_max_turns": new_turns,
+                "base_turns": base_turns,
+            },
+        )
+        self._task_sources[sibling.id] = f"rerun_bump_turns:{source}"
+        logger.info(
+            "Runtime task=%s rerun as task=%s max_turns=%d (parent=%d bump=+%d)",
+            parent.id,
+            sibling.id,
+            new_turns,
+            base_turns,
+            _RERUN_BUMP_TURNS_DEFAULT,
+        )
+
+        await self._notify(
+            sibling,
+            (
+                f"Task `{sibling.id}` queued (re-run of `{parent.id}` with "
+                f"`max_turns={new_turns}`, was {base_turns})."
+            ),
+            record_history=True,
+        )
+        await self._signal_status_by_id(sibling, TASK_STATUS_PENDING)
+        return (
+            f"Task `{parent.id}` queued for re-run as `{sibling.id}` "
+            f"with max_turns={new_turns}."
+        )
+
     async def _fail(self, task: RuntimeTask, error: str, *, response: AgentResponse | None = None) -> None:
         await self._store.update_runtime_task(
             task.id,
@@ -3506,6 +3701,69 @@ class RuntimeService:
             usage=response.usage if response is not None else None,
         )
         await self._signal_status_by_id(task, TASK_STATUS_FAILED)
+
+        if response is not None and response.error_kind == "max_turns":
+            await self._surface_rerun_bump_turns_button(task)
+
+    async def _surface_rerun_bump_turns_button(self, task: RuntimeTask) -> None:
+        """Post a decision surface offering to re-run the failed task with a
+        bumped ``max_turns`` budget. Fire-and-forget — any failure is logged
+        but does not propagate (the task is already terminal)."""
+        session = self._session_for(task)
+        if session is None:
+            logger.warning(
+                "Cannot surface rerun_bump_turns button for task=%s: no session for %s:%s",
+                task.id,
+                task.platform,
+                task.channel_id,
+            )
+            return
+        base_turns = task.agent_max_turns or _RERUN_FALLBACK_BASE_TURNS
+        new_turns = base_turns + _RERUN_BUMP_TURNS_DEFAULT
+        try:
+            nonce = await self._store.create_runtime_decision_nonce(
+                task.id,
+                ttl_minutes=self._decision_ttl_minutes,
+            )
+        except Exception as exc:
+            logger.warning("Failed to mint rerun_bump_turns nonce for task=%s: %s", task.id, exc)
+            return
+
+        mentions = ""
+        if self._owner_user_ids:
+            render_user_mention = getattr(session.channel, "render_user_mention", None)
+            if callable(render_user_mention):
+                mentions = " ".join(
+                    render_user_mention(uid) for uid in sorted(self._owner_user_ids)
+                )
+                if mentions:
+                    mentions += " "
+
+        ttl_hours = max(1, self._decision_ttl_minutes // 60)
+        text = (
+            f"{mentions}Task `{task.id}` hit `max_turns` ({base_turns}). "
+            f"Re-run with `max_turns={new_turns}`?\n"
+            f"_Button expires in ~{ttl_hours}h._"
+        )
+        logger.info(
+            "Surfacing rerun_bump_turns button task=%s thread=%s base=%d new=%d ttl_minutes=%d",
+            task.id,
+            task.thread_id,
+            base_turns,
+            new_turns,
+            self._decision_ttl_minutes,
+        )
+        try:
+            await self._send_decision_surface(
+                session,
+                task.thread_id,
+                text,
+                task.id,
+                nonce,
+                ["rerun_bump_turns"],
+            )
+        except Exception as exc:
+            logger.warning("Failed to post rerun_bump_turns surface for task=%s: %s", task.id, exc)
 
     async def _on_skill_task_merged(
         self,

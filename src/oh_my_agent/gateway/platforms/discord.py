@@ -505,6 +505,7 @@ class DiscordChannel(BaseChannel):
             "discard": ("Discard", "danger"),
             "request_changes": ("Request Changes", "secondary"),
             "replace": ("Replace", "secondary"),
+            "rerun_bump_turns": ("Re-run +30 turns", "primary"),
         }
         descriptors = [
             ActionDescriptor(

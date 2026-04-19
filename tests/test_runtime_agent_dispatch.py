@@ -68,9 +68,9 @@ class _StubAgent(BaseAgent):
 
 
 def _service_stub(responses: list[AgentResponse]):
-    """Build a minimal object exposing `_run_agent` bound to a stub with a mocked `_invoke_agent`."""
+    """Build a minimal object exposing `_run_agent` bound to a stub with a mocked `_invoke_agent_with_retry`."""
     stub = SimpleNamespace()
-    stub._invoke_agent = AsyncMock(side_effect=responses)
+    stub._invoke_agent_with_retry = AsyncMock(side_effect=responses)
     stub._run_agent = MethodType(RuntimeService._run_agent, stub)
     return stub
 
@@ -97,7 +97,7 @@ async def test_run_agent_falls_back_after_non_max_turns_error(caplog):
 
     assert name == "codex"
     assert response.text == "done"
-    assert stub._invoke_agent.await_count == 2
+    assert stub._invoke_agent_with_retry.await_count == 2
     messages = [rec.getMessage() for rec in caplog.records]
     assert any("Trying agent 'claude'" in m for m in messages)
     assert any("Trying agent 'codex'" in m for m in messages)
@@ -131,7 +131,7 @@ async def test_run_agent_does_not_fall_back_on_max_turns(caplog):
 
     assert name == "claude"
     assert response.error_kind == "max_turns"
-    assert stub._invoke_agent.await_count == 1
+    assert stub._invoke_agent_with_retry.await_count == 1
     messages = [rec.getMessage() for rec in caplog.records]
     assert any("hit max turns" in m and "not falling back" in m for m in messages)
 
@@ -158,9 +158,9 @@ async def test_run_agent_preferred_agent_short_circuits_fallback():
 
     assert name == "codex"
     assert response.error == "boom"
-    assert stub._invoke_agent.await_count == 1
+    assert stub._invoke_agent_with_retry.await_count == 1
     # Verify the forced agent was codex, not claude
-    forced_agent = stub._invoke_agent.await_args_list[0].args[0]
+    forced_agent = stub._invoke_agent_with_retry.await_args_list[0].args[0]
     assert forced_agent.name == "codex"
 
 
@@ -186,6 +186,6 @@ async def test_run_agent_all_fail_returns_last_response(caplog):
 
     assert name == "codex"
     assert response.error == "second fail"
-    assert stub._invoke_agent.await_count == 2
+    assert stub._invoke_agent_with_retry.await_count == 2
     messages = [rec.getMessage() for rec in caplog.records]
     assert any("All agents failed" in m for m in messages)
