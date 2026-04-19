@@ -50,6 +50,9 @@ class IncomingMessage:
     system: bool = False
     # File attachments (e.g. images) downloaded to local temp paths.
     attachments: list[Attachment] = field(default_factory=list)
+    # Platform message id this message is a reply to (e.g. Discord reply anchor).
+    # Used by the gateway to promote replies to automation posts into follow-up threads.
+    reply_to_message_id: str | None = None
 
 
 MessageHandler = Callable[[IncomingMessage], Awaitable[None]]
@@ -122,6 +125,20 @@ class BaseChannel(ABC):
     async def create_thread(self, msg: IncomingMessage, name: str) -> str:
         """Create a new thread from *msg* and return its platform thread_id."""
         ...
+
+    async def create_followup_thread(
+        self,
+        anchor_message_id: str,
+        name: str,
+    ) -> str | None:
+        """Create a thread attached to an existing channel message.
+
+        Used to spawn a follow-up thread rooted at a prior automation post.
+        Default implementation returns ``None`` — platforms that support
+        message-anchored threads (e.g. Discord) should override.
+        """
+        del anchor_message_id, name
+        return None
 
     @abstractmethod
     async def send(self, thread_id: str, text: str) -> str | None:

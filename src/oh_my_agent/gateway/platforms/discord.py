@@ -1598,6 +1598,12 @@ class DiscordChannel(BaseChannel):
                 )
             # Message directly in our target channel → needs new thread
             elif ch.id == target_id:
+                reply_to_id: str | None = None
+                ref = getattr(message, "reference", None)
+                if ref is not None:
+                    ref_msg_id = getattr(ref, "message_id", None)
+                    if ref_msg_id is not None:
+                        reply_to_id = str(ref_msg_id)
                 msg = IncomingMessage(
                     platform="discord",
                     channel_id=self._channel_id,
@@ -1608,6 +1614,7 @@ class DiscordChannel(BaseChannel):
                     raw=message,
                     preferred_agent=preferred_agent,
                     attachments=downloaded,
+                    reply_to_message_id=reply_to_id,
                 )
             else:
                 return
@@ -1697,6 +1704,32 @@ class DiscordChannel(BaseChannel):
             auto_archive_duration=THREAD_ARCHIVE_MINUTES,
         )
         return str(thread.id)
+
+    async def create_followup_thread(
+        self,
+        anchor_message_id: str,
+        name: str,
+    ) -> str | None:
+        if not self._client:
+            return None
+        try:
+            parent = self._client.get_channel(int(self._channel_id))
+            if parent is None:
+                parent = await self._client.fetch_channel(int(self._channel_id))
+            anchor = await parent.fetch_message(int(anchor_message_id))
+            thread = await anchor.create_thread(
+                name=name[:100],
+                auto_archive_duration=THREAD_ARCHIVE_MINUTES,
+            )
+            return str(thread.id)
+        except Exception:
+            logger.warning(
+                "create_followup_thread failed anchor=%s channel=%s",
+                anchor_message_id,
+                self._channel_id,
+                exc_info=True,
+            )
+            return None
 
     async def send(self, thread_id: str, text: str) -> str | None:
         thread = await self._resolve_channel(thread_id)

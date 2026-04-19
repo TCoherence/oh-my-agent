@@ -942,6 +942,74 @@ class GatewayManager:
                 )
                 return
 
+        # Reply-to-automation-post → spawn a follow-up thread anchored on the
+        # original bot message, and seed it with a system turn referencing the
+        # automation's archived artifacts. TTL is enforced by the runtime
+        # janitor, so we just trust whatever get_automation_post returns.
+        if (
+            msg.thread_id is None
+            and msg.reply_to_message_id
+            and not msg.system
+            and self._memory_store_ref is not None
+        ):
+            post = None
+            try:
+                post = await self._memory_store_ref.get_automation_post(
+                    msg.platform, msg.channel_id, msg.reply_to_message_id,
+                )
+            except Exception:
+                logger.debug(
+                    "[%s] get_automation_post failed reply_to=%s",
+                    req_id,
+                    msg.reply_to_message_id,
+                    exc_info=True,
+                )
+            if post is not None:
+                thread_name = f"follow-up · {post.automation_name}"[:90]
+                new_thread_id = await channel.create_followup_thread(
+                    msg.reply_to_message_id, thread_name,
+                )
+                if new_thread_id:
+                    logger.info(
+                        "[%s] AUTOMATION_FOLLOWUP thread=%s automation=%s anchor_msg=%s",
+                        req_id,
+                        new_thread_id,
+                        post.automation_name,
+                        msg.reply_to_message_id,
+                    )
+                    msg.thread_id = new_thread_id
+                    seed_lines = [
+                        f"[Follow-up on automation '{post.automation_name}'.]",
+                    ]
+                    if post.artifact_paths:
+                        seed_lines.append(
+                            "Artifacts from that run (read them as needed):"
+                        )
+                        for path in post.artifact_paths[:8]:
+                            seed_lines.append(f"- {path}")
+                        if len(post.artifact_paths) > 8:
+                            seed_lines.append(
+                                f"- ... and {len(post.artifact_paths) - 8} more"
+                            )
+                    else:
+                        seed_lines.append("(No archived artifact paths were recorded.)")
+                    await session.append_assistant(
+                        new_thread_id, "\n".join(seed_lines), "system",
+                    )
+                    try:
+                        await self._memory_store_ref.set_automation_post_follow_up_thread(
+                            platform=msg.platform,
+                            channel_id=msg.channel_id,
+                            message_id=msg.reply_to_message_id,
+                            follow_up_thread_id=new_thread_id,
+                        )
+                    except Exception:
+                        logger.debug(
+                            "[%s] set_automation_post_follow_up_thread failed",
+                            req_id,
+                            exc_info=True,
+                        )
+
         # Determine thread: use existing or create a new one
         thread_id = msg.thread_id
         if thread_id is None:

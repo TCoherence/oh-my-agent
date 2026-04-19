@@ -243,6 +243,7 @@
 - [x] Scheduler liveness watchdog：discord gateway 剧烈抖动（密集 `session invalidated` + `websocket behind`）后，scheduler cron loop 可能静默 stall —— 进程、discord.py、short-workspace janitor 都活着，只有 scheduler tick 停转，直到手动 SIGINT 重启才恢复。观察到的真实案例：2026-04-18 08:30 PDT paper-digest-daily-0830 错过触发，10 小时内零 scheduler 事件。需要给 scheduler 加存活指标（最近 tick 的 mtime 或心跳计数），manager 层周期性检查，stale 时重启内部 loop；不要做 catch-up/backfill（漏跑由 `/automation_run` 补）
 - [ ] CLI agent credential recovery：统一识别 `claude` / `codex` / `gemini` 的认证失效（401、invalid credentials、login required），避免无意义 fallback；补 owner-facing 提示、可恢复状态，以及按 provider 区分的自动/半自动重新登录链路
 - [x] Codex / Gemini CLI session resume
+- [ ] Automation follow-up 的 CLI session resume：在 `automation_posts` state 里同时保存 CLI session id，让 reply 触发的 follow-up thread 能 `--resume` 原 automation 对话。优先级较低 —— artifact 路径注入已覆盖大多数场景。
 - [ ] 增加内部 CLI agent 生命周期 hook（`pre-run`、`post-run`、`failure`、`resume`），用于 system-owned 的后处理能力，例如 reverse sync、artifact 后处理和可观测性收尾；这应保持为内部机制，而不是用户可见的新功能面
 - [ ] Skill feedback UX 后续优化：支持对同一次 skill 结果的任意消息分块做 reaction 反馈，并可选在 skill 完成后单独发一条 feedback prompt/message；反馈范围只针对已完成的 skill 输出，不覆盖 auth/system/普通聊天消息
 - [x] 持久化 automation 运行时状态（`last_run`、`next_run`、`last_error`），而不是每次重启后全部重算

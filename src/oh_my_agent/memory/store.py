@@ -17,6 +17,7 @@ import aiosqlite
 
 from oh_my_agent.auth.types import AUTH_SCOPE_DEFAULT, AuthFlow, CredentialHandle
 from oh_my_agent.runtime.types import (
+    AutomationPost,
     AutomationRuntimeState,
     HitlPrompt,
     NotificationRecord,
@@ -50,6 +51,7 @@ RUNTIME_STATE_TABLES = {
     "runtime_task_decisions",
     "ephemeral_workspaces",
     "automation_runtime_state",
+    "automation_posts",
 }
 SKILLS_TELEMETRY_TABLES = {
     "skill_provenance",
@@ -73,6 +75,7 @@ TABLE_COPY_ORDER = [
     "notification_events",
     "ephemeral_workspaces",
     "automation_runtime_state",
+    "automation_posts",
     "skill_provenance",
     "skill_invocations",
     "skill_feedback",
@@ -430,6 +433,43 @@ class MemoryStore(ABC):
 
     async def delete_automation_state(self, name: str) -> None:
         return None
+
+    # -- automation posts (for reply-triggered follow-up) -----------------
+
+    async def record_automation_post(
+        self,
+        *,
+        platform: str,
+        channel_id: str,
+        message_id: str,
+        automation_name: str,
+        artifact_paths: list[str] | None = None,
+        agent_name: str | None = None,
+        skill_name: str | None = None,
+        task_id: str | None = None,
+    ) -> None:
+        return None
+
+    async def get_automation_post(
+        self, platform: str, channel_id: str, message_id: str
+    ) -> AutomationPost | None:
+        return None
+
+    async def set_automation_post_follow_up_thread(
+        self,
+        *,
+        platform: str,
+        channel_id: str,
+        message_id: str,
+        follow_up_thread_id: str,
+    ) -> None:
+        return None
+
+    async def list_automation_posts(self, *, limit: int = 100) -> list[AutomationPost]:
+        return []
+
+    async def purge_expired_automation_posts(self, ttl_days: int) -> int:
+        return 0
 
     # -- schema version ---------------------------------------------------
 
@@ -793,6 +833,23 @@ CREATE TABLE IF NOT EXISTS automation_runtime_state (
     next_run_at      TIMESTAMP,
     updated_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS automation_posts (
+    platform             TEXT NOT NULL,
+    channel_id           TEXT NOT NULL,
+    message_id           TEXT NOT NULL,
+    automation_name      TEXT NOT NULL,
+    fired_at             TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    artifact_paths       TEXT,
+    agent_name           TEXT,
+    skill_name           TEXT,
+    task_id              TEXT,
+    follow_up_thread_id  TEXT,
+    PRIMARY KEY (platform, channel_id, message_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_automation_posts_fired_at
+    ON automation_posts(fired_at);
 
 CREATE TABLE IF NOT EXISTS skill_provenance (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1383,6 +1440,103 @@ class SQLiteMemoryStore(MemoryStore):
                 (name,),
             )
             await db.commit()
+
+    # -- automation posts (for reply-triggered follow-up) -----------------
+
+    async def record_automation_post(
+        self,
+        *,
+        platform: str,
+        channel_id: str,
+        message_id: str,
+        automation_name: str,
+        artifact_paths: list[str] | None = None,
+        agent_name: str | None = None,
+        skill_name: str | None = None,
+        task_id: str | None = None,
+    ) -> None:
+        paths_json = json.dumps(list(artifact_paths or []))
+        async with self._write_lock:
+            db = await self._conn()
+            await db.execute(
+                """
+                INSERT INTO automation_posts (
+                    platform, channel_id, message_id, automation_name,
+                    fired_at, artifact_paths, agent_name, skill_name, task_id
+                )
+                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?)
+                ON CONFLICT(platform, channel_id, message_id) DO UPDATE SET
+                    automation_name = excluded.automation_name,
+                    fired_at        = excluded.fired_at,
+                    artifact_paths  = excluded.artifact_paths,
+                    agent_name      = excluded.agent_name,
+                    skill_name      = excluded.skill_name,
+                    task_id         = excluded.task_id
+                """,
+                (
+                    platform,
+                    channel_id,
+                    message_id,
+                    automation_name,
+                    paths_json,
+                    agent_name,
+                    skill_name,
+                    task_id,
+                ),
+            )
+            await db.commit()
+
+    async def get_automation_post(
+        self, platform: str, channel_id: str, message_id: str
+    ) -> AutomationPost | None:
+        db = await self._conn()
+        cursor = await db.execute(
+            "SELECT * FROM automation_posts WHERE platform=? AND channel_id=? AND message_id=?",
+            (platform, channel_id, message_id),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return AutomationPost.from_row(dict(row))
+
+    async def set_automation_post_follow_up_thread(
+        self,
+        *,
+        platform: str,
+        channel_id: str,
+        message_id: str,
+        follow_up_thread_id: str,
+    ) -> None:
+        async with self._write_lock:
+            db = await self._conn()
+            await db.execute(
+                "UPDATE automation_posts SET follow_up_thread_id=? "
+                "WHERE platform=? AND channel_id=? AND message_id=?",
+                (follow_up_thread_id, platform, channel_id, message_id),
+            )
+            await db.commit()
+
+    async def list_automation_posts(self, *, limit: int = 100) -> list[AutomationPost]:
+        db = await self._conn()
+        cursor = await db.execute(
+            "SELECT * FROM automation_posts ORDER BY fired_at DESC LIMIT ?",
+            (int(limit),),
+        )
+        rows = await cursor.fetchall()
+        return [AutomationPost.from_row(dict(row)) for row in rows]
+
+    async def purge_expired_automation_posts(self, ttl_days: int) -> int:
+        """Delete automation_posts older than ``ttl_days``. Returns row count."""
+        if ttl_days <= 0:
+            return 0
+        async with self._write_lock:
+            db = await self._conn()
+            cursor = await db.execute(
+                f"DELETE FROM automation_posts WHERE fired_at < datetime('now', '-{int(ttl_days)} days')"
+            )
+            count = cursor.rowcount or 0
+            await db.commit()
+        return int(count)
 
     # -- schema version ---------------------------------------------------
 

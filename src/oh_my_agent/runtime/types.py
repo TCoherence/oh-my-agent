@@ -417,3 +417,47 @@ class AutomationRuntimeState:
             next_run_at=row.get("next_run_at"),
             updated_at=row.get("updated_at"),
         )
+
+
+@dataclass(frozen=True)
+class AutomationPost:
+    """Record of a message an automation posted into a channel.
+
+    Used to wire Discord-style "reply to this message" into a follow-up thread
+    that inherits the automation's artifacts as context.
+    """
+
+    platform: str
+    channel_id: str
+    message_id: str
+    automation_name: str
+    fired_at: str
+    artifact_paths: list[str]
+    agent_name: str | None = None
+    skill_name: str | None = None
+    task_id: str | None = None
+    follow_up_thread_id: str | None = None
+
+    @classmethod
+    def from_row(cls, row: dict[str, Any]) -> "AutomationPost":
+        raw_paths = row.get("artifact_paths")
+        paths: list[str] = []
+        if raw_paths:
+            try:
+                loaded = json.loads(raw_paths)
+                if isinstance(loaded, list):
+                    paths = [str(p) for p in loaded]
+            except (TypeError, ValueError):
+                paths = []
+        return cls(
+            platform=str(row["platform"]),
+            channel_id=str(row["channel_id"]),
+            message_id=str(row["message_id"]),
+            automation_name=str(row["automation_name"]),
+            fired_at=str(row["fired_at"]),
+            artifact_paths=paths,
+            agent_name=row.get("agent_name"),
+            skill_name=row.get("skill_name"),
+            task_id=row.get("task_id"),
+            follow_up_thread_id=row.get("follow_up_thread_id"),
+        )

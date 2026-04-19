@@ -117,6 +117,11 @@ _TASK_LIVE_STATUSES = {
 
 _PARTIAL_EXCERPT_MAX_CHARS = 2000
 
+# After this many days, automation_posts rows are dropped by the janitor —
+# replies older than this stop promoting to follow-up threads. MVP: fixed
+# constant; move to config if users ever complain.
+AUTOMATION_POST_TTL_DAYS = 7
+
 
 @dataclass(frozen=True)
 class ArtifactDeliveryResult:
@@ -2493,11 +2498,19 @@ class RuntimeService:
             try:
                 cleaned = await self._cleanup_expired_tasks()
                 cleaned_logs = await self._cleanup_expired_agent_logs()
-                if cleaned or cleaned_logs:
+                cleaned_posts = 0
+                try:
+                    cleaned_posts = await self._store.purge_expired_automation_posts(
+                        AUTOMATION_POST_TTL_DAYS
+                    )
+                except Exception:
+                    logger.debug("purge_expired_automation_posts failed", exc_info=True)
+                if cleaned or cleaned_logs or cleaned_posts:
                     logger.info(
-                        "Runtime janitor cleaned %d expired task workspace(s) and %d expired agent log(s)",
+                        "Runtime janitor cleaned %d expired task workspace(s), %d expired agent log(s), and %d expired automation post(s)",
                         cleaned,
                         cleaned_logs,
+                        cleaned_posts,
                     )
                 await asyncio.sleep(max(1, self._cleanup_interval_minutes) * 60)
             except asyncio.CancelledError:
@@ -3049,12 +3062,19 @@ class RuntimeService:
                         test_summary=test_summary,
                         delivery=delivery,
                     )
+                automation_artifact_paths: list[str] | None = None
+                if task.automation_name and delivery is not None:
+                    if delivery.archived_paths:
+                        automation_artifact_paths = list(delivery.archived_paths)
+                    elif delivery.delivered_paths:
+                        automation_artifact_paths = list(delivery.delivered_paths)
                 await self._notify(
                     task,
                     completion_text,
                     record_history=True,
                     terminal=True,
                     usage=response.usage,
+                    automation_artifact_paths=automation_artifact_paths,
                 )
                 await self._signal_status_by_id(task, TASK_STATUS_COMPLETED)
                 return
@@ -4175,6 +4195,7 @@ class RuntimeService:
         record_history: bool = False,
         terminal: bool = False,
         usage: dict[str, Any] | None = None,
+        automation_artifact_paths: list[str] | None = None,
     ) -> None:
         session = self._session_for(task)
         if session is None:
@@ -4183,7 +4204,12 @@ class RuntimeService:
             if record_history:
                 await session.append_assistant(task.thread_id, text[:4000], "runtime")
             if terminal:
-                await self._send_automation_terminal_message(task, text, usage=usage)
+                await self._send_automation_terminal_message(
+                    task,
+                    text,
+                    usage=usage,
+                    artifact_paths=automation_artifact_paths,
+                )
             return
         current = await self._store.get_runtime_task(task.id)
         status_message_id = current.status_message_id if current else task.status_message_id
@@ -4213,6 +4239,7 @@ class RuntimeService:
         text: str,
         *,
         usage: dict[str, Any] | None = None,
+        artifact_paths: list[str] | None = None,
     ) -> None:
         session = self._session_for(task)
         if session is None:
@@ -4224,13 +4251,38 @@ class RuntimeService:
         )
         first_chunk_budget = max(1, 2000 - len(attribution) - 1)
         chunks = chunk_message(text, max_size=first_chunk_budget)
+        first_message_id: str | None = None
         if not chunks:
-            await session.channel.send(task.thread_id, f"{attribution}\n*(empty automation output)*")
-            return
-        await session.channel.send(task.thread_id, f"{attribution}\n{chunks[0]}")
-        remainder = text[len(chunks[0]):].lstrip()
-        for chunk in chunk_message(remainder) if remainder else []:
-            await session.channel.send(task.thread_id, chunk)
+            first_message_id = await session.channel.send(
+                task.thread_id, f"{attribution}\n*(empty automation output)*"
+            )
+        else:
+            first_message_id = await session.channel.send(
+                task.thread_id, f"{attribution}\n{chunks[0]}"
+            )
+            remainder = text[len(chunks[0]):].lstrip()
+            for chunk in chunk_message(remainder) if remainder else []:
+                await session.channel.send(task.thread_id, chunk)
+
+        if first_message_id and task.automation_name:
+            try:
+                await self._store.record_automation_post(
+                    platform=task.platform,
+                    channel_id=task.channel_id,
+                    message_id=first_message_id,
+                    automation_name=task.automation_name,
+                    artifact_paths=list(artifact_paths or []),
+                    agent_name=agent_name,
+                    skill_name=task.skill_name,
+                    task_id=task.id,
+                )
+            except Exception:
+                logger.debug(
+                    "record_automation_post failed task=%s msg=%s",
+                    task.id,
+                    first_message_id,
+                    exc_info=True,
+                )
 
     async def _signal_status_by_id(self, task: RuntimeTask, status: str) -> None:
         emoji = self._emoji_for_status(status)
