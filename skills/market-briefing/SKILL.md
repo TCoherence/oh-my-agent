@@ -3,6 +3,7 @@ name: market-briefing
 description: Produce Chinese-first politics, finance, and AI market briefings with persisted Markdown and JSON outputs under ~/.oh-my-agent/reports/market-briefing/. Use this skill for bounded historical bootstrap dossiers, domain daily digests, and cross-domain weekly synthesis that should reuse prior stored reports rather than relying on Discord history.
 metadata:
   timeout_seconds: 1500
+  max_turns: 60
 ---
 
 # Market Briefing
