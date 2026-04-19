@@ -6,7 +6,21 @@ from dataclasses import dataclass
 
 @dataclass
 class AgentResponse:
-    """Result from an agent invocation."""
+    """Result from an agent invocation.
+
+    ``error_kind`` classifies failures so callers can decide retry policy.
+    Known values:
+
+    - ``max_turns``    — model exhausted its turn budget (structural; bump budget to retry)
+    - ``timeout``      — subprocess wall-clock exceeded (often transient)
+    - ``rate_limit``   — provider returned 429 / quota / rate-limit signal (transient; backoff)
+    - ``api_5xx``      — provider returned 5xx / overloaded / upstream error (transient; backoff)
+    - ``auth``         — credentials missing / invalid / expired (structural; no retry)
+    - ``cli_error``    — catch-all for non-classified CLI failures (structural by default)
+
+    Agents should populate ``error_kind`` whenever ``error`` is set. Unknown
+    failures fall back to ``cli_error``.
+    """
 
     text: str
     raw: dict | None = None

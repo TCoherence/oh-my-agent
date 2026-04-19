@@ -15,6 +15,7 @@ from oh_my_agent.agents.cli.base import (
     _extract_cli_error,
     _should_clear_resumed_session,
     _stream_cli_process,
+    classify_cli_error_kind,
 )
 
 logger = logging.getLogger(__name__)
@@ -284,6 +285,8 @@ class ClaudeAgent(BaseCLIAgent):
                     raw_terminal = raw_error.get("terminal_reason")
                     if isinstance(raw_terminal, str) and raw_terminal.strip():
                         terminal_reason = raw_terminal.strip()
+            if error_kind == "cli_error":
+                error_kind = classify_cli_error_kind(err_msg)
             partial_text = partial_text or _bounded_log_excerpt(log_path)
             return AgentResponse(
                 text="",

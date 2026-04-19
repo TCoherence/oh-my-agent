@@ -41,6 +41,56 @@ _INVALID_SESSION_MARKERS = (
     "failed to resume",
 )
 
+# Best-effort substring markers for splitting a generic CLI failure into a
+# more actionable ``error_kind``. Case-insensitive.
+_AUTH_MARKERS = (
+    "invalid api key",
+    "authentication failed",
+    "not authenticated",
+    "not logged in",
+    "please log in",
+    "please login",
+    "unauthorized",
+    "401",
+)
+_RATE_LIMIT_MARKERS = (
+    "rate limit",
+    "rate_limit",
+    "too many requests",
+    "quota exceeded",
+    "usage limit",
+    "429",
+)
+_API_5XX_MARKERS = (
+    "500 internal",
+    "internal server error",
+    "bad gateway",
+    "service unavailable",
+    "gateway timeout",
+    "overloaded",
+    "upstream",
+    "502",
+    "503",
+    "504",
+)
+
+
+def classify_cli_error_kind(err_msg: str) -> str:
+    """Best-effort classify a CLI error message into a retry-meaningful kind.
+
+    Returns one of ``rate_limit``, ``api_5xx``, ``auth``, or ``cli_error``
+    (fallback). Callers that already have a more specific kind (e.g.
+    ``max_turns`` from parsing a structured result) should skip this.
+    """
+    lowered = err_msg.lower()
+    if any(marker in lowered for marker in _RATE_LIMIT_MARKERS):
+        return "rate_limit"
+    if any(marker in lowered for marker in _API_5XX_MARKERS):
+        return "api_5xx"
+    if any(marker in lowered for marker in _AUTH_MARKERS):
+        return "auth"
+    return "cli_error"
+
 
 def _extract_cli_error(stderr_raw: bytes, stdout_raw: bytes) -> str:
     """Best-effort extraction of useful CLI error text.

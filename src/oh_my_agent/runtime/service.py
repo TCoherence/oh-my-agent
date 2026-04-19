@@ -3087,22 +3087,47 @@ class RuntimeService:
         workspace: Path,
         step: int,
     ) -> tuple[str, AgentResponse]:
+        label = f"[task={task.id} step={step}]"
+
         if task.preferred_agent:
             forced = registry.get_agent(task.preferred_agent)
             if forced is not None:
+                logger.info("Trying agent '%s' %s (forced)", forced.name, label)
                 response = await self._invoke_agent(forced, prompt, workspace, task.id, task, step)
+                if response.error:
+                    logger.warning(
+                        "Agent '%s' %s failed: %s (error_kind=%s)",
+                        forced.name,
+                        label,
+                        response.error,
+                        response.error_kind,
+                    )
                 return forced.name, response
 
         last_name = registry.agents[-1].name
         last_response = AgentResponse(text="", error="No agents available.")
         for agent in registry.agents:
+            logger.info("Trying agent '%s' %s", agent.name, label)
             response = await self._invoke_agent(agent, prompt, workspace, task.id, task, step)
             if not response.error:
                 return agent.name, response
             if response.error_kind == "max_turns":
+                logger.warning(
+                    "Agent '%s' %s hit max turns: %s — not falling back",
+                    agent.name,
+                    label,
+                    response.error,
+                )
                 return agent.name, response
+            logger.warning(
+                "Agent '%s' %s failed: %s — trying next",
+                agent.name,
+                label,
+                response.error,
+            )
             last_name = agent.name
             last_response = response
+        logger.error("All agents failed %s. Last error: %s", label, last_response.error)
         return last_name, last_response
 
     async def _invoke_agent(

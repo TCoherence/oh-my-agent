@@ -13,6 +13,7 @@ from oh_my_agent.agents.cli.base import (
     _extract_cli_error,
     _should_clear_resumed_session,
     _stream_cli_process,
+    classify_cli_error_kind,
 )
 
 logger = logging.getLogger(__name__)
@@ -226,7 +227,7 @@ class CodexCLIAgent(BaseCLIAgent):
             return AgentResponse(
                 text="",
                 error=f"{self.name} exited {returncode}: {err_msg[:400]}",
-                error_kind="cli_error",
+                error_kind=classify_cli_error_kind(err_msg),
             )
 
         raw = stdout.decode(errors="replace").strip()
