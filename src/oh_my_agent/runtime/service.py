@@ -127,6 +127,15 @@ class ArtifactDeliveryResult:
     attachment_names: list[str]
 
 
+def _fmt_dt(dt) -> str:
+    if dt is None:
+        return "n/a"
+    try:
+        return dt.strftime("%H:%M:%S")
+    except Exception:
+        return str(dt)[:19]
+
+
 class RuntimeService:
     """Autonomous task runtime for multi-step coding loops."""
 
@@ -1533,6 +1542,7 @@ class RuntimeService:
                     for af in recent_failures[:3]:
                         err_preview = (af.last_error or "")[:80]
                         lines.append(f"  - `{af.name}`: {err_preview}")
+                self._append_scheduler_liveness(lines, scheduler)
             except Exception:
                 lines.append("- Scheduler summary unavailable.")
         lines.extend(
@@ -1556,6 +1566,75 @@ class RuntimeService:
                 ]
             )
         return "\n".join(lines)[:3800]
+
+    def _append_scheduler_liveness(self, lines: list[str], scheduler) -> None:
+        """Append scheduler watchdog liveness details to a /doctor report."""
+        try:
+            from datetime import datetime, timedelta, timezone as _tz
+
+            now = datetime.now(_tz.utc).astimezone()
+            findings = scheduler.evaluate_job_health()
+            findings_by_job: dict[str, str] = {
+                f.name: f.reason for f in findings if f.scope == "job" and f.name
+            }
+            reload_findings = [f for f in findings if f.scope == "reload"]
+
+            reload_state = scheduler.get_reload_runtime_state()
+            if reload_state is not None:
+                lines.append(
+                    f"- Reload loop last progress: `{reload_state.last_progress_at.isoformat()}`"
+                )
+                if reload_findings:
+                    lines.append(
+                        f"  - ⚠️ reload loop stale: {reload_findings[0].reason}"
+                    )
+                if reload_state.last_restart_at is not None:
+                    since = now - reload_state.last_restart_at.astimezone(now.tzinfo)
+                    if since <= timedelta(hours=24):
+                        lines.append(
+                            f"  - Last restart: {reload_state.last_restart_at.isoformat()}"
+                            f" ({reload_state.last_restart_reason or 'unknown'})"
+                        )
+
+            all_states = scheduler.list_job_runtime_state()
+            stale_states = [s for s in all_states if s.name in findings_by_job]
+
+            if stale_states:
+                lines.append(f"- ⚠️ Stale jobs: `{len(stale_states)}`")
+                for s in stale_states[:10]:
+                    reason = findings_by_job.get(s.name, "?")
+                    lines.append(
+                        f"  - `{s.name}` ({reason}): phase={s.phase} "
+                        f"next_fire={_fmt_dt(s.next_fire_at)} "
+                        f"last_progress={_fmt_dt(s.last_progress_at)}"
+                    )
+            elif all_states:
+                preview = all_states[:8]
+                lines.append(f"- Active jobs preview: `{len(preview)}/{len(all_states)}`")
+                for s in preview:
+                    if s.phase == "firing" and s.fire_started_at is not None:
+                        lines.append(
+                            f"  - `{s.name}`: firing since {_fmt_dt(s.fire_started_at)}"
+                        )
+                    else:
+                        lines.append(
+                            f"  - `{s.name}`: sleeping until {_fmt_dt(s.next_fire_at)}"
+                        )
+                if len(all_states) > len(preview):
+                    lines.append(f"  - ... {len(all_states) - len(preview)} more jobs omitted")
+
+            recent_restarts = [
+                s for s in all_states
+                if s.last_restart_at is not None
+                and (now - s.last_restart_at.astimezone(now.tzinfo)) <= timedelta(hours=24)
+            ]
+            for s in recent_restarts[:5]:
+                lines.append(
+                    f"  - `{s.name}` restarted at {_fmt_dt(s.last_restart_at)}: "
+                    f"{s.last_restart_reason or 'unknown'}"
+                )
+        except Exception:
+            lines.append("- Scheduler liveness unavailable.")
 
     def _recent_failure_hints(self) -> str:
         if not self.service_log_path.exists():

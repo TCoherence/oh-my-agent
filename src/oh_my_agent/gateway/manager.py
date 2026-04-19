@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import suppress
 from dataclasses import dataclass
+from datetime import datetime
 import hashlib
 import inspect
 import logging
@@ -566,6 +567,9 @@ class GatewayManager:
 
         if self._scheduler:
             self._background_tasks.append(asyncio.create_task(self._run_scheduler()))
+            self._background_tasks.append(
+                asyncio.create_task(self._run_scheduler_supervisor())
+            )
             logger.info("Scheduler started with %d job(s)", len(self._scheduler.jobs))
 
         if self._runtime_service:
@@ -672,6 +676,43 @@ class GatewayManager:
         await self._sync_automation_runtime_state()
         await self._scheduler.run(self._dispatch_scheduled_job)
 
+    async def _run_scheduler_supervisor(
+        self, *, interval_seconds: float = 60.0
+    ) -> None:
+        """Periodic watchdog: evaluate scheduler liveness and self-heal."""
+        if not self._scheduler:
+            return
+        while True:
+            try:
+                await asyncio.sleep(interval_seconds)
+                if not self._scheduler:
+                    return
+                findings = self._scheduler.evaluate_job_health()
+                for finding in findings:
+                    if finding.scope == "job" and finding.name:
+                        restarted = await self._scheduler.restart_job(
+                            finding.name, reason=finding.reason
+                        )
+                        if restarted:
+                            logger.warning(
+                                "Supervisor restarted job=%s reason=%s",
+                                finding.name,
+                                finding.reason,
+                            )
+                    elif finding.scope == "reload":
+                        restarted = await self._scheduler.restart_reload_loop(
+                            reason=finding.reason
+                        )
+                        if restarted:
+                            logger.warning(
+                                "Supervisor restarted reload-loop reason=%s",
+                                finding.reason,
+                            )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Scheduler supervisor iteration failed")
+
     async def _sync_automation_runtime_state(self) -> None:
         """Persist next_run_at and enabled for all known automations."""
         store = getattr(self, "_memory_store_ref", None)
@@ -689,6 +730,26 @@ class GatewayManager:
                 next_run_at=next_run_iso,
             )
 
+    async def _refresh_automation_next_run_at(self, name: str) -> None:
+        """Refresh persisted next_run_at for a single automation. Never raises."""
+        store = getattr(self, "_memory_store_ref", None)
+        if not store or not self._scheduler:
+            return
+        try:
+            next_dt = self._scheduler.compute_job_next_run_at(name)
+            next_run_iso = next_dt.isoformat() if next_dt else None
+            record = self._scheduler.get_automation(name)
+            if record is None:
+                return
+            await store.upsert_automation_state(
+                name,
+                platform=record.platform,
+                channel_id=record.channel_id,
+                next_run_at=next_run_iso,
+            )
+        except Exception:
+            logger.warning("refresh_next_run_at failed name=%s", name, exc_info=True)
+
     async def fire_automation(self, name: str) -> str:
         """Manually fire a named automation job.  Returns a status message."""
         if not self._scheduler:
@@ -699,6 +760,17 @@ class GatewayManager:
         return f"Automation `{name}` not found or scheduler not running."
 
     async def _dispatch_scheduled_job(self, job: ScheduledJob) -> None:
+        try:
+            await self._dispatch_scheduled_job_body(job)
+        finally:
+            try:
+                await self._refresh_automation_next_run_at(job.name)
+            except Exception:
+                logger.warning(
+                    "refresh_next_run_at failed name=%s", job.name, exc_info=True
+                )
+
+    async def _dispatch_scheduled_job_body(self, job: ScheduledJob) -> None:
         store = getattr(self, "_memory_store_ref", None)
         key = self._session_key(job.platform, job.channel_id)
         session = self._sessions.get(key)

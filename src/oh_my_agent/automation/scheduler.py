@@ -131,6 +131,44 @@ class _CronSpec:
     weekday_wildcard: bool
 
 
+@dataclass
+class JobRuntimeState:
+    """Liveness state for one scheduled job. Updated by the job's runner."""
+
+    name: str
+    phase: str  # "sleeping" | "firing"
+    next_fire_at: datetime | None
+    fire_started_at: datetime | None
+    last_progress_at: datetime
+    last_restart_at: datetime | None = None
+    last_restart_reason: str | None = None
+    restart_in_progress: bool = False
+
+
+@dataclass
+class ReloadRuntimeState:
+    """Liveness state for the file-watch reload loop."""
+
+    last_progress_at: datetime
+    last_restart_at: datetime | None = None
+    last_restart_reason: str | None = None
+    restart_in_progress: bool = False
+
+
+@dataclass(frozen=True)
+class HealthFinding:
+    """One stale observation from evaluate_job_health."""
+
+    scope: str  # "job" | "reload"
+    reason: str  # "task_done_unexpectedly" | "missed_fire" | etc.
+    name: str | None = None  # job name; None for reload scope
+
+
+_DEFAULT_MIN_RESTART_INTERVAL_SECONDS = 120.0
+_DEFAULT_STALE_GRACE_SECONDS = 90.0
+_DEFAULT_RELOAD_STALE_FACTOR = 10.0  # reload loop stale if no progress for 10x reload_interval_seconds
+
+
 class Scheduler:
     """File-driven scheduler with polling-based hot reload."""
 
@@ -153,11 +191,16 @@ class Scheduler:
         self._jobs_by_name: dict[str, ScheduledJob] = {}
         self._duplicate_paths_by_name: dict[str, tuple[Path, ...]] = {}
         self._job_tasks: dict[str, asyncio.Task] = {}
+        self._job_state: dict[str, JobRuntimeState] = {}
+        self._reload_state: ReloadRuntimeState | None = None
+        self._reload_task: asyncio.Task | None = None
         self._snapshot: dict[Path, tuple[int, int]] = {}
         self._reload_lock = asyncio.Lock()
         self._on_fire: Callable[[ScheduledJob], Awaitable[None]] | None = None
         self._on_reload: Callable[[], Awaitable[None]] | None = None
         self._stop_event = asyncio.Event()
+        self._min_restart_interval_seconds: float = _DEFAULT_MIN_RESTART_INTERVAL_SECONDS
+        self._stale_grace_seconds: float = _DEFAULT_STALE_GRACE_SECONDS
         self._load_from_disk(initial=True)
 
     @property
@@ -238,6 +281,8 @@ class Scheduler:
         """Run active jobs and poll for filesystem changes until cancelled."""
         self._stop_event.clear()
         self._on_fire = on_fire
+        now = datetime.now(self._timezone)
+        self._reload_state = ReloadRuntimeState(last_progress_at=now)
         for job in self.jobs:
             self._start_job(job, on_fire)
 
@@ -247,14 +292,16 @@ class Scheduler:
             len(self._jobs_by_name),
         )
 
-        reload_task = asyncio.create_task(self._reload_loop(on_fire), name="scheduler:reload")
+        self._reload_task = asyncio.create_task(self._reload_loop(on_fire), name="scheduler:reload")
         try:
             await self._stop_event.wait()
         except asyncio.CancelledError:
             raise
         finally:
-            reload_task.cancel()
-            await asyncio.gather(reload_task, return_exceptions=True)
+            if self._reload_task is not None:
+                self._reload_task.cancel()
+                await asyncio.gather(self._reload_task, return_exceptions=True)
+                self._reload_task = None
             await self._stop_all_jobs()
 
     def stop(self) -> None:
@@ -282,13 +329,17 @@ class Scheduler:
                 await asyncio.sleep(self._reload_interval_seconds)
                 async with self._reload_lock:
                     snapshot = self._scan_snapshot()
-                    if snapshot == self._snapshot:
-                        continue
-                    await self._apply_snapshot(snapshot)
+                    if snapshot != self._snapshot:
+                        await self._apply_snapshot(snapshot)
+                self._touch_reload_progress()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 logger.exception("Scheduler reload failed: %s", exc)
+
+    def _touch_reload_progress(self) -> None:
+        if self._reload_state is not None:
+            self._reload_state.last_progress_at = datetime.now(self._timezone)
 
     def _load_from_disk(
         self,
@@ -548,12 +599,29 @@ class Scheduler:
         on_fire: Callable[[ScheduledJob], Awaitable[None]],
     ) -> None:
         runner = self._run_cron_job if job.cron else self._run_interval_job
+        now = datetime.now(self._timezone)
+        if job.cron:
+            initial_next_fire = self.compute_next_run_at(job)
+        else:
+            initial_next_fire = now + timedelta(seconds=job.initial_delay_seconds)
+
+        prior = self._job_state.get(job.name)
+        self._job_state[job.name] = JobRuntimeState(
+            name=job.name,
+            phase="sleeping",
+            next_fire_at=initial_next_fire,
+            fire_started_at=None,
+            last_progress_at=now,
+            last_restart_at=prior.last_restart_at if prior else None,
+            last_restart_reason=prior.last_restart_reason if prior else None,
+        )
         task = asyncio.create_task(runner(job, on_fire), name=f"scheduler:{job.name}")
         setattr(task, "_oma_job", job)
         self._job_tasks[job.name] = task
 
     async def _stop_job(self, name: str) -> None:
         task = self._job_tasks.pop(name, None)
+        self._job_state.pop(name, None)
         if task is None:
             return
         task.cancel()
@@ -562,10 +630,232 @@ class Scheduler:
     async def _stop_all_jobs(self) -> None:
         tasks = list(self._job_tasks.values())
         self._job_tasks.clear()
+        self._job_state.clear()
         for task in tasks:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+
+    def _mark_job_firing(self, name: str) -> None:
+        state = self._job_state.get(name)
+        if state is None:
+            return
+        now = datetime.now(self._timezone)
+        state.phase = "firing"
+        state.fire_started_at = now
+        state.last_progress_at = now
+
+    def _mark_job_sleeping(self, name: str, *, next_fire_at: datetime | None) -> None:
+        state = self._job_state.get(name)
+        if state is None:
+            return
+        now = datetime.now(self._timezone)
+        state.phase = "sleeping"
+        state.fire_started_at = None
+        state.last_progress_at = now
+        if next_fire_at is not None:
+            state.next_fire_at = next_fire_at
+
+    def list_job_runtime_state(self) -> list[JobRuntimeState]:
+        """Return a snapshot (copy) of liveness state for every active job."""
+        return [
+            JobRuntimeState(
+                name=state.name,
+                phase=state.phase,
+                next_fire_at=state.next_fire_at,
+                fire_started_at=state.fire_started_at,
+                last_progress_at=state.last_progress_at,
+                last_restart_at=state.last_restart_at,
+                last_restart_reason=state.last_restart_reason,
+                restart_in_progress=state.restart_in_progress,
+            )
+            for state in (self._job_state[name] for name in sorted(self._job_state))
+        ]
+
+    def get_job_runtime_state(self, name: str) -> JobRuntimeState | None:
+        """Return a snapshot (copy) of one job's liveness state, or None if unknown."""
+        state = self._job_state.get(name)
+        if state is None:
+            return None
+        return JobRuntimeState(
+            name=state.name,
+            phase=state.phase,
+            next_fire_at=state.next_fire_at,
+            fire_started_at=state.fire_started_at,
+            last_progress_at=state.last_progress_at,
+            last_restart_at=state.last_restart_at,
+            last_restart_reason=state.last_restart_reason,
+            restart_in_progress=state.restart_in_progress,
+        )
+
+    def get_reload_runtime_state(self) -> ReloadRuntimeState | None:
+        """Return a snapshot (copy) of reload loop liveness, or None if scheduler not running."""
+        state = self._reload_state
+        if state is None:
+            return None
+        return ReloadRuntimeState(
+            last_progress_at=state.last_progress_at,
+            last_restart_at=state.last_restart_at,
+            last_restart_reason=state.last_restart_reason,
+            restart_in_progress=state.restart_in_progress,
+        )
+
+    def compute_job_next_run_at(self, name: str) -> datetime | None:
+        """Compute the next cron/interval fire time for a known job from now."""
+        job = self._jobs_by_name.get(name)
+        if job is None:
+            return None
+        return self.compute_next_run_at(job)
+
+    def evaluate_job_health(self, now: datetime | None = None) -> list[HealthFinding]:
+        """Read-only health evaluation. Returns stale-job / stale-reload findings.
+
+        Rules:
+          A. task.done() is True but _stop_event not set  → task_done_unexpectedly
+          B. phase == "sleeping" AND now > next_fire_at + grace AND
+             last_progress_at < next_fire_at               → missed_fire
+          (phase == "firing" is never flagged — long-running legitimate fires.)
+
+        Reload loop: task.done() while not stopped, or no progress for
+        reload_interval * _DEFAULT_RELOAD_STALE_FACTOR.
+        """
+        if now is None:
+            now = datetime.now(self._timezone)
+        findings: list[HealthFinding] = []
+        stop_set = self._stop_event.is_set()
+        grace = timedelta(seconds=self._stale_grace_seconds)
+
+        for name in sorted(self._job_state):
+            state = self._job_state[name]
+            task = self._job_tasks.get(name)
+
+            if not stop_set and task is not None and task.done():
+                findings.append(
+                    HealthFinding(scope="job", name=name, reason="task_done_unexpectedly")
+                )
+                continue
+
+            if state.phase == "firing":
+                continue
+
+            if state.next_fire_at is None:
+                continue
+
+            if now > state.next_fire_at + grace and state.last_progress_at < state.next_fire_at:
+                findings.append(HealthFinding(scope="job", name=name, reason="missed_fire"))
+
+        reload_task = self._reload_task
+        reload_state = self._reload_state
+        if reload_state is not None:
+            if not stop_set and reload_task is not None and reload_task.done():
+                findings.append(
+                    HealthFinding(
+                        scope="reload", name=None, reason="task_done_unexpectedly"
+                    )
+                )
+            else:
+                stale_threshold = timedelta(
+                    seconds=self._reload_interval_seconds * _DEFAULT_RELOAD_STALE_FACTOR
+                )
+                if now - reload_state.last_progress_at > stale_threshold:
+                    findings.append(
+                        HealthFinding(scope="reload", name=None, reason="no_progress")
+                    )
+        return findings
+
+    async def restart_job(self, name: str, *, reason: str) -> bool:
+        """Self-heal a stale or dead per-job task. Rate-limited by min_restart_interval."""
+        job = self._jobs_by_name.get(name)
+        if job is None:
+            logger.debug("restart_job: unknown job %r", name)
+            return False
+
+        state = self._job_state.get(name)
+        now = datetime.now(self._timezone)
+        if state is not None:
+            if state.restart_in_progress:
+                logger.debug("restart_job: %r restart already in progress", name)
+                return False
+            if (
+                state.last_restart_at is not None
+                and (now - state.last_restart_at).total_seconds()
+                < self._min_restart_interval_seconds
+            ):
+                logger.debug(
+                    "restart_job: %r restart rate-limited (last=%s)",
+                    name,
+                    state.last_restart_at.isoformat(),
+                )
+                return False
+            state.restart_in_progress = True
+
+        try:
+            logger.warning("Scheduler restart job=%s reason=%s", name, reason)
+            task = self._job_tasks.pop(name, None)
+            self._job_state.pop(name, None)
+            if task is not None:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+            on_fire = self._on_fire
+            if on_fire is None:
+                logger.warning("restart_job: scheduler not running, cannot restart %r", name)
+                return False
+
+            self._start_job(job, on_fire)
+            new_state = self._job_state.get(name)
+            if new_state is not None:
+                new_state.last_restart_at = now
+                new_state.last_restart_reason = reason
+            return True
+        finally:
+            current = self._job_state.get(name)
+            if current is not None:
+                current.restart_in_progress = False
+
+    async def restart_reload_loop(self, *, reason: str) -> bool:
+        """Self-heal a stalled reload loop. Rate-limited by min_restart_interval."""
+        reload_state = self._reload_state
+        now = datetime.now(self._timezone)
+        if reload_state is not None:
+            if reload_state.restart_in_progress:
+                logger.debug("restart_reload_loop: already in progress")
+                return False
+            if (
+                reload_state.last_restart_at is not None
+                and (now - reload_state.last_restart_at).total_seconds()
+                < self._min_restart_interval_seconds
+            ):
+                logger.debug(
+                    "restart_reload_loop: rate-limited (last=%s)",
+                    reload_state.last_restart_at.isoformat(),
+                )
+                return False
+            reload_state.restart_in_progress = True
+
+        try:
+            on_fire = self._on_fire
+            if on_fire is None:
+                logger.warning("restart_reload_loop: scheduler not running")
+                return False
+
+            logger.warning("Scheduler restart reload loop reason=%s", reason)
+            task = self._reload_task
+            if task is not None:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+            self._reload_task = asyncio.create_task(
+                self._reload_loop(on_fire), name="scheduler:reload"
+            )
+            if reload_state is not None:
+                reload_state.last_progress_at = now
+                reload_state.last_restart_at = now
+                reload_state.last_restart_reason = reason
+            return True
+        finally:
+            if self._reload_state is not None:
+                self._reload_state.restart_in_progress = False
 
     async def _run_interval_job(
         self,
@@ -575,7 +865,9 @@ class Scheduler:
         if job.initial_delay_seconds > 0:
             await asyncio.sleep(job.initial_delay_seconds)
 
+        interval = job.interval_seconds or 0
         while True:
+            self._mark_job_firing(job.name)
             try:
                 logger.info(
                     "Scheduler firing interval job=%s platform=%s channel=%s thread=%s",
@@ -589,7 +881,10 @@ class Scheduler:
                 raise
             except Exception as exc:
                 logger.exception("Scheduler job '%s' failed: %s", job.name, exc)
-            await asyncio.sleep(job.interval_seconds or 0)
+            finally:
+                next_fire = datetime.now(self._timezone) + timedelta(seconds=interval)
+                self._mark_job_sleeping(job.name, next_fire_at=next_fire)
+            await asyncio.sleep(interval)
 
     async def _run_cron_job(
         self,
@@ -601,8 +896,10 @@ class Scheduler:
         while True:
             now = datetime.now(self._timezone)
             next_fire = _next_cron_fire(spec, now)
+            self._mark_job_sleeping(job.name, next_fire_at=next_fire)
             delay = max((next_fire - now).total_seconds(), 0.0)
             await asyncio.sleep(delay)
+            self._mark_job_firing(job.name)
             try:
                 logger.info(
                     "Scheduler firing cron job=%s schedule=%s platform=%s channel=%s thread=%s",
@@ -617,6 +914,10 @@ class Scheduler:
                 raise
             except Exception as exc:
                 logger.exception("Scheduler job '%s' failed: %s", job.name, exc)
+            finally:
+                post_fire_now = datetime.now(self._timezone)
+                post_next_fire = _next_cron_fire(spec, post_fire_now)
+                self._mark_job_sleeping(job.name, next_fire_at=post_next_fire)
 
 
 def build_scheduler_from_config(
