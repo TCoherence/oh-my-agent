@@ -14,12 +14,12 @@
 - **Workspace 隔离** — 三层沙箱：workspace cwd 限制、环境变量白名单、CLI 原生沙箱
 - **意图路由** — 可选的 LLM 分类器，将消息路由到回复、skill 调用、任务提案或 skill 创建
 - **图片支持** — Discord 附件下载、per-agent 图片处理、临时文件生命周期管理
-- **平台适配** — Discord（完整功能 + slash 命令）、Slack（stub）、可通过 `BaseChannel` ABC 扩展
+- **平台适配** — Discord（完整功能 + slash 命令）；可通过 `BaseChannel` ABC 扩展其他平台（post-1.0）
 
 ## 架构
 
 ```text
-User (Discord / Slack / ...)
+User (Discord / ...)
          │ message, @agent prefix, or /ask command
          ▼
    GatewayManager
@@ -161,8 +161,18 @@ Skills 放在 `skills/<name>/SKILL.md`。`SkillSync` 系统会自动同步到所
 | 运营指南 | [operator-guide.md](../EN/operator-guide.md) | [operator-guide.md](operator-guide.md) |
 | 路线图 | [todo.md](../EN/todo.md) | [todo.md](todo.md) |
 | 开发记录 | [development.md](../EN/development.md) | [development.md](development.md) |
-| 变更日志 | [CHANGELOG.md](../../CHANGELOG.md) | — |
+| 升级指南 | [upgrade-guide.md](../EN/upgrade-guide.md) | [upgrade-guide.md](upgrade-guide.md) |
+| 监控 | [monitoring.md](../EN/monitoring.md) | [monitoring.md](monitoring.md) |
+| 故障排查 | [troubleshooting.md](../EN/troubleshooting.md) | [troubleshooting.md](troubleshooting.md) |
+| 配置参考 | [config-reference.md](../EN/config-reference.md) | [config-reference.md](config-reference.md) |
+| 发版流程 | [release-process.md](../EN/release-process.md) | [release-process.md](release-process.md) |
 | v1.0 规划 | [v1.0-plan.md](../EN/v1.0-plan.md) | [v1.0-plan.md](v1.0-plan.md) |
+| 变更日志 | [CHANGELOG.md](../../CHANGELOG.md) | — |
+
+## 贡献与安全
+
+- [CONTRIBUTING.md](../../CONTRIBUTING.md) — 开发环境、测试、PR 规范
+- [SECURITY.md](../../SECURITY.md) — 漏洞上报流程
 
 ## 版本管理
 

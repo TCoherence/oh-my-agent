@@ -470,10 +470,9 @@ Tradeoff:
 
 - resumed CLI sessions do not always immediately recognize newly added skills
 - automation operator UI only shows valid visible automations, not invalid/conflicting ones
-- automation runtime state (`last_run`, `next_run`, `last_error`) is not yet persisted
 - generic HITL v1 is Discord-only and choice-only; there is no free-text or multi-select path yet
 - auth still uses its own dedicated suspended-run flow rather than the generic `hitl_prompts` path
-- missed-job behavior across downtime is not yet finalized
+- missed-job policy is fixed to `skip`; `/automation_run` covers manual catch-up
 - lifecycle hooks around agent runs are still only a backlog item, not a system feature yet
 
 ## Where to Look in Code

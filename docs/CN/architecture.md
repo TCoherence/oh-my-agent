@@ -470,10 +470,9 @@ flowchart TD
 
 - resumed CLI session 不一定能立刻认出刚新增的 skill
 - automation operator UI 目前只展示 valid 且 visible 的 automations，不展示 invalid/conflicting 条目
-- automation runtime state（`last_run`、`next_run`、`last_error`）还没有持久化
 - 通用 HITL v1 目前只覆盖 Discord 单选按钮，还没有自由文本和多选
 - auth 仍然沿用专门的 suspended-run 路径，而不是直接并入 `hitl_prompts`
-- 停机期间 missed jobs 的处理策略还没定死
+- missed-job 策略固定为 `skip`；补跑靠 `/automation_run` 手动触发
 - agent run 周围的 lifecycle hooks 目前还只是 backlog，还不是系统能力
 
 ## 代码入口索引
