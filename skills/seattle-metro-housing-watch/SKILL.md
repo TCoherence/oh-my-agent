@@ -2,7 +2,8 @@
 name: seattle-metro-housing-watch
 description: Produce Chinese-first Seattle metro housing reports with persisted Markdown and JSON outputs under ~/.oh-my-agent/reports/seattle-metro-housing-watch/. Use this skill for Seattle, Bellevue, Redmond, Kirkland, Issaquah, Bothell, and Lynnwood buy-side market pulse reports, area deep dives, and current housing snapshots that should reuse stored report history instead of relying only on chat memory.
 metadata:
-  timeout_seconds: 900
+  timeout_seconds: 1500
+  max_turns: 60
 ---
 
 # Seattle Metro Housing Watch
