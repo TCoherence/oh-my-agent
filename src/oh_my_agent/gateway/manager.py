@@ -560,15 +560,24 @@ class GatewayManager:
                 return handler
 
             handler = await make_handler(session, registry)
-            self._background_tasks.append(asyncio.create_task(channel.start(handler)))
+            self._background_tasks.append(
+                asyncio.create_task(
+                    channel.start(handler),
+                    name=f"channel:{channel.platform}:{channel.channel_id}",
+                )
+            )
             logger.info(
                 "Started channel %s:%s", channel.platform, channel.channel_id
             )
 
         if self._scheduler:
-            self._background_tasks.append(asyncio.create_task(self._run_scheduler()))
             self._background_tasks.append(
-                asyncio.create_task(self._run_scheduler_supervisor())
+                asyncio.create_task(self._run_scheduler(), name="scheduler")
+            )
+            self._background_tasks.append(
+                asyncio.create_task(
+                    self._run_scheduler_supervisor(), name="scheduler-supervisor"
+                )
             )
             logger.info("Scheduler started with %d job(s)", len(self._scheduler.jobs))
 
@@ -577,7 +586,12 @@ class GatewayManager:
 
         if self._short_workspace_enabled and self._short_workspace_root is not None:
             self._short_workspace_root.mkdir(parents=True, exist_ok=True)
-            self._background_tasks.append(asyncio.create_task(self._run_short_workspace_janitor()))
+            self._background_tasks.append(
+                asyncio.create_task(
+                    self._run_short_workspace_janitor(),
+                    name="short-workspace-janitor",
+                )
+            )
             logger.info(
                 "Short-workspace janitor enabled root=%s ttl=%sh interval=%sm",
                 self._short_workspace_root,
@@ -649,9 +663,13 @@ class GatewayManager:
             for task in pending:
                 task.cancel()
             if pending:
+                pending_names = [task.get_name() for task in pending]
                 await asyncio.gather(*pending, return_exceptions=True)
-            if pending:
-                logger.warning("Gateway shutdown cancelled %d lingering background task(s).", len(pending))
+                logger.warning(
+                    "Gateway shutdown cancelled %d lingering background task(s): %s",
+                    len(pending_names),
+                    ", ".join(pending_names),
+                )
 
     async def _notify_user_error(
         self,
