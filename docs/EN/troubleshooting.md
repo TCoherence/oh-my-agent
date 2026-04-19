@@ -330,6 +330,33 @@ grep -E 'skill_sync|full_sync' ~/.oh-my-agent/runtime/logs/service.log | tail -n
 
 ---
 
+## 16. Runtime task fails with `max_turns`
+
+**Symptom**: a runtime task (from `/task_start` or an automation) ends in `FAILED` with an error that mentions "max_turns" or "reached maximum number of turns". For automation-sourced tasks, the thread has a partial result then nothing.
+
+**Diagnose**:
+
+```bash
+# Which task and which agent hit it?
+grep 'hit max turns' ~/.oh-my-agent/runtime/logs/service.log | tail -n 10
+
+# Confirm the task's budget (not the skill's config, the *task* row):
+sqlite3 ~/.oh-my-agent/runtime/memory.db \
+  "SELECT id, automation_name, skill_name, agent_max_turns, status, error FROM runtime_tasks WHERE status='FAILED' ORDER BY ended_at DESC LIMIT 5;"
+
+# What does the skill advertise?
+grep -E 'max_turns|timeout_seconds' skills/<name>/SKILL.md
+```
+
+**Resolve**:
+
+- **One-shot rescue**: the thread should carry a "Re-run +30 turns" button (primary style). Click it to spawn a sibling task with `agent_max_turns = parent + 30` (fallback base 25). The button TTL is `runtime.decision_ttl_minutes` (default 24 h). No button surfacing? Confirm `owner_user_ids` is set and the `_surface_rerun_bump_turns_button` log line fires after the failure — if not, you probably hit the failure in the chat path (`/ask` or bare slash skill), which doesn't own a runtime task. Re-invoke via `/task_start` or an automation to get the button.
+- **Persistent fix**: bump the skill's `metadata.max_turns` in `skills/<name>/SKILL.md` (typical: 40–60 for multi-source digests). `timeout_seconds` alone is not enough — claude uses `--max-turns` independently. After editing, run `/reload-skills`.
+- **Not a skill task**: `/task_start` tasks inherit claude's default 25 turns. Raise the ceiling by either creating a dedicated skill with higher `max_turns`, or accepting the one-shot button bump for the current run.
+- Do **not** expect retry to help — `max_turns` is classified as terminal (retrying just consumes the same budget and fails again). See [task-model.md §7](task-model.md) for the full retry-vs-terminal taxonomy.
+
+---
+
 ## When to escalate
 
 If none of the patterns match, capture and attach to a GitHub issue:

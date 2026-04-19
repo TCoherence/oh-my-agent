@@ -126,7 +126,48 @@ For `artifact` tasks only:
 
 ---
 
-## 7. Known sharp edges
+## 7. Failure recovery: retry + rerun button
+
+Only the **runtime task path** (`/task_start` + automations). Chat-path `AgentRegistry.run()` (from `/ask` or slash skills) has no retry layer — those users retry manually.
+
+### 7.1 Transparent retry by `error_kind`
+
+`RuntimeService._invoke_agent_with_retry` classifies every agent outcome into an `error_kind` and retries transient kinds before letting the result propagate to the `AgentRegistry` fallback loop:
+
+| `error_kind` | Action | Backoff | Cap |
+|---|---|---|---|
+| success | return | — | — |
+| `rate_limit` | retry | 10 s → 30 s | 2 attempts |
+| `api_5xx` | retry | 5 s → 15 s | 2 attempts |
+| `timeout` | retry once | 0 s (immediate) | 1 attempt |
+| `max_turns` | **terminal** | — | 0 (surfaces re-run button) |
+| `auth` | **terminal** | — | 0 (triggers auth notification) |
+| `cli_error` | **terminal** | — | 0 (fallback to next agent) |
+
+Total retries across kinds are capped at `_MAX_TOTAL_RETRIES = 3` per agent invocation. Each retry logs `Runtime task=<id> retry=<n>/<max> kind=<k>` and records a `task.agent_retry` event. Retry counters do not carry across agents — a fallback from claude → codex gets a fresh retry budget.
+
+### 7.2 "Re-run +30 turns" button on `max_turns` failures
+
+When an agent returns `error_kind=max_turns`, the runtime treats it as terminal (retrying blindly just wastes the same budget again). Instead, `_fail` posts an interactive decision surface:
+
+```
+@owner Task `abc123…` hit `max_turns` (25). Re-run with `max_turns=55`?
+_Button expires in ~24h._
+[ Re-run +30 turns ]
+```
+
+Clicking the button:
+
+1. Consumes the decision nonce (TTL = `runtime.decision_ttl_minutes`, default 1440).
+2. Creates a **sibling task** that clones the parent (`goal`, `preferred_agent`, `completion_mode`, `automation_name`, `skill_name`, `task_type`, `test_command`) but with `agent_max_turns = parent.agent_max_turns + 30` (fallback base 25 if parent left it unset).
+3. Emits `task.rerun_sibling_created` on the parent (with `sibling_task_id`, `base_turns`, `agent_max_turns`, `actor_id`, `source`) and `task.created` on the sibling (with `parent_task_id`, `source="rerun_bump_turns:button"`).
+4. Puts the sibling into `PENDING` so the normal dispatch loop claims it.
+
+Bumping the skill's `metadata.max_turns` in `SKILL.md` is still preferred — the button is a one-shot rescue, not a permanent fix.
+
+---
+
+## 8. Known sharp edges
 
 1. **Router threshold is 0.55.** A casual phrase like "帮我研究一下 X / let me research X" clears the bar. If you want chat, either disable the router for that thread or rephrase. Raise `router.confidence_threshold` to trade recall for precision.
 2. **Artifact workspace has no bundled skills.** The isolated `_artifacts/<id>/` directory does not get `.claude/skills/` or `.gemini/skills/` populated, so a `research` artifact task cannot invoke, say, a `web-scraper` skill — the agent must inline all work. (Repo-change tasks *do* get skills via `_setup_workspace()`.)
@@ -137,7 +178,7 @@ For `artifact` tasks only:
 
 ---
 
-## 8. Related config keys
+## 9. Related config keys
 
 ```yaml
 runtime:

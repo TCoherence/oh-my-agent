@@ -330,6 +330,33 @@ grep -E 'skill_sync|full_sync' ~/.oh-my-agent/runtime/logs/service.log | tail -n
 
 ---
 
+## 16. Runtime task `max_turns` 失败
+
+**症状**：一个 runtime task（`/task_start` 或 automation 触发的）进 `FAILED`，错误信息含 "max_turns" 或 "reached maximum number of turns"。Automation 来的任务，线程里只有半截结果然后就没了。
+
+**排查**：
+
+```bash
+# 哪个 task、哪个 agent hit 的？
+grep 'hit max turns' ~/.oh-my-agent/runtime/logs/service.log | tail -n 10
+
+# 确认 task 的预算（不是 skill 配置，是 task 行里的）：
+sqlite3 ~/.oh-my-agent/runtime/memory.db \
+  "SELECT id, automation_name, skill_name, agent_max_turns, status, error FROM runtime_tasks WHERE status='FAILED' ORDER BY ended_at DESC LIMIT 5;"
+
+# skill 自己声明的是多少？
+grep -E 'max_turns|timeout_seconds' skills/<name>/SKILL.md
+```
+
+**解决**：
+
+- **一次性救场**：失败线程里应该出现一个 "Re-run +30 turns" 按钮（primary 样式）。点下去会创建一个 sibling task，`agent_max_turns = parent + 30`（parent 没设就以 25 为基准）。按钮的 TTL 是 `runtime.decision_ttl_minutes`，默认 24 小时。没看到按钮？先确认 `owner_user_ids` 配了，并且失败后日志里有 `_surface_rerun_bump_turns_button` 一行；都没有的话你大概率是在 chat path（`/ask` 或裸 slash skill）里 hit 的 —— 那条路径没有 runtime task，也没有按钮。改用 `/task_start` 或 automation 重发就能拿到按钮。
+- **长期修复**：把 `skills/<name>/SKILL.md` 里的 `metadata.max_turns` 调上去（多源 digest 类通常 40–60）。只设 `timeout_seconds` 是不够的 —— claude 的 `--max-turns` 是独立开关。改完跑一次 `/reload-skills`。
+- **不是 skill task**：`/task_start` 直建的任务会继承 claude 默认的 25 turns。要长期提高天花板，要么做一个专门的 skill 写高一点，要么接受当前这次走按钮 bump。
+- **不要指望 retry 能解决**：`max_turns` 被归为 terminal（retry 也只是再烧一次一样的预算）。完整的 retry vs terminal 分类见 [task-model.md §7](task-model.md)。
+
+---
+
 ## 何时升级到 issue
 
 以上模式都不匹配时，把以下材料贴进 GitHub issue：

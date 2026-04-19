@@ -8,6 +8,12 @@ The format is intentionally lightweight and release-oriented rather than exhaust
 
 ### Added
 
+- **Runtime retry by `error_kind` + "Re-run +30 turns" button** (Phase 3 of runtime agent-invocation UX, plan `3-diverge-refactor-snuggly-lerdorf`).
+  - New `_invoke_agent_with_retry` wrapper in `RuntimeService`: transient kinds `rate_limit` / `api_5xx` / `timeout` retry with per-kind backoff (10s→30s / 5s→15s / one 0s retry); total retries across kinds capped at 3 per call (`_MAX_TOTAL_RETRIES`). Terminal kinds (`max_turns` / `auth` / `cli_error`) never retry and still propagate to the `AgentRegistry` fallback loop. Each retry logs `Runtime task=<id> retry=<n>/<max> kind=<k>` and writes a `task.agent_retry` event.
+  - When a runtime task fails with `error_kind=max_turns`, `_fail` now posts an interactive decision surface ("Re-run +30 turns"). Clicking it creates a sibling task with `agent_max_turns = parent + 30` (fallback base 25 if parent left it unset), emits `task.rerun_sibling_created` on the parent and `task.created` on the sibling. Surface text @-mentions configured owners and advertises its TTL (from `runtime.decision_ttl_minutes`, default 24 h).
+  - New `DecisionAction` value `rerun_bump_turns`; Discord button label "Re-run +30 turns" (primary); `TaskService.disable_actions` exposes this single action on `FAILED` status.
+  - Scope: runtime task path only (`/task_start`, automations). Chat-path max_turns UX (`AgentRegistry.run()` from `/ask` / slash skills) stays out of scope per the original plan — users retry manually.
+  - Tests: `tests/test_runtime_agent_retry.py` (10) covers retry dispatch per kind, per-kind + global caps, retry-then-success path; `tests/test_runtime_rerun_bump_turns.py` (9) covers sibling task creation, lineage events, surface mentions/TTL, and that `_fail` only surfaces the button on `max_turns`.
 - **Automation follow-up via Discord reply** (MVP). Replying to any automation-posted channel message now spawns a Discord thread rooted on that message, seeded with a system turn that lists the original run's archived artifact paths. The agent continues in that thread as a normal conversation (CLI session is **not** resumed — artifact paths are injected as context instead; see [docs/EN/todo.md](docs/EN/todo.md) backlog for the optional `--resume` upgrade).
   - New `automation_posts` SQLite table: `(platform, channel_id, message_id)` primary key with `automation_name`, `fired_at`, `artifact_paths` (JSON), `agent_name`, `skill_name`, `task_id`, `follow_up_thread_id`. `CREATE TABLE IF NOT EXISTS` so existing DBs upgrade in place.
   - Runtime `_send_automation_terminal_message` now captures the first outbound message id and records an `automation_posts` row with the run's archived (or delivered) paths; `_notify` threads the paths through a new `automation_artifact_paths` kwarg.
@@ -27,6 +33,11 @@ The format is intentionally lightweight and release-oriented rather than exhaust
 ### Changed
 
 - `config.yaml.example` + local `config.yaml`: added `runtime.reports_dir` key.
+- **Skill turn budgets**: `deals-scanner`, `market-briefing`, `youtube-podcast-digest` now set `metadata.max_turns: 60` — previously only `timeout_seconds` was set, so claude fell back to its default 25-turn budget on multi-source fetch-then-aggregate workflows and hit `error_max_turns`. Same trap that was closed for `paper-digest` (a43b903) and `seattle-metro-housing-watch` (369affe).
+
+### Fixed
+
+- **Claude CLI failure path: JSONL-aware parsing**. `ClaudeAgent.run()`'s error branch used `json.loads(stdout)` which silently failed on multi-line NDJSON output (`system.init` → `assistant` → `user` → `result`), leaving `error_kind` as `cli_error` instead of classifying `error_max_turns` → `max_turns`. Reuse `_parse_claude_stream_json` so the last `type=result` frame is always read; when no result frame exists (CLI killed mid-stream), fall back to `classify_cli_error_kind` on stderr. Regression tests: `tests/test_claude_agent.py::test_claude_error_max_turns_with_ndjson_stdout` + `test_claude_ndjson_without_result_frame_falls_back_to_cli_error`. Observed in prod 2026-04-19: seattle-metro-housing-watch weekly hit max_turns but `AgentRegistry.run()` fell back to codex instead of short-circuiting, because the final frame's `subtype=error_max_turns` never reached the classifier.
 
 ## v0.9.2 - 2026-04-18
 

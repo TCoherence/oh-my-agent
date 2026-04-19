@@ -126,7 +126,48 @@ GatewayManager.handle_message()
 
 ---
 
-## 7. 已知坑点
+## 7. 失败恢复：retry + rerun 按钮
+
+仅 **runtime task 路径**（`/task_start` + automation）。Chat path 的 `AgentRegistry.run()`（`/ask` 或 slash skill）没有 retry，用户自己手动重发。
+
+### 7.1 基于 `error_kind` 的透明 retry
+
+`RuntimeService._invoke_agent_with_retry` 把每次 agent 结果归到一个 `error_kind`，对 transient 类型先 retry 再把结果交给 `AgentRegistry` 的 fallback loop：
+
+| `error_kind` | 行为 | Backoff | 上限 |
+|---|---|---|---|
+| success | 直接返回 | — | — |
+| `rate_limit` | retry | 10 s → 30 s | 2 次 |
+| `api_5xx` | retry | 5 s → 15 s | 2 次 |
+| `timeout` | retry 一次 | 0 s（立即） | 1 次 |
+| `max_turns` | **terminal** | — | 0（弹 re-run 按钮） |
+| `auth` | **terminal** | — | 0（触发 auth 通知） |
+| `cli_error` | **terminal** | — | 0（fallback 到下一个 agent） |
+
+跨类型的总 retry 次数受 `_MAX_TOTAL_RETRIES = 3` 限制（每次 agent 调用内）。每次 retry 打日志 `Runtime task=<id> retry=<n>/<max> kind=<k>`，并写一条 `task.agent_retry` 事件。retry 计数不跨 agent —— claude → codex 的 fallback 是全新的 retry 预算。
+
+### 7.2 `max_turns` 失败后的「Re-run +30 turns」按钮
+
+Agent 返回 `error_kind=max_turns` 时，runtime 视为 terminal（继续 retry 只会浪费一样的预算）。取而代之，`_fail` 会投一个交互 surface：
+
+```
+@owner Task `abc123…` hit `max_turns` (25). Re-run with `max_turns=55`?
+_Button expires in ~24h._
+[ Re-run +30 turns ]
+```
+
+点按钮后：
+
+1. 消耗 decision nonce（TTL = `runtime.decision_ttl_minutes`，默认 1440 分钟）。
+2. 创建一个 **sibling task**，克隆 parent（`goal`, `preferred_agent`, `completion_mode`, `automation_name`, `skill_name`, `task_type`, `test_command`），但 `agent_max_turns = parent.agent_max_turns + 30`（parent 没设的话回退基准 25）。
+3. 在 parent 上发 `task.rerun_sibling_created` 事件（带 `sibling_task_id`, `base_turns`, `agent_max_turns`, `actor_id`, `source`），在 sibling 上发 `task.created`（带 `parent_task_id`, `source="rerun_bump_turns:button"`）。
+4. Sibling 进 `PENDING`，由普通 dispatch loop 接手。
+
+如果频繁触发，还是优先把 SKILL.md 里的 `metadata.max_turns` 调上去 —— 按钮是一次性救场，不是长期修复。
+
+---
+
+## 8. 已知坑点
 
 1. **Router 阈值 0.55 偏低。** 一句「帮我研究一下 X / let me research X」就能越线。如果想走聊天，要么临时关路由要么改措辞；或者把 `router.confidence_threshold` 调高，用 precision 换 recall。
 2. **Artifact workspace 拿不到 bundled skills。** 隔离目录 `_artifacts/<id>/` 不会被 sync 进 `.claude/skills/` / `.gemini/skills/`，所以 artifact 任务跑的 agent 不能调用 `web-scraper` 这类本地 skill，只能在单轮内 inline 全部工作。（`repo_change` 任务会通过 `_setup_workspace()` 拿到 skills。）
@@ -137,7 +178,7 @@ GatewayManager.handle_message()
 
 ---
 
-## 8. 相关配置 key
+## 9. 相关配置 key
 
 ```yaml
 runtime:
