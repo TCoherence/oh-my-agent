@@ -158,6 +158,7 @@ Skills 放在 `skills/<name>/SKILL.md`。`SkillSync` 系统会自动同步到所
 | 文档 | EN | 中文 |
 |------|----|------|
 | 架构说明 | [architecture.md](../EN/architecture.md) | [architecture.md](architecture.md) |
+| 任务模型（类型 / 路由 / 状态） | [task-model.md](../EN/task-model.md) | [task-model.md](task-model.md) |
 | 运营指南 | [operator-guide.md](../EN/operator-guide.md) | [operator-guide.md](operator-guide.md) |
 | 路线图 | [todo.md](../EN/todo.md) | [todo.md](todo.md) |
 | 开发记录 | [development.md](../EN/development.md) | [development.md](development.md) |

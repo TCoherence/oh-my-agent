@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import fnmatch
 import inspect
 import json
@@ -125,6 +125,7 @@ class ArtifactDeliveryResult:
     message_ids: list[str]
     summary_text: str
     attachment_names: list[str]
+    archived_paths: list[str] = field(default_factory=list)
 
 
 def _fmt_dt(dt) -> str:
@@ -221,6 +222,11 @@ class RuntimeService:
         self._artifact_attachment_max_total_bytes = int(
             cfg.get("artifact_attachment_max_total_bytes", 20 * 1024 * 1024)
         )
+        reports_cfg = cfg.get("reports_dir", "~/.oh-my-agent/reports")
+        if reports_cfg in (None, False, ""):
+            self._reports_dir: Path | None = None
+        else:
+            self._reports_dir = Path(str(reports_cfg)).expanduser().resolve()
         self._auth_service = auth_service
         if self._auth_service is not None:
             self._auth_service.add_listener(self._on_auth_flow_event)
@@ -3575,6 +3581,41 @@ class RuntimeService:
                 results.append(candidate)
         return results
 
+    def _archive_artifact_files(self, task_id: str, paths: list[Path]) -> list[str]:
+        """Copy artifact files into the central reports archive.
+
+        Returns absolute string paths of the archived copies. Returns [] if
+        `reports_dir` is disabled, paths is empty, or archiving fails.
+        """
+        if not self._reports_dir or not paths:
+            return []
+        from datetime import datetime, timezone as _tz
+
+        try:
+            date_dir = self._reports_dir / datetime.now(_tz.utc).strftime("%Y-%m-%d")
+            date_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            logger.warning("Failed to create reports dir %s", self._reports_dir, exc_info=True)
+            return []
+        archived: list[str] = []
+        suffix_tag = (task_id or "")[:8] or "task"
+        for path in paths:
+            try:
+                source = path.resolve()
+                dest = date_dir / path.name
+                if dest.exists() and dest.resolve() != source:
+                    dest = date_dir / f"{dest.stem}-{suffix_tag}{dest.suffix}"
+                shutil.copy2(source, dest)
+                archived.append(str(dest.resolve()))
+            except OSError:
+                logger.warning(
+                    "Failed to archive artifact %s to %s",
+                    path,
+                    self._reports_dir,
+                    exc_info=True,
+                )
+        return archived
+
     def _render_delivery_lines(self, delivery: ArtifactDeliveryResult | None) -> list[str]:
         if delivery is None:
             return []
@@ -3589,6 +3630,11 @@ class RuntimeService:
             lines.extend(f"- `{path}`" for path in delivery.delivered_paths[:8])
             if len(delivery.delivered_paths) > 8:
                 lines.append(f"- ... and {len(delivery.delivered_paths) - 8} more")
+        if delivery.archived_paths:
+            lines.append("Archived to:")
+            lines.extend(f"- `{path}`" for path in delivery.archived_paths[:8])
+            if len(delivery.archived_paths) > 8:
+                lines.append(f"- ... and {len(delivery.archived_paths) - 8} more")
         return lines
 
     async def _deliver_artifacts(
@@ -3603,6 +3649,7 @@ class RuntimeService:
         artifact_paths = self._artifact_paths_for_task(task, changed_files)
         if not artifact_paths:
             return None
+        archived_paths = self._archive_artifact_files(task.id, artifact_paths)
         summary_text = task.output_summary or f"{len(artifact_paths)} artifact(s) ready."
         return await self.deliver_files(
             session=session,
@@ -3610,6 +3657,7 @@ class RuntimeService:
             artifact_paths=artifact_paths,
             summary_text=summary_text,
             log_label=f"task={task.id}",
+            archived_paths=archived_paths,
         )
 
     async def deliver_files(
@@ -3620,6 +3668,7 @@ class RuntimeService:
         artifact_paths: list[Path],
         summary_text: str,
         log_label: str = "",
+        archived_paths: list[str] | None = None,
     ) -> ArtifactDeliveryResult | None:
         """Deliver files via attachment upload with local path fallback.
 
@@ -3628,6 +3677,7 @@ class RuntimeService:
         """
         if not artifact_paths:
             return None
+        archived = list(archived_paths or [])
 
         channel_impl = type(session.channel)
         supports_attachment_upload = (
@@ -3667,6 +3717,7 @@ class RuntimeService:
                     message_ids=message_ids,
                     summary_text=summary_text,
                     attachment_names=[attachment.filename for attachment in attachments],
+                    archived_paths=archived,
                 )
             except Exception:
                 logger.warning("Artifact attachment delivery failed %s", log_label, exc_info=True)
@@ -3683,6 +3734,7 @@ class RuntimeService:
             message_ids=[],
             summary_text=summary_text,
             attachment_names=[],
+            archived_paths=archived,
         )
 
     async def _automation_completed_text(

@@ -183,6 +183,7 @@ Cron / interval 周期任务。
 | `state_path` | string | `~/.oh-my-agent/runtime/runtime.db` | task 状态机的 SQLite。 |
 | `worker_concurrency` | int | `3` | 并发 runtime task 上限。 |
 | `worktree_root` | string | `~/.oh-my-agent/runtime/tasks` | task worktree 根目录。 |
+| `reports_dir` | string | `~/.oh-my-agent/reports` | artifact 归档根目录，按 `YYYY-MM-DD/` 分层。设为 `""` 或 `false` 关闭归档。**不会**自动清理。 |
 | `default_agent` | string | `codex` | task 没指定 agent 时用这个。 |
 | `default_test_command` | string | `pytest -q` | VALIDATING 阶段执行的命令。 |
 | `default_max_steps` | int | `8` | 单 task 的 agent 步数硬上限。 |

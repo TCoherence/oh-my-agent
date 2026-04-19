@@ -159,6 +159,7 @@ Skills live at `skills/<name>/SKILL.md`. `SkillSync` syncs them to all CLI agent
 | Doc | EN | 中文 |
 |-----|----|------|
 | Architecture | [architecture.md](architecture.md) | [architecture.md](../CN/architecture.md) |
+| Task model (types, router, states) | [task-model.md](task-model.md) | [task-model.md](../CN/task-model.md) |
 | Operator guide | [operator-guide.md](operator-guide.md) | [operator-guide.md](../CN/operator-guide.md) |
 | Roadmap | [todo.md](todo.md) | [todo.md](../CN/todo.md) |
 | Development notes | [development.md](development.md) | [development.md](../CN/development.md) |

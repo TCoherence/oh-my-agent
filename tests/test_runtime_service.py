@@ -600,6 +600,7 @@ async def runtime_env(tmp_path):
         "enabled": True,
         "worker_concurrency": 1,
         "worktree_root": str(tmp_path / "worktrees"),
+        "reports_dir": str(tmp_path / "reports"),
         "default_agent": "done-agent",
         "default_test_command": "true",
         "default_max_steps": 8,
@@ -911,6 +912,58 @@ async def test_artifact_task_completes_without_merge(runtime_env):
     logs = await runtime.get_task_logs(task.id)
     assert "Artifacts:" in logs
     assert "Thread log:" in logs
+
+    reports_dir = runtime._reports_dir  # noqa: SLF001
+    assert reports_dir is not None
+    archived_files = list(reports_dir.rglob("daily-news*.md"))
+    assert len(archived_files) == 1
+    assert archived_files[0].parent.name.count("-") == 2  # YYYY-MM-DD subdir
+    sent_texts = [text for _, text in channel.sent]
+    assert any("Archived to:" in text and str(archived_files[0]) in text for text in sent_texts)
+
+
+@pytest.mark.asyncio
+async def test_artifact_task_archive_suffixes_conflicting_filename(runtime_env):
+    store: SQLiteMemoryStore = runtime_env["store"]
+    runtime: RuntimeService = runtime_env["runtime"]
+    channel: _FakeChannel = runtime_env["channel"]
+    registry = AgentRegistry([_ArtifactAgent()])
+    session = ChannelSession(
+        platform="discord",
+        channel_id="100",
+        channel=channel,
+        registry=registry,
+    )
+    runtime.register_session(session, registry)
+    await runtime.start()
+
+    for thread_suffix in ("a", "b"):
+        task = await runtime.create_artifact_task(
+            session=session,
+            registry=registry,
+            thread_id=f"thread-archive-{thread_suffix}",
+            goal="Generate a markdown daily news brief",
+            created_by="owner-1",
+            source="router",
+        )
+        await _wait_for_status(store, task.id, {TASK_STATUS_COMPLETED})
+
+    reports_dir = runtime._reports_dir  # noqa: SLF001
+    assert reports_dir is not None
+    archived = sorted(reports_dir.rglob("daily-news*.md"))
+    assert len(archived) == 2
+    # Second copy must have the short task id suffix so it does not overwrite the first.
+    assert any(path.stem != "daily-news" and path.stem.startswith("daily-news-") for path in archived)
+
+
+@pytest.mark.asyncio
+async def test_artifact_archive_disabled_when_reports_dir_empty(runtime_env, tmp_path):
+    runtime: RuntimeService = runtime_env["runtime"]
+    runtime._reports_dir = None  # noqa: SLF001 — emulates `reports_dir: ""` config
+
+    out = tmp_path / "src.md"
+    out.write_text("# hi", encoding="utf-8")
+    assert runtime._archive_artifact_files("task-xyz", [out]) == []  # noqa: SLF001
 
 
 @pytest.mark.asyncio
