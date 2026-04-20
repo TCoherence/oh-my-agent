@@ -1,0 +1,4 @@
+interface:
+  display_name: "Jensen Huang Speech Research"
+  short_description: "Research Jensen Huang's speeches, keynotes, guest podcast appearances, and interviews across a user-specified time window (default past month; supports past-2w / past-1m / past-3m / past-6m / past-1y / past-3y / bootstrap / custom)"
+  default_prompt: "请帮我调研 Jensen Huang 过去一个月的公开演讲、独立采访、做客播客和投资者活动，生成中文分析报告。如果要覆盖更长区间（比如过去三年做 bootstrap），请直接说明。"
