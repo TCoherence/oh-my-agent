@@ -103,11 +103,12 @@ The Docker image preinstalls `claude`, `gemini`, and `codex` CLIs. The host repo
 | Category | Commands |
 |----------|----------|
 | **Conversation** | `/ask`, `/reset`, `/history`, `/agent`, `/search` |
-| **Runtime Tasks** | `/task_start`, `/task_status`, `/task_list`, `/task_approve`, `/task_reject`, `/task_suggest`, `/task_resume`, `/task_stop`, `/task_merge`, `/task_discard`, `/task_changes`, `/task_logs`, `/task_cleanup` |
+| **Runtime Tasks** | `/task_start`, `/task_status`, `/task_list`, `/task_approve`, `/task_reject`, `/task_suggest`, `/task_resume`, `/task_stop`, `/task_merge`, `/task_discard`, `/task_replace`, `/task_changes`, `/task_logs`, `/task_cleanup` |
 | **Skills** | `/reload-skills`, `/skill_stats`, `/skill_enable` |
 | **Automations** | `/automation_status`, `/automation_reload`, `/automation_enable`, `/automation_disable`, `/automation_run` |
 | **Memory** | `/memories`, `/forget`, `/memorize` |
 | **Auth** | `/auth_login`, `/auth_status`, `/auth_clear` |
+| **Operator** | `/doctor` |
 
 ### Automations
 
@@ -145,9 +146,16 @@ DRAFT → RUNNING → VALIDATING → WAITING_MERGE → MERGED / COMPLETED
 
 | Skill | Description |
 |-------|-------------|
-| `market-briefing` | Daily/weekly briefings for politics, finance, and AI with persisted report storage |
-| `seattle-metro-housing-watch` | Seattle metro area housing market snapshots and deep-dives |
-| `scheduler` | Create and validate automation YAML files |
+| `market-briefing` | Chinese-first politics / finance / AI market briefings with persisted reports |
+| `paper-digest` | Daily arXiv + HuggingFace + Semantic Scholar paper radar (Chinese) |
+| `youtube-video-summary` | Single-link YouTube video summary via transcript-first extraction |
+| `youtube-podcast-digest` | Weekly digest of subscribed YouTube podcast channels (VC / AI / markets) |
+| `bilibili-video-summary` | Single-link Bilibili video summary with cookie-based auth fallback |
+| `deals-scanner` | Chinese-first deal scans across US credit cards, Rakuten, Slickdeals, Dealmoon |
+| `seattle-metro-housing-watch` | Seattle metro housing snapshots and deep-dives with stored report history |
+| `scheduler` | Create, update, and validate recurring automation YAML jobs |
+| `skill-creator` | Guide and scaffolding for creating new skills |
+| `adapt-community-skill` | Rewrite an imported / community skill to fit this workspace's conventions |
 
 Skills live in `skills/<name>/SKILL.md`. The `SkillSync` system distributes them to all CLI agent directories automatically.
 

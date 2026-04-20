@@ -87,6 +87,7 @@ The system has seven major subsystems.
 - Completion summary with goal, files changed, test counts, and timing metrics.
 - Artifact archive: on `completion_mode=reply` each delivered file is also copied to `<runtime.reports_dir>/artifacts/<filename>` (default `~/.oh-my-agent/reports/artifacts/`); filename collisions get a `-<task_id[:8]>` suffix. The completion message renders an `Archived to:` block. Set `runtime.reports_dir: ""` to disable.
 - Discord buttons for approval + slash command fallback.
+- Retry on transient agent errors (`rate_limit` / `api_5xx` / `timeout`) with per-kind backoff; on `max_turns` failure, `_fail` surfaces a "Re-run +30 turns" button that spawns a sibling task with a bumped `agent_max_turns` (parent+30, fallback base 25). Terminal kinds (`auth` / `cli_error`) never retry.
 - Janitor cleanup with configurable retention. Archive dir under `reports_dir/` is **not** auto-pruned.
 
 See [`docs/EN/task-model.md`](docs/EN/task-model.md) ([中文](docs/CN/task-model.md)) for the full task-type, router-intent, status, and delivery catalog — plus known sharp edges.
@@ -103,6 +104,7 @@ See [`docs/EN/task-model.md`](docs/EN/task-model.md) ([中文](docs/CN/task-mode
 - Per-automation `auto_approve: bool` (default `false`): when `true`, scheduler-fired runtime tasks skip risk evaluation and start immediately; when `false`, tasks go through normal `evaluate_strict_risk()` and may land in DRAFT.
 - `fire_job_now(name)`: programmatic one-shot trigger for manual `/automation_run` command.
 - Jobs dispatch back into `GatewayManager.handle_message()` as system messages.
+- Follow-up thread on reply: each automation-posted channel message is recorded in the `automation_posts` SQLite table (7-day TTL via the runtime janitor). Replying to that message spawns a Discord thread rooted on it, seeded with a system turn listing the original run's archived artifact paths; the agent continues there as a normal conversation (CLI session is not resumed — artifact paths are injected as context).
 
 **Sandbox isolation** (`main.py` + `BaseCLIAgent`)
 
