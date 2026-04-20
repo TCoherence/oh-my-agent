@@ -153,11 +153,13 @@ def _apply_v052_defaults(config: dict) -> None:
     router_cfg.setdefault("base_url", "https://api.deepseek.com/v1")
     router_cfg.setdefault("api_key_env", "DEEPSEEK_API_KEY")
     router_cfg.setdefault("model", "deepseek-chat")
-    router_cfg.setdefault("timeout_seconds", 8)
+    router_cfg.setdefault("timeout_seconds", 15)
     router_cfg.setdefault("max_retries", 1)
     router_cfg.setdefault("confidence_threshold", 0.55)
+    router_cfg.setdefault("autonomy_threshold", 0.90)
     router_cfg.setdefault("context_turns", 10)
     router_cfg.setdefault("require_user_confirm", True)
+    router_cfg.setdefault("extra_body", {})
 
     automations_cfg = config.setdefault("automations", {})
     automations_cfg.setdefault("enabled", True)
@@ -619,21 +621,31 @@ async def _async_main(config: dict, logger: logging.Logger, *, project_root: Pat
             else:
                 from oh_my_agent.gateway.router import OpenAICompatibleRouter
 
+                extra_body_cfg = router_cfg.get("extra_body", {})
+                if not isinstance(extra_body_cfg, dict):
+                    logger.warning(
+                        "router.extra_body must be a mapping, got %s; ignoring",
+                        type(extra_body_cfg).__name__,
+                    )
+                    extra_body_cfg = {}
                 intent_router = OpenAICompatibleRouter(
                     base_url=str(router_cfg.get("base_url", "https://api.deepseek.com/v1")),
                     api_key=api_key,
                     model=str(router_cfg.get("model", "deepseek-chat")),
-                    timeout_seconds=int(router_cfg.get("timeout_seconds", 8)),
+                    timeout_seconds=int(router_cfg.get("timeout_seconds", 15)),
                     confidence_threshold=float(router_cfg.get("confidence_threshold", 0.55)),
                     max_retries=int(router_cfg.get("max_retries", 1)),
+                    extra_body=extra_body_cfg,
                 )
                 logger.info(
-                    "Intent router enabled model=%s base=%s threshold=%.2f timeout=%ss retries=%s",
+                    "Intent router enabled model=%s base=%s threshold=%.2f autonomy=%.2f timeout=%ss retries=%s require_user_confirm=%s",
                     router_cfg.get("model", "deepseek-chat"),
                     router_cfg.get("base_url", "https://api.deepseek.com/v1"),
                     float(router_cfg.get("confidence_threshold", 0.55)),
-                    int(router_cfg.get("timeout_seconds", 8)),
+                    float(router_cfg.get("autonomy_threshold", 0.90)),
+                    int(router_cfg.get("timeout_seconds", 15)),
                     int(router_cfg.get("max_retries", 1)),
+                    bool(router_cfg.get("require_user_confirm", True)),
                 )
 
     # Build (channel, registry) pairs
@@ -688,6 +700,8 @@ async def _async_main(config: dict, logger: logging.Logger, *, project_root: Pat
         repo_root=project_root,
         intent_router=intent_router,
         router_context_turns=int(router_cfg.get("context_turns", 10)),
+        router_require_user_confirm=bool(router_cfg.get("require_user_confirm", True)),
+        router_autonomy_threshold=float(router_cfg.get("autonomy_threshold", 0.90)),
         skill_evaluation_config=config.get("skills", {}).get("evaluation", {}),
         judge_store=judge_store,
         judge=memory_judge,

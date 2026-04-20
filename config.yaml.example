@@ -70,12 +70,14 @@ router:
   provider: openai_compatible
   base_url: "https://<openai-compatible-endpoint>/v1"
   api_key_env: DEEPSEEK_API_KEY
-  model: deepseek-chat
-  timeout_seconds: 8
+  model: deepseek-chat            # or deepseek-reasoner — stronger reasoning, ~3x latency
+  timeout_seconds: 15             # bump to >=25 if model is a reasoner
   max_retries: 1
-  confidence_threshold: 0.55
+  confidence_threshold: 0.55      # below this → heuristic fallback
+  autonomy_threshold: 0.90        # create_skill/repair_skill auto-run only above this; in [conf_thr, auto_thr) it goes to DRAFT awaiting /task_approve
   context_turns: 10
-  require_user_confirm: true
+  require_user_confirm: true      # enforce borderline-band user confirmation (no longer a dead config)
+  extra_body: {}                  # pass-through to provider, e.g. {reasoning: {effort: medium}}; must not override messages/model/max_tokens/temperature
 
 automations:
   enabled: true

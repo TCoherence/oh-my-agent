@@ -1723,3 +1723,176 @@ async def test_handle_message_maps_unexpected_error_to_internal_message():
     await gm.handle_message(session, session.registry, _make_msg(thread_id="thread-1", content="trigger"))
 
     channel.send.assert_awaited_once_with("thread-1", USER_MSG_INTERNAL)
+
+
+# ── Router borderline / autonomy-threshold behavior ─────────────────── #
+
+
+def _make_router_border_channel():
+    channel = MagicMock()
+    channel.platform = "discord"
+    channel.channel_id = "100"
+    channel.create_thread = AsyncMock(return_value="t1")
+    channel.send = AsyncMock()
+    channel.typing = MagicMock()
+    channel.typing.return_value.__aenter__ = AsyncMock(return_value=None)
+    channel.typing.return_value.__aexit__ = AsyncMock(return_value=False)
+    return channel
+
+
+def _make_router_border_runtime():
+    runtime = MagicMock()
+    runtime.maybe_handle_thread_context = AsyncMock(return_value=False)
+    runtime.maybe_handle_incoming = AsyncMock(return_value=False)
+    runtime.create_skill_task = AsyncMock()
+    return runtime
+
+
+def _make_router_stub(*, decision: str, confidence: float, skill_name: str | None = None):
+    router = MagicMock()
+    router.confidence_threshold = 0.55
+    router.route = AsyncMock(
+        return_value=RouteDecision(
+            decision=decision,
+            confidence=confidence,
+            goal="do the thing",
+            risk_hints=[],
+            raw_text="{}",
+            skill_name=skill_name,
+            task_type="skill_change",
+            completion_mode="merge",
+        )
+    )
+    return router
+
+
+def _last_send_text(channel) -> str:
+    assert channel.send.await_args is not None, "channel.send was not awaited"
+    args = channel.send.await_args.args
+    if len(args) >= 2:
+        return args[1]
+    return channel.send.await_args.kwargs.get("content", "")
+
+
+@pytest.mark.asyncio
+async def test_router_create_skill_borderline_forces_draft_and_confirm_text():
+    channel = _make_router_border_channel()
+    registry = MagicMock(spec=AgentRegistry)
+    registry.run = AsyncMock()
+    runtime = _make_router_border_runtime()
+    router = _make_router_stub(decision="create_skill", confidence=0.70, skill_name="skill-x")
+
+    session = _make_session(channel=channel, registry=registry)
+    gm = GatewayManager(
+        [],
+        runtime_service=runtime,
+        intent_router=router,
+        router_require_user_confirm=True,
+        router_autonomy_threshold=0.90,
+    )
+    await gm.handle_message(session, registry, _make_msg(thread_id="t1", content="帮我做一件事"))
+
+    runtime.create_skill_task.assert_awaited_once()
+    kwargs = runtime.create_skill_task.call_args.kwargs
+    assert kwargs["force_draft"] is True
+    text = _last_send_text(channel)
+    assert "/task_approve" in text
+    assert "/task_reject" in text
+    assert "draft" in text.lower() or "not confident" in text.lower()
+
+
+@pytest.mark.asyncio
+async def test_router_create_skill_high_confidence_skips_borderline_and_auto_runs():
+    channel = _make_router_border_channel()
+    registry = MagicMock(spec=AgentRegistry)
+    registry.run = AsyncMock()
+    runtime = _make_router_border_runtime()
+    router = _make_router_stub(decision="create_skill", confidence=0.95, skill_name="skill-y")
+
+    session = _make_session(channel=channel, registry=registry)
+    gm = GatewayManager(
+        [],
+        runtime_service=runtime,
+        intent_router=router,
+        router_require_user_confirm=True,
+        router_autonomy_threshold=0.90,
+    )
+    await gm.handle_message(session, registry, _make_msg(thread_id="t1", content="create a daily AI news skill"))
+
+    runtime.create_skill_task.assert_awaited_once()
+    kwargs = runtime.create_skill_task.call_args.kwargs
+    # Non-borderline: manager must not override; force_draft passed through as None.
+    assert kwargs.get("force_draft") is None
+    text = _last_send_text(channel)
+    assert "/task_stop" in text
+    assert "started execution" in text.lower() or "already started" in text.lower()
+
+
+@pytest.mark.asyncio
+async def test_router_repair_skill_borderline_forces_draft_and_confirm_text(tmp_path):
+    channel = _make_router_border_channel()
+    registry = MagicMock(spec=AgentRegistry)
+    registry.run = AsyncMock()
+    runtime = _make_router_border_runtime()
+    router = _make_router_stub(decision="repair_skill", confidence=0.70, skill_name="paper-digest")
+
+    skills_root = tmp_path / "skills"
+    (skills_root / "paper-digest").mkdir(parents=True)
+    (skills_root / "paper-digest" / "SKILL.md").write_text("name: paper-digest\n", encoding="utf-8")
+    syncer = MagicMock()
+    syncer._skills_path = skills_root
+
+    session = _make_session(channel=channel, registry=registry)
+    await session.append_user("t1", "/paper-digest", "alice")
+    await session.append_assistant("t1", "result here", "claude")
+    gm = GatewayManager(
+        [],
+        runtime_service=runtime,
+        intent_router=router,
+        skill_syncer=syncer,
+        router_require_user_confirm=True,
+        router_autonomy_threshold=0.90,
+    )
+    await gm.handle_message(session, registry, _make_msg(thread_id="t1", content="这个 skill 有点问题"))
+
+    runtime.create_skill_task.assert_awaited_once()
+    kwargs = runtime.create_skill_task.call_args.kwargs
+    assert kwargs["force_draft"] is True
+    assert kwargs["source"] == "repair_skill"
+    text = _last_send_text(channel)
+    assert "/task_approve" in text
+    assert "/task_reject" in text
+
+
+@pytest.mark.asyncio
+async def test_router_repair_skill_high_confidence_skips_borderline_and_auto_runs(tmp_path):
+    channel = _make_router_border_channel()
+    registry = MagicMock(spec=AgentRegistry)
+    registry.run = AsyncMock()
+    runtime = _make_router_border_runtime()
+    router = _make_router_stub(decision="repair_skill", confidence=0.95, skill_name="paper-digest")
+
+    skills_root = tmp_path / "skills"
+    (skills_root / "paper-digest").mkdir(parents=True)
+    (skills_root / "paper-digest" / "SKILL.md").write_text("name: paper-digest\n", encoding="utf-8")
+    syncer = MagicMock()
+    syncer._skills_path = skills_root
+
+    session = _make_session(channel=channel, registry=registry)
+    await session.append_user("t1", "/paper-digest", "alice")
+    await session.append_assistant("t1", "result here", "claude")
+    gm = GatewayManager(
+        [],
+        runtime_service=runtime,
+        intent_router=router,
+        skill_syncer=syncer,
+        router_require_user_confirm=True,
+        router_autonomy_threshold=0.90,
+    )
+    await gm.handle_message(session, registry, _make_msg(thread_id="t1", content="fix the summary length"))
+
+    runtime.create_skill_task.assert_awaited_once()
+    kwargs = runtime.create_skill_task.call_args.kwargs
+    assert kwargs.get("force_draft") is None
+    text = _last_send_text(channel)
+    assert "/task_stop" in text

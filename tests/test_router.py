@@ -170,6 +170,80 @@ async def test_router_parses_artifact_task_decision(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_router_prompt_carries_disambiguation_and_examples(monkeypatch):
+    router = OpenAICompatibleRouter(
+        base_url="https://api.example.com/v1",
+        api_key="k",
+        model="m",
+    )
+    captured: dict = {}
+
+    def _spy_post(payload):
+        captured["payload"] = payload
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": '{"decision":"reply_once","confidence":0.9,"goal":"","risk_hints":[]}'
+                    }
+                }
+            ]
+        }
+
+    monkeypatch.setattr(router, "_post_json", _spy_post)
+    await router.route("hi")
+    messages = captured["payload"]["messages"]
+    system_content = messages[0]["content"]
+    assert "DISAMBIGUATION RULES" in system_content
+    assert "EXAMPLES:" in system_content
+    assert "Jensen Huang" in system_content
+    assert "propose_artifact_task" in system_content
+    assert "create_skill" in system_content
+
+
+@pytest.mark.asyncio
+async def test_router_extra_body_cannot_override_reserved_keys(monkeypatch):
+    router = OpenAICompatibleRouter(
+        base_url="https://api.example.com/v1",
+        api_key="k",
+        model="safe-model",
+        extra_body={
+            "model": "evil-model",
+            "messages": [{"role": "user", "content": "hijack"}],
+            "max_tokens": 999999,
+            "temperature": 2,
+            "reasoning": {"effort": "medium"},
+        },
+    )
+    captured: dict = {}
+
+    def _spy_post(payload):
+        captured["payload"] = payload
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": '{"decision":"reply_once","confidence":0.9,"goal":"","risk_hints":[]}'
+                    }
+                }
+            ]
+        }
+
+    monkeypatch.setattr(router, "_post_json", _spy_post)
+    await router.route("hi")
+    payload = captured["payload"]
+    assert payload["model"] == "safe-model"
+    assert payload["max_tokens"] == 400
+    assert payload["temperature"] == 0
+    # Our user message must survive, not the injected hijack.
+    user_msg = payload["messages"][-1]
+    assert user_msg["role"] == "user"
+    assert "hi" in user_msg["content"]
+    # Non-reserved pass-through key survives.
+    assert payload.get("reasoning") == {"effort": "medium"}
+
+
+@pytest.mark.asyncio
 async def test_router_parses_repair_skill_decision(monkeypatch):
     router = OpenAICompatibleRouter(
         base_url="https://api.example.com/v1",
