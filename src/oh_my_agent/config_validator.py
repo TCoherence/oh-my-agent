@@ -57,6 +57,9 @@ class ValidationResult:
         return "\n".join(lines)
 
 
+ROUTER_RESERVED_PAYLOAD_KEYS = frozenset({"messages", "model", "max_tokens", "temperature"})
+
+
 def validate_config(config: dict[str, Any]) -> ValidationResult:
     """Validate a loaded config dict.  Returns a ``ValidationResult``."""
     result = ValidationResult()
@@ -65,6 +68,7 @@ def validate_config(config: dict[str, Any]) -> ValidationResult:
     _check_automations(config, result)
     _check_logging(config, result)
     _check_sections(config, result)
+    _check_router(config, result)
     return result
 
 
@@ -216,3 +220,81 @@ def _check_sections(config: dict, result: ValidationResult) -> None:
         val = config.get(section)
         if val is not None and not isinstance(val, dict):
             result.errors.append(ConfigError(section, "must be a mapping if present", "warning"))
+
+
+# ── Router ──────────────────────────────────────────────────────────── #
+
+def _check_router(config: dict, result: ValidationResult) -> None:
+    """Validate the ``router`` section's typed fields."""
+    router = config.get("router")
+    if router is None or not isinstance(router, dict):
+        return  # section-level issue already handled by _check_sections
+
+    def _err(path: str, message: str) -> None:
+        result.errors.append(ConfigError(path, message, "error"))
+
+    # Booleans
+    for key in ("enabled", "require_user_confirm"):
+        if key in router and not isinstance(router[key], bool):
+            _err(f"router.{key}", f"must be a bool, got {type(router[key]).__name__}")
+
+    # Positive integers
+    for key in ("timeout_seconds", "context_turns"):
+        if key in router:
+            val = router[key]
+            if isinstance(val, bool) or not isinstance(val, int) or val <= 0:
+                _err(f"router.{key}", f"must be a positive integer, got '{val}'")
+
+    # Non-negative integers
+    if "max_retries" in router:
+        val = router["max_retries"]
+        if isinstance(val, bool) or not isinstance(val, int) or val < 0:
+            _err("router.max_retries", f"must be a non-negative integer, got '{val}'")
+
+    # Floats in [0, 1]
+    for key in ("confidence_threshold", "autonomy_threshold"):
+        if key in router:
+            val = router[key]
+            if isinstance(val, bool) or not isinstance(val, (int, float)):
+                _err(f"router.{key}", f"must be a number in [0, 1], got '{val}'")
+                continue
+            fval = float(val)
+            if fval < 0.0 or fval > 1.0:
+                _err(f"router.{key}", f"must be in [0, 1], got {fval}")
+
+    # autonomy_threshold >= confidence_threshold (only when both are valid numbers in [0, 1])
+    ct = router.get("confidence_threshold")
+    at = router.get("autonomy_threshold")
+    if (
+        isinstance(ct, (int, float))
+        and not isinstance(ct, bool)
+        and isinstance(at, (int, float))
+        and not isinstance(at, bool)
+        and 0.0 <= float(ct) <= 1.0
+        and 0.0 <= float(at) <= 1.0
+        and float(at) < float(ct)
+    ):
+        _err(
+            "router.autonomy_threshold",
+            (
+                f"must be >= router.confidence_threshold (got {float(at)} < {float(ct)}); "
+                "otherwise the borderline-confirmation band collapses and users never see "
+                "a draft for destructive intents"
+            ),
+        )
+
+    # extra_body: dict with no reserved keys
+    if "extra_body" in router:
+        extra = router["extra_body"]
+        if not isinstance(extra, dict):
+            _err("router.extra_body", f"must be a mapping, got {type(extra).__name__}")
+        else:
+            for reserved in ROUTER_RESERVED_PAYLOAD_KEYS:
+                if reserved in extra:
+                    _err(
+                        f"router.extra_body.{reserved}",
+                        (
+                            f"reserved key '{reserved}' is set by the router itself and must not "
+                            "be overridden via extra_body"
+                        ),
+                    )

@@ -23,6 +23,9 @@ class RouteDecision:
     completion_mode: str | None = None
 
 
+_RESERVED_PAYLOAD_KEYS = frozenset({"messages", "model", "max_tokens", "temperature"})
+
+
 class OpenAICompatibleRouter:
     """LLM classifier for deciding chat reply vs runtime task proposal."""
 
@@ -32,9 +35,10 @@ class OpenAICompatibleRouter:
         base_url: str,
         api_key: str,
         model: str,
-        timeout_seconds: int = 8,
+        timeout_seconds: int = 15,
         confidence_threshold: float = 0.55,
         max_retries: int = 1,
+        extra_body: dict[str, Any] | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
@@ -42,48 +46,80 @@ class OpenAICompatibleRouter:
         self._timeout_seconds = int(timeout_seconds)
         self._confidence_threshold = float(confidence_threshold)
         self._max_retries = max(0, int(max_retries))
+        raw_extra = dict(extra_body) if isinstance(extra_body, dict) else {}
+        self._extra_body: dict[str, Any] = {}
+        for key, value in raw_extra.items():
+            if key in _RESERVED_PAYLOAD_KEYS:
+                logger.warning(
+                    "Router extra_body key %r is reserved and will be ignored",
+                    key,
+                )
+                continue
+            self._extra_body[key] = value
 
     @property
     def confidence_threshold(self) -> float:
         return self._confidence_threshold
 
     async def route(self, message: str, *, context: str | None = None) -> RouteDecision | None:
-        payload = {
+        system_prompt = (
+            "Classify whether the user message should be handled as "
+            "a one-off chat reply, a direct invocation of an existing skill, "
+            "a multi-step artifact task, a multi-step repository-change task, "
+            "a skill-creation task, or a repair request for an existing skill.\n\n"
+            "DISAMBIGUATION RULES (read first):\n"
+            "- For one-time deliverables like research reports, summaries, analyses, "
+            "briefs, news digests (keywords: 报告/总结/调研/分析/research/summary/brief/report), "
+            "choose `propose_artifact_task`. This is the default for 'do this research "
+            "and give me a report' requests.\n"
+            "- Choose `create_skill` ONLY when (a) the user explicitly asks to "
+            "create/build/make a skill (keywords: create a skill / 创建/新建/生成 skill / "
+            "package as a workflow), OR (b) the workflow is clearly recurring or "
+            "parameterizable (scheduled, templated with variable inputs like 'for any "
+            "ticker I give', 'every morning').\n"
+            "- Never infer skill-creation intent just because the word 'skill' appears "
+            "in prior context or the known-skills list.\n"
+            "- When both artifact and skill could apply, prefer artifact (lower blast "
+            "radius).\n\n"
+            "Output strict JSON only with keys: decision, confidence, goal, risk_hints, skill_name, task_type, completion_mode.\n"
+            "decision must be 'reply_once', 'invoke_existing_skill', 'propose_artifact_task', 'propose_repo_task', 'create_skill', or 'repair_skill'.\n"
+            "If invoke_existing_skill, keep goal empty when possible and provide skill_name if obvious.\n"
+            "Known skills may be provided as name plus description. Prefer invoke_existing_skill when the current "
+            "message semantically matches one of those skill descriptions.\n"
+            "Prefer invoke_existing_skill when recent context shows a known skill was just merged, synced, or recently used, "
+            "and the current message is a follow-up asking to try again, analyze now, run it now, or continue with that skill.\n"
+            "Prefer repair_skill instead of create_skill when recent context identifies a most recently invoked skill and the user "
+            "is asking to fix, improve, adapt, internalize, refine, or base that skill on another reference project/tool/output.\n"
+            "Do not create a parallel new skill just because the user mentions an external repo, project, or tool; if they want "
+            "to upgrade the existing skill, keep skill_name pointed at the existing skill unless they explicitly ask for a separate skill.\n"
+            "If propose_artifact_task, propose_repo_task, create_skill, or repair_skill, write a concise executable goal.\n"
+            "If create_skill or repair_skill, also provide skill_name as a hyphen-case slug.\n"
+            "Use repair_skill when the user is giving feedback on an existing skill or asking to fix/update one based on recent skill output.\n"
+            "If propose_artifact_task, task_type should be 'artifact' and completion_mode should be 'reply' or 'artifact'.\n"
+            "If propose_repo_task, task_type should be 'repo_change' and completion_mode should be 'merge'.\n"
+            "If create_skill or repair_skill, task_type should be 'skill_change' and completion_mode should be 'merge'.\n"
+            "If reply_once, goal can be empty string and skill_name should be empty string.\n"
+            "confidence must be a float between 0 and 1.\n\n"
+            "EXAMPLES:\n"
+            "- User: \"调研 Jensen Huang 过去 3 年所有公开演讲，整理成报告\"\n"
+            "  → {\"decision\":\"propose_artifact_task\",\"task_type\":\"artifact\",\"completion_mode\":\"reply\"}\n"
+            "- User: \"帮我做一个 skill，每天总结 AI 领域的新论文\"\n"
+            "  → {\"decision\":\"create_skill\",\"skill_name\":\"ai-paper-daily-digest\",\"task_type\":\"skill_change\",\"completion_mode\":\"merge\"}\n"
+            "- User: \"paper-digest 这个 skill 昨天输出的 summary 太短了，改一下\"\n"
+            "  → {\"decision\":\"repair_skill\",\"skill_name\":\"paper-digest\",\"task_type\":\"skill_change\",\"completion_mode\":\"merge\"}\n"
+            "- User: \"用 paper-digest 看一下今天 arxiv 的 LLM 板块\"\n"
+            "  → {\"decision\":\"invoke_existing_skill\",\"skill_name\":\"paper-digest\"}"
+        )
+        core_payload: dict[str, Any] = {
             "model": self._model,
             "temperature": 0,
-            "max_tokens": 300,
+            "max_tokens": 400,
             "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "Classify whether the user message should be handled as "
-                        "a one-off chat reply, a direct invocation of an existing skill, "
-                        "a multi-step artifact task, a multi-step repository-change task, "
-                        "a skill-creation task, or a repair request for an existing skill.\n"
-                        "Output strict JSON only with keys: decision, confidence, goal, risk_hints, skill_name, task_type, completion_mode.\n"
-                        "decision must be 'reply_once', 'invoke_existing_skill', 'propose_artifact_task', 'propose_repo_task', 'create_skill', or 'repair_skill'.\n"
-                        "If invoke_existing_skill, keep goal empty when possible and provide skill_name if obvious.\n"
-                        "Known skills may be provided as name plus description. Prefer invoke_existing_skill when the current "
-                        "message semantically matches one of those skill descriptions.\n"
-                        "Prefer invoke_existing_skill when recent context shows a known skill was just merged, synced, or recently used, "
-                        "and the current message is a follow-up asking to try again, analyze now, run it now, or continue with that skill.\n"
-                        "Prefer repair_skill instead of create_skill when recent context identifies a most recently invoked skill and the user "
-                        "is asking to fix, improve, adapt, internalize, refine, or base that skill on another reference project/tool/output.\n"
-                        "Do not create a parallel new skill just because the user mentions an external repo, project, or tool; if they want "
-                        "to upgrade the existing skill, keep skill_name pointed at the existing skill unless they explicitly ask for a separate skill.\n"
-                        "If propose_artifact_task, propose_repo_task, create_skill, or repair_skill, write a concise executable goal.\n"
-                        "If create_skill or repair_skill, also provide skill_name as a hyphen-case slug.\n"
-                        "Use repair_skill when the user is giving feedback on an existing skill or asking to fix/update one based on recent skill output.\n"
-                        "If propose_artifact_task, task_type should be 'artifact' and completion_mode should be 'reply' or 'artifact'.\n"
-                        "If propose_repo_task, task_type should be 'repo_change' and completion_mode should be 'merge'.\n"
-                        "If create_skill or repair_skill, task_type should be 'skill_change' and completion_mode should be 'merge'.\n"
-                        "If reply_once, goal can be empty string and skill_name should be empty string.\n"
-                        "confidence must be a float between 0 and 1."
-                    ),
-                },
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": (f"{context}\n\nCurrent user message:\n{message[:1500]}" if context else message[:1500])},
             ],
         }
+        payload: dict[str, Any] = {**self._extra_body, **core_payload}
         attempts = self._max_retries + 1
         data: dict[str, Any] | None = None
         last_exc: Exception | None = None

@@ -1029,6 +1029,7 @@ class RuntimeService:
         preferred_agent: str | None = None,
         skill_name: str,
         source: str,
+        force_draft: bool | None = None,
     ) -> RuntimeTask:
         existing = (
             {d.name for d in self._skills_path.iterdir() if d.is_dir()}
@@ -1039,6 +1040,9 @@ class RuntimeService:
         effective_goal = f"Update existing skill '{resolved_name}': {goal}" if is_update else goal
         skill_timeout = self._skill_timeout_seconds_by_name(resolved_name)
         skill_max_turns = self._skill_max_turns_by_name(resolved_name)
+        resolved_force_draft = (
+            bool(force_draft) if force_draft is not None else (not self._skill_auto_approve)
+        )
         return await self.create_task(
             session=session,
             registry=registry,
@@ -1051,7 +1055,7 @@ class RuntimeService:
             max_steps=6,
             max_minutes=15,
             source=source,
-            force_draft=not self._skill_auto_approve,
+            force_draft=resolved_force_draft,
             task_type=TASK_TYPE_SKILL_CHANGE,
             completion_mode=TASK_COMPLETION_MERGE,
             skill_name=resolved_name,
