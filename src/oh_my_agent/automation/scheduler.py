@@ -41,6 +41,20 @@ _WEEKDAY_NAMES = {
 
 
 @dataclass(frozen=True)
+class DumpChannelConfig:
+    """Named dump/notify channel used for automation completion messages.
+
+    Looked up by ``target_channel`` in an automation YAML; the resolved
+    ``channel_id`` is threaded through the runtime task as ``notify_channel_id``
+    and rewrites the destination of completion/archive messages while DRAFT,
+    approval, and progress messages stay on the source channel.
+    """
+
+    platform: str
+    channel_id: str
+
+
+@dataclass(frozen=True)
 class ScheduledJob:
     """Single periodic automation job."""
 
@@ -61,6 +75,7 @@ class ScheduledJob:
     timeout_seconds: int | None = None
     max_turns: int | None = None
     auto_approve: bool = False
+    notify_channel_id: str | None = None
 
     @property
     def schedule_kind(self) -> str:
@@ -87,6 +102,7 @@ class AutomationRecord:
     timeout_seconds: int | None = None
     max_turns: int | None = None
     auto_approve: bool = False
+    notify_channel_id: str | None = None
 
     @property
     def schedule_kind(self) -> str:
@@ -111,6 +127,7 @@ class AutomationRecord:
             timeout_seconds=self.timeout_seconds,
             max_turns=self.max_turns,
             auto_approve=self.auto_approve,
+            notify_channel_id=self.notify_channel_id,
         )
 
 
@@ -180,6 +197,7 @@ class Scheduler:
         default_target_user_id: str | None = None,
         timezone: tzinfo | None = None,
         timezone_name: str | None = None,
+        dump_channels: dict[str, "DumpChannelConfig"] | None = None,
     ) -> None:
         self._storage_dir = storage_dir.expanduser().resolve()
         self._storage_dir.mkdir(parents=True, exist_ok=True)
@@ -187,6 +205,7 @@ class Scheduler:
         self._default_target_user_id = default_target_user_id
         self._timezone = timezone or _resolve_local_timezone()
         self._timezone_name = timezone_name or _describe_timezone(self._timezone)
+        self._dump_channels: dict[str, DumpChannelConfig] = dict(dump_channels or {})
         self._records_by_name: dict[str, AutomationRecord] = {}
         self._jobs_by_name: dict[str, ScheduledJob] = {}
         self._duplicate_paths_by_name: dict[str, tuple[Path, ...]] = {}
@@ -496,6 +515,24 @@ class Scheduler:
 
         auto_approve = bool(raw.get("auto_approve", False))
 
+        notify_channel_id: str | None = None
+        target_channel_raw = raw.get("target_channel")
+        if target_channel_raw is not None:
+            target_channel = str(target_channel_raw).strip()
+            if target_channel:
+                dump = self._dump_channels.get(target_channel)
+                if dump is None:
+                    raise ValueError(
+                        f"target_channel {target_channel!r} is not configured under "
+                        "automations.dump_channels"
+                    )
+                if dump.platform != platform:
+                    raise ValueError(
+                        f"target_channel {target_channel!r} platform {dump.platform!r} "
+                        f"does not match automation platform {platform!r}"
+                    )
+                notify_channel_id = dump.channel_id
+
         record = AutomationRecord(
                 name=name,
                 platform=platform,
@@ -515,6 +552,7 @@ class Scheduler:
                 timeout_seconds=timeout_seconds,
                 max_turns=max_turns,
                 auto_approve=auto_approve,
+                notify_channel_id=notify_channel_id,
             )
         return _ParsedAutomation(
             record=record,
@@ -945,13 +983,37 @@ def build_scheduler_from_config(
     configured_timezone = sched_cfg.get("timezone")
     timezone_obj, timezone_name = _resolve_configured_timezone(configured_timezone)
 
+    dump_channels = _parse_dump_channels(sched_cfg.get("dump_channels"))
+
     return Scheduler(
         storage_dir=storage_dir,
         reload_interval_seconds=reload_interval_seconds,
         default_target_user_id=default_target_user_id,
         timezone=timezone_obj,
         timezone_name=timezone_name,
+        dump_channels=dump_channels,
     )
+
+
+def _parse_dump_channels(raw: object) -> dict[str, DumpChannelConfig]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError("automations.dump_channels must be a mapping")
+    resolved: dict[str, DumpChannelConfig] = {}
+    for name, entry in raw.items():
+        if not isinstance(entry, dict):
+            raise ValueError(
+                f"automations.dump_channels.{name} must be a mapping with platform/channel_id"
+            )
+        platform = str(entry.get("platform", "")).strip()
+        channel_id = str(entry.get("channel_id", "")).strip()
+        if not platform:
+            raise ValueError(f"automations.dump_channels.{name}.platform is required")
+        if not channel_id:
+            raise ValueError(f"automations.dump_channels.{name}.channel_id is required")
+        resolved[str(name)] = DumpChannelConfig(platform=platform, channel_id=channel_id)
+    return resolved
 
 
 def _resolve_local_timezone() -> tzinfo:

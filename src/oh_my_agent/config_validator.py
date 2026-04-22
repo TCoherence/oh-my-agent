@@ -171,6 +171,36 @@ def _check_automations(config: dict, result: ValidationResult) -> None:
     if automations is None or not isinstance(automations, dict):
         return
 
+    dump_channels = automations.get("dump_channels")
+    if dump_channels is not None:
+        if not isinstance(dump_channels, dict):
+            result.errors.append(ConfigError(
+                "automations.dump_channels",
+                "must be a mapping of name → {platform, channel_id}",
+                "warning",
+            ))
+        else:
+            for name, entry in dump_channels.items():
+                if not isinstance(entry, dict):
+                    result.errors.append(ConfigError(
+                        f"automations.dump_channels.{name}",
+                        "must be a mapping with platform/channel_id",
+                        "warning",
+                    ))
+                    continue
+                if not entry.get("platform"):
+                    result.errors.append(ConfigError(
+                        f"automations.dump_channels.{name}.platform",
+                        "is required",
+                        "warning",
+                    ))
+                if not entry.get("channel_id"):
+                    result.errors.append(ConfigError(
+                        f"automations.dump_channels.{name}.channel_id",
+                        "is required",
+                        "warning",
+                    ))
+
     storage_dir = automations.get("storage_dir")
     if not storage_dir:
         return

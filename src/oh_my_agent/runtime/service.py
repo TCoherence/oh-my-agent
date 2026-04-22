@@ -651,6 +651,21 @@ class RuntimeService:
         self._sessions[key] = session
         self._registries[key] = registry
 
+    def register_session_alias(
+        self,
+        *,
+        session: ChannelSession,
+        registry: AgentRegistry,
+        platform: str,
+        channel_id: str,
+    ) -> None:
+        """Alias a second channel_id (e.g. automation dump channel) to an
+        already-constructed ChannelSession so terminal messages bound to
+        that channel can reuse the same BaseChannel/send path."""
+        key = self._key(platform, channel_id)
+        self._sessions[key] = session
+        self._registries[key] = registry
+
     async def start(self) -> None:
         if not self._enabled:
             return
@@ -857,6 +872,7 @@ class RuntimeService:
         automation_name: str | None = None,
         agent_timeout_seconds: int | None = None,
         agent_max_turns: int | None = None,
+        notify_channel_id: str | None = None,
     ) -> RuntimeTask:
         self.register_session(session, registry)
 
@@ -896,6 +912,7 @@ class RuntimeService:
             skill_name=skill_name,
             agent_timeout_seconds=agent_timeout_seconds,
             agent_max_turns=agent_max_turns,
+            notify_channel_id=notify_channel_id,
         )
         await self._store.add_runtime_event(
             task.id,
@@ -999,6 +1016,7 @@ class RuntimeService:
         skill_name: str | None = None,
         agent_timeout_seconds: int | None = None,
         agent_max_turns: int | None = None,
+        notify_channel_id: str | None = None,
     ) -> RuntimeTask:
         return await self.create_task(
             session=session,
@@ -1020,6 +1038,7 @@ class RuntimeService:
             skill_name=skill_name,
             agent_timeout_seconds=agent_timeout_seconds,
             agent_max_turns=agent_max_turns,
+            notify_channel_id=notify_channel_id,
         )
 
     async def create_skill_task(
@@ -1082,6 +1101,7 @@ class RuntimeService:
         timeout_seconds: int | None = None,
         max_turns: int | None = None,
         auto_approve: bool = False,
+        notify_channel_id: str | None = None,
     ) -> RuntimeTask | None:
         tasks = await self._store.list_runtime_tasks(
             platform=session.platform,
@@ -1131,6 +1151,7 @@ class RuntimeService:
             skill_name=skill_name,
             agent_timeout_seconds=effective_timeout_seconds,
             agent_max_turns=effective_max_turns,
+            notify_channel_id=notify_channel_id,
         )
 
     async def get_task(self, task_id: str) -> RuntimeTask | None:
@@ -4791,9 +4812,16 @@ class RuntimeService:
         usage: dict[str, Any] | None = None,
         artifact_paths: list[str] | None = None,
     ) -> None:
-        session = self._session_for(task)
+        # Completion-only redirect: when the automation declares a dump
+        # channel, we post the terminal message and record the
+        # automation_posts row against that channel. The originating source
+        # channel keeps DRAFT / approval / progress messages.
+        notify_channel_id = task.notify_channel_id or task.channel_id
+        session = self._session_for_notify(task, notify_channel_id)
         if session is None:
             return
+        notify_thread_id = notify_channel_id if task.notify_channel_id else task.thread_id
+
         agent_name = await self._resolve_last_agent_name(task)
         attribution = append_usage_audit(
             f"-# automation `{task.automation_name}` · run `{task.id}` · via **{agent_name}**",
@@ -4804,21 +4832,21 @@ class RuntimeService:
         first_message_id: str | None = None
         if not chunks:
             first_message_id = await session.channel.send(
-                task.thread_id, f"{attribution}\n*(empty automation output)*"
+                notify_thread_id, f"{attribution}\n*(empty automation output)*"
             )
         else:
             first_message_id = await session.channel.send(
-                task.thread_id, f"{attribution}\n{chunks[0]}"
+                notify_thread_id, f"{attribution}\n{chunks[0]}"
             )
             remainder = text[len(chunks[0]):].lstrip()
             for chunk in chunk_message(remainder) if remainder else []:
-                await session.channel.send(task.thread_id, chunk)
+                await session.channel.send(notify_thread_id, chunk)
 
         if first_message_id and task.automation_name:
             try:
                 await self._store.record_automation_post(
                     platform=task.platform,
-                    channel_id=task.channel_id,
+                    channel_id=notify_channel_id,
                     message_id=first_message_id,
                     automation_name=task.automation_name,
                     artifact_paths=list(artifact_paths or []),
@@ -4833,6 +4861,22 @@ class RuntimeService:
                     first_message_id,
                     exc_info=True,
                 )
+
+    def _session_for_notify(
+        self, task: RuntimeTask, notify_channel_id: str
+    ) -> ChannelSession | None:
+        """Resolve the session that owns the terminal-message destination.
+
+        Dump channels share a single bot/gateway connection with the source
+        channel, so the session is registered under an alias key and we look
+        it up by platform+notify_channel_id. Falls back to the source
+        channel's session.
+        """
+        if notify_channel_id != task.channel_id:
+            session = self._sessions.get(self._key(task.platform, notify_channel_id))
+            if session is not None:
+                return session
+        return self._session_for(task)
 
     async def _signal_status_by_id(self, task: RuntimeTask, status: str) -> None:
         emoji = self._emoji_for_status(status)

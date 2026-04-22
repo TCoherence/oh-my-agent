@@ -630,6 +630,7 @@ CREATE TABLE IF NOT EXISTS runtime_tasks (
     workspace_cleaned_at TIMESTAMP,
     task_type           TEXT NOT NULL DEFAULT 'repo_change',
     skill_name          TEXT,
+    notify_channel_id   TEXT,
     created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     started_at          TIMESTAMP,
     updated_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -994,6 +995,7 @@ class SQLiteMemoryStore(MemoryStore):
         await self._ensure_column("runtime_tasks", "skill_name", "TEXT")
         await self._ensure_column("runtime_tasks", "agent_timeout_seconds", "INTEGER")
         await self._ensure_column("runtime_tasks", "agent_max_turns", "INTEGER")
+        await self._ensure_column("runtime_tasks", "notify_channel_id", "TEXT")
         await self._ensure_column("auth_credentials", "scope_key", "TEXT NOT NULL DEFAULT 'default'")
         await self._ensure_column("skill_provenance", "auto_disabled", "INTEGER NOT NULL DEFAULT 0")
         await self._ensure_column("skill_provenance", "auto_disabled_reason", "TEXT")
@@ -1242,8 +1244,9 @@ class SQLiteMemoryStore(MemoryStore):
                 "INSERT INTO runtime_tasks "
                 "(id, platform, channel_id, thread_id, created_by, goal, original_request, preferred_agent, "
                 " status, max_steps, max_minutes, agent_timeout_seconds, agent_max_turns, test_command, "
-                " completion_mode, output_summary, artifact_manifest, automation_name, task_type, skill_name) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " completion_mode, output_summary, artifact_manifest, automation_name, task_type, skill_name, "
+                " notify_channel_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     kwargs["task_id"],
                     kwargs["platform"],
@@ -1267,6 +1270,7 @@ class SQLiteMemoryStore(MemoryStore):
                     kwargs.get("automation_name"),
                     kwargs.get("task_type", "repo_change"),
                     kwargs.get("skill_name"),
+                    kwargs.get("notify_channel_id"),
                 ),
             )
             await db.commit()

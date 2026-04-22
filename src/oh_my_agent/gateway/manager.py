@@ -131,6 +131,30 @@ class GatewayManager:
     def _session_key(self, platform: str, channel_id: str) -> str:
         return f"{platform}:{channel_id}"
 
+    def _dump_channels_for(self, platform: str, source_channel_id: str) -> list[str]:
+        """Return dump channel ids registered on the scheduler for this
+        platform, excluding the source channel itself. Dump channels share
+        the source channel's bot/gateway connection (single token = single
+        listener) — they are send-only aliases."""
+        sched = self._scheduler
+        if sched is None:
+            return []
+        configured: dict[str, object] = getattr(sched, "_dump_channels", {}) or {}
+        seen: set[str] = set()
+        result: list[str] = []
+        for dump in configured.values():
+            dump_platform = getattr(dump, "platform", None)
+            dump_channel_id = getattr(dump, "channel_id", None)
+            if dump_platform != platform or not dump_channel_id:
+                continue
+            if dump_channel_id == source_channel_id:
+                continue
+            if dump_channel_id in seen:
+                continue
+            seen.add(dump_channel_id)
+            result.append(dump_channel_id)
+        return result
+
     def _get_session(
         self, channel: BaseChannel, registry: AgentRegistry
     ) -> ChannelSession:
@@ -558,6 +582,30 @@ class GatewayManager:
             if self._runtime_service:
                 self._runtime_service.register_session(session, registry)
 
+            # Register dump-channel aliases so completion messages bound to a
+            # separate channel_id reuse the same BaseChannel + session.
+            dump_channels = self._dump_channels_for(channel.platform, channel.channel_id)
+            for dump_channel_id in dump_channels:
+                self._sessions[self._session_key(channel.platform, dump_channel_id)] = session
+                self._session_index[
+                    self._session_key(channel.platform, dump_channel_id)
+                ] = (session, registry)
+                if self._runtime_service:
+                    self._runtime_service.register_session_alias(
+                        session=session,
+                        registry=registry,
+                        platform=channel.platform,
+                        channel_id=dump_channel_id,
+                    )
+                if hasattr(channel, "register_dump_channel"):
+                    channel.register_dump_channel(dump_channel_id)
+                logger.info(
+                    "Dump channel alias registered platform=%s source=%s dump=%s",
+                    channel.platform,
+                    channel.channel_id,
+                    dump_channel_id,
+                )
+
             async def make_handler(s: ChannelSession, r: AgentRegistry):
                 async def handler(msg: IncomingMessage) -> None:
                     await self.handle_message(s, r, msg)
@@ -869,6 +917,7 @@ class GatewayManager:
                     timeout_seconds=job.timeout_seconds,
                     max_turns=job.max_turns,
                     auto_approve=job.auto_approve,
+                    notify_channel_id=job.notify_channel_id,
                 )
                 if task and store:
                     await store.upsert_automation_state(
@@ -988,8 +1037,14 @@ class GatewayManager:
                 )
             if post is not None:
                 thread_name = f"follow-up · {post.automation_name}"[:90]
+                # When the anchor message lives in a dump channel (different
+                # from the channel the BaseChannel was constructed with),
+                # create_followup_thread needs the parent channel id passed
+                # explicitly so it can fetch the anchor from there.
                 new_thread_id = await channel.create_followup_thread(
-                    msg.reply_to_message_id, thread_name,
+                    msg.reply_to_message_id,
+                    thread_name,
+                    parent_channel_id=msg.channel_id,
                 )
                 if new_thread_id:
                     logger.info(

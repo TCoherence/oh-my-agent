@@ -245,6 +245,10 @@ class DiscordChannel(BaseChannel):
         self._token = token
         self._channel_id = channel_id
         self._owner_user_ids = owner_user_ids or set()
+        # Dump channels are send/reply-only aliases registered by the gateway
+        # manager after construction. The bot must still accept replies to
+        # messages posted there so follow-up threads can be spawned on them.
+        self._dump_channel_ids: set[str] = set()
         self._client: discord.Client | None = None
         # Injected by GatewayManager after construction
         self._session = None  # ChannelSession
@@ -291,6 +295,13 @@ class DiscordChannel(BaseChannel):
         """Inject runtime service for /task_* commands and decision buttons."""
         self._runtime_service = runtime_service
         self._refresh_services()
+
+    def register_dump_channel(self, channel_id: str) -> None:
+        """Record a dump channel id so ``on_message`` will route replies
+        that arrive there (e.g. users replying to an automation terminal
+        message posted to the dump channel) back into the gateway."""
+        if channel_id and channel_id != self._channel_id:
+            self._dump_channel_ids.add(str(channel_id))
 
     def _render_hitl_prompt_message(self, prompt: HitlPrompt) -> str:
         if prompt.status == "completed":
@@ -1750,11 +1761,22 @@ class DiscordChannel(BaseChannel):
                     preferred_agent = first
                     content = rest.strip()
 
-            # Message in a thread whose parent is our target channel
-            if isinstance(ch, discord.Thread) and ch.parent_id == target_id:
+            # Dump channels accepted alongside the primary listening channel:
+            # replies to automation terminal messages spawn follow-up threads
+            # there. The channel_id on IncomingMessage carries the actual
+            # source channel so automation_post lookup + follow-up thread
+            # anchoring resolves against the right channel.
+            dump_ids = {int(cid) for cid in self._dump_channel_ids if cid.isdigit()}
+            accepted_parent_ids = {target_id, *dump_ids}
+
+            # Message in a thread whose parent is our target channel (or a dump channel)
+            if isinstance(ch, discord.Thread) and ch.parent_id in accepted_parent_ids:
+                source_channel_id = (
+                    self._channel_id if ch.parent_id == target_id else str(ch.parent_id)
+                )
                 msg = IncomingMessage(
                     platform="discord",
-                    channel_id=self._channel_id,
+                    channel_id=source_channel_id,
                     thread_id=str(ch.id),
                     author=str(message.author.display_name),
                     author_id=str(message.author.id),
@@ -1763,8 +1785,11 @@ class DiscordChannel(BaseChannel):
                     preferred_agent=preferred_agent,
                     attachments=downloaded,
                 )
-            # Message directly in our target channel → needs new thread
-            elif ch.id == target_id:
+            # Message directly in our target channel (or a dump channel) → may spawn new thread
+            elif ch.id in accepted_parent_ids:
+                source_channel_id = (
+                    self._channel_id if ch.id == target_id else str(ch.id)
+                )
                 reply_to_id: str | None = None
                 ref = getattr(message, "reference", None)
                 if ref is not None:
@@ -1773,7 +1798,7 @@ class DiscordChannel(BaseChannel):
                         reply_to_id = str(ref_msg_id)
                 msg = IncomingMessage(
                     platform="discord",
-                    channel_id=self._channel_id,
+                    channel_id=source_channel_id,
                     thread_id=None,
                     author=str(message.author.display_name),
                     author_id=str(message.author.id),
@@ -1876,13 +1901,16 @@ class DiscordChannel(BaseChannel):
         self,
         anchor_message_id: str,
         name: str,
+        *,
+        parent_channel_id: str | None = None,
     ) -> str | None:
         if not self._client:
             return None
+        effective_parent = parent_channel_id or self._channel_id
         try:
-            parent = self._client.get_channel(int(self._channel_id))
+            parent = self._client.get_channel(int(effective_parent))
             if parent is None:
-                parent = await self._client.fetch_channel(int(self._channel_id))
+                parent = await self._client.fetch_channel(int(effective_parent))
             anchor = await parent.fetch_message(int(anchor_message_id))
             thread = await anchor.create_thread(
                 name=name[:100],
@@ -1893,7 +1921,7 @@ class DiscordChannel(BaseChannel):
             logger.warning(
                 "create_followup_thread failed anchor=%s channel=%s",
                 anchor_message_id,
-                self._channel_id,
+                effective_parent,
                 exc_info=True,
             )
             return None

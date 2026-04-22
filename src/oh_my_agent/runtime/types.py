@@ -122,6 +122,7 @@ class RuntimeTask:
     ended_at: str | None
     task_type: str = TASK_TYPE_REPO_CHANGE
     skill_name: str | None = None
+    notify_channel_id: str | None = None
 
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> "RuntimeTask":
@@ -170,6 +171,7 @@ class RuntimeTask:
             ended_at=row.get("ended_at"),
             task_type=raw_task_type,
             skill_name=row.get("skill_name"),
+            notify_channel_id=row.get("notify_channel_id"),
         )
 
 

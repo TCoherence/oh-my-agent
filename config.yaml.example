@@ -84,6 +84,16 @@ automations:
   storage_dir: ~/.oh-my-agent/automations
   reload_interval_seconds: 5       # polling-based hot reload for automation files
   timezone: local                  # 'local' or an IANA zone like 'America/Los_Angeles'
+  # Named "dump" channels for routing automation completion messages to a
+  # separate channel (opt-in per automation via `target_channel: <name>`).
+  # The source channel keeps DRAFT / approval / progress traffic; only the
+  # terminal message + archived automation_posts row land in the dump channel.
+  # Dump channels share the bot's existing gateway connection — they're
+  # send-only aliases, not a second listener.
+  dump_channels: {}
+  #   oma_dump:
+  #     platform: discord
+  #     channel_id: "${DISCORD_OMA_DUMP_CHANNEL_ID}"
 
 runtime:
   enabled: true

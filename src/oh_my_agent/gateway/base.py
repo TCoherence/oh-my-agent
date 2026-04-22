@@ -130,14 +130,19 @@ class BaseChannel(ABC):
         self,
         anchor_message_id: str,
         name: str,
+        *,
+        parent_channel_id: str | None = None,
     ) -> str | None:
         """Create a thread attached to an existing channel message.
 
         Used to spawn a follow-up thread rooted at a prior automation post.
-        Default implementation returns ``None`` — platforms that support
-        message-anchored threads (e.g. Discord) should override.
+        When ``parent_channel_id`` is set, the channel adapter should resolve
+        the anchor message from that channel — this matters for dump-channel
+        automation posts, where the anchor lives outside the bot's primary
+        listening channel. Default implementation returns ``None`` — platforms
+        that support message-anchored threads (e.g. Discord) should override.
         """
-        del anchor_message_id, name
+        del anchor_message_id, name, parent_channel_id
         return None
 
     @abstractmethod
