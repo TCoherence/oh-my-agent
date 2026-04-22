@@ -928,6 +928,92 @@ async def test_artifact_task_completes_without_merge(runtime_env):
 
 
 @pytest.mark.asyncio
+async def test_notify_failure_marks_failed_without_false_complete(runtime_env):
+    """Observer-race regression pin. The completion branch used to write
+    status=COMPLETED BEFORE the channel ``_notify``, so a concurrent
+    poller could sample the COMPLETED watermark before the message had
+    landed (or, worse, if the notify raised, never).
+
+    The fix reorders the completion branch so ``_notify`` runs first;
+    only if it lands does the DB flip to COMPLETED. A raising notify
+    instead marks the task ``FAILED`` with
+    ``error=notification_failure: …``, persists the summary /
+    output_summary / artifact_manifest (so a future ``/task_resend`` or
+    manual retry can rebuild the completion text without any new
+    persistence schema), and emits a ``task.notification_failed`` event.
+    This test pins all four invariants:
+
+    1. Status is FAILED, not COMPLETED.
+    2. ``error`` carries the ``notification_failure:`` prefix.
+    3. Persisted fields are sufficient to rebuild completion text.
+    4. ``task.completed`` event is NOT emitted (no false watermark).
+    """
+    store: SQLiteMemoryStore = runtime_env["store"]
+    runtime: RuntimeService = runtime_env["runtime"]
+    channel: _FakeChannel = runtime_env["channel"]
+    registry = AgentRegistry([_ArtifactAgent()])
+    session = ChannelSession(
+        platform="discord",
+        channel_id="100",
+        channel=channel,
+        registry=registry,
+    )
+    runtime.register_session(session, registry)
+    await runtime.start()
+
+    # Wrap ``_notify`` so only the terminal call (the one guarded by the
+    # new try/except) raises. Non-terminal status updates during RUNNING
+    # continue to work — they're not the subject of this race, and
+    # forcing them to raise would trip unrelated failure paths.
+    original_notify = runtime._notify  # noqa: SLF001
+
+    async def _raise_on_terminal(task, text, *, record_history=False, terminal=False, **kwargs):
+        if terminal:
+            raise RuntimeError("simulated discord 500 on terminal notify")
+        return await original_notify(
+            task, text, record_history=record_history, terminal=terminal, **kwargs
+        )
+
+    runtime._notify = _raise_on_terminal  # type: ignore[assignment]  # noqa: SLF001
+
+    task = await runtime.create_artifact_task(
+        session=session,
+        registry=registry,
+        thread_id="thread-notify-fail",
+        goal="Generate a markdown daily news brief",
+        created_by="owner-1",
+        source="router",
+    )
+
+    failed = await _wait_for_status(store, task.id, {TASK_STATUS_FAILED})
+
+    # Invariant 1: status is FAILED, not COMPLETED.
+    assert failed.status == TASK_STATUS_FAILED
+    assert failed.status != TASK_STATUS_COMPLETED
+
+    # Invariant 2: error carries the distinctive notification_failure prefix
+    # (so ops can grep logs / filter failed tasks by this kind).
+    assert "notification_failure" in (failed.error or "")
+
+    # Invariant 3: persisted fields are sufficient to rebuild the
+    # completion text for a future resend. No new columns needed —
+    # summary / output_summary / artifact_manifest already existed.
+    assert failed.artifact_manifest == ["reports/daily-news.md"]
+    assert failed.summary
+    assert failed.output_summary
+
+    events = await store.list_runtime_events(task.id, limit=50)
+    event_types = [e.get("event_type") for e in events]
+    # task.notification_failed event is recorded (distinct from task.failed
+    # so dashboards can tell "agent work failed" from "agent work
+    # succeeded but user never saw output").
+    assert "task.notification_failed" in event_types
+    # Invariant 4: task.completed must NOT appear — we never reached
+    # the COMPLETED watermark.
+    assert "task.completed" not in event_types
+
+
+@pytest.mark.asyncio
 async def test_publish_canonical_destination_overwrites_without_suffix(runtime_env):
     """Regression pin: two tasks produce the same canonical workspace path
     (e.g., both write `reports/daily-news.md`) → second call overwrites the

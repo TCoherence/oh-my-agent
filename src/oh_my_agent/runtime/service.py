@@ -3023,33 +3023,30 @@ class RuntimeService:
                 )
                 artifact_manifest = changed_files if task.completion_mode != TASK_COMPLETION_MERGE else None
                 if self._uses_merge_flow(task) and self._merge_gate_enabled:
-                    new_state = TASK_STATUS_WAITING_MERGE
-                else:
-                    new_state = TASK_STATUS_COMPLETED
-
-                await self._store.update_runtime_task(
-                    task.id,
-                    status=new_state,
-                    ended_at_now=True,
-                    summary=summary,
-                    output_summary=output_summary,
-                    artifact_manifest=artifact_manifest,
-                    blocked_reason=None,
-                    merge_error=None,
-                )
-                await self._store.add_runtime_event(
-                    task.id,
-                    "task.completed",
-                    {
-                        "status": new_state,
-                        "step": step,
-                        "total_agent_s": round(total_agent_s, 2),
-                        "total_test_s": round(total_test_s, 2),
-                        "total_elapsed_s": round(total_elapsed_s, 2),
-                    },
-                )
-
-                if self._uses_merge_flow(task) and self._merge_gate_enabled:
+                    # Merge flow: WAITING_MERGE is non-terminal and is
+                    # coupled to its own decision surface (buttons), so the
+                    # notify-before-commit reorder below does not apply.
+                    await self._store.update_runtime_task(
+                        task.id,
+                        status=TASK_STATUS_WAITING_MERGE,
+                        ended_at_now=True,
+                        summary=summary,
+                        output_summary=output_summary,
+                        artifact_manifest=artifact_manifest,
+                        blocked_reason=None,
+                        merge_error=None,
+                    )
+                    await self._store.add_runtime_event(
+                        task.id,
+                        "task.completed",
+                        {
+                            "status": TASK_STATUS_WAITING_MERGE,
+                            "step": step,
+                            "total_agent_s": round(total_agent_s, 2),
+                            "total_test_s": round(total_test_s, 2),
+                            "total_elapsed_s": round(total_elapsed_s, 2),
+                        },
+                    )
                     auto_merge_allowed = not any(
                         item.get("status") == "review_required"
                         and (
@@ -3108,7 +3105,20 @@ class RuntimeService:
                     logger.info("Runtime task=%s WAITING_MERGE step=%d", task.id, step)
                     return
 
-                logger.info("Runtime task=%s COMPLETED step=%d", task.id, step)
+                # Reply / artifact path: notify BEFORE writing
+                # status=COMPLETED. Python code between ``await``s is atomic
+                # from an observer's perspective, so placing the DB commit
+                # immediately after a successful ``_notify`` makes the
+                # COMPLETED watermark trustworthy — any poller that reads
+                # COMPLETED is guaranteed the channel message has landed.
+                # If ``_notify`` raises we flip the task to FAILED with
+                # ``error=notification_failure: ...`` and persist the
+                # summary / output_summary / artifact_manifest so a future
+                # manual resend can rebuild the completion text without
+                # needing any new persistence schema.
+                logger.info(
+                    "Runtime task=%s preparing completion step=%d", task.id, step,
+                )
                 completed_task = await self._store.get_runtime_task(task.id) or task
                 delivery = None
                 if completed_task.task_type == TASK_TYPE_ARTIFACT:
@@ -3116,24 +3126,7 @@ class RuntimeService:
                         task=completed_task,
                         changed_files=changed_files,
                     )
-                    if delivery is not None:
-                        await self._store.add_runtime_event(
-                            task.id,
-                            "task.artifacts_delivered",
-                            {
-                                "mode": delivery.mode,
-                                "paths": delivery.delivered_paths[:8],
-                                "attachments": delivery.attachment_names[:8],
-                            },
-                        )
                 if task.automation_name:
-                    await self._store.upsert_automation_state(
-                        task.automation_name,
-                        platform=task.platform,
-                        channel_id=task.channel_id,
-                        last_success_at="__NOW__",
-                        last_error=None,
-                    )
                     completion_text = await self._automation_completed_text(
                         task=completed_task,
                         changed_files=changed_files,
@@ -3157,15 +3150,91 @@ class RuntimeService:
                         automation_artifact_paths = list(delivery.archived_paths)
                     elif delivery.delivered_paths:
                         automation_artifact_paths = list(delivery.delivered_paths)
-                await self._notify(
-                    task,
-                    completion_text,
-                    record_history=True,
-                    terminal=True,
-                    usage=response.usage,
-                    automation_artifact_paths=automation_artifact_paths,
+
+                try:
+                    await self._notify(
+                        task,
+                        completion_text,
+                        record_history=True,
+                        terminal=True,
+                        usage=response.usage,
+                        automation_artifact_paths=automation_artifact_paths,
+                    )
+                except Exception as exc:
+                    logger.exception(
+                        "Runtime task=%s notification failed step=%d",
+                        task.id,
+                        step,
+                    )
+                    await self._store.update_runtime_task(
+                        task.id,
+                        status=TASK_STATUS_FAILED,
+                        ended_at_now=True,
+                        error=f"notification_failure: {exc!r}"[:2000],
+                        summary=summary,
+                        output_summary=output_summary,
+                        artifact_manifest=artifact_manifest,
+                    )
+                    await self._store.add_runtime_event(
+                        task.id,
+                        "task.notification_failed",
+                        {"error": repr(exc)[:1000], "mode": "reply"},
+                    )
+                    if task.automation_name:
+                        await self._store.upsert_automation_state(
+                            task.automation_name,
+                            platform=task.platform,
+                            channel_id=task.channel_id,
+                            last_error=f"notification_failure: {exc!r}"[:1000],
+                        )
+                    await self._signal_status_by_id(task, TASK_STATUS_FAILED)
+                    return
+
+                # Notify landed — commit the COMPLETED watermark. Ordering
+                # inside this block doesn't affect observer race semantics
+                # (the message is already visible); keep DB writes grouped
+                # so any read after COMPLETED sees a consistent row.
+                await self._store.update_runtime_task(
+                    task.id,
+                    status=TASK_STATUS_COMPLETED,
+                    ended_at_now=True,
+                    summary=summary,
+                    output_summary=output_summary,
+                    artifact_manifest=artifact_manifest,
+                    blocked_reason=None,
+                    merge_error=None,
                 )
+                await self._store.add_runtime_event(
+                    task.id,
+                    "task.completed",
+                    {
+                        "status": TASK_STATUS_COMPLETED,
+                        "step": step,
+                        "total_agent_s": round(total_agent_s, 2),
+                        "total_test_s": round(total_test_s, 2),
+                        "total_elapsed_s": round(total_elapsed_s, 2),
+                    },
+                )
+                if delivery is not None:
+                    await self._store.add_runtime_event(
+                        task.id,
+                        "task.artifacts_delivered",
+                        {
+                            "mode": delivery.mode,
+                            "paths": delivery.delivered_paths[:8],
+                            "attachments": delivery.attachment_names[:8],
+                        },
+                    )
+                if task.automation_name:
+                    await self._store.upsert_automation_state(
+                        task.automation_name,
+                        platform=task.platform,
+                        channel_id=task.channel_id,
+                        last_success_at="__NOW__",
+                        last_error=None,
+                    )
                 await self._signal_status_by_id(task, TASK_STATUS_COMPLETED)
+                logger.info("Runtime task=%s COMPLETED step=%d", task.id, step)
                 return
 
             prior_failure = test_summary if not test_ok else None
