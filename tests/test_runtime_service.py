@@ -915,15 +915,29 @@ async def test_artifact_task_completes_without_merge(runtime_env):
 
     reports_dir = runtime._reports_dir  # noqa: SLF001
     assert reports_dir is not None
-    archived_files = list(reports_dir.rglob("daily-news*.md"))
-    assert len(archived_files) == 1
-    assert archived_files[0].parent.name == "artifacts"
+    # Rule 2: workspace `reports/daily-news.md` is reports-shaped → published
+    # to the canonical path `reports_dir/daily-news.md` (NOT under
+    # `reports_dir/artifacts/`, which was the old flat-archive behavior).
+    published_files = list(reports_dir.rglob("daily-news*.md"))
+    assert len(published_files) == 1
+    assert published_files[0] == reports_dir / "daily-news.md"
+    # Should NOT also be duplicated under artifacts/ fallback dir.
+    assert not (reports_dir / "artifacts" / "daily-news.md").exists()
     sent_texts = [text for _, text in channel.sent]
-    assert any("Archived to:" in text and str(archived_files[0]) in text for text in sent_texts)
+    assert any("Published to:" in text and str(published_files[0]) in text for text in sent_texts)
 
 
 @pytest.mark.asyncio
-async def test_artifact_task_archive_suffixes_conflicting_filename(runtime_env):
+async def test_publish_canonical_destination_overwrites_without_suffix(runtime_env):
+    """Regression pin: two tasks produce the same canonical workspace path
+    (e.g., both write `reports/daily-news.md`) → second call overwrites the
+    first at the canonical destination. Exactly one file exists at
+    `reports_dir/daily-news.md` and NO `…-<task_id[:8]>.md` suffix file is
+    created. This guards against someone 'fixing' canonical collisions by
+    reintroducing suffixes — the whole point of Rule 2 is that a canonical
+    path identifies the same logical file, so suffixing would re-create the
+    duplication we removed.
+    """
     store: SQLiteMemoryStore = runtime_env["store"]
     runtime: RuntimeService = runtime_env["runtime"]
     channel: _FakeChannel = runtime_env["channel"]
@@ -941,7 +955,7 @@ async def test_artifact_task_archive_suffixes_conflicting_filename(runtime_env):
         task = await runtime.create_artifact_task(
             session=session,
             registry=registry,
-            thread_id=f"thread-archive-{thread_suffix}",
+            thread_id=f"thread-canonical-{thread_suffix}",
             goal="Generate a markdown daily news brief",
             created_by="owner-1",
             source="router",
@@ -950,20 +964,165 @@ async def test_artifact_task_archive_suffixes_conflicting_filename(runtime_env):
 
     reports_dir = runtime._reports_dir  # noqa: SLF001
     assert reports_dir is not None
-    archived = sorted(reports_dir.rglob("daily-news*.md"))
-    assert len(archived) == 2
-    # Second copy must have the short task id suffix so it does not overwrite the first.
-    assert any(path.stem != "daily-news" and path.stem.startswith("daily-news-") for path in archived)
+    published = sorted(reports_dir.rglob("daily-news*.md"))
+    # Rule 2 canonical publish: same canonical path → overwrite → exactly 1 file.
+    assert len(published) == 1
+    assert published[0] == reports_dir / "daily-news.md"
+    # No suffix-tagged sibling under the canonical dir.
+    canonical_dir = reports_dir
+    suffixed = [
+        p for p in canonical_dir.glob("daily-news-*.md") if p != published[0]
+    ]
+    assert suffixed == []
+    # No spillover into the flat-fallback dir either.
+    assert not (reports_dir / "artifacts" / "daily-news.md").exists()
 
 
 @pytest.mark.asyncio
-async def test_artifact_archive_disabled_when_reports_dir_empty(runtime_env, tmp_path):
+async def test_publish_disabled_when_reports_dir_empty(runtime_env, tmp_path):
     runtime: RuntimeService = runtime_env["runtime"]
     runtime._reports_dir = None  # noqa: SLF001 — emulates `reports_dir: ""` config
 
     out = tmp_path / "src.md"
     out.write_text("# hi", encoding="utf-8")
-    assert runtime._archive_artifact_files("task-xyz", [out]) == []  # noqa: SLF001
+    # New signature: workspace_path kwarg required.
+    assert (
+        runtime._publish_artifact_files(  # noqa: SLF001
+            "task-xyz", [out], workspace_path=None
+        )
+        == []
+    )
+
+
+@pytest.mark.asyncio
+async def test_publish_reuses_existing_reports_path(runtime_env, tmp_path):
+    """Rule 1: artifact whose resolved path is already under ``reports_dir``
+    (and not under workspace) is reused in place — no copy, no fallback dir."""
+    runtime: RuntimeService = runtime_env["runtime"]
+    reports_dir = runtime._reports_dir  # noqa: SLF001
+    assert reports_dir is not None
+    target = reports_dir / "market-briefing" / "2026-04-22.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("already stable\n", encoding="utf-8")
+
+    workspace_root = tmp_path / "workspace-outside-reports"
+    workspace_root.mkdir(parents=True)
+
+    published = runtime._publish_artifact_files(  # noqa: SLF001
+        "task-001", [target], workspace_path=str(workspace_root)
+    )
+    assert published == [str(target.resolve())]
+    # Flat-fallback dir must not have been created for a rule-1 reuse.
+    assert not (reports_dir / "artifacts").exists()
+
+
+@pytest.mark.asyncio
+async def test_publish_maps_workspace_reports_path_into_reports_dir(
+    runtime_env, tmp_path
+):
+    """Rule 2 happy path: workspace `reports/<sub>/<file>` → published at
+    `reports_dir/<sub>/<file>` preserving sub-tree."""
+    runtime: RuntimeService = runtime_env["runtime"]
+    reports_dir = runtime._reports_dir  # noqa: SLF001
+    assert reports_dir is not None
+    workspace = tmp_path / "ws-rule2"
+    source = workspace / "reports" / "paper-digest" / "daily" / "2026-04-22.md"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("# paper digest\n", encoding="utf-8")
+
+    published = runtime._publish_artifact_files(  # noqa: SLF001
+        "task-002", [source], workspace_path=str(workspace)
+    )
+    canonical = reports_dir / "paper-digest" / "daily" / "2026-04-22.md"
+    assert published == [str(canonical.resolve())]
+    assert canonical.read_text(encoding="utf-8") == "# paper digest\n"
+    # Not also at reports_dir/artifacts/ — that would be the old duplication.
+    assert not (reports_dir / "artifacts" / "2026-04-22.md").exists()
+
+
+@pytest.mark.asyncio
+async def test_publish_falls_back_to_flat_artifacts_for_non_reports_workspace_file(
+    runtime_env, tmp_path
+):
+    """Rule 3: workspace file not under `reports/` → flat fallback at
+    `reports_dir/artifacts/<basename>`."""
+    runtime: RuntimeService = runtime_env["runtime"]
+    reports_dir = runtime._reports_dir  # noqa: SLF001
+    assert reports_dir is not None
+    workspace = tmp_path / "ws-rule3"
+    source = workspace / "notes.txt"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("freeform\n", encoding="utf-8")
+
+    published = runtime._publish_artifact_files(  # noqa: SLF001
+        "task-003", [source], workspace_path=str(workspace)
+    )
+    expected = reports_dir / "artifacts" / "notes.txt"
+    assert published == [str(expected.resolve())]
+    assert expected.read_text(encoding="utf-8") == "freeform\n"
+
+
+@pytest.mark.asyncio
+async def test_publish_falls_back_to_flat_artifacts_for_absolute_outside_workspace(
+    runtime_env, tmp_path
+):
+    """Rule 4: absolute path under neither `workspace_path` nor `reports_dir`
+    → flat fallback at `reports_dir/artifacts/<basename>`."""
+    runtime: RuntimeService = runtime_env["runtime"]
+    reports_dir = runtime._reports_dir  # noqa: SLF001
+    assert reports_dir is not None
+    workspace = tmp_path / "ws-rule4"
+    workspace.mkdir(parents=True)
+    orphan_dir = tmp_path / "orphan"
+    orphan_dir.mkdir(parents=True)
+    source = orphan_dir / "snapshot.json"
+    source.write_text("{}\n", encoding="utf-8")
+
+    published = runtime._publish_artifact_files(  # noqa: SLF001
+        "task-004", [source], workspace_path=str(workspace)
+    )
+    expected = reports_dir / "artifacts" / "snapshot.json"
+    assert published == [str(expected.resolve())]
+
+
+@pytest.mark.asyncio
+async def test_publish_collision_suffixes_task_id_only_for_flat_fallback(
+    runtime_env, tmp_path
+):
+    """Scoped to rules 3 / 4: two distinct tasks produce the same basename via
+    the fallback path → second gets `-<task_id[:8]>` suffix. Must NOT
+    accidentally generalize to rule 1 or rule 2 canonical destinations.
+    """
+    runtime: RuntimeService = runtime_env["runtime"]
+    reports_dir = runtime._reports_dir  # noqa: SLF001
+    assert reports_dir is not None
+
+    # Two separate workspaces, each producing a top-level `notes.txt`.
+    def _mk_workspace(name: str, content: str) -> Path:
+        ws = tmp_path / name
+        ws.mkdir(parents=True)
+        (ws / "notes.txt").write_text(content, encoding="utf-8")
+        return ws
+
+    ws_a = _mk_workspace("ws-suffix-a", "from a\n")
+    ws_b = _mk_workspace("ws-suffix-b", "from b\n")
+
+    pub_a = runtime._publish_artifact_files(  # noqa: SLF001
+        "aaaa1111-task", [ws_a / "notes.txt"], workspace_path=str(ws_a)
+    )
+    pub_b = runtime._publish_artifact_files(  # noqa: SLF001
+        "bbbb2222-task", [ws_b / "notes.txt"], workspace_path=str(ws_b)
+    )
+
+    assert pub_a == [str((reports_dir / "artifacts" / "notes.txt").resolve())]
+    # Second call is suffixed with the first 8 chars of the task id.
+    assert pub_b == [
+        str((reports_dir / "artifacts" / "notes-bbbb2222.txt").resolve())
+    ]
+    # Original file was not clobbered.
+    assert (reports_dir / "artifacts" / "notes.txt").read_text(
+        encoding="utf-8"
+    ) == "from a\n"
 
 
 @pytest.mark.asyncio
@@ -994,7 +1153,10 @@ async def test_artifact_task_delivery_falls_back_to_paths_when_attachments_not_a
     assert completed.status == TASK_STATUS_COMPLETED
     assert channel.attachments == []
     sent_texts = [text for _, text in channel.sent]
-    assert any("Delivery mode: `path`" in text for text in sent_texts)
+    # ``Published to:`` block carries the absolute canonical path as the primary
+    # answer; ``Delivered via:`` is subordinate transport detail.
+    assert any("Published to:" in text for text in sent_texts)
+    assert any("Delivered via: `path`" in text for text in sent_texts)
     assert any("/reports/daily-news.md" in text for text in sent_texts)
 
 
@@ -1368,7 +1530,12 @@ async def test_scheduler_automation_posts_direct_result_without_status_spam(runt
         f"automation `daily-news` · run `{task.id}` · via **artifact-agent**" in text and "# Daily News" in text
         for _, text in channel.sent
     )
-    assert any(f"-# run dir: `_artifacts/{task.id}`" in text for _, text in channel.sent)
+    # Scratch/ephemeral dir is now labeled explicitly so it's not mistaken for
+    # the primary artifact location.
+    assert any(
+        f"-# scratch (ephemeral): `_artifacts/{task.id}`" in text
+        for _, text in channel.sent
+    )
     assert not any(text.startswith("**Task Status**") for _, text in channel.sent)
     assert not any(text.startswith("**Task Update**") for _, text in channel.sent)
 
@@ -1405,8 +1572,21 @@ async def test_scheduler_automation_formats_body_notes_and_done_footer(runtime_e
     assert any("**Output**" in text for text in sent_texts)
     assert any("Hello! This is an automation smoke test" in text for text in sent_texts)
     assert any("-# I'll fetch the current local time" in text for text in sent_texts)
-    assert any("-# artifact: `response.txt`" in text for text in sent_texts)
-    assert any(f"-# run dir: `_artifacts/{task.id}`" in text for text in sent_texts)
+    # ``response.txt`` is not under a ``reports/`` sub-tree in the workspace,
+    # so rule 3 fires: published to ``reports_dir/artifacts/response.txt``.
+    # The note line uses the absolute published path as the primary handle,
+    # NOT the workspace-relative ``response.txt`` (which is ephemeral).
+    reports_dir = runtime._reports_dir  # noqa: SLF001
+    assert reports_dir is not None
+    expected_published = reports_dir / "artifacts" / "response.txt"
+    assert any(
+        f"-# published: `{expected_published}`" in text for text in sent_texts
+    )
+    # The ephemeral scratch dir is labeled explicitly.
+    assert any(
+        f"-# scratch (ephemeral): `_artifacts/{task.id}`" in text
+        for text in sent_texts
+    )
     assert any(f"automation `hello-from-codex` · run `{task.id}` · via **automation-narrative**" in text for text in sent_texts)
     assert any("4,321 in / 2,109 out" in text for text in sent_texts)
     assert any("cache 90,000r/12,000w" in text for text in sent_texts)
@@ -2243,6 +2423,136 @@ async def test_runtime_suggest_action_resends_decision_surface(runtime_env):
     latest_draft = channel.drafts[-1]
     assert "add --no-build-isolation flag" in latest_draft["draft_text"]
     assert "Suggestion Recorded" in latest_draft["draft_text"]
+
+
+@pytest.mark.asyncio
+async def test_suggest_handler_writes_budget_overrides(runtime_env):
+    """Fix 2: suggest handler honors ``max_turns`` / ``timeout_seconds`` by
+    mutating the task row before approval. Event payload records the override
+    values; the draft surface mentions the override in the ``Budget override:``
+    footer line.
+    """
+    store: SQLiteMemoryStore = runtime_env["store"]
+    runtime: RuntimeService = runtime_env["runtime"]
+    channel: _FakeChannel = runtime_env["channel"]
+    registry = AgentRegistry([_DoneAgent()])
+    session = ChannelSession(
+        platform="discord",
+        channel_id="100",
+        channel=channel,
+        registry=registry,
+    )
+    runtime.register_session(session, registry)
+    await runtime.start()
+
+    draft = await store.create_runtime_task(
+        task_id="task-sb",
+        platform="discord",
+        channel_id="100",
+        thread_id="thread-sb",
+        created_by="owner-1",
+        goal="tighten docs",
+        preferred_agent="done-agent",
+        status=TASK_STATUS_DRAFT,
+        max_steps=5,
+        max_minutes=15,
+        test_command="true",
+    )
+    assert draft.agent_max_turns is None
+    assert draft.agent_timeout_seconds is None
+
+    event = await runtime.build_slash_decision_event(
+        platform="discord",
+        channel_id="100",
+        thread_id="thread-sb",
+        task_id="task-sb",
+        action="suggest",
+        actor_id="owner-1",
+        suggestion="please narrow to README only",
+        max_turns=50,
+        timeout_seconds=1200,
+    )
+    assert event is not None
+    result = await runtime.handle_decision_event(event)
+    assert "suggestion recorded" in result.lower()
+
+    updated = await store.get_runtime_task("task-sb")
+    assert updated is not None
+    assert updated.agent_max_turns == 50
+    assert updated.agent_timeout_seconds == 1200
+    assert updated.resume_instruction == "please narrow to README only"
+
+    events = await store.list_runtime_events("task-sb")
+    suggested = [e for e in events if e["event_type"] == "task.suggested"]
+    assert suggested, "task.suggested event should be recorded"
+    payload = suggested[-1]["payload"]
+    assert payload["max_turns_override"] == 50
+    assert payload["timeout_seconds_override"] == 1200
+
+    # Decision surface carries the override hint for the approver, and makes
+    # clear this is the per-call inner budget (not the outer max_steps loop).
+    latest_draft = channel.drafts[-1]
+    assert "Per-call budget override" in latest_draft["draft_text"]
+    assert "max_turns → 50" in latest_draft["draft_text"]
+    assert "timeout → 1200s" in latest_draft["draft_text"]
+    # And the footer explicitly reminds the owner that outer budgets are untouched.
+    assert "max_steps" in latest_draft["draft_text"]
+
+
+@pytest.mark.asyncio
+async def test_suggest_handler_without_budget_leaves_fields(runtime_env):
+    """Control: suggest with no budget overrides does NOT mutate the existing
+    ``agent_max_turns`` / ``agent_timeout_seconds`` fields.
+    """
+    store: SQLiteMemoryStore = runtime_env["store"]
+    runtime: RuntimeService = runtime_env["runtime"]
+    channel: _FakeChannel = runtime_env["channel"]
+    registry = AgentRegistry([_DoneAgent()])
+    session = ChannelSession(
+        platform="discord",
+        channel_id="100",
+        channel=channel,
+        registry=registry,
+    )
+    runtime.register_session(session, registry)
+    await runtime.start()
+
+    await store.create_runtime_task(
+        task_id="task-sb2",
+        platform="discord",
+        channel_id="100",
+        thread_id="thread-sb2",
+        created_by="owner-1",
+        goal="tighten docs",
+        preferred_agent="done-agent",
+        status=TASK_STATUS_DRAFT,
+        max_steps=5,
+        max_minutes=15,
+        test_command="true",
+        agent_max_turns=33,
+        agent_timeout_seconds=444,
+    )
+
+    event = await runtime.build_slash_decision_event(
+        platform="discord",
+        channel_id="100",
+        thread_id="thread-sb2",
+        task_id="task-sb2",
+        action="suggest",
+        actor_id="owner-1",
+        suggestion="go ahead",
+    )
+    assert event is not None
+    await runtime.handle_decision_event(event)
+
+    updated = await store.get_runtime_task("task-sb2")
+    assert updated is not None
+    # Unchanged.
+    assert updated.agent_max_turns == 33
+    assert updated.agent_timeout_seconds == 444
+    # No ``Per-call budget override`` footer when neither kwarg was set.
+    latest_draft = channel.drafts[-1]
+    assert "budget override" not in latest_draft["draft_text"].lower()
 
 
 @pytest.mark.asyncio

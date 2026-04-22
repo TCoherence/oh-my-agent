@@ -82,6 +82,8 @@ class _RuntimeStub:
             nonce="nonce-1",
             source="slash",
             suggestion=kwargs.get("suggestion"),
+            max_turns=kwargs.get("max_turns"),
+            timeout_seconds=kwargs.get("timeout_seconds"),
         )
 
     async def handle_decision_event(self, event: TaskDecisionEvent):
@@ -212,6 +214,60 @@ async def test_decide_button_uses_provided_nonce():
     assert isinstance(runtime.last_event, TaskDecisionEvent)
     assert runtime.last_event.nonce == "nonce-xyz"
     assert runtime.last_event.source == "button"
+
+
+@pytest.mark.asyncio
+async def test_decide_suggest_passes_budget_overrides_slash():
+    runtime = _RuntimeStub()
+    service = TaskService(runtime)
+
+    await service.decide(
+        platform="discord",
+        channel_id="100",
+        thread_id="200",
+        task_id="task-1",
+        action="suggest",
+        actor_id="owner-1",
+        suggestion="Please narrow scope",
+        max_turns=45,
+        timeout_seconds=900,
+    )
+
+    # Slash path: _RuntimeStub.last_event is ("slash", kwargs); then overwritten
+    # by the subsequent handle_decision_event call on the same stub. So inspect
+    # the event that handle_decision_event received last.
+    event = runtime.last_event
+    assert isinstance(event, TaskDecisionEvent)
+    assert event.max_turns == 45
+    assert event.timeout_seconds == 900
+    assert event.source == "slash"
+
+
+@pytest.mark.asyncio
+async def test_decide_suggest_passes_budget_overrides_button():
+    runtime = _RuntimeStub()
+    service = TaskService(runtime)
+
+    await service.decide(
+        platform="discord",
+        channel_id="100",
+        thread_id="200",
+        task_id="task-1",
+        action="suggest",
+        actor_id="owner-1",
+        source="button",
+        nonce="nonce-abc",
+        suggestion="Use path A",
+        max_turns=60,
+        timeout_seconds=1200,
+    )
+
+    event = runtime.last_event
+    assert isinstance(event, TaskDecisionEvent)
+    assert event.source == "button"
+    assert event.nonce == "nonce-abc"
+    assert event.max_turns == 60
+    assert event.timeout_seconds == 1200
 
 
 @pytest.mark.asyncio

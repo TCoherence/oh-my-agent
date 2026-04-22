@@ -1003,6 +1003,12 @@ class GatewayManager:
                     seed_lines = [
                         f"[Follow-up on automation '{post.automation_name}'.]",
                     ]
+                    # ``post.artifact_paths`` records the absolute **published**
+                    # artifact paths from the original run (populated from
+                    # ``delivery.archived_paths`` — legacy name, semantic is
+                    # "single durable location per artifact under reports_dir").
+                    # These are stable (reports_dir is not auto-pruned), which
+                    # is why we prefer them over the workspace scratch path.
                     if post.artifact_paths:
                         seed_lines.append(
                             "Artifacts from that run (read them as needed):"
@@ -1014,7 +1020,7 @@ class GatewayManager:
                                 f"- ... and {len(post.artifact_paths) - 8} more"
                             )
                     else:
-                        seed_lines.append("(No archived artifact paths were recorded.)")
+                        seed_lines.append("(No published artifact paths were recorded.)")
                     await session.append_assistant(
                         new_thread_id, "\n".join(seed_lines), "system",
                     )

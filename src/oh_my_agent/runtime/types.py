@@ -184,6 +184,12 @@ class TaskDecisionEvent:
     nonce: str
     source: DecisionSource
     suggestion: str | None = None
+    # Optional budget overrides carried by `suggest` / `request_changes` actions.
+    # When non-None, the runtime updates the task row's agent_max_turns /
+    # agent_timeout_seconds before the next invocation, so the agent loop
+    # re-reads them at the next temporary_max_turns / temporary_timeout bake.
+    max_turns: int | None = None
+    timeout_seconds: int | None = None
 
 
 @dataclass(frozen=True)

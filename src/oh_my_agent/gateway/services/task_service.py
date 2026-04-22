@@ -131,6 +131,8 @@ class TaskService:
         suggestion: str | None = None,
         source: str = "slash",
         nonce: str | None = None,
+        max_turns: int | None = None,
+        timeout_seconds: int | None = None,
     ) -> TaskActionResult:
         if self._runtime is None:
             return TaskActionResult(success=False, message="Runtime service is not enabled.")
@@ -159,6 +161,8 @@ class TaskService:
                 nonce=nonce,
                 source="button",
                 suggestion=suggestion,
+                max_turns=max_turns,
+                timeout_seconds=timeout_seconds,
             )
         else:
             event = await self._runtime.build_slash_decision_event(
@@ -169,6 +173,8 @@ class TaskService:
                 action=resolved_action,
                 actor_id=actor_id,
                 suggestion=suggestion,
+                max_turns=max_turns,
+                timeout_seconds=timeout_seconds,
             )
             if not event:
                 return TaskActionResult(

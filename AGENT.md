@@ -85,10 +85,16 @@ The system has seven major subsystems.
 - Message-driven control: `_parse_control_intent(text)` detects stop/pause/resume from normal thread messages.
 - PAUSED state: non-terminal, workspace preserved, resumable with instruction.
 - Completion summary with goal, files changed, test counts, and timing metrics.
-- Artifact archive: on `completion_mode=reply` each delivered file is also copied to `<runtime.reports_dir>/artifacts/<filename>` (default `~/.oh-my-agent/reports/artifacts/`); filename collisions get a `-<task_id[:8]>` suffix. The completion message renders an `Archived to:` block. Set `runtime.reports_dir: ""` to disable.
+- **Single published artifact path**. On `completion_mode=reply`, each delivered file is published to exactly one durable location under `runtime.reports_dir/...` (default `~/.oh-my-agent/reports/`) — no parallel flat-copy. Four publish rules:
+  1. Files whose resolved path is already under `reports_dir/` (and not under the task workspace) are **reused in place** — no copy.
+  2. Workspace files under `reports/<sub-tree>/...` are published at `reports_dir/<sub-tree>/...`, preserving structure. **Canonical collisions overwrite in place, no suffix** — same canonical path identifies the same logical file, so suffixing would reintroduce duplication.
+  3. Workspace files not under `reports/` fall back to `reports_dir/artifacts/<basename>` with a `-<task_id[:8]>` suffix on basename collisions.
+  4. Absolute paths (from `artifact_manifest`) that live under neither the workspace nor `reports_dir` use the same flat-fallback rule as (3).
+
+  The completion message renders `Published to:` as the primary path block; transport details (`Delivered via:`, `Attachments:`) and the ephemeral scratch dir (`_artifacts/<task_id>/`) are labeled subordinate. Follow-up threads seed the system turn with the absolute published path. Set `runtime.reports_dir: ""` to disable publishing.
 - Discord buttons for approval + slash command fallback.
 - Retry on transient agent errors (`rate_limit` / `api_5xx` / `timeout`) with per-kind backoff; on `max_turns` failure, `_fail` surfaces a "Re-run +30 turns" button that spawns a sibling task with a bumped `agent_max_turns` (parent+30, fallback base 25). Terminal kinds (`auth` / `cli_error`) never retry.
-- Janitor cleanup with configurable retention. Archive dir under `reports_dir/` is **not** auto-pruned.
+- Janitor cleanup with configurable retention. Published tree under `reports_dir/` is **not** auto-pruned.
 
 See [`docs/EN/task-model.md`](docs/EN/task-model.md) ([中文](docs/CN/task-model.md)) for the full task-type, router-intent, status, and delivery catalog — plus known sharp edges.
 
@@ -104,7 +110,7 @@ See [`docs/EN/task-model.md`](docs/EN/task-model.md) ([中文](docs/CN/task-mode
 - Per-automation `auto_approve: bool` (default `false`): when `true`, scheduler-fired runtime tasks skip risk evaluation and start immediately; when `false`, tasks go through normal `evaluate_strict_risk()` and may land in DRAFT.
 - `fire_job_now(name)`: programmatic one-shot trigger for manual `/automation_run` command.
 - Jobs dispatch back into `GatewayManager.handle_message()` as system messages.
-- Follow-up thread on reply: each automation-posted channel message is recorded in the `automation_posts` SQLite table (7-day TTL via the runtime janitor). Replying to that message spawns a Discord thread rooted on it, seeded with a system turn listing the original run's archived artifact paths; the agent continues there as a normal conversation (CLI session is not resumed — artifact paths are injected as context).
+- Follow-up thread on reply: each automation-posted channel message is recorded in the `automation_posts` SQLite table (7-day TTL via the runtime janitor). Replying to that message spawns a Discord thread rooted on it, seeded with a system turn listing the original run's published artifact paths; the agent continues there as a normal conversation (CLI session is not resumed — artifact paths are injected as context).
 
 **Sandbox isolation** (`main.py` + `BaseCLIAgent`)
 

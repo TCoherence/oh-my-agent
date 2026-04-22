@@ -6,6 +6,15 @@ The format is intentionally lightweight and release-oriented rather than exhaust
 
 ## Unreleased
 
+### Added
+
+- **`/task_suggest` accepts `max_turns` / `timeout_seconds` budget overrides** (slash + Discord modal). The optional kwargs are threaded through `TaskService.decide()` → `TaskDecisionEvent` → `handle_decision_event`'s suggest / request_changes branches, which write `agent_max_turns` / `agent_timeout_seconds` onto the task row before re-queueing. The next run honors the new budget via `AgentRegistry._temporary_max_turns` / `_temporary_timeout`. The `task.suggested` event payload records `max_turns_override` / `timeout_seconds_override`; a `Budget override: max_turns → … · timeout → …s` line is appended to the surfaced suggestion text. Slash validation uses `app_commands.Range[int, 1, 500]` / `app_commands.Range[int, 1, 86400]` for Discord-native enforcement.
+- **Discord Modal on the `Suggest` button**. Clicking the button now opens a Discord modal with three fields — suggestion (required, up to 2000 chars), max_turns (optional, positive integer), timeout_seconds (optional, positive integer). Strict integer validation via `_parse_optional_positive_int`: non-integer or `≤ 0` inputs surface an ephemeral error and the decision is not applied. Previously the button called `decide()` without a suggestion and with no way to pass budget overrides; users had to fall back to `/task_suggest`.
+
+### Changed
+
+- **Single published artifact path** (`runtime.reports_dir/...`). `_archive_artifact_files` is replaced by `_publish_artifact_files` with four rules: (a) files already under `reports_dir/` are reused in place (no copy); (b) workspace files under `reports/<sub-tree>/…` are mirrored to `reports_dir/<sub-tree>/…` preserving structure — canonical collisions overwrite in place, no suffix; (c) other workspace files fall back to `reports_dir/artifacts/<basename>` with a `-<task_id[:8]>` suffix on basename collisions; (d) absolute paths outside both `workspace_path` and `reports_dir` follow the same flat fallback as (c). User-facing "Archived to:" → "Published to:" — the absolute published path is now the primary answer to "where is my artifact?", with `Delivered via: <mode>` / `Scratch (ephemeral): _artifacts/<task_id>/` demoted to subordinate transport detail. Follow-up thread seeders and `automation_posts.artifact_paths` already use the published paths (durable; `reports_dir/` is not janitor-pruned).
+
 ## v0.9.3 - 2026-04-19
 
 ### Added

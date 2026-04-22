@@ -134,6 +134,106 @@ async def _download_discord_attachments(
     return results
 
 
+def _parse_optional_positive_int(raw: str, field: str) -> tuple[int | None, str | None]:
+    """Parse an optional positive integer from a modal/textinput string.
+
+    Returns ``(value, error)``. Empty / whitespace input yields ``(None, None)``.
+    Non-integer or non-positive input yields ``(None, <human-readable error>)``.
+    Strict: never silently coerces.
+    """
+    stripped = (raw or "").strip()
+    if not stripped:
+        return None, None
+    try:
+        value = int(stripped)
+    except ValueError:
+        return None, f"`{field}` must be an integer; got {stripped!r}."
+    if value <= 0:
+        return None, f"`{field}` must be positive; got {value}."
+    return value, None
+
+
+class _TaskSuggestModal(discord.ui.Modal):
+    """Modal launched from the Suggest button to collect suggestion + optional budget.
+
+    One-shot / transient: Discord does not persist modals across bot restarts,
+    so no rehydration is needed (unlike interactive button views). Budget
+    overrides are validated with ``_parse_optional_positive_int``; any bad
+    input short-circuits with an ephemeral error and ``decide()`` is NOT called.
+    """
+
+    def __init__(
+        self,
+        *,
+        prompt: InteractivePrompt,
+        decision: InteractiveDecision,
+        original_message_id: str,
+        channel: "DiscordChannel",
+    ) -> None:
+        # Title is capped at 45 chars by Discord; truncate task id safely.
+        task_id_hint = (decision.entity_id or "")[:12]
+        super().__init__(title=f"Suggest changes — task {task_id_hint}"[:45])
+        self._prompt = prompt
+        self._decision = decision
+        self._original_message_id = original_message_id
+        self._channel = channel
+
+        self._suggestion_input = discord.ui.TextInput(
+            label="Suggestion",
+            style=discord.TextStyle.paragraph,
+            placeholder="What should the agent change on the next run?",
+            required=True,
+            max_length=2000,
+        )
+        # NOTE: these labels intentionally say "per call" to disambiguate the
+        # per-invocation agent turn/timeout budget (Claude's ``--max-turns`` /
+        # subprocess timeout) from the OUTER runtime loop budget
+        # (``max_steps`` / ``max_minutes``), which this modal does NOT affect.
+        # ``step=N/M`` in operator logs is the outer counter; the override here
+        # feeds into each inner agent call.
+        self._max_turns_input = discord.ui.TextInput(
+            label="Agent max-turns per call (optional)",
+            style=discord.TextStyle.short,
+            placeholder="claude --max-turns; e.g. 45",
+            required=False,
+            max_length=4,
+        )
+        self._timeout_input = discord.ui.TextInput(
+            label="Agent timeout sec per call (optional)",
+            style=discord.TextStyle.short,
+            placeholder="per-call timeout; e.g. 900",
+            required=False,
+            max_length=6,
+        )
+        self.add_item(self._suggestion_input)
+        self.add_item(self._max_turns_input)
+        self.add_item(self._timeout_input)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        max_turns, err_turns = _parse_optional_positive_int(
+            str(self._max_turns_input.value), "max_turns"
+        )
+        if err_turns:
+            await interaction.response.send_message(err_turns, ephemeral=True)
+            return
+        timeout_seconds, err_timeout = _parse_optional_positive_int(
+            str(self._timeout_input.value), "timeout_seconds"
+        )
+        if err_timeout:
+            await interaction.response.send_message(err_timeout, ephemeral=True)
+            return
+        suggestion = str(self._suggestion_input.value).strip()
+        await self._channel._finalize_task_decision(
+            interaction,
+            prompt=self._prompt,
+            decision=self._decision,
+            message_id=self._original_message_id,
+            suggestion=suggestion,
+            max_turns=max_turns,
+            timeout_seconds=timeout_seconds,
+        )
+
+
 class DiscordChannel(BaseChannel):
     """Discord platform adapter implementing BaseChannel.
 
@@ -653,14 +753,64 @@ class DiscordChannel(BaseChannel):
                 ephemeral=True,
             )
             return
-        await interaction.response.defer(ephemeral=True)
+        # Capture the original prompt message id up-front: after a modal submit,
+        # ``interaction.message`` is None, so we must fall back to the decision
+        # (which recorded it at click time).
+        original_message_id = (
+            str(interaction.message.id)
+            if interaction.message is not None
+            else str(decision.message_id or "")
+        )
+        if decision.action_id == "suggest":
+            # Modals REQUIRE an unacknowledged interaction — must NOT defer first.
+            await interaction.response.send_modal(
+                _TaskSuggestModal(
+                    prompt=prompt,
+                    decision=decision,
+                    original_message_id=original_message_id,
+                    channel=self,
+                )
+            )
+            return
+        await self._finalize_task_decision(
+            interaction,
+            prompt=prompt,
+            decision=decision,
+            message_id=original_message_id,
+        )
+
+    async def _finalize_task_decision(
+        self,
+        interaction: discord.Interaction,
+        *,
+        prompt: InteractivePrompt,
+        decision: InteractiveDecision,
+        message_id: str,
+        suggestion: str | None = None,
+        max_turns: int | None = None,
+        timeout_seconds: int | None = None,
+    ) -> None:
+        """Shared finalize flow for both direct button clicks and modal submits.
+
+        - Direct click: ``interaction.response`` is pristine → we defer first.
+        - Modal submit: ``interaction.response`` was already consumed by
+          ``send_modal`` on the parent interaction; the submit interaction's
+          response is still fresh, so we defer it too before updating the
+          original prompt message.
+
+        We always finish with ``interaction.followup.send`` (never
+        ``response.send_message``) to stay safe regardless of entry point.
+        """
+        assert self._task_service is not None
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
         task = None
         if self._runtime_service is not None:
             task = await self._runtime_service.get_task(decision.entity_id)
         try:
             await self.update_interactive(
                 str(interaction.channel_id),
-                str(interaction.message.id) if interaction.message is not None else str(decision.message_id or ""),
+                message_id,
                 self._build_task_interactive_prompt(
                     draft_text=self._task_service.build_processing_text(
                         original_text=prompt.text,
@@ -684,11 +834,14 @@ class DiscordChannel(BaseChannel):
             actor_id=decision.actor_id,
             source="button",
             nonce=prompt.idempotency_key,
+            suggestion=suggestion,
+            max_turns=max_turns,
+            timeout_seconds=timeout_seconds,
         )
         try:
             await self.update_interactive(
                 str(interaction.channel_id),
-                str(interaction.message.id) if interaction.message is not None else str(decision.message_id or ""),
+                message_id,
                 self._build_task_interactive_prompt(
                     draft_text=self._task_service.build_task_draft_text(
                         original_text=prompt.text,
@@ -1319,6 +1472,8 @@ class DiscordChannel(BaseChannel):
             action: str,
             task_id: str,
             suggestion: str | None = None,
+            max_turns: int | None = None,
+            timeout_seconds: int | None = None,
         ):
             if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
                 await interaction.response.send_message(
@@ -1335,6 +1490,8 @@ class DiscordChannel(BaseChannel):
                 action=action,
                 actor_id=str(interaction.user.id),
                 suggestion=suggestion,
+                max_turns=max_turns,
+                timeout_seconds=timeout_seconds,
             )
             await interaction.followup.send(result.message[:1900], ephemeral=True)
 
@@ -1349,17 +1506,26 @@ class DiscordChannel(BaseChannel):
             await _slash_decide(interaction, action="reject", task_id=task_id)
 
         @tree.command(name="task_suggest", description="Suggest changes for a runtime task draft")
-        @app_commands.describe(task_id="Task ID", suggestion="Suggested change")
+        @app_commands.describe(
+            task_id="Task ID",
+            suggestion="Suggested change",
+            max_turns="Override --max-turns per agent call (outer max_steps unchanged; optional)",
+            timeout_seconds="Override per-call agent timeout seconds (outer max_minutes unchanged; optional)",
+        )
         async def slash_task_suggest(
             interaction: discord.Interaction,
             task_id: str,
             suggestion: str,
+            max_turns: app_commands.Range[int, 1, 500] | None = None,
+            timeout_seconds: app_commands.Range[int, 1, 86400] | None = None,
         ):
             await _slash_decide(
                 interaction,
                 action="suggest",
                 task_id=task_id,
                 suggestion=suggestion,
+                max_turns=max_turns,
+                timeout_seconds=timeout_seconds,
             )
 
         @tree.command(name="task_merge", description="Merge a completed runtime task into current branch")

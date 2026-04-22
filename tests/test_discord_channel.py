@@ -422,3 +422,277 @@ async def test_send_task_draft_uses_send_interactive():
 
     assert msg_id == "msg-2"
     assert captured == [("200", "Approve this task", "task", "nonce-1")]
+
+
+# ---------------------------------------------------------------------------
+# Fix 1: Suggest button opens a Discord modal (not a direct decide call).
+# ---------------------------------------------------------------------------
+
+
+from oh_my_agent.gateway.platforms.discord import (  # noqa: E402
+    _TaskSuggestModal,
+    _parse_optional_positive_int,
+)
+from oh_my_agent.gateway.base import InteractivePrompt, ActionDescriptor  # noqa: E402
+from oh_my_agent.gateway.services.types import (  # noqa: E402
+    InteractiveDecision,
+    TaskActionResult,
+)
+
+
+def test_parse_optional_positive_int_empty_returns_none():
+    assert _parse_optional_positive_int("", "max_turns") == (None, None)
+    assert _parse_optional_positive_int("   ", "max_turns") == (None, None)
+
+
+def test_parse_optional_positive_int_valid():
+    assert _parse_optional_positive_int("45", "max_turns") == (45, None)
+    assert _parse_optional_positive_int(" 900 ", "timeout_seconds") == (900, None)
+
+
+def test_parse_optional_positive_int_rejects_non_integer():
+    value, err = _parse_optional_positive_int("abc", "max_turns")
+    assert value is None
+    assert err is not None
+    assert "must be an integer" in err
+    assert "'abc'" in err
+
+
+def test_parse_optional_positive_int_rejects_zero_and_negative():
+    value, err = _parse_optional_positive_int("0", "max_turns")
+    assert value is None
+    assert err is not None and "must be positive" in err
+    value, err = _parse_optional_positive_int("-5", "timeout_seconds")
+    assert value is None
+    assert err is not None and "must be positive" in err
+
+
+class _FakeModalSender:
+    def __init__(self) -> None:
+        self.modals: list[object] = []
+        self.messages: list[tuple[str, bool]] = []
+        self.deferred = False
+        self._done = False
+
+    def is_done(self) -> bool:
+        return self._done
+
+    async def send_modal(self, modal):
+        self.modals.append(modal)
+        self._done = True
+
+    async def send_message(self, text, ephemeral=False):
+        self.messages.append((text, ephemeral))
+        self._done = True
+
+    async def defer(self, ephemeral=False):
+        self.deferred = True
+        self._done = True
+
+
+class _FakeFollowup:
+    def __init__(self) -> None:
+        self.sent: list[tuple[str, bool]] = []
+
+    async def send(self, text, ephemeral=False):
+        self.sent.append((text, ephemeral))
+
+
+class _FakeTaskService:
+    def __init__(self, result_msg: str = "done") -> None:
+        self.decide_calls: list[dict] = []
+        self._result_msg = result_msg
+
+    async def decide(self, **kwargs):
+        self.decide_calls.append(kwargs)
+        return TaskActionResult(
+            success=True,
+            message=self._result_msg,
+            task_id=kwargs.get("task_id"),
+            task_status="DRAFT",
+        )
+
+    def build_processing_text(self, *, original_text, task, action):
+        return f"processing:{action}"
+
+    def build_task_draft_text(self, *, original_text, task, result_message):
+        return f"draft:{result_message}"
+
+    @staticmethod
+    def disable_actions(task, *, suggestion_only: bool = False):
+        del task, suggestion_only
+        return ["approve"]
+
+
+def _task_prompt() -> InteractivePrompt:
+    return InteractivePrompt(
+        text="Approve task?",
+        actions=[
+            ActionDescriptor(id="approve", label="Approve", style="success"),
+            ActionDescriptor(id="suggest", label="Suggest", style="secondary"),
+        ],
+        idempotency_key="nonce-xyz",
+        entity_kind="task",
+        entity_id="task-abc",
+    )
+
+
+def _suggest_decision() -> InteractiveDecision:
+    return InteractiveDecision(
+        entity_id="task-abc",
+        entity_kind="task",
+        action_id="suggest",
+        actor_id="42",
+        message_id="555",
+    )
+
+
+@pytest.mark.asyncio
+async def test_suggest_button_opens_modal_and_does_not_call_decide():
+    """The Suggest button must route into a Modal, not directly to decide().
+    This is the regression guard for the original bug: the button call dropped
+    ``suggestion`` and no UI collected it.
+    """
+    channel = DiscordChannel(token="x", channel_id="100", owner_user_ids={"42"})
+    task_service = _FakeTaskService()
+    channel._task_service = task_service  # type: ignore[attr-defined]
+    response = _FakeModalSender()
+    followup = _FakeFollowup()
+    interaction = SimpleNamespace(
+        user=SimpleNamespace(id=42),
+        response=response,
+        followup=followup,
+        message=SimpleNamespace(id=555),
+        channel_id=200,
+    )
+
+    await channel._handle_task_interaction(  # type: ignore[arg-type]
+        interaction,
+        prompt=_task_prompt(),
+        decision=_suggest_decision(),
+    )
+
+    # Must have launched a modal — the fix — and NOT have invoked decide.
+    assert len(response.modals) == 1
+    assert isinstance(response.modals[0], _TaskSuggestModal)
+    assert task_service.decide_calls == []
+    # Also: the interaction.response was not deferred (modals require fresh response).
+    assert response.deferred is False
+
+
+@pytest.mark.asyncio
+async def test_modal_submit_invokes_decide_with_budget():
+    """Happy path: suggestion + valid budget ints → decide() sees all three."""
+    channel = DiscordChannel(token="x", channel_id="100", owner_user_ids={"42"})
+    task_service = _FakeTaskService(result_msg="Task `task-abc` suggestion recorded.")
+    channel._task_service = task_service  # type: ignore[attr-defined]
+
+    async def _fake_update_interactive(thread_id, message_id, prompt):
+        return None
+
+    channel.update_interactive = _fake_update_interactive  # type: ignore[method-assign]
+
+    modal = _TaskSuggestModal(
+        prompt=_task_prompt(),
+        decision=_suggest_decision(),
+        original_message_id="555",
+        channel=channel,
+    )
+    # Populate the TextInput ``value`` properties via the private ``_value``
+    # slot (discord.py sets this when Discord returns the submitted modal).
+    modal._suggestion_input._value = "please narrow to README"  # type: ignore[attr-defined]
+    modal._max_turns_input._value = "45"  # type: ignore[attr-defined]
+    modal._timeout_input._value = "900"  # type: ignore[attr-defined]
+
+    submit_response = _FakeModalSender()
+    submit_followup = _FakeFollowup()
+    interaction = SimpleNamespace(
+        user=SimpleNamespace(id=42),
+        response=submit_response,
+        followup=submit_followup,
+        message=None,  # modal submits have no anchor message
+        channel_id=200,
+    )
+
+    await modal.on_submit(interaction)
+
+    assert len(task_service.decide_calls) == 1
+    call = task_service.decide_calls[0]
+    assert call["action"] == "suggest"
+    assert call["suggestion"] == "please narrow to README"
+    assert call["max_turns"] == 45
+    assert call["timeout_seconds"] == 900
+    assert call["nonce"] == "nonce-xyz"
+    assert call["source"] == "button"
+    # Followup was used (response was consumed by defer before final message).
+    assert submit_followup.sent
+    assert submit_followup.sent[-1][1] is True  # ephemeral
+
+
+@pytest.mark.asyncio
+async def test_modal_submit_rejects_non_integer_budget_without_calling_decide():
+    """Bad max_turns → ephemeral error; decide() NOT called."""
+    channel = DiscordChannel(token="x", channel_id="100", owner_user_ids={"42"})
+    task_service = _FakeTaskService()
+    channel._task_service = task_service  # type: ignore[attr-defined]
+
+    modal = _TaskSuggestModal(
+        prompt=_task_prompt(),
+        decision=_suggest_decision(),
+        original_message_id="555",
+        channel=channel,
+    )
+    modal._suggestion_input._value = "ok"  # type: ignore[attr-defined]
+    modal._max_turns_input._value = "abc"  # type: ignore[attr-defined]
+    modal._timeout_input._value = ""  # type: ignore[attr-defined]
+
+    submit_response = _FakeModalSender()
+    interaction = SimpleNamespace(
+        user=SimpleNamespace(id=42),
+        response=submit_response,
+        followup=_FakeFollowup(),
+        message=None,
+        channel_id=200,
+    )
+
+    await modal.on_submit(interaction)
+
+    assert task_service.decide_calls == []
+    assert submit_response.messages
+    err_text, ephemeral = submit_response.messages[0]
+    assert "max_turns" in err_text and "integer" in err_text
+    assert ephemeral is True
+
+
+@pytest.mark.asyncio
+async def test_modal_submit_rejects_non_positive_budget_without_calling_decide():
+    """Zero / negative max_turns → ephemeral error; decide() NOT called."""
+    channel = DiscordChannel(token="x", channel_id="100", owner_user_ids={"42"})
+    task_service = _FakeTaskService()
+    channel._task_service = task_service  # type: ignore[attr-defined]
+
+    modal = _TaskSuggestModal(
+        prompt=_task_prompt(),
+        decision=_suggest_decision(),
+        original_message_id="555",
+        channel=channel,
+    )
+    modal._suggestion_input._value = "ok"  # type: ignore[attr-defined]
+    modal._max_turns_input._value = "0"  # type: ignore[attr-defined]
+    modal._timeout_input._value = ""  # type: ignore[attr-defined]
+
+    submit_response = _FakeModalSender()
+    interaction = SimpleNamespace(
+        user=SimpleNamespace(id=42),
+        response=submit_response,
+        followup=_FakeFollowup(),
+        message=None,
+        channel_id=200,
+    )
+
+    await modal.on_submit(interaction)
+
+    assert task_service.decide_calls == []
+    assert submit_response.messages
+    err_text, _ = submit_response.messages[0]
+    assert "must be positive" in err_text

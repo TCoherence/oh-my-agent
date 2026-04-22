@@ -148,6 +148,11 @@ class ArtifactDeliveryResult:
     message_ids: list[str]
     summary_text: str
     attachment_names: list[str]
+    # ``archived_paths`` is a legacy identifier retained for API stability.
+    # Semantic: the list of absolute **published** paths — one durable
+    # location per artifact under ``reports_dir``. Do NOT add a secondary
+    # "archive copy" behavior on top of this field; the refactor eliminated
+    # the flat-duplicate archive pattern deliberately.
     archived_paths: list[str] = field(default_factory=list)
 
 
@@ -2402,14 +2407,24 @@ class RuntimeService:
                 task.id,
                 ttl_minutes=self._decision_ttl_minutes,
             )
-            await self._store.update_runtime_task(
-                task.id,
-                resume_instruction=suggestion or task.resume_instruction,
-            )
+            updates: dict[str, Any] = {
+                "resume_instruction": suggestion or task.resume_instruction,
+            }
+            if event.max_turns is not None:
+                updates["agent_max_turns"] = event.max_turns
+            if event.timeout_seconds is not None:
+                updates["agent_timeout_seconds"] = event.timeout_seconds
+            await self._store.update_runtime_task(task.id, **updates)
             await self._store.add_runtime_event(
                 task.id,
                 "task.suggested",
-                {"actor_id": event.actor_id, "source": event.source, "suggestion": suggestion},
+                {
+                    "actor_id": event.actor_id,
+                    "source": event.source,
+                    "suggestion": suggestion,
+                    "max_turns_override": event.max_turns,
+                    "timeout_seconds_override": event.timeout_seconds,
+                },
             )
             session = self._session_for(task)
             if session is not None:
@@ -2419,6 +2434,22 @@ class RuntimeService:
                     f"> {suggestion_preview}\n\n"
                     "Approve to run with this guidance, or reject to discard."
                 )
+                if event.max_turns is not None or event.timeout_seconds is not None:
+                    parts: list[str] = []
+                    if event.max_turns is not None:
+                        parts.append(f"max_turns → {event.max_turns}")
+                    if event.timeout_seconds is not None:
+                        parts.append(f"timeout → {event.timeout_seconds}s")
+                    # "Per-call" makes it explicit this is the inner agent
+                    # invocation budget (Claude ``--max-turns`` / subprocess
+                    # timeout), NOT the outer runtime ``max_steps`` /
+                    # ``max_minutes`` loop — a real source of user confusion
+                    # (see task-model.md §8.1). Keep the literal substring
+                    # "Budget override" so existing tests still match.
+                    suggest_text += (
+                        f"\n\n_Per-call budget override: {' · '.join(parts)}_"
+                        "\n_(outer `max_steps` / `max_minutes` unchanged.)_"
+                    )
                 await self._send_decision_surface(
                     session,
                     event.thread_id,
@@ -2465,17 +2496,27 @@ class RuntimeService:
 
         # request_changes: move back to BLOCKED and keep suggestion as resume hint.
         suggestion = (event.suggestion or "").strip()
-        await self._store.update_runtime_task(
-            task.id,
-            status=TASK_STATUS_BLOCKED,
-            blocked_reason="Requested changes before merge.",
-            resume_instruction=suggestion or task.resume_instruction,
-            ended_at=None,
-        )
+        request_changes_updates: dict[str, Any] = {
+            "status": TASK_STATUS_BLOCKED,
+            "blocked_reason": "Requested changes before merge.",
+            "resume_instruction": suggestion or task.resume_instruction,
+            "ended_at": None,
+        }
+        if event.max_turns is not None:
+            request_changes_updates["agent_max_turns"] = event.max_turns
+        if event.timeout_seconds is not None:
+            request_changes_updates["agent_timeout_seconds"] = event.timeout_seconds
+        await self._store.update_runtime_task(task.id, **request_changes_updates)
         await self._store.add_runtime_event(
             task.id,
             "task.request_changes",
-            {"actor_id": event.actor_id, "source": event.source, "suggestion": suggestion},
+            {
+                "actor_id": event.actor_id,
+                "source": event.source,
+                "suggestion": suggestion,
+                "max_turns_override": event.max_turns,
+                "timeout_seconds_override": event.timeout_seconds,
+            },
         )
         await self._notify(
             task,
@@ -2498,6 +2539,8 @@ class RuntimeService:
         action: str,
         actor_id: str,
         suggestion: str | None = None,
+        max_turns: int | None = None,
+        timeout_seconds: int | None = None,
     ) -> TaskDecisionEvent | None:
         nonce = await self._store.get_active_runtime_decision_nonce(task_id)
         if not nonce:
@@ -2515,6 +2558,8 @@ class RuntimeService:
             nonce=nonce,
             source="slash",
             suggestion=suggestion,
+            max_turns=max_turns,
+            timeout_seconds=timeout_seconds,
         )
 
     async def _worker_loop(self, idx: int) -> None:
@@ -3103,6 +3148,11 @@ class RuntimeService:
                     )
                 automation_artifact_paths: list[str] | None = None
                 if task.automation_name and delivery is not None:
+                    # ``archived_paths`` == absolute published paths (durable,
+                    # in ``reports_dir``). Prefer these for the follow-up
+                    # thread seeder so Reply-in-thread context points at the
+                    # stable location, not the ephemeral ``_artifacts/<id>``
+                    # workspace path.
                     if delivery.archived_paths:
                         automation_artifact_paths = list(delivery.archived_paths)
                     elif delivery.delivered_paths:
@@ -3888,43 +3938,190 @@ class RuntimeService:
                 results.append(candidate)
         return results
 
-    def _archive_artifact_files(self, task_id: str, paths: list[Path]) -> list[str]:
-        """Copy artifact files into the central reports archive.
+    def _publish_artifact_files(
+        self,
+        task_id: str,
+        paths: list[Path],
+        *,
+        workspace_path: str | None,
+    ) -> list[str]:
+        """Publish artifact files to their single durable location.
 
-        Returns absolute string paths of the archived copies. Returns [] if
-        `reports_dir` is disabled, paths is empty, or archiving fails.
+        Returns a list of absolute string paths. One published location per
+        artifact — no parallel flat-copy. Four rules, evaluated in order:
+
+        1. **Already stable** — source resolves under ``reports_dir`` AND not
+           under ``workspace_path``: reuse the source path as-is (no copy).
+        2. **Workspace reports-shaped** (canonical publish) — source is under
+           ``workspace_path`` and its relative path starts with ``reports/``:
+           publish at ``reports_dir / <rel-without-reports-prefix>``, preserving
+           sub-tree. **Collision policy: overwrite in place, no suffix.**
+           Canonical paths identify the same logical file; suffixing would
+           reintroduce the duplication this refactor is eliminating.
+        3. **Workspace, non-reports-shaped** — source under ``workspace_path``
+           but not inside ``reports/``: fallback to
+           ``reports_dir / "artifacts" / <basename>`` with a
+           ``-<task_id[:8]>`` suffix on basename collisions (ad-hoc artifacts
+           need disambiguation).
+        4. **Absolute, outside both trees** — artifact_manifest absolute paths
+           that live under neither ``workspace_path`` nor ``reports_dir``:
+           same as rule 3 (flat fallback with suffix).
+
+        Returns ``[]`` if ``reports_dir`` is disabled, paths is empty, or
+        every op fails.
         """
         if not self._reports_dir or not paths:
             return []
         try:
-            archive_dir = self._reports_dir / "artifacts"
-            archive_dir.mkdir(parents=True, exist_ok=True)
+            reports_root = self._reports_dir.resolve()
         except OSError:
-            logger.warning("Failed to create reports dir %s", self._reports_dir, exc_info=True)
+            logger.warning(
+                "Failed to resolve reports dir %s", self._reports_dir, exc_info=True
+            )
             return []
-        archived: list[str] = []
+        workspace_root: Path | None = None
+        if workspace_path:
+            try:
+                workspace_root = Path(workspace_path).resolve()
+            except OSError:
+                workspace_root = None
         suffix_tag = (task_id or "")[:8] or "task"
+        published: list[str] = []
+
+        def _is_under(path: Path, root: Path) -> bool:
+            try:
+                path.relative_to(root)
+                return True
+            except ValueError:
+                return False
+
+        def _flat_fallback(source: Path) -> Path | None:
+            # Rules 3 and 4: reports_dir/artifacts/<basename>, with suffix on collision.
+            archive_dir = reports_root / "artifacts"
+            try:
+                archive_dir.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                logger.warning(
+                    "Failed to create fallback artifact dir %s",
+                    archive_dir,
+                    exc_info=True,
+                )
+                return None
+            dest = archive_dir / source.name
+            if dest.exists() and dest.resolve() != source:
+                dest = archive_dir / f"{dest.stem}-{suffix_tag}{dest.suffix}"
+            return dest
+
+        def _copy_or_skip(source: Path, dest: Path) -> str | None:
+            """Copy ``source`` → ``dest`` (overwriting) unless they are the same
+            file; return the absolute path of the resulting location, or None
+            on OSError (caller logs and continues)."""
+            try:
+                if dest.exists() and dest.resolve() == source:
+                    return str(source)
+                shutil.copy2(source, dest)
+                return str(dest.resolve())
+            except OSError:
+                return None
+
         for path in paths:
             try:
                 source = path.resolve()
-                dest = archive_dir / path.name
-                if dest.exists() and dest.resolve() != source:
-                    dest = archive_dir / f"{dest.stem}-{suffix_tag}{dest.suffix}"
-                shutil.copy2(source, dest)
-                archived.append(str(dest.resolve()))
             except OSError:
+                logger.warning("Failed to resolve artifact source %s", path, exc_info=True)
+                continue
+            under_reports = _is_under(source, reports_root)
+            under_workspace = workspace_root is not None and _is_under(source, workspace_root)
+
+            # Rule 1: already under reports_dir and not under workspace_path → reuse.
+            if under_reports and not under_workspace:
+                published.append(str(source))
+                continue
+
+            # Rule 2: workspace + reports-shaped → canonical publish, overwrite.
+            if under_workspace:
+                assert workspace_root is not None  # for type checker
+                rel = source.relative_to(workspace_root)
+                parts = rel.parts
+                if parts and parts[0] == "reports" and len(parts) > 1:
+                    canonical_rel = Path(*parts[1:])
+                    dest = reports_root / canonical_rel
+                    try:
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                    except OSError:
+                        logger.warning(
+                            "Failed to create canonical publish dir %s",
+                            dest.parent,
+                            exc_info=True,
+                        )
+                        continue
+                    outcome = _copy_or_skip(source, dest)  # overwrites in place, no suffix.
+                    if outcome is None:
+                        logger.warning(
+                            "Failed to publish artifact %s to %s",
+                            path,
+                            dest,
+                            exc_info=True,
+                        )
+                        continue
+                    published.append(outcome)
+                    continue
+                # Rule 3: workspace but not reports-shaped → flat fallback.
+                dest = _flat_fallback(source)
+                if dest is None:
+                    continue
+                outcome = _copy_or_skip(source, dest)
+                if outcome is None:
+                    logger.warning(
+                        "Failed to publish artifact %s to %s",
+                        path,
+                        dest,
+                        exc_info=True,
+                    )
+                    continue
+                published.append(outcome)
+                continue
+
+            # Rule 4: absolute path, outside both trees → flat fallback.
+            dest = _flat_fallback(source)
+            if dest is None:
+                continue
+            outcome = _copy_or_skip(source, dest)
+            if outcome is None:
                 logger.warning(
-                    "Failed to archive artifact %s to %s",
+                    "Failed to publish artifact %s to %s",
                     path,
-                    self._reports_dir,
+                    dest,
                     exc_info=True,
                 )
-        return archived
+                continue
+            published.append(outcome)
+        return published
 
     def _render_delivery_lines(self, delivery: ArtifactDeliveryResult | None) -> list[str]:
         if delivery is None:
             return []
-        lines = [f"Delivery mode: `{delivery.mode}`"]
+        lines: list[str] = []
+        # ``archived_paths`` is the list of absolute **published** paths (one
+        # durable location per artifact); identifier kept for API stability.
+        # Render this FIRST so it answers "where is my artifact?" primarily;
+        # transport details (mode / attachment basenames / in-workspace path)
+        # follow as subordinate context.
+        if delivery.archived_paths:
+            lines.append("Published to:")
+            lines.extend(f"- `{path}`" for path in delivery.archived_paths[:8])
+            if len(delivery.archived_paths) > 8:
+                lines.append(f"- ... and {len(delivery.archived_paths) - 8} more")
+            lines.append(f"Delivered via: `{delivery.mode}`")
+            if delivery.mode == "attachment" and delivery.attachment_names:
+                lines.append("Attachments:")
+                lines.extend(f"- `{name}`" for name in delivery.attachment_names[:8])
+                if len(delivery.attachment_names) > 8:
+                    lines.append(f"- ... and {len(delivery.attachment_names) - 8} more")
+            return lines
+        # Fallback: no published paths (e.g., reports_dir disabled) — show the
+        # transport-layer info as the main block so users still see something.
+        lines.append(f"Delivery mode: `{delivery.mode}`")
         if delivery.mode == "attachment" and delivery.attachment_names:
             lines.append("Attachments:")
             lines.extend(f"- `{name}`" for name in delivery.attachment_names[:8])
@@ -3935,11 +4132,6 @@ class RuntimeService:
             lines.extend(f"- `{path}`" for path in delivery.delivered_paths[:8])
             if len(delivery.delivered_paths) > 8:
                 lines.append(f"- ... and {len(delivery.delivered_paths) - 8} more")
-        if delivery.archived_paths:
-            lines.append("Archived to:")
-            lines.extend(f"- `{path}`" for path in delivery.archived_paths[:8])
-            if len(delivery.archived_paths) > 8:
-                lines.append(f"- ... and {len(delivery.archived_paths) - 8} more")
         return lines
 
     async def _deliver_artifacts(
@@ -3954,7 +4146,15 @@ class RuntimeService:
         artifact_paths = self._artifact_paths_for_task(task, changed_files)
         if not artifact_paths:
             return None
-        archived_paths = self._archive_artifact_files(task.id, artifact_paths)
+        published_paths = self._publish_artifact_files(
+            task.id, artifact_paths, workspace_path=task.workspace_path
+        )
+        # NOTE: ``archived_paths`` is a legacy identifier retained for API
+        # stability. Semantic is the list of absolute **published** paths (one
+        # durable location per artifact under ``reports_dir``). Do not layer a
+        # secondary "archive copy" behavior on top of this field — the whole
+        # point of the refactor is to keep exactly one path per artifact.
+        archived_paths = published_paths
         summary_text = task.output_summary or f"{len(artifact_paths)} artifact(s) ready."
         return await self.deliver_files(
             session=session,
@@ -4058,7 +4258,25 @@ class RuntimeService:
             source_text = task.output_summary
 
         body, notes = self._split_automation_output(source_text)
-        if artifact_path:
+
+        # ``delivery.archived_paths`` is the list of absolute **published** paths
+        # (one durable location per artifact); identifier kept for API stability.
+        # Use the published path(s) as the PRIMARY answer to "where is my
+        # artifact?" — it's the single stable location. Workspace-relative
+        # ``changed_files`` / ``artifact_path`` refer to ephemeral scratch and
+        # are demoted to subordinate context when a published path is present.
+        published_paths: list[str] = (
+            list(delivery.archived_paths) if delivery and delivery.archived_paths else []
+        )
+        if published_paths:
+            notes.append(
+                "published: " + ", ".join(f"`{p}`" for p in published_paths[:4])
+            )
+            if len(published_paths) > 4:
+                notes[-1] += f" and {len(published_paths) - 4} more"
+        elif artifact_path:
+            # Fallback: no published path (reports_dir disabled) → use workspace
+            # relative path so users still have a handle.
             notes.append(f"artifact: `{artifact_path}`")
         elif changed_files:
             notes.append(
@@ -4066,9 +4284,6 @@ class RuntimeService:
             )
             if len(changed_files) > 4:
                 notes[-1] += f" and {len(changed_files) - 4} more"
-        if task.workspace_path:
-            run_dir = Path(task.workspace_path).name
-            notes.append(f"run dir: `_artifacts/{run_dir}`")
 
         lines: list[str] = []
         if body:
@@ -4088,10 +4303,14 @@ class RuntimeService:
 
         lines.append("")
         lines.append("-# ✅ automation run complete")
+        # Transport-layer detail: subordinate to the published-path note above.
         if delivery:
-            lines.append(f"-# delivery: `{delivery.mode}`")
-            for path in delivery.delivered_paths[:4]:
-                lines.append(f"-# path: `{path}`")
+            lines.append(f"-# delivered via: `{delivery.mode}`")
+        # Scratch (ephemeral) dir: labeled explicitly so it's not mistaken for
+        # the primary artifact location. The janitor prunes this tree.
+        if task.workspace_path:
+            run_dir = Path(task.workspace_path).name
+            lines.append(f"-# scratch (ephemeral): `_artifacts/{run_dir}`")
         return "\n".join(lines)
 
     def _automation_artifact_preview(
