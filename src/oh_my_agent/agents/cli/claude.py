@@ -8,6 +8,15 @@ from pathlib import Path
 
 from oh_my_agent.agents.base import AgentResponse
 from oh_my_agent.agents.control_prompt import inject_control_protocol
+from oh_my_agent.agents.events import (
+    AgentEvent,
+    SystemInitEvent,
+    TextEvent,
+    ThinkingEvent,
+    ToolResultEvent,
+    ToolUseEvent,
+    UsageEvent,
+)
 from oh_my_agent.agents.cli.base import (
     BaseCLIAgent,
     _bounded_log_excerpt,
@@ -151,6 +160,114 @@ class ClaudeAgent(BaseCLIAgent):
         cmd = self._base_command(prompt)
         cmd.extend(["--output-format", "stream-json", "--verbose"])
         return cmd
+
+    def _parse_stream_line(self, line: str) -> list[AgentEvent]:
+        """Map one line of Claude stream-json NDJSON output to AgentEvents."""
+        stripped = line.strip()
+        if not stripped:
+            return []
+        try:
+            event = json.loads(stripped)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return []
+        if not isinstance(event, dict):
+            return []
+
+        et = event.get("type")
+        if et == "system" and event.get("subtype") == "init":
+            tools = event.get("tools") or []
+            if not isinstance(tools, list):
+                tools = []
+            return [
+                SystemInitEvent(
+                    session_id=event.get("session_id"),
+                    model=event.get("model"),
+                    tools=[str(t) for t in tools if t],
+                    raw=event,
+                    agent=self.name,
+                )
+            ]
+
+        if et == "assistant":
+            message = event.get("message") or {}
+            content = message.get("content") or []
+            if not isinstance(content, list):
+                return []
+            out: list[AgentEvent] = []
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                btype = block.get("type")
+                if btype == "text":
+                    text = block.get("text", "")
+                    if isinstance(text, str) and text:
+                        out.append(TextEvent(text=text, agent=self.name))
+                elif btype == "thinking":
+                    thinking = block.get("thinking") or block.get("text") or ""
+                    if isinstance(thinking, str) and thinking:
+                        out.append(ThinkingEvent(text=thinking, agent=self.name))
+                elif btype == "tool_use":
+                    raw_input = block.get("input")
+                    if not isinstance(raw_input, dict):
+                        raw_input = {}
+                    out.append(
+                        ToolUseEvent(
+                            tool_id=str(block.get("id") or ""),
+                            name=str(block.get("name") or ""),
+                            input=raw_input,
+                            agent=self.name,
+                        )
+                    )
+            return out
+
+        if et == "user":
+            message = event.get("message") or {}
+            content = message.get("content") or []
+            if not isinstance(content, list):
+                return []
+            out = []
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") != "tool_result":
+                    continue
+                raw_output = block.get("content", "")
+                if isinstance(raw_output, list):
+                    # content may be a list of {"type":"text","text":"..."} blocks
+                    parts: list[str] = []
+                    for part in raw_output:
+                        if isinstance(part, dict) and isinstance(part.get("text"), str):
+                            parts.append(part["text"])
+                    raw_output = "\n".join(parts)
+                elif not isinstance(raw_output, str):
+                    raw_output = str(raw_output)
+                out.append(
+                    ToolResultEvent(
+                        tool_id=str(block.get("tool_use_id") or ""),
+                        output=raw_output,
+                        is_error=bool(block.get("is_error", False)),
+                        agent=self.name,
+                    )
+                )
+            return out
+
+        if et == "result":
+            usage_obj = event.get("usage") or {}
+            cost = event.get("total_cost_usd") or event.get("cost_usd")
+            # Don't synthesize a TextEvent from result.result — that text has
+            # already been yielded via the assistant frames during the stream.
+            return [
+                UsageEvent(
+                    input_tokens=usage_obj.get("input_tokens"),
+                    output_tokens=usage_obj.get("output_tokens"),
+                    cache_read_input_tokens=usage_obj.get("cache_read_input_tokens"),
+                    cache_creation_input_tokens=usage_obj.get("cache_creation_input_tokens"),
+                    cost_usd=cost,
+                    agent=self.name,
+                )
+            ]
+
+        return []
 
     def _build_resume_command(self, prompt: str, session_id: str) -> list[str]:
         """Build a command that resumes an existing Claude session."""

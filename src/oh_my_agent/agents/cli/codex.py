@@ -7,6 +7,15 @@ from pathlib import Path
 
 from oh_my_agent.agents.base import AgentResponse
 from oh_my_agent.agents.control_prompt import inject_control_protocol
+from oh_my_agent.agents.events import (
+    AgentEvent,
+    SystemInitEvent,
+    TextEvent,
+    ThinkingEvent,
+    ToolResultEvent,
+    ToolUseEvent,
+    UsageEvent,
+)
 from oh_my_agent.agents.cli.base import (
     BaseCLIAgent,
     _build_prompt_with_history,
@@ -252,6 +261,172 @@ class CodexCLIAgent(BaseCLIAgent):
                 continue
 
         return self._parse_output(raw)
+
+    def _parse_stream_line(self, line: str) -> list[AgentEvent]:
+        """Map one JSONL line of Codex event output to AgentEvents.
+
+        Mirrors Agentara's Codex event mapping: ``thread.started`` sets up the
+        session, ``item.started`` / ``item.completed`` frames carry typed
+        payloads (agent_message, reasoning, command_execution, file_change,
+        mcp_tool_call, web_search), and ``turn.completed`` carries token usage.
+        """
+        stripped = line.strip()
+        if not stripped:
+            return []
+        try:
+            event = json.loads(stripped)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return []
+        if not isinstance(event, dict):
+            return []
+
+        etype = event.get("type", "")
+        if etype == "thread.started":
+            return [
+                SystemInitEvent(
+                    session_id=event.get("thread_id"),
+                    raw=event,
+                    agent=self.name,
+                )
+            ]
+
+        if etype == "turn.completed":
+            usage_obj = event.get("usage") or {}
+            return [
+                UsageEvent(
+                    input_tokens=usage_obj.get("input_tokens"),
+                    output_tokens=usage_obj.get("output_tokens"),
+                    cache_read_input_tokens=usage_obj.get("cached_input_tokens"),
+                    agent=self.name,
+                )
+            ]
+
+        item = event.get("item")
+        if not isinstance(item, dict):
+            return []
+
+        item_type = item.get("type", "")
+        item_id = str(item.get("id") or "")
+
+        if item_type in {"agent_message", "assistant_message", "message"}:
+            # Codex re-emits the same item on item.started and item.completed;
+            # only take the completed frame to avoid duplicating streamed text.
+            if etype != "item.completed":
+                return []
+            text = _extract_codex_text(event)
+            if not text:
+                return []
+            return [TextEvent(text=text, agent=self.name)]
+
+        if item_type == "reasoning":
+            if etype != "item.completed":
+                return []
+            text = item.get("text") or item.get("summary") or ""
+            if not isinstance(text, str) or not text:
+                return []
+            return [ThinkingEvent(text=text, agent=self.name)]
+
+        if item_type == "command_execution":
+            if etype == "item.started":
+                command = item.get("command") or item.get("cmd") or ""
+                return [
+                    ToolUseEvent(
+                        tool_id=item_id,
+                        name="Bash",
+                        input={"command": command} if command else {},
+                        agent=self.name,
+                    )
+                ]
+            if etype == "item.completed":
+                output = (
+                    item.get("aggregated_output")
+                    or item.get("output")
+                    or item.get("stdout")
+                    or ""
+                )
+                is_error = bool(item.get("exit_code", 0))
+                return [
+                    ToolResultEvent(
+                        tool_id=item_id,
+                        name="Bash",
+                        output=str(output),
+                        is_error=is_error,
+                        agent=self.name,
+                    )
+                ]
+            return []
+
+        if item_type == "file_change":
+            if etype != "item.completed":
+                return []
+            # Each change frame can list multiple path edits.
+            changes = item.get("changes") or []
+            if not isinstance(changes, list):
+                changes = [item]
+            out: list[AgentEvent] = []
+            for change in changes:
+                if not isinstance(change, dict):
+                    continue
+                op = str(change.get("operation") or change.get("op") or "edit")
+                path = change.get("path") or item.get("path") or ""
+                out.append(
+                    ToolUseEvent(
+                        tool_id=item_id,
+                        name=op.capitalize() if op else "Edit",
+                        input={"path": str(path)},
+                        agent=self.name,
+                    )
+                )
+            return out
+
+        if item_type == "mcp_tool_call":
+            name = str(item.get("name") or "MCP")
+            if etype == "item.started":
+                args = item.get("arguments") or item.get("input") or {}
+                if not isinstance(args, dict):
+                    args = {"raw": str(args)}
+                return [
+                    ToolUseEvent(
+                        tool_id=item_id,
+                        name=name,
+                        input=args,
+                        agent=self.name,
+                    )
+                ]
+            if etype == "item.completed":
+                output = item.get("output") or item.get("result") or ""
+                is_error = bool(item.get("is_error") or item.get("error"))
+                return [
+                    ToolResultEvent(
+                        tool_id=item_id,
+                        name=name,
+                        output=str(output),
+                        is_error=is_error,
+                        agent=self.name,
+                    )
+                ]
+
+        if item_type == "web_search":
+            if etype == "item.started":
+                return [
+                    ToolUseEvent(
+                        tool_id=item_id,
+                        name="WebSearch",
+                        input={"query": str(item.get("query") or "")},
+                        agent=self.name,
+                    )
+                ]
+            if etype == "item.completed":
+                return [
+                    ToolResultEvent(
+                        tool_id=item_id,
+                        name="WebSearch",
+                        output=str(item.get("result") or item.get("output") or ""),
+                        agent=self.name,
+                    )
+                ]
+
+        return []
 
     def _parse_output(self, raw: str) -> AgentResponse:
         """Parse Codex JSONL event stream to extract response text and token usage."""
