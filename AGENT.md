@@ -18,6 +18,10 @@ pip install -e ".[dev]"
 pytest                            # full test suite
 pytest tests/test_memory_store.py # single file
 pytest -k "test_fallback"         # single test by name
+
+# Lint & type-check (CI runs these before pytest; push-blockers)
+ruff check src tests              # lint + import sort
+mypy src                          # static type-check (68 files, 0 errors)
 ```
 
 ## Architecture
