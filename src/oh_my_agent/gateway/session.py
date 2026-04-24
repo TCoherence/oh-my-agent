@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from oh_my_agent.agents.registry import AgentRegistry
     from oh_my_agent.gateway.base import BaseChannel
+    from oh_my_agent.memory.session_diary import SessionDiaryWriter
     from oh_my_agent.memory.store import MemoryStore
 
 logger = logging.getLogger(__name__)
@@ -27,6 +28,7 @@ class ChannelSession:
     channel: BaseChannel
     registry: AgentRegistry
     memory_store: MemoryStore | None = None
+    diary_writer: SessionDiaryWriter | None = None
 
     # In-memory cache: thread_id → list of turns
     _cache: dict[str, list[dict]] = field(default_factory=dict)
@@ -69,6 +71,18 @@ class ChannelSession:
                 self.platform, self.channel_id, thread_id, turn,
             )
             turn["_id"] = row_id
+        if self.diary_writer is not None:
+            try:
+                await self.diary_writer.append(
+                    role="user",
+                    platform=self.platform,
+                    channel_id=self.channel_id,
+                    thread_id=thread_id,
+                    author=author,
+                    content=content,
+                )
+            except Exception:
+                logger.debug("diary_writer.append(user) failed", exc_info=True)
 
     async def append_assistant(self, thread_id: str, content: str, agent_name: str) -> None:
         turn = {"role": "assistant", "content": content, "agent": agent_name}
@@ -79,6 +93,18 @@ class ChannelSession:
                 self.platform, self.channel_id, thread_id, turn,
             )
             turn["_id"] = row_id
+        if self.diary_writer is not None:
+            try:
+                await self.diary_writer.append(
+                    role="assistant",
+                    platform=self.platform,
+                    channel_id=self.channel_id,
+                    thread_id=thread_id,
+                    author=agent_name,
+                    content=content,
+                )
+            except Exception:
+                logger.debug("diary_writer.append(assistant) failed", exc_info=True)
 
     async def clear_history(self, thread_id: str) -> None:
         """Delete all history for a thread (cache + store)."""

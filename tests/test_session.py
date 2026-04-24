@@ -78,3 +78,49 @@ async def test_clear_history():
     assert len(await s.get_history("t1")) == 1
     await s.clear_history("t1")
     assert await s.get_history("t1") == []
+
+
+@pytest.mark.asyncio
+async def test_diary_writer_receives_user_and_assistant_turns(tmp_path):
+    from oh_my_agent.gateway.session import ChannelSession
+    from oh_my_agent.memory.session_diary import SessionDiaryWriter
+
+    writer = SessionDiaryWriter(tmp_path)
+    writer.start()
+    s = ChannelSession(
+        platform="discord",
+        channel_id="c1",
+        channel=MagicMock(),
+        registry=MagicMock(),
+        diary_writer=writer,
+    )
+    await s.append_user("t1", "hi", "alice")
+    await s.append_assistant("t1", "hello back", "claude")
+    await writer.stop()
+
+    files = list(tmp_path.glob("*.md"))
+    assert len(files) == 1
+    body = files[0].read_text(encoding="utf-8")
+    assert "user:alice" in body and "assistant:claude" in body
+    assert "> hi" in body and "hello back" in body
+
+
+@pytest.mark.asyncio
+async def test_diary_writer_failures_do_not_break_session(tmp_path):
+    from oh_my_agent.gateway.session import ChannelSession
+
+    class _ExplodingDiary:
+        async def append(self, **_kwargs):  # noqa: ANN003
+            raise RuntimeError("disk full")
+
+    s = ChannelSession(
+        platform="discord",
+        channel_id="c1",
+        channel=MagicMock(),
+        registry=MagicMock(),
+        diary_writer=_ExplodingDiary(),
+    )
+    # The append must succeed even though the diary raises.
+    await s.append_user("t1", "hi", "alice")
+    history = await s.get_history("t1")
+    assert history and history[0]["content"] == "hi"

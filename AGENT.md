@@ -64,6 +64,7 @@ The system has seven major subsystems.
 - `Judge` (`memory/judge.py`): event-driven LLM agent that replaces the per-turn memory extractor. `run(thread_id, conversation, store, registry)` builds a prompt that includes the full thread plus the current `active` memory list and asks the agent for an `actions` array. `add` creates entries; `strengthen` increments observation_count and appends evidence; `supersede` chains old → new; `no_op` is required when nothing is worth saving. Parse failures fall back to a simplified schema retry. Explicit `/memorize <summary>` short-circuits the LLM step.
 - `IdleTracker` (`memory/idle_trigger.py`): per-thread `last_message_ts` tracker with a background polling task. When a thread is silent for `idle_seconds` (default 900 s = 15 min), invokes the registered `_on_fire` callback, which triggers `Judge.run()`. `touch()` resets the timer; `mark_judged()` prevents re-fire until the next user message; `forget()` drops state.
 - Memory triggers: (1) idle 15 min, (2) Discord `/memorize [summary] [scope]`, (3) natural-language keyword match (configurable via `memory.judge.keyword_patterns`, e.g. `记一下` / `remember this`). All paths converge on `Judge.run()`. Injection still happens as a `[Remembered context]` block before agent prompts; only `status=active` entries are eligible.
+- `SessionDiaryWriter` (`memory/session_diary.py`): append-only per-day markdown log under `runtime_root/diary/YYYY-MM-DD.md`. Fire-and-forget enqueue from `ChannelSession.append_user/append_assistant`; a single background worker drains the queue so writes never interleave. Operator-visible only — never read back by the agent. Disable via `memory.diary.enabled: false`; override path with `memory.diary.path`.
 
 **Skill system** (`src/oh_my_agent/skills/`)
 
@@ -129,7 +130,7 @@ Without `workspace` in config, the bot runs in backward-compatible mode (full en
 `load_config()` reads `config.yaml` with `${ENV_VAR}` substitution. Sections:
 
 ```yaml
-memory:         # SQLite backend, max_turns, summary_max_chars, judge (idle_seconds, keyword_patterns, inject_limit)
+memory:         # SQLite backend, max_turns, summary_max_chars, judge (idle_seconds, keyword_patterns, inject_limit), diary (enabled, path)
 access:         # optional owner-only mode: owner_user_ids
 skills:         # enabled, path
 automations:    # optional recurring jobs (interval_seconds)

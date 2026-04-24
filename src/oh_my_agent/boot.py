@@ -387,6 +387,7 @@ async def _shutdown(
     logger: logging.Logger,
     *,
     reason: str,
+    diary_writer=None,
 ) -> None:
     logger.info("Shutdown started reason=%s", reason)
     if scheduler:
@@ -398,6 +399,9 @@ async def _shutdown(
         await runtime_service.stop()
     if memory_store:
         await memory_store.close()
+    if diary_writer is not None:
+        with suppress(Exception):
+            await diary_writer.stop()
     logger.info("Shutdown complete reason=%s", reason)
 
 
@@ -814,6 +818,21 @@ async def ignite(ctx: BootContext) -> None:
     if memory_store:
         gateway.set_memory_store(memory_store)
 
+    diary_writer = None
+    diary_cfg = memory_cfg.get("diary", {}) if isinstance(memory_cfg, dict) else {}
+    if diary_cfg.get("enabled", True):
+        from oh_my_agent.memory.session_diary import SessionDiaryWriter
+
+        diary_dir_cfg = diary_cfg.get("path")
+        if diary_dir_cfg:
+            diary_dir = Path(str(diary_dir_cfg)).expanduser().resolve()
+        else:
+            diary_dir = ctx.runtime_root / "diary"
+        diary_writer = SessionDiaryWriter(diary_dir)
+        diary_writer.start()
+        gateway.set_diary_writer(diary_writer)
+        logger.info("Session diary enabled at %s", diary_dir)
+
     logger.info("Starting gateway with %d channel(s)...", len(channel_pairs))
     loop = asyncio.get_running_loop()
     shutdown_event = asyncio.Event()
@@ -840,6 +859,7 @@ async def ignite(ctx: BootContext) -> None:
             memory_store,
             logger,
             reason=reason,
+            diary_writer=diary_writer,
         )
 
     try:
