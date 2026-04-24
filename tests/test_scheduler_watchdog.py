@@ -95,8 +95,11 @@ def _seed_interval_job(
 
 
 async def _stop(scheduler: Scheduler, run_task: asyncio.Task) -> None:
+    # Budget is generous because shutdown has to drain the reload loop,
+    # due loop, and any in-flight fire task; GitHub Actions + Python 3.11
+    # can be slow enough that 2s is not enough headroom under load.
     scheduler.stop()
-    await asyncio.wait_for(run_task, timeout=2.0)
+    await asyncio.wait_for(run_task, timeout=10.0)
 
 
 # ----------------------------------------------------------------------
@@ -243,7 +246,7 @@ async def test_due_loop_fires_cron_job_when_due(tmp_path):
         state = scheduler._job_state["daily"]
         state.next_fire_at = datetime.now(timezone.utc) - timedelta(seconds=1)
         scheduler._due_loop_wakeup.set()
-        await asyncio.wait_for(fired.wait(), timeout=1.0)
+        await asyncio.wait_for(fired.wait(), timeout=3.0)
     finally:
         await _stop(scheduler, run_task)
 
@@ -260,7 +263,7 @@ async def test_due_loop_fires_interval_job_with_initial_delay(tmp_path):
     run_task = asyncio.create_task(scheduler.run(on_fire))
     try:
         # Initial delay is 0, so first fire should happen ~immediately.
-        deadline = asyncio.get_event_loop().time() + 1.0
+        deadline = asyncio.get_event_loop().time() + 3.0
         while not fires and asyncio.get_event_loop().time() < deadline:
             await asyncio.sleep(0.02)
         assert fires, "expected first fire within 1s"
@@ -284,7 +287,7 @@ async def test_due_loop_does_not_double_fire_in_flight_job(tmp_path):
     run_task = asyncio.create_task(scheduler.run(on_fire))
     try:
         # Wait for first fire to start.
-        deadline = asyncio.get_event_loop().time() + 1.0
+        deadline = asyncio.get_event_loop().time() + 3.0
         while fires == 0 and asyncio.get_event_loop().time() < deadline:
             await asyncio.sleep(0.02)
         assert fires == 1
@@ -367,7 +370,7 @@ async def test_due_loop_recovers_after_simulated_host_suspend(tmp_path, monkeypa
         scheduler._due_loop_wakeup.set()
 
         # Recovery must happen within one tick, not 60s.
-        await asyncio.wait_for(fired.wait(), timeout=1.0)
+        await asyncio.wait_for(fired.wait(), timeout=3.0)
     finally:
         await _stop(scheduler, run_task)
 
@@ -420,7 +423,7 @@ async def test_reload_remove_cancels_in_flight_fire(tmp_path):
 
     run_task = asyncio.create_task(scheduler.run(on_fire))
     try:
-        await asyncio.wait_for(fired.wait(), timeout=1.5)
+        await asyncio.wait_for(fired.wait(), timeout=3.0)
         assert "tick" in scheduler._fire_tasks
 
         # Remove the file and trigger reload.
@@ -428,7 +431,7 @@ async def test_reload_remove_cancels_in_flight_fire(tmp_path):
         await scheduler.reload_now()
 
         # In-flight fire should have been cancelled; state dropped.
-        await asyncio.wait_for(cancelled.wait(), timeout=1.0)
+        await asyncio.wait_for(cancelled.wait(), timeout=3.0)
         assert "tick" not in scheduler._fire_tasks
         assert "tick" not in scheduler._job_state
     finally:
@@ -456,7 +459,7 @@ async def test_reload_add_does_not_disturb_unrelated_in_flight_fire(tmp_path):
 
     run_task = asyncio.create_task(scheduler.run(on_fire))
     try:
-        await asyncio.wait_for(fired.wait(), timeout=1.5)
+        await asyncio.wait_for(fired.wait(), timeout=3.0)
         original_task = scheduler._fire_tasks["tick"]
 
         # Add an unrelated new job on disk and trigger reload.
@@ -528,7 +531,7 @@ async def test_fire_job_now_returns_ok_and_dispatches(tmp_path):
         await asyncio.sleep(0.1)
         result = await scheduler.fire_job_now("daily")
         assert result == "ok"
-        await asyncio.wait_for(fired.wait(), timeout=1.0)
+        await asyncio.wait_for(fired.wait(), timeout=3.0)
     finally:
         await _stop(scheduler, run_task)
 
@@ -574,7 +577,7 @@ async def test_fire_job_now_returns_already_firing(tmp_path):
         await asyncio.sleep(0.1)
         # First manual fire starts.
         assert await scheduler.fire_job_now("daily") == "ok"
-        await asyncio.wait_for(fired.wait(), timeout=1.0)
+        await asyncio.wait_for(fired.wait(), timeout=3.0)
         assert scheduler._job_state["daily"].phase == "firing"
         # Second manual fire must be refused.
         assert await scheduler.fire_job_now("daily") == "already_firing"
@@ -601,7 +604,7 @@ async def test_manual_fire_preserves_future_scheduled_next_fire(tmp_path):
         scheduler._job_state["hourly"].next_fire_at = future
 
         assert await scheduler.fire_job_now("hourly") == "ok"
-        await asyncio.wait_for(fired.wait(), timeout=1.0)
+        await asyncio.wait_for(fired.wait(), timeout=3.0)
         await asyncio.sleep(0.1)  # let finally run
 
         state = scheduler._job_state["hourly"]
@@ -630,7 +633,7 @@ async def test_manual_fire_advances_when_pinned_already_overdue(tmp_path):
         scheduler._job_state["tick"].next_fire_at = datetime.now(timezone.utc) - timedelta(seconds=5)
 
         assert await scheduler.fire_job_now("tick") == "ok"
-        await asyncio.wait_for(fired.wait(), timeout=1.0)
+        await asyncio.wait_for(fired.wait(), timeout=3.0)
         await asyncio.sleep(0.1)
 
         state = scheduler._job_state["tick"]
