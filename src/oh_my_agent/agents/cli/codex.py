@@ -5,7 +5,7 @@ import json
 import logging
 from pathlib import Path
 
-from oh_my_agent.agents.base import AgentResponse, PartialTextHook
+from oh_my_agent.agents.base import AgentResponse, PartialTextHook, ToolUseHook
 from oh_my_agent.agents.control_prompt import inject_control_protocol
 from oh_my_agent.agents.events import (
     AgentEvent,
@@ -190,28 +190,32 @@ class CodexCLIAgent(BaseCLIAgent):
         log_path: Path | None = None,
         image_paths: list[Path] | None = None,
         on_partial: PartialTextHook | None = None,
+        on_tool_use: ToolUseHook | None = None,
     ) -> AgentResponse:
         """Run the Codex CLI.
 
         If *thread_id* is given and a session ID exists for it, uses
         ``codex exec resume`` to continue the session (avoiding history flattening).
 
-        When ``on_partial`` is provided, the call switches to the streaming
-        path on **both** fresh and resume invocations. Only image-bearing
-        turns stay in block mode today (``--image`` argv + streaming fold
-        together but we keep the simple path until we need it).
+        When ``on_partial`` or ``on_tool_use`` is provided, the call switches
+        to the streaming path on **both** fresh and resume invocations. Only
+        image-bearing turns stay in block mode today (``--image`` argv +
+        streaming fold together but we keep the simple path until we need it).
         """
         prompt = inject_control_protocol(prompt)
         session_id = self._session_ids.get(thread_id) if thread_id else None
 
+        streaming = (on_partial is not None or on_tool_use is not None)
+
         if session_id:
             cmd = self._build_resume_command(prompt, session_id, image_paths=image_paths)
-            if on_partial is not None and not image_paths:
+            if streaming and not image_paths:
                 logger.info("Streaming %s (resume session %s) ...", self.name, session_id[:12])
                 return await self._run_streamed(
                     prompt=prompt,
                     history=None,
                     on_partial=on_partial,
+                    on_tool_use=on_tool_use,
                     workspace_override=workspace_override,
                     log_path=log_path,
                     thread_id=thread_id,
@@ -220,12 +224,13 @@ class CodexCLIAgent(BaseCLIAgent):
             logger.info("Resuming %s session %s ...", self.name, session_id[:12])
         else:
             full_prompt = _build_prompt_with_history(prompt, history)
-            if on_partial is not None and not image_paths:
+            if streaming and not image_paths:
                 logger.info("Streaming %s (new session) ...", self.name)
                 return await self._run_streamed(
                     prompt=full_prompt,
                     history=None,
                     on_partial=on_partial,
+                    on_tool_use=on_tool_use,
                     workspace_override=workspace_override,
                     log_path=log_path,
                     thread_id=thread_id,

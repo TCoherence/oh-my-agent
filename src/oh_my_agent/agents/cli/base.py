@@ -9,13 +9,14 @@ from collections.abc import AsyncIterator
 from contextlib import suppress
 from pathlib import Path
 
-from oh_my_agent.agents.base import AgentResponse, BaseAgent, PartialTextHook
+from oh_my_agent.agents.base import AgentResponse, BaseAgent, PartialTextHook, ToolUseHook
 from oh_my_agent.agents.events import (
     AgentEvent,
     CompleteEvent,
     ErrorEvent,
     SystemInitEvent,
     TextEvent,
+    ToolUseEvent,
     UsageEvent,
 )
 
@@ -476,12 +477,14 @@ class BaseCLIAgent(BaseAgent):
         workspace_override: Path | None = None,
         log_path: Path | None = None,
         on_partial: PartialTextHook | None = None,
+        on_tool_use: ToolUseHook | None = None,
     ) -> AgentResponse:
-        if on_partial is not None:
+        if on_partial is not None or on_tool_use is not None:
             return await self._run_streamed(
                 prompt=prompt,
                 history=history,
                 on_partial=on_partial,
+                on_tool_use=on_tool_use,
                 workspace_override=workspace_override,
                 log_path=log_path,
             )
@@ -528,11 +531,12 @@ class BaseCLIAgent(BaseAgent):
         *,
         prompt: str,
         history: list[dict] | None,
-        on_partial: PartialTextHook,
+        on_partial: PartialTextHook | None,
         workspace_override: Path | None,
         log_path: Path | None,
         thread_id: str | None = None,
         command: list[str] | None = None,
+        on_tool_use: ToolUseHook | None = None,
     ) -> AgentResponse:
         """Drive ``self.stream()`` and build an AgentResponse from the events.
 
@@ -555,8 +559,13 @@ class BaseCLIAgent(BaseAgent):
             ):
                 if isinstance(event, TextEvent):
                     accumulated.append(event.text)
-                    with suppress(Exception):
-                        await on_partial("\n".join(accumulated))
+                    if on_partial is not None:
+                        with suppress(Exception):
+                            await on_partial("\n".join(accumulated))
+                elif isinstance(event, ToolUseEvent):
+                    if on_tool_use is not None and event.name:
+                        with suppress(Exception):
+                            await on_tool_use(event.name)
                 elif isinstance(event, SystemInitEvent):
                     if event.session_id:
                         session_id = event.session_id

@@ -191,3 +191,152 @@ async def test_truncate_preview_keeps_message_under_cap():
         assert len(body) <= 120
 
 
+@pytest.mark.asyncio
+async def test_note_tool_use_records_count_and_last_name():
+    ch = FakeChannel()
+    relay = StreamingRelay(channel=ch, thread_id="t")
+    await relay.start("…")
+    await relay.note_tool_use("Read")
+    await relay.note_tool_use("Bash")
+    await relay.note_tool_use("")  # empty/whitespace → ignored
+    await relay.note_tool_use("   ")
+    assert relay.tool_count == 2
+
+
+@pytest.mark.asyncio
+async def test_finalize_attribution_includes_tool_count_suffix():
+    ch = FakeChannel()
+    relay = StreamingRelay(
+        channel=ch,
+        thread_id="t",
+        attribution_prefix="-# via **claude**",
+        min_edit_interval=0.0,
+    )
+    await relay.start("…")
+    await relay.note_tool_use("Read")
+    await relay.note_tool_use("Edit")
+    await relay.finalize("all done")
+    assert ch.edits
+    last_body = ch.edits[-1][2]
+    # Pluralized "tools" (count=2), on the attribution line
+    assert "🔧 2 tools" in last_body
+    assert "all done" in last_body
+
+
+@pytest.mark.asyncio
+async def test_finalize_attribution_singular_tool():
+    ch = FakeChannel()
+    relay = StreamingRelay(
+        channel=ch,
+        thread_id="t",
+        attribution_prefix="-# via **claude**",
+        min_edit_interval=0.0,
+    )
+    await relay.start("…")
+    await relay.note_tool_use("Read")
+    await relay.finalize("done")
+    last_body = ch.edits[-1][2]
+    assert "🔧 1 tool" in last_body
+    assert "🔧 1 tools" not in last_body  # singular
+
+
+@pytest.mark.asyncio
+async def test_finalize_no_tools_no_suffix():
+    ch = FakeChannel()
+    relay = StreamingRelay(
+        channel=ch,
+        thread_id="t",
+        attribution_prefix="-# via **claude**",
+        min_edit_interval=0.0,
+    )
+    await relay.start("…")
+    await relay.finalize("done")
+    last_body = ch.edits[-1][2]
+    assert "🔧" not in last_body
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_rewrites_placeholder_with_elapsed_time():
+    ch = FakeChannel()
+    relay = StreamingRelay(
+        channel=ch,
+        thread_id="t",
+        attribution_prefix="-# via **claude**",
+        heartbeat_interval=0.04,
+    )
+    await relay.start("⏳ *thinking…*")
+    # Wait long enough for at least one heartbeat tick.
+    await asyncio.sleep(0.12)
+    try:
+        # There should be at least one heartbeat-driven edit, and no
+        # real "update()" text was ever passed.
+        assert ch.edits, "heartbeat should have produced at least one edit"
+        last_body = ch.edits[-1][2]
+        # Format should include an elapsed-seconds bit like "(Ns)".
+        import re as _re
+        assert _re.search(r"\(\d+s\)", last_body), last_body
+        # And preserve the italic "thinking" cue.
+        assert "thinking" in last_body
+    finally:
+        await relay.finalize("wrap up")
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_includes_tool_name_when_known():
+    ch = FakeChannel()
+    relay = StreamingRelay(
+        channel=ch,
+        thread_id="t",
+        attribution_prefix="-# via **claude**",
+        heartbeat_interval=0.04,
+    )
+    await relay.start("⏳ *thinking…*")
+    await relay.note_tool_use("Read")
+    await asyncio.sleep(0.12)
+    try:
+        assert ch.edits, "expected at least one heartbeat edit"
+        last_body = ch.edits[-1][2]
+        assert "using Read" in last_body
+    finally:
+        await relay.finalize("done")
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_cancelled_on_first_update():
+    ch = FakeChannel()
+    relay = StreamingRelay(
+        channel=ch,
+        thread_id="t",
+        heartbeat_interval=0.04,
+        min_edit_interval=0.0,
+    )
+    await relay.start("⏳ *thinking…*")
+    await relay.update("real text arrived")
+    # Sleep past two heartbeat cycles; no further placeholder edits should land.
+    edits_after_update = len(ch.edits)
+    await asyncio.sleep(0.15)
+    # The heartbeat task has been cancelled, so no NEW placeholder edits
+    # should appear. Only the (already fired) update edit is in place.
+    assert len(ch.edits) == edits_after_update
+    await relay.finalize("done")
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_cancelled_on_finalize():
+    ch = FakeChannel()
+    relay = StreamingRelay(
+        channel=ch,
+        thread_id="t",
+        heartbeat_interval=0.04,
+    )
+    await relay.start("⏳ *thinking…*")
+    # Finalize before any heartbeat tick fires.
+    await relay.finalize("shortcut")
+    # Background task should have been cancelled/cleared.
+    assert relay._heartbeat_task is None
+    # And no further placeholder edits should arrive.
+    before = len(ch.edits)
+    await asyncio.sleep(0.12)
+    assert len(ch.edits) == before
+
+

@@ -11,6 +11,12 @@ from typing import TypeAlias
 # their own progress on this callback.
 PartialTextHook: TypeAlias = Callable[[str], Awaitable[None]]
 
+# Tool-use hook: called with the tool name each time the agent emits a
+# ToolUseEvent. Lets the chat layer surface "⚙ using Read" / tool count in
+# the live anchor without leaking full tool input/output. Optional: agents
+# that don't emit tool events (e.g. Gemini) simply never call it.
+ToolUseHook: TypeAlias = Callable[[str], Awaitable[None]]
+
 
 @dataclass
 class AgentResponse:

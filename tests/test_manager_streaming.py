@@ -248,3 +248,35 @@ async def test_streaming_threads_on_partial_through_registry():
     kwargs = reg.run.await_args.kwargs
     assert "on_partial" in kwargs
     assert callable(kwargs["on_partial"])
+
+
+@pytest.mark.asyncio
+async def test_streaming_threads_on_tool_use_through_registry():
+    channel = _FakeChannel()
+    reg, _ = _registry_with_partial(text="done")
+    session = _session(channel)
+
+    gm = GatewayManager(
+        [],
+        streaming_config={"enabled": True, "min_edit_interval_ms": 0},
+    )
+    await gm.handle_message(session, reg, _msg())
+
+    # registry.run should also receive the tool-use hook.
+    kwargs = reg.run.await_args.kwargs
+    assert "on_tool_use" in kwargs
+    assert callable(kwargs["on_tool_use"])
+
+
+@pytest.mark.asyncio
+async def test_streaming_disabled_does_not_pass_on_tool_use():
+    channel = _FakeChannel()
+    reg, _ = _registry_with_partial(text="done")
+    session = _session(channel)
+
+    gm = GatewayManager([], streaming_config={"enabled": False})
+    await gm.handle_message(session, reg, _msg())
+
+    kwargs = reg.run.await_args.kwargs
+    # Either absent or explicitly None — both are acceptable ways of opting out.
+    assert kwargs.get("on_tool_use") is None

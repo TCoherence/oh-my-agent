@@ -9,6 +9,10 @@ is the middle-man that fixes this:
 - the relay collapses all updates inside the throttle window into a single
   trailing edit scheduled to fire when the window reopens, so the user sees
   ~1 Hz progress without us burning the rate-limit bucket;
+- while no text has arrived yet (the model is reasoning / running tools),
+  a background heartbeat rewrites the placeholder with an elapsed-time suffix
+  and the most recent tool name so the user can tell the run is still alive
+  instead of staring at a frozen ``⏳ *thinking…*``;
 - on ``finalize()`` the relay flushes the last frame and then appends any
   overflow chunks past the platform's 2000-char message cap as fresh messages
   using the existing ``chunk_message`` splitter.
@@ -34,6 +38,12 @@ logger = logging.getLogger(__name__)
 # attribution prefix + a trailing newline still fit.
 _DEFAULT_MAX_MSG_CHARS = 1990
 
+# Heartbeat cadence: how often to rewrite the placeholder while we're still
+# waiting for the first TextEvent. 3 s is well above the 1 s min edit interval
+# floor and keeps us comfortably under Discord's "5 edits / 5 s per message"
+# budget even if a user lowers ``gateway.streaming.min_edit_interval_ms``.
+_HEARTBEAT_INTERVAL_SECONDS = 3.0
+
 
 class StreamingRelay:
     """Edit one chat message in-place as partial agent text arrives.
@@ -49,6 +59,8 @@ class StreamingRelay:
         async for event in agent.stream(...):
             if isinstance(event, TextEvent):
                 await relay.update(accumulated_text)
+            elif isinstance(event, ToolUseEvent):
+                await relay.note_tool_use(event.name)
         await relay.finalize(full_text, usage=response.usage)
     """
 
@@ -60,12 +72,14 @@ class StreamingRelay:
         attribution_prefix: str = "",
         min_edit_interval: float = 1.0,
         max_chars: int = _DEFAULT_MAX_MSG_CHARS,
+        heartbeat_interval: float = _HEARTBEAT_INTERVAL_SECONDS,
     ) -> None:
         self._channel = channel
         self._thread_id = thread_id
         self._attribution_prefix = attribution_prefix
         self._min_edit_interval = max(0.0, float(min_edit_interval))
         self._max_chars = int(max_chars)
+        self._heartbeat_interval = max(0.0, float(heartbeat_interval))
 
         self._message_id: str | None = None
         self._latest_text: str = ""
@@ -74,6 +88,13 @@ class StreamingRelay:
         self._pending_task: asyncio.Task | None = None
         self._lock = asyncio.Lock()
         self._finalized = False
+
+        # Heartbeat / tool-activity state.
+        self._placeholder_base: str = ""
+        self._start_ts: float = 0.0
+        self._heartbeat_task: asyncio.Task | None = None
+        self._last_tool_name: str | None = None
+        self._tool_count: int = 0
 
     # --------------------------------------------------------------------
     # Public API
@@ -84,17 +105,29 @@ class StreamingRelay:
         """The id of the anchor message (set after ``start``)."""
         return self._message_id
 
+    @property
+    def tool_count(self) -> int:
+        """Total ``note_tool_use`` calls observed during this run."""
+        return self._tool_count
+
     async def start(self, placeholder: str = "⏳ *thinking…*") -> str | None:
         """Send the anchor message and return its id.
 
         Called once before the first ``update``. Subsequent calls are no-ops.
+        Also launches the heartbeat coroutine that rewrites the placeholder
+        with elapsed time until the first real text arrives.
         """
         if self._message_id is not None:
             return self._message_id
+        self._placeholder_base = placeholder
         body = self._render(placeholder)
         self._message_id = await self._channel.send(self._thread_id, body)
         self._last_rendered = body
-        self._last_edit_ts = time.monotonic()
+        now = time.monotonic()
+        self._last_edit_ts = now
+        self._start_ts = now
+        if self._message_id is not None and self._heartbeat_interval > 0:
+            self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         return self._message_id
 
     async def update(self, text: str) -> None:
@@ -106,6 +139,7 @@ class StreamingRelay:
         """
         if self._finalized or self._message_id is None:
             return
+        self._cancel_heartbeat()
         async with self._lock:
             self._latest_text = text
             elapsed = time.monotonic() - self._last_edit_ts
@@ -113,6 +147,22 @@ class StreamingRelay:
             await self._flush_once()
         else:
             await self._ensure_pending_flush(self._min_edit_interval - elapsed)
+
+    async def note_tool_use(self, name: str) -> None:
+        """Record that a tool was invoked.
+
+        We only track the *name* and a running count — no arguments, no
+        output. The heartbeat picks up the new tool name on its next tick;
+        ``finalize()`` appends ``· 🔧 N tools`` to the attribution. Callers
+        that don't want this signal never invoke the hook.
+        """
+        if self._finalized:
+            return
+        cleaned = (name or "").strip()
+        if not cleaned:
+            return
+        self._last_tool_name = cleaned
+        self._tool_count += 1
 
     async def finalize(
         self,
@@ -132,6 +182,7 @@ class StreamingRelay:
         if self._finalized:
             return [self._message_id] if self._message_id else []
         self._finalized = True
+        self._cancel_heartbeat()
         # Cancel any scheduled trailing edit — we're about to do the real one.
         pending = self._pending_task
         self._pending_task = None
@@ -143,6 +194,7 @@ class StreamingRelay:
                 pass
 
         attribution = attribution_override if attribution_override is not None else self._attribution_prefix
+        attribution = self._decorate_attribution_with_tools(attribution)
         if usage:
             try:
                 # Local import to avoid a circular reference during test setup
@@ -178,6 +230,7 @@ class StreamingRelay:
         if self._finalized or self._message_id is None:
             return
         self._finalized = True
+        self._cancel_heartbeat()
         pending = self._pending_task
         self._pending_task = None
         if pending is not None and not pending.done():
@@ -197,6 +250,75 @@ class StreamingRelay:
         if self._attribution_prefix:
             return f"{self._attribution_prefix}\n{body}"
         return body
+
+    def _decorate_attribution_with_tools(self, attribution: str) -> str:
+        """Append ``· 🔧 N tool(s)`` to the attribution if any were seen."""
+        if self._tool_count <= 0:
+            return attribution
+        suffix = f" · 🔧 {self._tool_count} tool{'s' if self._tool_count != 1 else ''}"
+        if not attribution:
+            return suffix.lstrip(" ·")
+        return f"{attribution}{suffix}"
+
+    def _render_heartbeat_body(self) -> str:
+        """Build the placeholder body for the current heartbeat tick."""
+        elapsed = max(0, int(time.monotonic() - self._start_ts))
+        # Start from the original placeholder label and append status, so users
+        # who configured a custom placeholder still see their text.
+        base = self._placeholder_base.strip() or "⏳ *thinking…*"
+        # If the base is a classic italic placeholder like ``⏳ *thinking…*``,
+        # inject elapsed/tool status inside the italics so formatting stays
+        # tight. Otherwise just append plainly.
+        italic_body = base.startswith("*") and base.endswith("*") and len(base) >= 2
+        if italic_body:
+            inner = base[1:-1]
+        else:
+            # Treat forms like ``⏳ *thinking…*`` where the emoji prefix sits
+            # outside the italic span.
+            lead, sep, rest = base.partition("*")
+            if sep and rest.endswith("*") and len(rest) >= 1:
+                inner = rest[:-1]
+                prefix = lead
+            else:
+                inner = None
+                prefix = ""
+        status_bits = [f"({elapsed}s)"]
+        if self._last_tool_name:
+            status_bits.append(f"using {self._last_tool_name}")
+        status = " · ".join(status_bits)
+        if italic_body:
+            return f"*{inner} · {status}*"
+        if inner is not None:
+            return f"{prefix}*{inner} · {status}*"
+        return f"{base} · {status}"
+
+    async def _heartbeat_loop(self) -> None:
+        try:
+            while True:
+                await asyncio.sleep(self._heartbeat_interval)
+                if self._finalized or self._latest_text:
+                    return
+                body = self._render(self._render_heartbeat_body())
+                async with self._lock:
+                    if self._finalized or self._latest_text:
+                        return
+                    if body == self._last_rendered:
+                        continue
+                    self._last_rendered = body
+                    self._last_edit_ts = time.monotonic()
+                await self._safe_edit(body)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.debug("StreamingRelay heartbeat failed", exc_info=True)
+
+    def _cancel_heartbeat(self) -> None:
+        task = self._heartbeat_task
+        if task is None:
+            return
+        self._heartbeat_task = None
+        if not task.done():
+            task.cancel()
 
     async def _flush_once(self) -> None:
         """Render the current latest_text and push one edit if it changed."""

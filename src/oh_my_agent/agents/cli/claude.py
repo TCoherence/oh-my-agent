@@ -6,7 +6,7 @@ import logging
 import shutil
 from pathlib import Path
 
-from oh_my_agent.agents.base import AgentResponse, PartialTextHook
+from oh_my_agent.agents.base import AgentResponse, PartialTextHook, ToolUseHook
 from oh_my_agent.agents.control_prompt import inject_control_protocol
 from oh_my_agent.agents.events import (
     AgentEvent,
@@ -326,15 +326,17 @@ class ClaudeAgent(BaseCLIAgent):
         log_path: Path | None = None,
         image_paths: list[Path] | None = None,
         on_partial: PartialTextHook | None = None,
+        on_tool_use: ToolUseHook | None = None,
     ) -> AgentResponse:
         """Run the Claude CLI.
 
         If *thread_id* is given and a session ID exists for it, uses
         ``--resume`` to continue the session (avoiding history flattening).
 
-        When *on_partial* is provided, the call switches to the streaming
-        path on **both** fresh and resume invocations — each assistant text
-        block fires ``on_partial(accumulated)``. Images attached to resume
+        When *on_partial* or *on_tool_use* is provided, the call switches to
+        the streaming path on **both** fresh and resume invocations — each
+        assistant text block fires ``on_partial(accumulated)`` and each tool
+        invocation fires ``on_tool_use(name)``. Images attached to resume
         turns still use the block-mode path because ``_augment_prompt_with_images``
         is not compatible with the streaming argv today.
         """
@@ -346,15 +348,18 @@ class ClaudeAgent(BaseCLIAgent):
         if image_paths:
             prompt = self._augment_prompt_with_images(prompt, image_paths, cwd)
 
+        streaming = (on_partial is not None or on_tool_use is not None)
+
         if session_id:
             # Resume existing session — send only the new prompt
             cmd = self._build_resume_command(prompt, session_id)
-            if on_partial is not None and not image_paths:
+            if streaming and not image_paths:
                 logger.info("Streaming %s (resume session %s) ...", self.name, session_id[:12])
                 return await self._run_streamed(
                     prompt=prompt,
                     history=None,
                     on_partial=on_partial,
+                    on_tool_use=on_tool_use,
                     workspace_override=workspace_override,
                     log_path=log_path,
                     thread_id=thread_id,
@@ -366,12 +371,13 @@ class ClaudeAgent(BaseCLIAgent):
             full_prompt = _build_prompt_with_history(prompt, history)
             # When streaming is requested, delegate to the base streaming driver
             # which consumes self.stream() via `--output-format stream-json`.
-            if on_partial is not None:
+            if streaming:
                 logger.info("Streaming %s (new session) ...", self.name)
                 return await self._run_streamed(
                     prompt=full_prompt,
                     history=None,
                     on_partial=on_partial,
+                    on_tool_use=on_tool_use,
                     workspace_override=workspace_override,
                     log_path=log_path,
                     thread_id=thread_id,

@@ -370,6 +370,7 @@ class GatewayManager:
         max_turns_override: int | None,
         on_agent_run=None,
         on_partial=None,
+        on_tool_use=None,
     ):
         run_task = asyncio.create_task(
             registry.run(
@@ -384,6 +385,7 @@ class GatewayManager:
                 max_turns_override=max_turns_override,
                 on_agent_run=on_agent_run,
                 on_partial=on_partial,
+                on_tool_use=on_tool_use,
             )
         )
         started_at = time.perf_counter()
@@ -1508,6 +1510,7 @@ class GatewayManager:
         )
         relay: StreamingRelay | None = None
         on_partial_hook = None
+        on_tool_use_hook = None
         if self._streaming_enabled and getattr(channel, "supports_streaming_edit", False):
             initial_agent_name = msg.preferred_agent or (
                 registry.agents[0].name if registry.agents else "agent"
@@ -1521,10 +1524,12 @@ class GatewayManager:
                 )
                 await relay.start(self._streaming_placeholder)
                 on_partial_hook = relay.update
+                on_tool_use_hook = relay.note_tool_use
             except Exception as exc:
                 logger.warning("[%s] streaming_relay_start_failed err=%s", req_id, exc)
                 relay = None
                 on_partial_hook = None
+                on_tool_use_hook = None
 
         t_agent = time.perf_counter()
         async with channel.typing(thread_id):
@@ -1562,6 +1567,7 @@ class GatewayManager:
                 max_turns_override=self._skill_max_turns_by_name(tracked_skill),
                 on_agent_run=_record_agent_run,
                 on_partial=on_partial_hook,
+                on_tool_use=on_tool_use_hook,
             )
         elapsed_agent = time.perf_counter() - t_agent
         await self._sync_registry_sessions(session, thread_id, registry)

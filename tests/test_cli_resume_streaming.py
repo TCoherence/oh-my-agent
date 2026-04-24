@@ -184,6 +184,102 @@ async def test_gemini_plaintext_stream_lines_still_forwarded(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_claude_streaming_fires_on_tool_use_for_each_tool_use_event(monkeypatch):
+    ndjson = [
+        '{"type":"system","subtype":"init","session_id":"sess_new","model":"sonnet","tools":[]}',
+        '{"type":"assistant","message":{"content":['
+        '{"type":"tool_use","id":"tu_1","name":"Read","input":{"file_path":"/x"}}'
+        "]}}",
+        '{"type":"user","message":{"content":['
+        '{"type":"tool_result","tool_use_id":"tu_1","content":"..."}'
+        "]}}",
+        '{"type":"assistant","message":{"content":['
+        '{"type":"tool_use","id":"tu_2","name":"Bash","input":{"command":"ls"}}'
+        "]}}",
+        '{"type":"assistant","message":{"content":[{"type":"text","text":"ok"}]}}',
+        '{"type":"result","subtype":"success"}',
+    ]
+    _install_fake_stream(monkeypatch, ndjson)
+
+    agent = ClaudeAgent(cli_path="claude")
+
+    tool_names: list[str] = []
+
+    async def _on_tool_use(name: str) -> None:
+        tool_names.append(name)
+
+    async def _on_partial(text: str) -> None:
+        pass
+
+    resp = await agent.run(
+        "please look up something",
+        thread_id="t1",
+        on_partial=_on_partial,
+        on_tool_use=_on_tool_use,
+    )
+
+    assert tool_names == ["Read", "Bash"]
+    assert resp.error is None
+    assert resp.text.strip() == "ok"
+
+
+@pytest.mark.asyncio
+async def test_on_tool_use_alone_activates_streaming_path(monkeypatch):
+    """``on_tool_use`` without ``on_partial`` must still take the streaming path."""
+    ndjson = [
+        '{"type":"system","subtype":"init","session_id":"sess_x","model":"sonnet","tools":[]}',
+        '{"type":"assistant","message":{"content":['
+        '{"type":"tool_use","id":"tu_a","name":"Glob","input":{"pattern":"*.py"}}'
+        "]}}",
+        '{"type":"assistant","message":{"content":[{"type":"text","text":"all done"}]}}',
+        '{"type":"result","subtype":"success"}',
+    ]
+    captured = _install_fake_stream(monkeypatch, ndjson)
+
+    agent = ClaudeAgent(cli_path="claude")
+
+    tool_names: list[str] = []
+
+    async def _on_tool_use(name: str) -> None:
+        tool_names.append(name)
+
+    resp = await agent.run(
+        "scan",
+        thread_id="t1",
+        on_tool_use=_on_tool_use,
+    )
+
+    assert captured, "streaming path was not taken"
+    assert "stream-json" in captured[0]
+    assert tool_names == ["Glob"]
+    assert resp.text.strip() == "all done"
+
+
+@pytest.mark.asyncio
+async def test_codex_streaming_fires_on_tool_use_for_command_execution(monkeypatch):
+    jsonl = [
+        '{"type":"thread.started","thread_id":"thr_x"}',
+        '{"type":"item.started","item":{"id":"c1","type":"command_execution","command":"ls"}}',
+        '{"type":"item.completed","item":{"id":"c1","type":"command_execution","aggregated_output":"a","exit_code":0}}',
+        '{"type":"item.completed","item":{"id":"m1","type":"agent_message","text":"done"}}',
+        '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}',
+    ]
+    _install_fake_stream(monkeypatch, jsonl)
+
+    agent = CodexCLIAgent(cli_path="codex")
+    tool_names: list[str] = []
+
+    async def _on_tool_use(name: str) -> None:
+        tool_names.append(name)
+
+    resp = await agent.run("run something", thread_id="t1", on_tool_use=_on_tool_use)
+
+    # Command execution surfaces as a "Bash" tool-use event in Codex mapping.
+    assert tool_names == ["Bash"]
+    assert resp.text.strip() == "done"
+
+
+@pytest.mark.asyncio
 async def test_claude_resume_with_image_stays_in_block_mode(monkeypatch, tmp_path):
     """Images + resume still fall back to block mode — streaming + argv
     augmentation is not yet wired together. Pins the intentional skip."""
