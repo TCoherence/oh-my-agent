@@ -272,9 +272,9 @@ async def test_heartbeat_rewrites_placeholder_with_elapsed_time():
         # real "update()" text was ever passed.
         assert ch.edits, "heartbeat should have produced at least one edit"
         last_body = ch.edits[-1][2]
-        # Format should include an elapsed-seconds bit like "(Ns)".
+        # Elapsed time renders as `⏱ Ns` on the attribution line.
         import re as _re
-        assert _re.search(r"\(\d+s\)", last_body), last_body
+        assert _re.search(r"⏱ \d+s", last_body), last_body
         # And preserve the italic "thinking" cue.
         assert "thinking" in last_body
     finally:
@@ -336,8 +336,9 @@ async def test_tool_trail_appears_during_streaming_phase():
 
 
 @pytest.mark.asyncio
-async def test_tool_trail_dedups_consecutive_duplicates():
-    """5 sequential Bash calls render as one ``Bash`` in the trail, not five."""
+async def test_tool_trail_keeps_full_trace_no_dedup():
+    """Every tool invocation lands on the trail in arrival order — including
+    consecutive duplicates. The trail IS the trace; we don't collapse it."""
     ch = FakeChannel()
     relay = StreamingRelay(
         channel=ch,
@@ -353,17 +354,18 @@ async def test_tool_trail_dedups_consecutive_duplicates():
     await relay.note_tool_use("Read")
     await relay.note_tool_use("Read")
     last_body = ch.edits[-1][2]
-    # Trail has exactly two distinct entries, in arrival order.
-    trail_line = [ln for ln in last_body.split("\n") if "🔧" in ln][0]
-    assert trail_line == "-# 🔧 Bash · Read"
-    # But total tool_count still reflects every invocation.
+    trail_lines = [ln for ln in last_body.split("\n") if "🔧" in ln]
+    # 7 entries wrap to two lines at 5 names per line.
+    assert trail_lines == [
+        "-# 🔧 Bash · Bash · Bash · Bash · Bash",
+        "-# 🔧 Read · Read",
+    ]
     assert relay.tool_count == 7
 
 
 @pytest.mark.asyncio
-async def test_tool_trail_shows_overflow_marker_past_visible_cap():
-    """Once we pass ``_TOOL_TRAIL_VISIBLE`` distinct names, remaining tools
-    collapse into a ``(+N)`` overflow suffix so the subtext line stays short."""
+async def test_tool_trail_wraps_to_multiple_lines_at_five_per_line():
+    """All tool entries shown — every 5 entries roll into a new -# 🔧 line."""
     ch = FakeChannel()
     relay = StreamingRelay(
         channel=ch,
@@ -374,12 +376,15 @@ async def test_tool_trail_shows_overflow_marker_past_visible_cap():
     )
     await relay.start("⏳ *thinking…*")
     await relay.update("streaming…")
-    for name in ("Glob", "Read", "Bash", "Edit", "Write"):
+    for name in ("Glob", "Read", "Bash", "Edit", "Write", "Search", "Replace"):
         await relay.note_tool_use(name)
     last_body = ch.edits[-1][2]
-    trail_line = [ln for ln in last_body.split("\n") if "🔧" in ln][0]
-    # First 3 distinct names shown, rest collapsed into (+N).
-    assert trail_line == "-# 🔧 Glob · Read · Bash (+2)"
+    trail_lines = [ln for ln in last_body.split("\n") if "🔧" in ln]
+    # 7 distinct names span two `-# 🔧` lines, no `(+N)` overflow.
+    assert trail_lines == [
+        "-# 🔧 Glob · Read · Bash · Edit · Write",
+        "-# 🔧 Search · Replace",
+    ]
 
 
 @pytest.mark.asyncio
@@ -402,28 +407,48 @@ async def test_finalize_drops_live_trail_line_keeps_count_summary():
     # Exactly one `-#` line (the summarized attribution), plus the final body.
     subtext_lines = [ln for ln in last_body.split("\n") if ln.startswith("-#")]
     assert len(subtext_lines) == 1
-    # And that line has the count summary, not the trail.
+    # And that line has the count summary plus elapsed-time stamp, not the trail.
     assert "🔧 3 tools" in subtext_lines[0]
-    assert " · " in subtext_lines[0]  # separator between name + count
+    assert "⏱ " in subtext_lines[0]
+    assert " · " in subtext_lines[0]  # separator between attribution + count
 
 
 @pytest.mark.asyncio
-async def test_heartbeat_cancelled_on_first_update():
+async def test_heartbeat_keeps_running_through_streaming_phase():
+    """Heartbeat lives until ``finalize()``/``error()`` so the elapsed-time
+    stamp on the attribution line keeps ticking even after the first text
+    chunk arrives. (Previous behavior: heartbeat cancelled on first update.)
+
+    Note: the elapsed display rounds down to whole seconds, so we need to
+    sleep ≥ 1.0 s for the rendered ``⏱ Ns`` value to actually change and
+    cause a real edit (otherwise the dedup guard in ``_flush_once`` would
+    suppress the heartbeat-driven edit even though it fired).
+    """
     ch = FakeChannel()
     relay = StreamingRelay(
         channel=ch,
         thread_id="t",
-        heartbeat_interval=0.04,
+        attribution_prefix="-# via **claude**",
+        heartbeat_interval=0.5,
         min_edit_interval=0.0,
     )
     await relay.start("⏳ *thinking…*")
     await relay.update("real text arrived")
-    # Sleep past two heartbeat cycles; no further placeholder edits should land.
     edits_after_update = len(ch.edits)
-    await asyncio.sleep(0.15)
-    # The heartbeat task has been cancelled, so no NEW placeholder edits
-    # should appear. Only the (already fired) update edit is in place.
-    assert len(ch.edits) == edits_after_update
+    # ≥1.05 s lets the integer-second display roll from "0s" → "1s" so the
+    # dedup guard releases and the heartbeat-driven edit actually lands.
+    await asyncio.sleep(1.1)
+    assert len(ch.edits) > edits_after_update, (
+        "heartbeat should keep refreshing past first update()"
+    )
+    last_body = ch.edits[-1][2]
+    # The streamed text is preserved …
+    assert "real text arrived" in last_body
+    # … and the attribution still carries the live `⏱ Ns` stamp with N≥1.
+    import re as _re
+    m = _re.search(r"⏱ (\d+)s", last_body)
+    assert m is not None, last_body
+    assert int(m.group(1)) >= 1
     await relay.finalize("done")
 
 
@@ -444,5 +469,23 @@ async def test_heartbeat_cancelled_on_finalize():
     before = len(ch.edits)
     await asyncio.sleep(0.12)
     assert len(ch.edits) == before
+
+
+def test_format_elapsed_under_one_minute_uses_seconds():
+    assert StreamingRelay._format_elapsed(0) == "0s"
+    assert StreamingRelay._format_elapsed(1) == "1s"
+    assert StreamingRelay._format_elapsed(59) == "59s"
+
+
+def test_format_elapsed_minute_range_uses_m_s():
+    assert StreamingRelay._format_elapsed(60) == "1m 00s"
+    assert StreamingRelay._format_elapsed(75) == "1m 15s"
+    assert StreamingRelay._format_elapsed(3599) == "59m 59s"
+
+
+def test_format_elapsed_hour_range_uses_h_m():
+    assert StreamingRelay._format_elapsed(3600) == "1h 00m"
+    assert StreamingRelay._format_elapsed(3780) == "1h 03m"
+    assert StreamingRelay._format_elapsed(7320) == "2h 02m"
 
 
