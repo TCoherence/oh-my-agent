@@ -65,7 +65,7 @@ class WorktreeManager:
                     proc.kill()
                     stdout, stderr = await communicate_task
                     return (
-                        proc.returncode,
+                        proc.returncode if proc.returncode is not None else -1,
                         stdout.decode(errors="replace"),
                         stderr.decode(errors="replace"),
                         True,
@@ -78,7 +78,7 @@ class WorktreeManager:
                     timeout=wait_timeout,
                 )
                 return (
-                    proc.returncode,
+                    proc.returncode if proc.returncode is not None else -1,
                     stdout.decode(errors="replace"),
                     stderr.decode(errors="replace"),
                     False,
@@ -89,7 +89,7 @@ class WorktreeManager:
                     proc.kill()
                     stdout, stderr = await communicate_task
                     return (
-                        proc.returncode,
+                        proc.returncode if proc.returncode is not None else -1,
                         stdout.decode(errors="replace"),
                         stderr.decode(errors="replace"),
                         True,

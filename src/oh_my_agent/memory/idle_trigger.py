@@ -132,7 +132,7 @@ class IdleTracker:
                 logger.warning("memory idle fire failed for %s: %s", key, exc)
             finally:
                 async with self._lock:
-                    state = self._states.get(key)
-                    if state is not None:
-                        state.pending = False
-                        state.last_judge_ts = time.time()
+                    refreshed = self._states.get(key)
+                    if refreshed is not None:
+                        refreshed.pending = False
+                        refreshed.last_judge_ts = time.time()

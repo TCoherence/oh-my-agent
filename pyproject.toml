@@ -32,7 +32,13 @@ Issues = "https://github.com/TCoherence/oh-my-agent/issues"
 anthropic = ["anthropic>=0.40"]
 openai = ["openai>=1.0"]
 all = ["anthropic>=0.40", "openai>=1.0"]
-dev = ["pytest>=8", "pytest-asyncio>=0.24", "ruff>=0.13"]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.13",
+    "mypy>=1.13",
+    "types-PyYAML",
+]
 
 [project.scripts]
 oh-my-agent = "oh_my_agent.main:main"
@@ -53,6 +59,25 @@ extend-exclude = ["skills", ".claude"]
 # Defaults (E4/E7/E9/F) + I (isort) for import sorting.
 # Intentionally minimal — widen later once baseline is clean.
 select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+# Intentionally lax baseline — widen later once clean. Goals today: catch
+# undefined names, obviously-wrong return types, None-attr access.
+warn_redundant_casts = true
+warn_unused_ignores = true
+no_implicit_optional = true
+
+# Three high-traffic modules carry most of the legacy debt (~57 of 88
+# baseline errors). Skip them for now; revisit per-file in follow-up PRs.
+[[tool.mypy.overrides]]
+module = [
+    "oh_my_agent.gateway.platforms.discord",
+    "oh_my_agent.runtime.service",
+    "oh_my_agent.automation.scheduler",
+]
+ignore_errors = true
 
 [build-system]
 requires = ["setuptools>=75"]

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from oh_my_agent.agents.registry import AgentRegistry
@@ -84,7 +84,7 @@ class ChannelSession:
                 logger.debug("diary_writer.append(user) failed", exc_info=True)
 
     async def append_assistant(self, thread_id: str, content: str, agent_name: str) -> None:
-        turn = {"role": "assistant", "content": content, "agent": agent_name}
+        turn: dict[str, Any] = {"role": "assistant", "content": content, "agent": agent_name}
         history = await self.get_history(thread_id)
         history.append(turn)
         if self.memory_store:

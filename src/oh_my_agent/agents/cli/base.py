@@ -606,7 +606,7 @@ class BaseCLIAgent(BaseAgent):
         text = "\n".join(accumulated)
         if thread_id and session_id and hasattr(self, "_session_ids"):
             try:
-                self._session_ids[thread_id] = session_id  # type: ignore[attr-defined]
+                self._session_ids[thread_id] = session_id
             except Exception:  # pragma: no cover - defensive
                 pass
         return AgentResponse(text=text, usage=usage)

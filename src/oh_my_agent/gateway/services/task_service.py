@@ -153,6 +153,7 @@ class TaskService:
             task = await self._runtime.get_task(task_id)
             if task and task.status in {"WAITING_MERGE", "APPLIED"}:
                 resolved_action = "request_changes"
+        event: TaskDecisionEvent | None
         if source == "button":
             if not nonce:
                 return TaskActionResult(success=False, message="Decision token is missing.", task_id=task_id)

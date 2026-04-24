@@ -32,7 +32,12 @@ class ClaudeAgent(BaseAgent):
     def name(self) -> str:
         return "claude"
 
-    async def run(self, prompt: str) -> AgentResponse:
+    async def run(
+        self,
+        prompt: str,
+        history: list[dict] | None = None,
+    ) -> AgentResponse:
+        del history  # unused — this legacy SDK shim ignores conversation history
         cmd = self._build_command(prompt)
         logger.info("Running: %s", " ".join(cmd[:6]) + " ...")
 

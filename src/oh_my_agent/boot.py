@@ -588,8 +588,14 @@ async def ignite(ctx: BootContext) -> None:
     compressor = None
 
     if memory_cfg.get("backend", "sqlite") == "sqlite":
+        from typing import cast
+
         from oh_my_agent.memory.compressor import HistoryCompressor
-        from oh_my_agent.memory.store import SplitSQLiteMemoryStore, maybe_split_legacy_memory_db
+        from oh_my_agent.memory.store import (
+            MemoryStore,
+            SplitSQLiteMemoryStore,
+            maybe_split_legacy_memory_db,
+        )
 
         conversation_db_path = Path(memory_cfg.get("path", "~/.oh-my-agent/runtime/memory.db")).expanduser().resolve()
         runtime_db_path = Path(config.get("runtime", {}).get("state_path", "~/.oh-my-agent/runtime/runtime.db")).expanduser().resolve()
@@ -616,7 +622,10 @@ async def ignite(ctx: BootContext) -> None:
         )
 
         compressor = HistoryCompressor(
-            store=memory_store,
+            # SplitSQLiteMemoryStore is duck-compatible with MemoryStore;
+            # making it a true subclass would require implementing every
+            # abstract method. Cast for now.
+            store=cast(MemoryStore, memory_store),
             max_turns=int(memory_cfg.get("max_turns", 20)),
             summary_max_chars=int(memory_cfg.get("summary_max_chars", 500)),
         )

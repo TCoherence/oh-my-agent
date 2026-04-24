@@ -6,6 +6,7 @@ import re
 import time
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 from oh_my_agent.agents.base import AgentResponse, BaseAgent
 
@@ -103,7 +104,7 @@ class AgentRegistry:
         on_tool_use=None,
     ) -> AgentResponse:
         sig = inspect.signature(agent.run)
-        kwargs = {}
+        kwargs: dict[str, Any] = {}
         if "thread_id" in sig.parameters:
             kwargs["thread_id"] = thread_id
         if "workspace_override" in sig.parameters:
