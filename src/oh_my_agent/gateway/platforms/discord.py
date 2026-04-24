@@ -238,7 +238,8 @@ class DiscordChannel(BaseChannel):
     """Discord platform adapter implementing BaseChannel.
 
     Supports both regular messages and slash commands
-    (``/ask``, ``/reset``, ``/agent``, ``/search``).
+    (``/reset``, ``/history``, ``/agent``, ``/search``, and the runtime /
+    skills / memory / automation command families).
     """
 
     def __init__(self, token: str, channel_id: str, owner_user_ids: set[str] | None = None) -> None:
@@ -982,50 +983,6 @@ class DiscordChannel(BaseChannel):
             return None
 
         # ---- Slash commands ------------------------------------------------
-
-        @tree.command(name="ask", description="Ask the AI agent a question (creates a new thread)")
-        @app_commands.describe(
-            question="Your question for the AI agent",
-            agent="Agent to use (e.g. claude, gemini, codex). Defaults to fallback order.",
-        )
-        async def slash_ask(
-            interaction: discord.Interaction,
-            question: str,
-            agent: str | None = None,
-        ):
-            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
-                await interaction.response.send_message(
-                    "This bot is currently restricted to the configured owner.",
-                    ephemeral=True,
-                )
-                return
-
-            if interaction.channel_id != target_id:
-                await interaction.response.send_message(
-                    "This command only works in the configured channel.",
-                    ephemeral=True,
-                )
-                return
-
-            validation_error = await self._ask_service.validate_ask_params(self._registry, agent)
-            if validation_error:
-                await interaction.response.send_message(validation_error, ephemeral=True)
-                return
-
-            await interaction.response.send_message(question)
-            response_msg = await interaction.original_response()
-
-            msg = IncomingMessage(
-                platform="discord",
-                channel_id=self._channel_id,
-                thread_id=None,
-                author=str(interaction.user.display_name),
-                author_id=str(interaction.user.id),
-                content=question,
-                raw=response_msg,
-                preferred_agent=agent,
-            )
-            await _handler(msg)
 
         @tree.command(name="reset", description="Clear conversation history for this thread")
         async def slash_reset(interaction: discord.Interaction):

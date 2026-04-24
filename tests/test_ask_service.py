@@ -29,17 +29,6 @@ class _SessionStub:
 
 
 @pytest.mark.asyncio
-async def test_validate_ask_params_rejects_unknown_agent():
-    service = AskService()
-    registry = _RegistryStub()
-
-    error = await service.validate_ask_params(registry, "missing")
-
-    assert error is not None
-    assert "Unknown agent" in error
-
-
-@pytest.mark.asyncio
 async def test_reset_history_calls_session():
     service = AskService()
     session = _SessionStub()

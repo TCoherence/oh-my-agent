@@ -13,17 +13,8 @@ class AskService:
     """Auxiliary service for ask-related slash commands.
 
     The core ask flow remains in GatewayManager.handle_message(); this service
-    only handles validation, history reset, history formatting, and agent list
-    assembly.
+    only handles history reset, history formatting, and agent list assembly.
     """
-
-    async def validate_ask_params(self, registry: AgentRegistry | None, agent_name: str | None) -> str | None:
-        if not agent_name or registry is None:
-            return None
-        if registry.get_agent(agent_name) is not None:
-            return None
-        names = [agent.name for agent in registry.agents]
-        return f"Unknown agent `{agent_name}`. Available: {', '.join(f'`{name}`' for name in names)}"
 
     async def reset_history(self, session: ChannelSession | None, thread_id: str) -> ServiceResult:
         if session is None:
