@@ -5,8 +5,8 @@ import pytest
 from oh_my_agent.control.protocol import (
     ProtocolError,
     extract_control_frame,
-    parse_auth_challenge,
     parse_ask_user_challenge,
+    parse_auth_challenge,
     parse_control_envelope,
     strip_control_frame_text,
 )

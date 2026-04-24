@@ -9,14 +9,13 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from oh_my_agent.auth.types import AuthFlow, CredentialHandle
 from oh_my_agent.agents.base import AgentResponse, BaseAgent
 from oh_my_agent.agents.registry import AgentRegistry
+from oh_my_agent.auth.types import AuthFlow, CredentialHandle
 from oh_my_agent.gateway.base import IncomingMessage
 from oh_my_agent.gateway.session import ChannelSession
 from oh_my_agent.memory.store import SQLiteMemoryStore
 from oh_my_agent.runtime import (
-    RuntimeService,
     TASK_STATUS_BLOCKED,
     TASK_STATUS_COMPLETED,
     TASK_STATUS_DRAFT,
@@ -26,8 +25,9 @@ from oh_my_agent.runtime import (
     TASK_STATUS_RUNNING,
     TASK_STATUS_STOPPED,
     TASK_STATUS_TIMEOUT,
-    TASK_STATUS_WAITING_USER_INPUT,
     TASK_STATUS_WAITING_MERGE,
+    TASK_STATUS_WAITING_USER_INPUT,
+    RuntimeService,
 )
 
 

@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from oh_my_agent.agents.registry import AgentRegistry
-from oh_my_agent.automation.scheduler import Scheduler, ScheduledJob
+from oh_my_agent.automation.scheduler import ScheduledJob, Scheduler
 from oh_my_agent.gateway.manager import GatewayManager
 from oh_my_agent.gateway.session import ChannelSession
 from oh_my_agent.memory.store import SQLiteMemoryStore

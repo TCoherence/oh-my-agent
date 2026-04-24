@@ -39,7 +39,6 @@ from oh_my_agent.memory.store import (
     SQLiteMemoryStore,
 )
 
-
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MIGRATION_SCRIPT = REPO_ROOT / "scripts" / "migrate_memory_to_judge.py"
 

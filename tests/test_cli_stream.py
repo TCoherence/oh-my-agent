@@ -3,15 +3,23 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 
 from oh_my_agent.agents.cli.base import BaseCLIAgent, _stream_cli_lines
+from oh_my_agent.agents.cli.claude import ClaudeAgent
+from oh_my_agent.agents.cli.codex import CodexCLIAgent
 from oh_my_agent.agents.events import (
     AgentEvent,
     CompleteEvent,
     ErrorEvent,
+    SystemInitEvent,
     TextEvent,
+    ThinkingEvent,
+    ToolResultEvent,
+    ToolUseEvent,
+    UsageEvent,
 )
 
 
@@ -94,19 +102,6 @@ async def test_stream_surfaces_error_event_on_missing_binary() -> None:
 # ---------------------------------------------------------------------------
 # Per-CLI _parse_stream_line mapping
 # ---------------------------------------------------------------------------
-
-
-import json
-
-from oh_my_agent.agents.cli.claude import ClaudeAgent
-from oh_my_agent.agents.cli.codex import CodexCLIAgent
-from oh_my_agent.agents.events import (
-    SystemInitEvent,
-    ThinkingEvent,
-    ToolResultEvent,
-    ToolUseEvent,
-    UsageEvent,
-)
 
 
 def test_claude_parse_stream_line_system_init() -> None:

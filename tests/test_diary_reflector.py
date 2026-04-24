@@ -3,15 +3,15 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from oh_my_agent.memory.diary_reflector import (
+    _MAX_DIARY_CHARS,
     DiaryReflectionLoop,
     DiaryReflector,
-    _MAX_DIARY_CHARS,
 )
 from oh_my_agent.memory.judge_store import JudgeStore
 
@@ -319,7 +319,6 @@ async def test_loop_fires_when_wait_completes(monkeypatch):
     # Patch asyncio.wait_for so the first "wait for stop event" returns via
     # TimeoutError — triggering a fire — and the second returns normally so
     # the loop exits.
-    original_wait_for = asyncio.wait_for
 
     async def fake_wait_for(awaitable, timeout):  # noqa: ARG001
         fire_count["n"] += 1

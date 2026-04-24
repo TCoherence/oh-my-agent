@@ -4,7 +4,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-
 SCRIPT = Path("skills/scheduler/scripts/validate_automations.py")
 
 

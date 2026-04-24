@@ -1,9 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import suppress
-from dataclasses import dataclass
-from datetime import datetime
 import hashlib
 import inspect
 import logging
@@ -12,26 +9,37 @@ import re
 import shutil
 import time
 import uuid
+from contextlib import suppress
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
+from oh_my_agent.agents.registry import AgentRegistry
 from oh_my_agent.automation import ScheduledJob, Scheduler
 from oh_my_agent.control.protocol import (
     ProtocolError,
     extract_control_frame,
-    parse_auth_challenge,
     parse_ask_user_challenge,
+    parse_auth_challenge,
     parse_control_envelope,
     strip_control_frame_text,
 )
 from oh_my_agent.gateway.base import BaseChannel, IncomingMessage
 from oh_my_agent.gateway.session import ChannelSession
 from oh_my_agent.gateway.stream_relay import StreamingRelay
-from oh_my_agent.agents.registry import AgentRegistry
-from oh_my_agent.skills.frontmatter import read_skill_frontmatter, resolve_skill_frontmatter, skill_execution_limits
 from oh_my_agent.runtime.policy import is_artifact_intent, is_long_task_intent, is_skill_intent
+from oh_my_agent.skills.frontmatter import (
+    read_skill_frontmatter,
+    resolve_skill_frontmatter,
+    skill_execution_limits,
+)
 from oh_my_agent.utils.chunker import chunk_message
 from oh_my_agent.utils.errors import user_safe_agent_error, user_safe_message
-from oh_my_agent.utils.usage import append_usage_audit, format_usage_audit, record_usage_from_response
+from oh_my_agent.utils.usage import (
+    append_usage_audit,
+    format_usage_audit,
+    record_usage_from_response,
+)
 
 logger = logging.getLogger(__name__)
 

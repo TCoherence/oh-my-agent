@@ -588,8 +588,8 @@ async def ignite(ctx: BootContext) -> None:
     compressor = None
 
     if memory_cfg.get("backend", "sqlite") == "sqlite":
-        from oh_my_agent.memory.store import SplitSQLiteMemoryStore, maybe_split_legacy_memory_db
         from oh_my_agent.memory.compressor import HistoryCompressor
+        from oh_my_agent.memory.store import SplitSQLiteMemoryStore, maybe_split_legacy_memory_db
 
         conversation_db_path = Path(memory_cfg.get("path", "~/.oh-my-agent/runtime/memory.db")).expanduser().resolve()
         runtime_db_path = Path(config.get("runtime", {}).get("state_path", "~/.oh-my-agent/runtime/runtime.db")).expanduser().resolve()
@@ -630,9 +630,9 @@ async def ignite(ctx: BootContext) -> None:
     memory_inject_limit = int(memory_cfg_block.get("inject_limit", 12))
     memory_keyword_patterns = memory_cfg_block.get("keyword_patterns") or None
     if memory_cfg_block.get("enabled", False):
-        from oh_my_agent.memory.judge_store import JudgeStore
-        from oh_my_agent.memory.judge import Judge
         from oh_my_agent.memory.idle_trigger import IdleTracker
+        from oh_my_agent.memory.judge import Judge
+        from oh_my_agent.memory.judge_store import JudgeStore
 
         memory_dir = str(
             Path(memory_cfg_block.get("memory_dir", "~/.oh-my-agent/memory")).expanduser().resolve()
@@ -875,7 +875,7 @@ async def ignite(ctx: BootContext) -> None:
         diary_reflector = DiaryReflector(diary_dir=diary_dir, store=judge_store)
         gateway.set_diary_reflector(diary_reflector)
         fire_hour = int(reflection_cfg.get("fire_hour_local", 2))
-        if agents and channel_pairs:
+        if channel_pairs:
             # Reflection uses any configured agent registry; reuse the first
             # channel's registry to avoid picking a new model configuration.
             _channel, reflect_registry = channel_pairs[0]

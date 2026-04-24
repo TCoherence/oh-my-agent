@@ -1,8 +1,7 @@
 """Tests for image attachment support across the pipeline."""
 
-import asyncio
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -10,7 +9,6 @@ from oh_my_agent.agents.base import AgentResponse, BaseAgent
 from oh_my_agent.agents.registry import AgentRegistry
 from oh_my_agent.gateway.base import Attachment, IncomingMessage
 from oh_my_agent.gateway.session import ChannelSession
-
 
 # ---------------------------------------------------------------------------
 # Attachment.is_image

@@ -3,7 +3,6 @@
 import pytest
 
 from oh_my_agent.memory.store import SQLiteMemoryStore
-from oh_my_agent.runtime.types import AutomationRuntimeState
 
 
 @pytest.fixture

@@ -7,6 +7,15 @@ import shutil
 from pathlib import Path
 
 from oh_my_agent.agents.base import AgentResponse, PartialTextHook, ToolUseHook
+from oh_my_agent.agents.cli.base import (
+    BaseCLIAgent,
+    _bounded_log_excerpt,
+    _build_prompt_with_history,
+    _extract_cli_error,
+    _should_clear_resumed_session,
+    _stream_cli_process,
+    classify_cli_error_kind,
+)
 from oh_my_agent.agents.control_prompt import inject_control_protocol
 from oh_my_agent.agents.events import (
     AgentEvent,
@@ -16,15 +25,6 @@ from oh_my_agent.agents.events import (
     ToolResultEvent,
     ToolUseEvent,
     UsageEvent,
-)
-from oh_my_agent.agents.cli.base import (
-    BaseCLIAgent,
-    _bounded_log_excerpt,
-    _build_prompt_with_history,
-    _extract_cli_error,
-    _should_clear_resumed_session,
-    _stream_cli_process,
-    classify_cli_error_kind,
 )
 
 logger = logging.getLogger(__name__)

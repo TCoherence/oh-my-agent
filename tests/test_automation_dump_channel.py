@@ -19,9 +19,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from oh_my_agent.automation import (
-    AutomationRecord,
     DumpChannelConfig,
-    Scheduler,
     build_scheduler_from_config,
 )
 from oh_my_agent.gateway.session import ChannelSession

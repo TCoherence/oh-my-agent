@@ -1,8 +1,10 @@
-import pytest
 from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from oh_my_agent.agents.base import AgentResponse
 from oh_my_agent.memory.compressor import HistoryCompressor
 from oh_my_agent.memory.store import SQLiteMemoryStore
-from oh_my_agent.agents.base import AgentResponse
 
 
 @pytest.fixture

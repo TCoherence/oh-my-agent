@@ -1,7 +1,6 @@
 """Tests for SkillValidator and ValidationResult."""
 from __future__ import annotations
 
-import os
 import stat
 from pathlib import Path
 
@@ -9,7 +8,6 @@ import pytest
 import yaml
 
 from oh_my_agent.skills.validator import SkillValidator, ValidationResult
-
 
 # ---------------------------------------------------------------------------
 # Helpers

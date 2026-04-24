@@ -1,10 +1,10 @@
-import os
 import textwrap
 from pathlib import Path
 
 import pytest
 import yaml
-from oh_my_agent.config import load_config, _substitute
+
+from oh_my_agent.config import _substitute, load_config
 
 
 def test_substitute_replaces_env_var(monkeypatch):

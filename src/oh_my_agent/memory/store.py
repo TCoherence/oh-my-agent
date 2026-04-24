@@ -6,7 +6,6 @@ import logging
 import os
 import shutil
 import sqlite3
-import tempfile
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
