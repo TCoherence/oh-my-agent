@@ -69,14 +69,6 @@ warn_redundant_casts = true
 warn_unused_ignores = true
 no_implicit_optional = true
 
-# One high-traffic module carries the remaining legacy debt. Skip it
-# for now; revisit in a follow-up PR.
-[[tool.mypy.overrides]]
-module = [
-    "oh_my_agent.gateway.platforms.discord",
-]
-ignore_errors = true
-
 [build-system]
 requires = ["setuptools>=75"]
 build-backend = "setuptools.build_meta"
