@@ -69,12 +69,11 @@ warn_redundant_casts = true
 warn_unused_ignores = true
 no_implicit_optional = true
 
-# Two high-traffic modules carry the remaining legacy debt. Skip them
-# for now; revisit per-file in follow-up PRs.
+# One high-traffic module carries the remaining legacy debt. Skip it
+# for now; revisit in a follow-up PR.
 [[tool.mypy.overrides]]
 module = [
     "oh_my_agent.gateway.platforms.discord",
-    "oh_my_agent.runtime.service",
 ]
 ignore_errors = true
 

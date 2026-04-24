@@ -447,7 +447,7 @@ class RuntimeService:
             f"Candidate skill `{task.skill_name}` overlaps with existing skill "
             f"`{best['skill_name']}` (similarity={float(best['score']):.2f})."
         )
-        result = {
+        result: dict[str, Any] = {
             "evaluation_type": "overlap",
             "status": "review_required",
             "summary": summary,
@@ -502,7 +502,8 @@ class RuntimeService:
             return None
 
         meta = self._extract_skill_frontmatter(skill_dir / "SKILL.md")
-        metadata = meta.get("metadata") if isinstance(meta.get("metadata"), dict) else {}
+        raw_metadata = meta.get("metadata")
+        metadata: dict[str, Any] = raw_metadata if isinstance(raw_metadata, dict) else {}
         source_urls = metadata.get("source_urls")
         adapted_from = metadata.get("adapted_from")
         adaptation_notes = metadata.get("adaptation_notes")
@@ -521,7 +522,7 @@ class RuntimeService:
                 "External-source skill adaptation is missing required metadata: "
                 + ", ".join(missing_fields)
             )
-            details = {
+            details: dict[str, Any] = {
                 "missing_fields": missing_fields,
                 "request_urls": extracted_urls,
             }
@@ -2355,8 +2356,8 @@ class RuntimeService:
                 return f"Task `{task.id}` workspace cleaned."
             return f"Task `{task.id}` had no workspace to clean."
 
-        cleaned = await self._cleanup_expired_tasks()
-        return f"Cleanup completed. {cleaned} task workspace(s) removed."
+        removed_count = await self._cleanup_expired_tasks()
+        return f"Cleanup completed. {removed_count} task workspace(s) removed."
 
     async def handle_decision_event(self, event: TaskDecisionEvent) -> str:
         if not self._is_authorized(event.actor_id):
@@ -3427,7 +3428,7 @@ class RuntimeService:
         step: int,
     ) -> AgentResponse:
         sig = inspect.signature(agent.run)
-        kwargs = {}
+        kwargs: dict[str, Any] = {}
         if "thread_id" in sig.parameters:
             kwargs["thread_id"] = runtime_thread_id
         if "workspace_override" in sig.parameters:
@@ -4186,15 +4187,15 @@ class RuntimeService:
                     published.append(outcome)
                     continue
                 # Rule 3: workspace but not reports-shaped → flat fallback.
-                dest = _flat_fallback(source)
-                if dest is None:
+                fallback = _flat_fallback(source)
+                if fallback is None:
                     continue
-                outcome = _copy_or_skip(source, dest)
+                outcome = _copy_or_skip(source, fallback)
                 if outcome is None:
                     logger.warning(
                         "Failed to publish artifact %s to %s",
                         path,
-                        dest,
+                        fallback,
                         exc_info=True,
                     )
                     continue
@@ -4202,15 +4203,15 @@ class RuntimeService:
                 continue
 
             # Rule 4: absolute path, outside both trees → flat fallback.
-            dest = _flat_fallback(source)
-            if dest is None:
+            fallback = _flat_fallback(source)
+            if fallback is None:
                 continue
-            outcome = _copy_or_skip(source, dest)
+            outcome = _copy_or_skip(source, fallback)
             if outcome is None:
                 logger.warning(
                     "Failed to publish artifact %s to %s",
                     path,
-                    dest,
+                    fallback,
                     exc_info=True,
                 )
                 continue
@@ -4309,7 +4310,7 @@ class RuntimeService:
             or getattr(channel_impl, "send_attachments", None) is not BaseChannel.send_attachments
         )
         total_size = 0
-        attachments = []
+        attachments: list[OutgoingAttachment] = []
         for path in artifact_paths:
             try:
                 size = path.stat().st_size
