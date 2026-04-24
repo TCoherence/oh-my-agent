@@ -246,6 +246,7 @@
 - [ ] Automation follow-up 的 CLI session resume：在 `automation_posts` state 里同时保存 CLI session id，让 reply 触发的 follow-up thread 能 `--resume` 原 automation 对话。优先级较低 —— artifact 路径注入已覆盖大多数场景。
 - [ ] 增加内部 CLI agent 生命周期 hook（`pre-run`、`post-run`、`failure`、`resume`），用于 system-owned 的后处理能力，例如 reverse sync、artifact 后处理和可观测性收尾；这应保持为内部机制，而不是用户可见的新功能面
 - [ ] Skill feedback UX 后续优化：支持对同一次 skill 结果的任意消息分块做 reaction 反馈，并可选在 skill 完成后单独发一条 feedback prompt/message；反馈范围只针对已完成的 skill 输出，不覆盖 auth/system/普通聊天消息
+- [ ] Worktree 开发体验：git worktree 里端到端跑 `oh-my-agent` 不方便 —— `config.yaml` 是 gitignored，每个 worktree 都要手动 symlink；直接复用 prod config 又会让开发版代码污染 `~/.oh-my-agent/` 真实 runtime。探讨方案：独立 `~/.oh-my-agent/dev-config.yaml`（runtime 路径全部换到 `~/.oh-my-agent-dev/`，Discord token/channel 换成 `DEV_*` 环境变量）+ Claude Code SessionStart hook 在 `*/oh-my-agent/.claude/worktrees/*` 自动 symlink `config.yaml` → dev-config。优先级低：pytest 路径不受影响（不读 config），只影响真实 bot 端到端测试
 - [x] 持久化 automation 运行时状态（`last_run`、`next_run`、`last_error`），而不是每次重启后全部重算
 - [x] 增加 automation 的 operator 控制面，例如 `/automation_status`、`/automation_reload`、`/automation_enable`、`/automation_disable`（当前是 Discord-only、owner-only、ephemeral 的 MVP）
 - [x] PRIORITY：把 skill 级别的 `metadata.timeout_seconds` 继续传递到 runtime task / automation 执行链路里，让长耗时的 automation-backed skill 也能继承和直接 skill 调用一致的 timeout override
