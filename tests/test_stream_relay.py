@@ -282,7 +282,9 @@ async def test_heartbeat_rewrites_placeholder_with_elapsed_time():
 
 
 @pytest.mark.asyncio
-async def test_heartbeat_includes_tool_name_when_known():
+async def test_heartbeat_surfaces_tool_trail_on_second_subtext_line():
+    """During heartbeat, tool names live on a dedicated ``-# 🔧 …`` line
+    (not glued into the body) so they don't crowd the thinking placeholder."""
     ch = FakeChannel()
     relay = StreamingRelay(
         channel=ch,
@@ -296,9 +298,113 @@ async def test_heartbeat_includes_tool_name_when_known():
     try:
         assert ch.edits, "expected at least one heartbeat edit"
         last_body = ch.edits[-1][2]
-        assert "using Read" in last_body
+        # Tool trail is its own `-#` line, not merged into the body.
+        assert "-# 🔧 Read" in last_body
+        # Body itself stays the calm placeholder.
+        assert last_body.strip().endswith("*thinking…*")
+        # Elapsed lives on the first `-#` line, not in the body.
+        lines = last_body.split("\n")
+        assert lines[-1].strip() == "⏳ *thinking…*"
     finally:
         await relay.finalize("done")
+
+
+@pytest.mark.asyncio
+async def test_tool_trail_appears_during_streaming_phase():
+    """After real text has arrived (heartbeat dead), a subsequent tool event
+    must still surface on the ``-# 🔧 …`` trail line via an anchor edit."""
+    ch = FakeChannel()
+    relay = StreamingRelay(
+        channel=ch,
+        thread_id="t",
+        attribution_prefix="-# via **claude**",
+        min_edit_interval=0.0,
+        heartbeat_interval=0.0,  # no heartbeat interference
+    )
+    await relay.start("⏳ *thinking…*")
+    await relay.update("first chunk of real text")
+    # Now in streaming phase — heartbeat is dead, latest_text is non-empty.
+    await relay.note_tool_use("Glob")
+    assert ch.edits, "tool event during streaming should trigger an edit"
+    last_body = ch.edits[-1][2]
+    # Body keeps the live text, trail lands on the second `-#` line.
+    assert "first chunk of real text" in last_body
+    assert "-# 🔧 Glob" in last_body
+    # First attribution line stays clean (no elapsed now that heartbeat is over).
+    first_line = last_body.split("\n", 1)[0]
+    assert "⏳" not in first_line
+
+
+@pytest.mark.asyncio
+async def test_tool_trail_dedups_consecutive_duplicates():
+    """5 sequential Bash calls render as one ``Bash`` in the trail, not five."""
+    ch = FakeChannel()
+    relay = StreamingRelay(
+        channel=ch,
+        thread_id="t",
+        attribution_prefix="-# via **claude**",
+        min_edit_interval=0.0,
+        heartbeat_interval=0.0,
+    )
+    await relay.start("⏳ *thinking…*")
+    await relay.update("streaming…")
+    for _ in range(5):
+        await relay.note_tool_use("Bash")
+    await relay.note_tool_use("Read")
+    await relay.note_tool_use("Read")
+    last_body = ch.edits[-1][2]
+    # Trail has exactly two distinct entries, in arrival order.
+    trail_line = [ln for ln in last_body.split("\n") if "🔧" in ln][0]
+    assert trail_line == "-# 🔧 Bash · Read"
+    # But total tool_count still reflects every invocation.
+    assert relay.tool_count == 7
+
+
+@pytest.mark.asyncio
+async def test_tool_trail_shows_overflow_marker_past_visible_cap():
+    """Once we pass ``_TOOL_TRAIL_VISIBLE`` distinct names, remaining tools
+    collapse into a ``(+N)`` overflow suffix so the subtext line stays short."""
+    ch = FakeChannel()
+    relay = StreamingRelay(
+        channel=ch,
+        thread_id="t",
+        attribution_prefix="-# via **claude**",
+        min_edit_interval=0.0,
+        heartbeat_interval=0.0,
+    )
+    await relay.start("⏳ *thinking…*")
+    await relay.update("streaming…")
+    for name in ("Glob", "Read", "Bash", "Edit", "Write"):
+        await relay.note_tool_use(name)
+    last_body = ch.edits[-1][2]
+    trail_line = [ln for ln in last_body.split("\n") if "🔧" in ln][0]
+    # First 3 distinct names shown, rest collapsed into (+N).
+    assert trail_line == "-# 🔧 Glob · Read · Bash (+2)"
+
+
+@pytest.mark.asyncio
+async def test_finalize_drops_live_trail_line_keeps_count_summary():
+    """The live trail (``-# 🔧 A · B · C``) is for progress; on finalize we
+    collapse it back to a single ``🔧 N tools`` figure on the attribution."""
+    ch = FakeChannel()
+    relay = StreamingRelay(
+        channel=ch,
+        thread_id="t",
+        attribution_prefix="-# via **claude**",
+        min_edit_interval=0.0,
+        heartbeat_interval=0.0,
+    )
+    await relay.start("⏳ *thinking…*")
+    for name in ("Glob", "Read", "Bash"):
+        await relay.note_tool_use(name)
+    await relay.finalize("all done")
+    last_body = ch.edits[-1][2]
+    # Exactly one `-#` line (the summarized attribution), plus the final body.
+    subtext_lines = [ln for ln in last_body.split("\n") if ln.startswith("-#")]
+    assert len(subtext_lines) == 1
+    # And that line has the count summary, not the trail.
+    assert "🔧 3 tools" in subtext_lines[0]
+    assert " · " in subtext_lines[0]  # separator between name + count
 
 
 @pytest.mark.asyncio

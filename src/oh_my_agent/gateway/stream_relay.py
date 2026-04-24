@@ -93,8 +93,11 @@ class StreamingRelay:
         self._placeholder_base: str = ""
         self._start_ts: float = 0.0
         self._heartbeat_task: asyncio.Task | None = None
-        self._last_tool_name: str | None = None
         self._tool_count: int = 0
+        # Distinct tool names in arrival order (consecutive duplicates
+        # collapsed). Drives the live ``-# 🔧 …`` line; on finalize we
+        # collapse back to a single ``🔧 N tools`` summary.
+        self._tool_trail: list[str] = []
 
     # --------------------------------------------------------------------
     # Public API
@@ -151,18 +154,31 @@ class StreamingRelay:
     async def note_tool_use(self, name: str) -> None:
         """Record that a tool was invoked.
 
-        We only track the *name* and a running count — no arguments, no
-        output. The heartbeat picks up the new tool name on its next tick;
-        ``finalize()`` appends ``· 🔧 N tools`` to the attribution. Callers
-        that don't want this signal never invoke the hook.
+        We track only the name. Every invocation bumps ``_tool_count``; the
+        name gets appended to ``_tool_trail`` unless it duplicates the most
+        recent entry (so N sequential Bash calls render as one ``Bash`` +
+        counter, not ``Bash · Bash · Bash …``). While we're mid-stream this
+        also schedules an anchor edit so the new trail shows up on the
+        ``-# 🔧 …`` line within the next throttle window. On finalize we
+        collapse the trail back to a single ``🔧 N tools`` summary.
         """
         if self._finalized:
             return
         cleaned = (name or "").strip()
         if not cleaned:
             return
-        self._last_tool_name = cleaned
+        if not self._tool_trail or self._tool_trail[-1] != cleaned:
+            self._tool_trail.append(cleaned)
         self._tool_count += 1
+        # No anchor yet, or heartbeat will pick it up on its next tick.
+        if self._message_id is None or self._heartbeat_task is not None:
+            return
+        async with self._lock:
+            elapsed = time.monotonic() - self._last_edit_ts
+        if elapsed >= self._min_edit_interval:
+            await self._flush_once()
+        else:
+            await self._ensure_pending_flush(self._min_edit_interval - elapsed)
 
     async def finalize(
         self,
@@ -246,13 +262,59 @@ class StreamingRelay:
     # Internals
     # --------------------------------------------------------------------
 
+    # Live tool-trail on the ``-# 🔧 …`` line shows at most this many distinct
+    # tool names; anything beyond rolls into a ``(+N)`` overflow marker so the
+    # subtext block doesn't grow unbounded.
+    _TOOL_TRAIL_VISIBLE = 3
+
     def _render(self, body: str) -> str:
-        if self._attribution_prefix:
-            return f"{self._attribution_prefix}\n{body}"
-        return body
+        """Join the live (multi-line) attribution block with the body."""
+        lines = self._build_attribution_lines()
+        if not lines:
+            return body
+        return "\n".join(lines) + "\n" + body
+
+    def _build_attribution_lines(self) -> list[str]:
+        """Current attribution block as zero, one, or two ``-#`` lines.
+
+        Layout:
+          line 1: ``{attribution_prefix}`` (plus ``· ⏳ (Ns)`` while heartbeat
+                  is still active — i.e. no real text has arrived yet);
+          line 2: ``-# 🔧 T1 · T2 · T3 (+N)`` — only when at least one tool
+                  has been observed, and only pre-finalize.
+        """
+        lines: list[str] = []
+        attrib1 = self._attribution_prefix
+        if (
+            not self._finalized
+            and not self._latest_text
+            and self._heartbeat_task is not None
+            and self._start_ts > 0
+        ):
+            elapsed = max(0, int(time.monotonic() - self._start_ts))
+            suffix = f"⏳ ({elapsed}s)"
+            attrib1 = f"{attrib1} · {suffix}" if attrib1 else f"-# {suffix}"
+        if attrib1:
+            lines.append(attrib1)
+        if not self._finalized and self._tool_trail:
+            trail = self._format_tool_trail()
+            if trail:
+                lines.append(f"-# {trail}")
+        return lines
+
+    def _format_tool_trail(self) -> str:
+        """Render the ``🔧 A · B · C (+N)`` segment for the live trail line."""
+        if not self._tool_trail:
+            return ""
+        shown = self._tool_trail[: self._TOOL_TRAIL_VISIBLE]
+        joined = " · ".join(shown)
+        hidden = len(self._tool_trail) - len(shown)
+        if hidden > 0:
+            joined = f"{joined} (+{hidden})"
+        return f"🔧 {joined}"
 
     def _decorate_attribution_with_tools(self, attribution: str) -> str:
-        """Append ``· 🔧 N tool(s)`` to the attribution if any were seen."""
+        """Append ``· 🔧 N tool(s)`` to the *finalized* attribution line."""
         if self._tool_count <= 0:
             return attribution
         suffix = f" · 🔧 {self._tool_count} tool{'s' if self._tool_count != 1 else ''}"
@@ -261,36 +323,15 @@ class StreamingRelay:
         return f"{attribution}{suffix}"
 
     def _render_heartbeat_body(self) -> str:
-        """Build the placeholder body for the current heartbeat tick."""
-        elapsed = max(0, int(time.monotonic() - self._start_ts))
-        # Start from the original placeholder label and append status, so users
-        # who configured a custom placeholder still see their text.
+        """Placeholder body during heartbeat — intentionally static.
+
+        Elapsed time + tool trail now live on the ``-#`` attribution lines, so
+        the body just shows a calm ``*thinking…*`` cue. We keep this method so
+        the heartbeat loop can still re-render on every tick and pick up any
+        attribution changes (e.g. a newly-seen tool).
+        """
         base = self._placeholder_base.strip() or "⏳ *thinking…*"
-        # If the base is a classic italic placeholder like ``⏳ *thinking…*``,
-        # inject elapsed/tool status inside the italics so formatting stays
-        # tight. Otherwise just append plainly.
-        italic_body = base.startswith("*") and base.endswith("*") and len(base) >= 2
-        if italic_body:
-            inner = base[1:-1]
-        else:
-            # Treat forms like ``⏳ *thinking…*`` where the emoji prefix sits
-            # outside the italic span.
-            lead, sep, rest = base.partition("*")
-            if sep and rest.endswith("*") and len(rest) >= 1:
-                inner = rest[:-1]
-                prefix = lead
-            else:
-                inner = None
-                prefix = ""
-        status_bits = [f"({elapsed}s)"]
-        if self._last_tool_name:
-            status_bits.append(f"using {self._last_tool_name}")
-        status = " · ".join(status_bits)
-        if italic_body:
-            return f"*{inner} · {status}*"
-        if inner is not None:
-            return f"{prefix}*{inner} · {status}*"
-        return f"{base} · {status}"
+        return base
 
     async def _heartbeat_loop(self) -> None:
         try:
@@ -349,8 +390,12 @@ class StreamingRelay:
 
     def _truncate_preview(self, text: str) -> str:
         """Clip the live preview so it always fits in a single message."""
-        # 1 char reserved for the newline between attribution and body.
-        budget = max(1, self._max_chars - len(self._attribution_prefix) - 1)
+        # Account for the full live attribution block (may be 1 OR 2 ``-#``
+        # lines) plus the single newline separating it from the body.
+        lines = self._build_attribution_lines()
+        attrib_block = "\n".join(lines)
+        overhead = len(attrib_block) + (1 if attrib_block else 0)
+        budget = max(1, self._max_chars - overhead)
         if len(text) <= budget:
             return text
         # Reserve 2 chars for the "\n…" suffix we append after trimming.
