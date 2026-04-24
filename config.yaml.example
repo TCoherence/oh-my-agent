@@ -186,3 +186,16 @@ agents:
   #   model: gpt-4o
   #   api_key: ${OPENAI_API_KEY}
   #   max_tokens: 4096
+
+# ============================================================
+# Experiment — short-term features, promoted to top-level sections
+# when they stabilize. Don't depend on these shapes long-term.
+# ============================================================
+experiment:
+  # Opt-in structured trace of every agent event (tool_use, tool_result,
+  # thinking, usage) as JSONL under <path>/YYYY-MM-DD.jsonl. One line per
+  # event, for post-hoc audit / replay / ops debugging. Never read by the
+  # agent. Writes are enqueued + drained by a single background worker.
+  tool_trace:
+    enabled: false
+    # path: ~/.oh-my-agent/runtime/traces   # defaults to <runtime_root>/traces/

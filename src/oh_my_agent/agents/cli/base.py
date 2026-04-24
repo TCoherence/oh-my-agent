@@ -389,11 +389,45 @@ class BaseCLIAgent(BaseAgent):
         timeout: int = DEFAULT_TIMEOUT_SECONDS,
         workspace: Path | None = None,
         passthrough_env: list[str] | None = None,
+        trace_writer=None,
     ) -> None:
         self._cli_path = cli_path
         self._timeout = timeout
         self._workspace = workspace
         self._passthrough_env = passthrough_env  # None = not configured
+        self._trace_writer = trace_writer
+
+    def set_trace_writer(self, trace_writer) -> None:
+        """Inject a trace writer post-construction (boot plumbing convenience)."""
+        self._trace_writer = trace_writer
+
+    async def _emit_trace_events(self, stdout_raw: bytes, *, thread_id: str | None) -> None:
+        """Feed parsed stream events to the trace writer, if configured.
+
+        Runs post-hoc over the already-captured stdout so ``run()`` keeps
+        its current shape. No-op when no trace writer is set.
+        """
+        writer = self._trace_writer
+        if writer is None:
+            return
+        try:
+            text = stdout_raw.decode(errors="replace")
+        except Exception:
+            return
+        tid = thread_id or "-"
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                events = self._parse_stream_line(line)
+            except Exception:
+                continue
+            for event in events:
+                try:
+                    await writer.append(agent=self.name, thread_id=tid, event=event)
+                except Exception:
+                    logger.debug("trace_writer.append failed", exc_info=True)
 
     @property
     def _cwd(self) -> str | None:

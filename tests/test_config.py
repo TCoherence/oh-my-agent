@@ -87,6 +87,9 @@ def test_local_config_covers_example_keys():
         "gateway.channels[].channel_id",
         "access.owner_user_ids",
         "router.api_key_env",
+        # Short-term experiment keys — tracked in config.yaml.example but
+        # not required in local config until they graduate.
+        "experiment",
     }
     required_paths = {
         path

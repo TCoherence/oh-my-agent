@@ -388,6 +388,7 @@ async def _shutdown(
     *,
     reason: str,
     diary_writer=None,
+    trace_writer=None,
 ) -> None:
     logger.info("Shutdown started reason=%s", reason)
     if scheduler:
@@ -402,6 +403,9 @@ async def _shutdown(
     if diary_writer is not None:
         with suppress(Exception):
             await diary_writer.stop()
+    if trace_writer is not None:
+        with suppress(Exception):
+            await trace_writer.stop()
     logger.info("Shutdown complete reason=%s", reason)
 
 
@@ -544,12 +548,31 @@ async def ignite(ctx: BootContext) -> None:
         workspace = _setup_workspace(str(config["workspace"]), project_root, skills_path_for_ws)
         logger.info("Workspace: %s", workspace)
 
+    # Experiment: opt-in tool-trace JSONL writer (quarantined under the
+    # ``experiment`` config section until it graduates to ``memory`` proper).
+    experiment_cfg = config.get("experiment", {}) if isinstance(config.get("experiment"), dict) else {}
+    trace_cfg = experiment_cfg.get("tool_trace", {}) if isinstance(experiment_cfg.get("tool_trace"), dict) else {}
+    trace_writer = None
+    if trace_cfg.get("enabled", False):
+        from oh_my_agent.trace import TraceWriter
+
+        trace_path_cfg = trace_cfg.get("path")
+        if trace_path_cfg:
+            trace_dir = Path(str(trace_path_cfg)).expanduser().resolve()
+        else:
+            trace_dir = ctx.runtime_root / "traces"
+        trace_writer = TraceWriter(trace_dir)
+        trace_writer.start()
+        logger.info("[experiment] tool_trace enabled at %s", trace_dir)
+
     # Build agent registry map
     agents_cfg: dict = config.get("agents", {})
     agent_instances: dict = {}
     for agent_name, agent_cfg in agents_cfg.items():
         try:
             agent_instances[agent_name] = _build_agent(agent_name, agent_cfg, workspace=workspace)
+            if trace_writer is not None and hasattr(agent_instances[agent_name], "set_trace_writer"):
+                agent_instances[agent_name].set_trace_writer(trace_writer)
             logger.info("Loaded agent '%s' (%s)", agent_name, agent_cfg.get("type"))
         except Exception as exc:
             logger.error("Failed to build agent '%s': %s", agent_name, exc)
@@ -860,6 +883,7 @@ async def ignite(ctx: BootContext) -> None:
             logger,
             reason=reason,
             diary_writer=diary_writer,
+            trace_writer=trace_writer,
         )
 
     try:

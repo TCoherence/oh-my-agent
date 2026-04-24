@@ -416,6 +416,8 @@ class ClaudeAgent(BaseCLIAgent):
 
         raw = stdout.decode(errors="replace").strip()
 
+        await self._emit_trace_events(stdout, thread_id=thread_id)
+
         # Parse stream-json NDJSON output: pull session_id from init event and
         # pull the final result / usage / cost from the last result event.
         init_session_id, final_frame = _parse_claude_stream_json(raw)

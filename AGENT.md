@@ -30,7 +30,7 @@ The system has seven major subsystems.
 - `GatewayManager`: holds `(BaseChannel, AgentRegistry)` pairs, routes `IncomingMessage` to `handle_message()`. Manages `ChannelSession`s, triggers history compression in the background, touches the `IdleTracker` per message, and dispatches `Judge` runs on idle / `/memorize` / keyword triggers.
 - `ChannelSession`: per-channel state with async API. Loads/persists per-thread conversation histories via `MemoryStore`. In-memory cache avoids repeated DB reads.
 - Discord slash commands via `app_commands.CommandTree`:
-  - Conversation: `/ask`, `/reset`, `/history`, `/agent`, `/search`
+  - Conversation: `/reset`, `/history`, `/agent`, `/search`
   - Runtime tasks: `/task_start`, `/task_status`, `/task_list`, `/task_approve`, `/task_reject`, `/task_suggest`, `/task_resume`, `/task_stop`, `/task_merge`, `/task_discard`, `/task_replace`, `/task_changes`, `/task_logs`, `/task_cleanup`
   - Skills: `/reload-skills`, `/skill_stats`, `/skill_enable`
   - Automations: `/automation_status`, `/automation_reload`, `/automation_enable`, `/automation_disable`, `/automation_run`
@@ -38,7 +38,6 @@ The system has seven major subsystems.
   - Operator: `/doctor`
   - Memory: `/memories`, `/forget`, `/memorize`
 - Agent targeting:
-  - `/ask` supports optional `agent` argument for new threads.
   - Thread messages support `@claude` / `@gemini` / `@codex` prefix to force one agent for that turn.
   - Prefix is stripped before dispatch; agent name is passed via `IncomingMessage.preferred_agent`.
 - Image attachments: `Attachment` dataclass (`filename`, `content_type`, `local_path`, `original_url`, `size_bytes`, `is_image` property). Discord `on_message` downloads `image/*` attachments (≤10 MB) to temp dir. `IncomingMessage.attachments` carries them through the pipeline. Image-only messages get a default analysis prompt.
@@ -140,6 +139,7 @@ router:         # optional LLM intent classification (OpenAI-compatible)
 runtime:        # autonomous task orchestration, merge gate, cleanup
 gateway:        # channels list (platform, token, channel_id, agents)
 agents:         # per-agent: type, cli_path, model, timeout, allowed_tools, env_passthrough, skip_git_repo_check
+experiment:     # opt-in short-term features — promoted to top-level sections when stable; currently: tool_trace (enabled, path)
 ```
 
 **Adding a new platform**: subclass `BaseChannel`, implement `start/create_thread/send`, add a branch in `main._build_channel()`.
