@@ -113,7 +113,7 @@ class GatewayManager:
             kw.lower() for kw in (memory_keyword_patterns or default_keywords) if kw
         ]
         if self._idle_tracker is not None:
-            self._idle_tracker._on_fire = self._idle_judge_fire  # type: ignore[attr-defined]
+            self._idle_tracker._on_fire = self._idle_judge_fire
         stream_cfg = streaming_config or {}
         self._streaming_enabled = bool(stream_cfg.get("enabled", False))
         try:
@@ -494,6 +494,9 @@ class GatewayManager:
             if result != f"Thread `{thread_id}` is waiting for input.":
                 await session.channel.send(thread_id, result)
             return True
+        # ask_user_challenge was None and the early-return at line 442 ruled
+        # out both being None — so auth_challenge must be non-None here.
+        assert auth_challenge is not None
         if not self._runtime_service or not hasattr(self._runtime_service, "mark_thread_auth_required"):
             await session.channel.send(
                 thread_id,

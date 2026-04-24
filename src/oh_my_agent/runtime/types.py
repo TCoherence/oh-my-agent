@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 TASK_TYPE_ARTIFACT = "artifact"
 TASK_TYPE_REPO_CHANGE = "repo_change"
@@ -230,7 +230,7 @@ class SuspendedAgentRun:
             channel_id=str(row["channel_id"]),
             thread_id=str(row["thread_id"]),
             agent_name=str(row["agent_name"]),
-            status=str(row["status"]),
+            status=cast(SuspendedAgentRunStatus, str(row["status"])),
             provider=str(row["provider"]),
             control_envelope_json=str(row["control_envelope_json"]),
             session_id_snapshot=row.get("session_id_snapshot"),
@@ -307,13 +307,13 @@ class HitlPrompt:
 
         return cls(
             id=str(row["id"]),
-            target_kind=str(row["target_kind"]),
+            target_kind=cast(HitlPromptTargetKind, str(row["target_kind"])),
             platform=str(row["platform"]),
             channel_id=str(row["channel_id"]),
             thread_id=str(row["thread_id"]),
             task_id=row.get("task_id"),
             agent_name=str(row["agent_name"]),
-            status=str(row["status"]),
+            status=cast(HitlPromptStatus, str(row["status"])),
             question=str(row["question"]),
             details=row.get("details"),
             choices=choices,
@@ -380,8 +380,8 @@ class NotificationRecord:
             payload = raw_payload
         return cls(
             id=str(row["id"]),
-            kind=str(row["kind"]),
-            status=str(row["status"]),
+            kind=cast(NotificationKind, str(row["kind"])),
+            status=cast(NotificationStatus, str(row["status"])),
             platform=str(row["platform"]),
             channel_id=str(row["channel_id"]),
             thread_id=str(row["thread_id"]),

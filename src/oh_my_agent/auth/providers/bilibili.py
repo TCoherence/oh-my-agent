@@ -137,7 +137,7 @@ class BilibiliAuthProvider:
                     discard=False,
                     comment=None,
                     comment_url=None,
-                    rest={"HttpOnly": bool(cookie.get("http_only"))},
+                    rest={"HttpOnly": ""} if cookie.get("http_only") else {},
                     rfc2109=False,
                 )
             )
@@ -301,7 +301,7 @@ class BilibiliAuthProvider:
     def _load_cookie_map(cookie_path: Path) -> dict[str, str]:
         jar = http.cookiejar.MozillaCookieJar(str(cookie_path))
         jar.load(ignore_discard=True, ignore_expires=True)
-        return {cookie.name: cookie.value for cookie in jar}
+        return {cookie.name: cookie.value for cookie in jar if cookie.value is not None}
 
     @staticmethod
     def _cookie_header(cookies: dict[str, str]) -> str:

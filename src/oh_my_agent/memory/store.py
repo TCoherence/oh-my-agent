@@ -1847,7 +1847,7 @@ class SQLiteMemoryStore(MemoryStore):
             "ORDER BY seq DESC LIMIT ?",
             (task_id, int(limit)),
         )
-        rows = await cursor.fetchall()
+        rows = list(await cursor.fetchall())
         items: list[dict[str, Any]] = []
         for row in reversed(rows):
             payload: dict[str, Any]
@@ -2560,7 +2560,7 @@ class SQLiteMemoryStore(MemoryStore):
                 ),
             )
             await db.commit()
-            return int(cursor.lastrowid)
+            return int(cursor.lastrowid or 0)
 
     async def set_skill_invocation_response_message(
         self,

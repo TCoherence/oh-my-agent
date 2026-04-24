@@ -1,30 +1,30 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 AUTH_SCOPE_DEFAULT = "default"
-
-AUTH_CREDENTIAL_STATUS_VALID = "valid"
-AUTH_CREDENTIAL_STATUS_INVALID = "invalid"
-AUTH_CREDENTIAL_STATUS_EXPIRED = "expired"
-
-AUTH_FLOW_STATUS_PENDING = "pending"
-AUTH_FLOW_STATUS_QR_READY = "qr_ready"
-AUTH_FLOW_STATUS_APPROVED = "approved"
-AUTH_FLOW_STATUS_EXPIRED = "expired"
-AUTH_FLOW_STATUS_FAILED = "failed"
-AUTH_FLOW_STATUS_CANCELLED = "cancelled"
-
-AUTH_POLL_STATUS_PENDING = "pending"
-AUTH_POLL_STATUS_SCANNED = "scanned"
-AUTH_POLL_STATUS_APPROVED = "approved"
-AUTH_POLL_STATUS_EXPIRED = "expired"
-AUTH_POLL_STATUS_FAILED = "failed"
 
 AuthCredentialStatus = Literal["valid", "invalid", "expired"]
 AuthFlowStatus = Literal["pending", "qr_ready", "approved", "expired", "failed", "cancelled"]
 AuthPollStatus = Literal["pending", "scanned", "approved", "expired", "failed"]
+
+AUTH_CREDENTIAL_STATUS_VALID: AuthCredentialStatus = "valid"
+AUTH_CREDENTIAL_STATUS_INVALID: AuthCredentialStatus = "invalid"
+AUTH_CREDENTIAL_STATUS_EXPIRED: AuthCredentialStatus = "expired"
+
+AUTH_FLOW_STATUS_PENDING: AuthFlowStatus = "pending"
+AUTH_FLOW_STATUS_QR_READY: AuthFlowStatus = "qr_ready"
+AUTH_FLOW_STATUS_APPROVED: AuthFlowStatus = "approved"
+AUTH_FLOW_STATUS_EXPIRED: AuthFlowStatus = "expired"
+AUTH_FLOW_STATUS_FAILED: AuthFlowStatus = "failed"
+AUTH_FLOW_STATUS_CANCELLED: AuthFlowStatus = "cancelled"
+
+AUTH_POLL_STATUS_PENDING: AuthPollStatus = "pending"
+AUTH_POLL_STATUS_SCANNED: AuthPollStatus = "scanned"
+AUTH_POLL_STATUS_APPROVED: AuthPollStatus = "approved"
+AUTH_POLL_STATUS_EXPIRED: AuthPollStatus = "expired"
+AUTH_POLL_STATUS_FAILED: AuthPollStatus = "failed"
 
 
 @dataclass(frozen=True)
@@ -48,7 +48,7 @@ class CredentialHandle:
             provider=str(row["provider"]),
             owner_user_id=str(row["owner_user_id"]),
             scope_key=str(row.get("scope_key", AUTH_SCOPE_DEFAULT)),
-            status=str(row["status"]),
+            status=cast(AuthCredentialStatus, str(row["status"])),
             storage_path=str(row["storage_path"]),
             metadata=row.get("metadata_json") or {},
             last_verified_at=row.get("last_verified_at"),
@@ -87,7 +87,7 @@ class AuthFlow:
             channel_id=str(row["channel_id"]),
             thread_id=str(row["thread_id"]),
             linked_task_id=row.get("linked_task_id"),
-            status=str(row["status"]),
+            status=cast(AuthFlowStatus, str(row["status"])),
             provider_flow_id=str(row["provider_flow_id"]),
             qr_payload=str(row["qr_payload"]),
             qr_image_path=row.get("qr_image_path"),
