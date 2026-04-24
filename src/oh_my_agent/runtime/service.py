@@ -4017,14 +4017,32 @@ class RuntimeService:
         return "\n".join(lines)[:1900]
 
     def _artifact_paths_for_task(self, task: RuntimeTask, changed_files: list[str]) -> list[Path]:
-        if not task.workspace_path:
-            return []
-        workspace = Path(task.workspace_path)
+        """Resolve artifact paths for delivery / publishing.
+
+        Accepts both workspace-relative and absolute entries in the manifest.
+        Rule 4 of ``_publish_artifact_files`` (absolute paths outside both
+        the workspace and ``reports_dir``) is only reachable in the real task
+        flow if this collector preserves absolute entries — which it does
+        explicitly here rather than relying on Python's
+        ``Path("/ws") / "/abs" → Path("/abs")`` quirk.
+
+        Tasks without ``workspace_path`` (rare but legal: future ingest-from-
+        outside scenarios) are still supported — absolute manifest entries
+        flow through, relative entries are skipped.
+        """
+        workspace = Path(task.workspace_path) if task.workspace_path else None
         results: list[Path] = []
         manifest = task.artifact_manifest or changed_files
         for rel_path in manifest:
-            candidate = workspace / rel_path
-            if candidate.is_file():
+            entry = Path(rel_path)
+            candidate: Path | None
+            if entry.is_absolute():
+                candidate = entry
+            elif workspace is not None:
+                candidate = workspace / entry
+            else:
+                candidate = None
+            if candidate is not None and candidate.is_file():
                 results.append(candidate)
         return results
 
@@ -4360,17 +4378,17 @@ class RuntimeService:
         )
         if published_paths:
             notes.append(
-                "published: " + ", ".join(f"`{p}`" for p in published_paths[:4])
+                "Published to: " + ", ".join(f"`{p}`" for p in published_paths[:4])
             )
             if len(published_paths) > 4:
                 notes[-1] += f" and {len(published_paths) - 4} more"
         elif artifact_path:
             # Fallback: no published path (reports_dir disabled) → use workspace
             # relative path so users still have a handle.
-            notes.append(f"artifact: `{artifact_path}`")
+            notes.append(f"Workspace artifact (scratch): `{artifact_path}`")
         elif changed_files:
             notes.append(
-                "artifacts: " + ", ".join(f"`{path}`" for path in changed_files[:4])
+                "Workspace artifacts (scratch): " + ", ".join(f"`{path}`" for path in changed_files[:4])
             )
             if len(changed_files) > 4:
                 notes[-1] += f" and {len(changed_files) - 4} more"
