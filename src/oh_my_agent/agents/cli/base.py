@@ -5,9 +5,17 @@ import json
 import logging
 import os
 from abc import abstractmethod
+from collections.abc import AsyncIterator
+from contextlib import suppress
 from pathlib import Path
 
 from oh_my_agent.agents.base import AgentResponse, BaseAgent
+from oh_my_agent.agents.events import (
+    AgentEvent,
+    CompleteEvent,
+    ErrorEvent,
+    TextEvent,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -162,6 +170,140 @@ def _bounded_log_excerpt(log_path: Path | None, *, max_chars: int = 2000) -> str
     if not text:
         return None
     return text[-max_chars:]
+
+
+async def _stream_cli_lines(
+    *cmd: str,
+    cwd: str | None,
+    env: dict[str, str],
+    timeout: int | None,
+    cancel: asyncio.Event | None = None,
+    log_path: Path | None = None,
+) -> AsyncIterator[tuple[str, str]]:
+    """Spawn the CLI subprocess and yield ``(stream_label, line)`` tuples as output arrives.
+
+    ``stream_label`` is ``"stdout"`` / ``"stderr"``. The generator exits normally
+    once the subprocess has exited and both pipes are drained. The final
+    return code is exposed via :class:`_StreamState` in a side channel — see
+    :meth:`BaseCLIAgent.stream` for the typical consumption pattern.
+
+    ``cancel`` — when set during iteration, the subprocess is killed and the
+    generator stops. Semantically equivalent to ``AbortSignal.abort()`` — a
+    single event threaded from the runtime worker collapses the cancellation
+    path down from the current five-hop (intent-parse → DB status write →
+    heartbeat poll → Task.cancel → proc.kill).
+    """
+    log_handle = None
+    if log_path is not None:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_handle = log_path.open("a", encoding="utf-8")
+        log_handle.write(f"$ {' '.join(cmd)}\n")
+        if cwd:
+            log_handle.write(f"[cwd] {cwd}\n")
+        log_handle.write("\n")
+        log_handle.flush()
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        cwd=cwd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=env,
+    )
+
+    # Pump both pipes into a queue; one consumer pulls interleaved frames.
+    queue: asyncio.Queue[tuple[str, str] | None] = asyncio.Queue()
+
+    async def _pump(stream, label: str) -> None:
+        try:
+            while True:
+                chunk = await stream.readline()
+                if not chunk:
+                    break
+                text = chunk.decode(errors="replace").rstrip("\n")
+                if log_handle is not None:
+                    log_handle.write(f"[{label}] {text}\n")
+                    log_handle.flush()
+                await queue.put((label, text))
+        finally:
+            await queue.put(None)
+
+    stdout_pump = asyncio.create_task(_pump(proc.stdout, "stdout"), name="cli:pump-stdout")
+    stderr_pump = asyncio.create_task(_pump(proc.stderr, "stderr"), name="cli:pump-stderr")
+
+    cancel_waiter: asyncio.Task | None = None
+    if cancel is not None:
+        cancel_waiter = asyncio.create_task(cancel.wait(), name="cli:cancel-wait")
+
+    timeout_waiter: asyncio.Task | None = None
+    if timeout is not None:
+        timeout_waiter = asyncio.create_task(asyncio.sleep(timeout), name="cli:timeout")
+
+    pumps_remaining = 2
+    killed_reason: str | None = None
+    try:
+        while pumps_remaining > 0:
+            get_task = asyncio.create_task(queue.get(), name="cli:queue-get")
+            watchers: set[asyncio.Task] = {get_task}
+            if cancel_waiter is not None:
+                watchers.add(cancel_waiter)
+            if timeout_waiter is not None:
+                watchers.add(timeout_waiter)
+
+            done, _ = await asyncio.wait(watchers, return_when=asyncio.FIRST_COMPLETED)
+
+            if get_task not in done:
+                get_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await get_task
+                if cancel_waiter is not None and cancel_waiter in done:
+                    killed_reason = "cancelled"
+                elif timeout_waiter is not None and timeout_waiter in done:
+                    killed_reason = "timeout"
+                proc.kill()
+                break
+
+            item = get_task.result()
+            if item is None:
+                pumps_remaining -= 1
+                continue
+            yield item
+
+        # Drain any remaining buffered frames from the pumps after cancel/timeout.
+        with suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(
+                asyncio.gather(stdout_pump, stderr_pump, return_exceptions=True),
+                timeout=2,
+            )
+        while not queue.empty():
+            item = queue.get_nowait()
+            if item is None:
+                continue
+            yield item
+
+        # Ensure process is reaped.
+        with suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(proc.wait(), timeout=2)
+        if proc.returncode is None:
+            proc.kill()
+            await proc.wait()
+
+        if killed_reason == "timeout":
+            raise asyncio.TimeoutError()
+    except (asyncio.CancelledError, GeneratorExit):
+        proc.kill()
+        with suppress(Exception):
+            await asyncio.wait_for(proc.wait(), timeout=2)
+        raise
+    finally:
+        for t in (cancel_waiter, timeout_waiter, stdout_pump, stderr_pump):
+            if t is not None and not t.done():
+                t.cancel()
+                with suppress(asyncio.CancelledError, Exception):
+                    await t
+        if log_handle is not None:
+            log_handle.write(f"\n[exit] {proc.returncode}\n")
+            log_handle.close()
 
 
 async def _stream_cli_process(
@@ -343,3 +485,94 @@ class BaseCLIAgent(BaseAgent):
         The default implementation treats stdout as plain text.
         """
         return AgentResponse(text=raw)
+
+    def _parse_stream_line(self, line: str) -> list[AgentEvent]:
+        """Translate one line of CLI stdout into zero or more :class:`AgentEvent`.
+
+        The default implementation wraps the line in a plain :class:`TextEvent`.
+        Subclasses that emit structured output (Claude's stream-json, Codex's
+        JSONL event stream) override this to return typed ``ToolUseEvent`` /
+        ``ThinkingEvent`` / ``SystemInitEvent`` / etc.
+        """
+        stripped = line.strip()
+        if not stripped:
+            return []
+        return [TextEvent(text=stripped, agent=self.name)]
+
+    async def stream(
+        self,
+        prompt: str,
+        history: list[dict] | None = None,
+        *,
+        cancel: asyncio.Event | None = None,
+        workspace_override: Path | None = None,
+        log_path: Path | None = None,
+    ) -> AsyncIterator[AgentEvent]:
+        """Run the CLI and yield typed :class:`AgentEvent` objects as they arrive.
+
+        The default implementation shells out via :func:`_stream_cli_lines`,
+        calls :meth:`_parse_stream_line` on each stdout line, and yields a
+        :class:`CompleteEvent` at the end with the accumulated plain-text view.
+        Stderr is buffered and only surfaced (as an :class:`ErrorEvent`) on
+        non-zero exit.
+
+        ``cancel`` — optional asyncio.Event. When set, the subprocess is killed
+        and the generator exits without yielding a CompleteEvent.
+        """
+        full_prompt = _build_prompt_with_history(prompt, history)
+        cmd = self._build_command(full_prompt)
+        logger.info("Streaming %s: %s ...", self.name, " ".join(cmd[:4]))
+
+        collected_text: list[str] = []
+        stderr_lines: list[str] = []
+
+        try:
+            async for stream_label, line in _stream_cli_lines(
+                *cmd,
+                cwd=self._resolve_cwd(workspace_override),
+                env=self._build_env(),
+                timeout=self._timeout,
+                cancel=cancel,
+                log_path=log_path,
+            ):
+                if stream_label == "stderr":
+                    stderr_lines.append(line)
+                    continue
+                events = self._parse_stream_line(line)
+                for event in events:
+                    yield event
+                    if isinstance(event, TextEvent):
+                        collected_text.append(event.text)
+        except asyncio.TimeoutError:
+            yield ErrorEvent(
+                message=f"{self.name} CLI timed out after {self._timeout}s",
+                error_kind="timeout",
+                agent=self.name,
+            )
+            return
+        except FileNotFoundError:
+            yield ErrorEvent(
+                message=f"{self.name} CLI not found at '{self._cli_path}'. Is it installed?",
+                error_kind="cli_error",
+                agent=self.name,
+            )
+            return
+
+        if cancel is not None and cancel.is_set():
+            # Cancelled mid-stream; skip the complete marker.
+            return
+
+        if stderr_lines:
+            # Non-fatal stderr still gets surfaced as an error event so the
+            # caller can surface it (e.g. into the session diary).
+            err_msg = "\n".join(stderr_lines)[-400:]
+            yield ErrorEvent(
+                message=err_msg,
+                error_kind=classify_cli_error_kind(err_msg),
+                agent=self.name,
+            )
+
+        yield CompleteEvent(
+            text="\n".join(collected_text),
+            agent=self.name,
+        )
