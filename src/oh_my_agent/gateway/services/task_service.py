@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import TYPE_CHECKING, Awaitable, Callable
+from typing import TYPE_CHECKING, Awaitable, Callable, Literal
 
 from oh_my_agent.gateway.services.types import ServiceResult, TaskActionResult, TaskListResult, TaskSummary
 from oh_my_agent.runtime.types import RuntimeTask, TaskDecisionEvent
@@ -13,7 +13,8 @@ if TYPE_CHECKING:
     from oh_my_agent.runtime.service import RuntimeService
 
 
-FireAutomation = Callable[[str], Awaitable[bool]]
+FireJobResult = Literal["ok", "not_found", "scheduler_down", "already_firing"]
+FireAutomation = Callable[[str], Awaitable[FireJobResult]]
 
 
 _ERROR_PREFIXES = (
@@ -244,7 +245,7 @@ class TaskService:
                 task=task,
             )
         try:
-            fired = await self._fire_automation(automation_name)
+            result = await self._fire_automation(automation_name)
         except Exception as exc:
             task = await self._runtime.get_task(task_id)
             return TaskActionResult(
@@ -255,9 +256,16 @@ class TaskService:
                 task=task,
             )
         task = await self._runtime.get_task(task_id)
-        suffix = "refired" if fired else "refire returned False (no active job?)"
+        if result == "ok":
+            suffix = "refired"
+        elif result == "already_firing":
+            suffix = "refire skipped (already firing)"
+        elif result == "not_found":
+            suffix = "refire failed (automation not found)"
+        else:  # scheduler_down
+            suffix = "refire failed (scheduler not running)"
         return TaskActionResult(
-            success=bool(fired),
+            success=result == "ok",
             message=f"{message} ({suffix})",
             task_id=task_id,
             task_status=task.status if task else None,
