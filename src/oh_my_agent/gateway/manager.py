@@ -112,7 +112,20 @@ class GatewayManager:
             interval_ms = int(stream_cfg.get("min_edit_interval_ms", 1000))
         except (TypeError, ValueError):
             interval_ms = 1000
-        self._streaming_min_edit_interval = max(0.0, interval_ms / 1000.0)
+        # Discord edits: ~5 per 5s per message. Anything below 500ms risks
+        # 429s under a busy stream, so floor the config-driven value here.
+        # Tests that construct StreamingRelay directly can still pass a smaller
+        # interval; the floor only protects the operator-configured path.
+        requested_interval_s = max(0.0, interval_ms / 1000.0)
+        min_safe_interval_s = 0.5
+        if requested_interval_s and requested_interval_s < min_safe_interval_s:
+            logger.warning(
+                "streaming.min_edit_interval_ms=%d below %dms floor — clamping up to avoid Discord 429s",
+                interval_ms,
+                int(min_safe_interval_s * 1000),
+            )
+            requested_interval_s = min_safe_interval_s
+        self._streaming_min_edit_interval = requested_interval_s
         try:
             placeholder = str(stream_cfg.get("placeholder", "⏳ *thinking…*"))
         except Exception:

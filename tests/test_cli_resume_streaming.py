@@ -105,9 +105,25 @@ async def test_codex_resume_runs_through_streaming_when_on_partial(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_gemini_resume_runs_through_streaming_when_on_partial(monkeypatch):
-    # Gemini stream fallback parses each stdout line as a TextEvent.
-    lines = ["resumed gemini line A", "resumed gemini line B"]
-    captured = _install_fake_stream(monkeypatch, lines)
+    # Real Gemini `--output-format json` emits a single JSON object once the
+    # response is ready. The streaming path must extract `response` out of
+    # that, not forward the raw JSON line to the user.
+    import json as _json
+
+    payload = _json.dumps(
+        {
+            "response": "resumed gemini reply",
+            "session_id": "gsess_new",
+            "stats": {
+                "models": {
+                    "gemini-3-flash-preview": {
+                        "tokens": {"prompt": 12, "candidates": 7, "cached": 0},
+                    }
+                }
+            },
+        }
+    )
+    captured = _install_fake_stream(monkeypatch, [payload])
 
     agent = GeminiCLIAgent(cli_path="gemini")
     agent.set_session_id("t1", "gsess_existing")
@@ -124,9 +140,46 @@ async def test_gemini_resume_runs_through_streaming_when_on_partial(monkeypatch)
     assert "--resume" in cmd
     assert "gsess_existing" in cmd
 
+    assert partials, "on_partial should fire at least once during streaming"
+    # Must be the extracted response text, not the raw JSON literal.
+    assert partials[-1] == "resumed gemini reply"
+    assert "{" not in partials[-1], "partial must not leak raw JSON to users"
+
+    assert resp.text == "resumed gemini reply"
+    assert resp.error is None
+    # session_id from the emitted init event is captured + stored.
+    assert agent.get_session_id("t1") == "gsess_new"
+    # Usage is surfaced via the stats → usage translator.
+    assert resp.usage == {
+        "input_tokens": 12,
+        "output_tokens": 7,
+        "cache_read_input_tokens": 0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_gemini_plaintext_stream_lines_still_forwarded(monkeypatch):
+    """Non-JSON lines (future plaintext stream mode or stray output) must still
+    reach the user as plain TextEvents, not be silently dropped."""
+    captured = _install_fake_stream(
+        monkeypatch,
+        ["partial line one", "partial line two"],
+    )
+
+    agent = GeminiCLIAgent(cli_path="gemini")
+    agent.set_session_id("t1", "gsess_existing")
+
+    partials: list[str] = []
+
+    async def _on_partial(text: str) -> None:
+        partials.append(text)
+
+    resp = await agent.run("hi again", thread_id="t1", on_partial=_on_partial)
+
+    assert captured
     assert partials
-    assert "resumed gemini line A" in partials[-1]
-    assert "resumed gemini line B" in partials[-1]
+    assert "partial line one" in partials[-1]
+    assert "partial line two" in partials[-1]
     assert resp.error is None
 
 

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import time
 
 import pytest
 
@@ -190,3 +189,5 @@ async def test_truncate_preview_keeps_message_under_cap():
     # Every edit body must be <= 120 chars (our max_chars cap).
     for _, _, body in ch.edits:
         assert len(body) <= 120
+
+

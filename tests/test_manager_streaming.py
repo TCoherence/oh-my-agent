@@ -207,6 +207,31 @@ async def test_streaming_overflow_spills_to_followup_sends():
     )
 
 
+def test_streaming_min_edit_interval_ms_is_floored():
+    """A misconfigured ``min_edit_interval_ms: 200`` would risk Discord 429s
+    (5 edits / 5s per message). The config parser clamps it up to 500ms."""
+    # Below floor — should be lifted to 0.5s.
+    gm_low = GatewayManager(
+        [],
+        streaming_config={"enabled": True, "min_edit_interval_ms": 100},
+    )
+    assert gm_low._streaming_min_edit_interval == 0.5
+
+    # Above floor — should be preserved.
+    gm_ok = GatewayManager(
+        [],
+        streaming_config={"enabled": True, "min_edit_interval_ms": 1500},
+    )
+    assert gm_ok._streaming_min_edit_interval == 1.5
+
+    # Explicit zero stays zero (opt-in to no throttle, e.g. for tests).
+    gm_zero = GatewayManager(
+        [],
+        streaming_config={"enabled": True, "min_edit_interval_ms": 0},
+    )
+    assert gm_zero._streaming_min_edit_interval == 0.0
+
+
 @pytest.mark.asyncio
 async def test_streaming_threads_on_partial_through_registry():
     channel = _FakeChannel()

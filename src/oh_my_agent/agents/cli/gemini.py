@@ -8,6 +8,12 @@ from pathlib import Path
 
 from oh_my_agent.agents.base import AgentResponse, PartialTextHook
 from oh_my_agent.agents.control_prompt import inject_control_protocol
+from oh_my_agent.agents.events import (
+    AgentEvent,
+    SystemInitEvent,
+    TextEvent,
+    UsageEvent,
+)
 from oh_my_agent.agents.cli.base import (
     BaseCLIAgent,
     _build_prompt_with_history,
@@ -235,6 +241,70 @@ class GeminiCLIAgent(BaseCLIAgent):
                 }
 
         return AgentResponse(text=text, raw=data, usage=usage)
+
+    def _extract_usage_from_stats(self, stats: dict | None) -> dict | None:
+        if not isinstance(stats, dict):
+            return None
+        models = stats.get("models")
+        if not isinstance(models, dict) or not models:
+            return None
+        total_prompt = total_candidates = total_cached = 0
+        for model_stats in models.values():
+            if not isinstance(model_stats, dict):
+                continue
+            tokens = model_stats.get("tokens") or {}
+            if not isinstance(tokens, dict):
+                continue
+            total_prompt += int(tokens.get("prompt", 0) or 0)
+            total_candidates += int(tokens.get("candidates", 0) or 0)
+            total_cached += int(tokens.get("cached", 0) or 0)
+        if not (total_prompt or total_candidates):
+            return None
+        return {
+            "input_tokens": total_prompt,
+            "output_tokens": total_candidates,
+            "cache_read_input_tokens": total_cached,
+        }
+
+    def _parse_stream_line(self, line: str) -> list[AgentEvent]:
+        """Map one line of Gemini stdout to AgentEvents.
+
+        Gemini ``--output-format json`` emits a single JSON object once the
+        full response is ready (not per-token), so the streaming path
+        would otherwise show users the raw JSON literal. Detect that here
+        and extract the ``response`` field. Plaintext fallback for
+        non-JSON lines preserves progressive display when the CLI is
+        invoked without ``--output-format json``.
+        """
+        stripped = line.strip()
+        if not stripped:
+            return []
+        if stripped.startswith("{"):
+            try:
+                data = json.loads(stripped)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                data = None
+            if isinstance(data, dict):
+                events: list[AgentEvent] = []
+                sid = data.get("session_id")
+                if isinstance(sid, str) and sid:
+                    events.append(SystemInitEvent(session_id=sid, raw=data, agent=self.name))
+                text = data.get("response")
+                if isinstance(text, str) and text:
+                    events.append(TextEvent(text=text, agent=self.name))
+                usage = self._extract_usage_from_stats(data.get("stats"))
+                if usage:
+                    events.append(
+                        UsageEvent(
+                            input_tokens=usage.get("input_tokens"),
+                            output_tokens=usage.get("output_tokens"),
+                            cache_read_input_tokens=usage.get("cache_read_input_tokens"),
+                            agent=self.name,
+                        )
+                    )
+                if events:
+                    return events
+        return [TextEvent(text=stripped, agent=self.name)]
 
     def _parse_output(self, raw: str) -> AgentResponse:
         """Parse Gemini JSON output (used by base class run(); session_id not captured here)."""
