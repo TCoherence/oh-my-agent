@@ -30,7 +30,7 @@ from oh_my_agent.skills.frontmatter import read_skill_frontmatter, resolve_skill
 from oh_my_agent.runtime.policy import is_artifact_intent, is_long_task_intent, is_skill_intent
 from oh_my_agent.utils.chunker import chunk_message
 from oh_my_agent.utils.errors import user_safe_agent_error, user_safe_message
-from oh_my_agent.utils.usage import append_usage_audit, format_usage_audit
+from oh_my_agent.utils.usage import append_usage_audit, format_usage_audit, record_usage_from_response
 
 logger = logging.getLogger(__name__)
 
@@ -1507,6 +1507,15 @@ class GatewayManager:
             )
         elapsed_agent = time.perf_counter() - t_agent
         await self._sync_registry_sessions(session, thread_id, registry)
+        await record_usage_from_response(
+            getattr(self, "_memory_store_ref", None),
+            agent=agent_used.name,
+            source="chat",
+            platform=session.platform,
+            channel_id=session.channel_id,
+            thread_id=thread_id,
+            response=response,
+        )
         route_source = "explicit" if explicit_skill else "router" if routed_skill else None
         invocation_id = None
         if tracked_skill and route_source:

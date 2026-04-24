@@ -74,7 +74,7 @@ from oh_my_agent.runtime.types import (
 from oh_my_agent.runtime.worktree import WorktreeError, WorktreeManager
 from oh_my_agent.utils.chunker import chunk_message
 from oh_my_agent.utils.errors import user_safe_agent_error
-from oh_my_agent.utils.usage import append_usage_audit
+from oh_my_agent.utils.usage import append_usage_audit, record_usage_from_response
 
 logger = logging.getLogger(__name__)
 
@@ -3356,6 +3356,16 @@ class RuntimeService:
             response = await self._invoke_agent(
                 agent, prompt, workspace, runtime_thread_id, task, step
             )
+            await record_usage_from_response(
+                self._store,
+                agent=agent.name,
+                source="automation" if task.automation_name else "runtime",
+                platform=task.platform,
+                channel_id=task.channel_id,
+                thread_id=task.thread_id,
+                response=response,
+                task_id=task.id,
+            )
             if not response.error:
                 return response
             kind = response.error_kind or "cli_error"
@@ -5026,6 +5036,15 @@ class RuntimeService:
                     agent_used, response = await asyncio.wait_for(asyncio.shield(run_task), timeout=interval)
                     elapsed = time.perf_counter() - started_at
                     effective_log_path = self._agent_specific_log_path(log_path, agent_used.name)
+                    await record_usage_from_response(
+                        self._store,
+                        agent=agent_used.name,
+                        source="runtime",
+                        platform=session.platform,
+                        channel_id=session.channel_id,
+                        thread_id=thread_id,
+                        response=response,
+                    )
                     if response.error and not response.partial_text:
                         response.partial_text = _bounded_log_excerpt(
                             effective_log_path,

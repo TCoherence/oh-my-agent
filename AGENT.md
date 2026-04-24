@@ -35,7 +35,7 @@ The system has seven major subsystems.
   - Skills: `/reload-skills`, `/skill_stats`, `/skill_enable`
   - Automations: `/automation_status`, `/automation_reload`, `/automation_enable`, `/automation_disable`, `/automation_run`
   - Auth: `/auth_login`, `/auth_status`, `/auth_clear`
-  - Operator: `/doctor`
+  - Operator: `/doctor`, `/usage_today`, `/usage_thread`
   - Memory: `/memories`, `/forget`, `/memorize`
 - Agent targeting:
   - Thread messages support `@claude` / `@gemini` / `@codex` prefix to force one agent for that turn.

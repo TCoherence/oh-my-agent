@@ -6,7 +6,9 @@ import tempfile
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 import discord
 from discord import app_commands
@@ -132,6 +134,59 @@ async def _download_discord_attachments(
         except Exception:
             logger.warning("Failed to download attachment %s", att.filename, exc_info=True)
     return results
+
+
+def _start_of_today_utc() -> str:
+    now = datetime.now(timezone.utc)
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    return start.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _hours_ago_utc(hours: int) -> str:
+    ts = datetime.now(timezone.utc) - timedelta(hours=hours)
+    return ts.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _render_usage_summary(summary: dict[str, Any], *, title: str) -> str:
+    total = summary.get("total") or {}
+    by_agent = summary.get("by_agent") or []
+    by_source = summary.get("by_source") or []
+
+    def _fmt_cost(value: Any) -> str:
+        try:
+            return f"${float(value or 0):.4f}"
+        except (TypeError, ValueError):
+            return "$0.0000"
+
+    lines = [f"**{title}**"]
+    events = int(total.get("events") or 0)
+    if events == 0:
+        lines.append("_no usage recorded in this window._")
+        return "\n".join(lines)
+    in_tok = int(total.get("input_tokens") or 0)
+    out_tok = int(total.get("output_tokens") or 0)
+    cache_r = int(total.get("cache_read_input_tokens") or 0)
+    cache_w = int(total.get("cache_creation_input_tokens") or 0)
+    lines.append(
+        f"Total: `{events}` events · `{in_tok:,}` in / `{out_tok:,}` out · "
+        f"cache `{cache_r:,}r/{cache_w:,}w` · {_fmt_cost(total.get('cost_usd'))}"
+    )
+    if by_agent:
+        lines.append("**By agent:**")
+        for row in by_agent[:8]:
+            lines.append(
+                f"• `{row.get('agent')}` — `{int(row.get('events') or 0)}` events · "
+                f"`{int(row.get('input_tokens') or 0):,}` in / `{int(row.get('output_tokens') or 0):,}` out · "
+                f"{_fmt_cost(row.get('cost_usd'))}"
+            )
+    if by_source:
+        lines.append("**By source:**")
+        for row in by_source[:8]:
+            lines.append(
+                f"• `{row.get('source')}` — `{int(row.get('events') or 0)}` events · "
+                f"{_fmt_cost(row.get('cost_usd'))}"
+            )
+    return "\n".join(lines)
 
 
 def _parse_optional_positive_int(raw: str, field: str) -> tuple[int | None, str | None]:
@@ -1680,6 +1735,66 @@ class DiscordChannel(BaseChannel):
             )
             prefix = "✅ " if result.success else "❌ "
             await interaction.followup.send(prefix + result.message[:1900], ephemeral=True)
+
+        # ---- Usage ledger --------------------------------------------------
+
+        @tree.command(name="usage_today", description="Show today's token usage totals for this channel")
+        async def slash_usage_today(interaction: discord.Interaction):
+            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
+                await interaction.response.send_message(
+                    "This command is restricted to the configured owner.",
+                    ephemeral=True,
+                )
+                return
+            if not self._memory_store or not hasattr(self._memory_store, "get_usage_summary"):
+                await interaction.response.send_message(
+                    "Usage ledger is not available.", ephemeral=True,
+                )
+                return
+            await interaction.response.defer(ephemeral=True)
+            since = _start_of_today_utc()
+            summary = await self._memory_store.get_usage_summary(
+                since_ts=since,
+                platform=self.platform,
+                channel_id=str(self._channel_id),
+            )
+            await interaction.followup.send(
+                _render_usage_summary(summary, title=f"Usage since {since[:10]} UTC (channel)")[:1900],
+                ephemeral=True,
+            )
+
+        @tree.command(name="usage_thread", description="Show token usage for this thread (last 24h)")
+        async def slash_usage_thread(interaction: discord.Interaction, hours: int = 24):
+            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
+                await interaction.response.send_message(
+                    "This command is restricted to the configured owner.",
+                    ephemeral=True,
+                )
+                return
+            if not self._memory_store or not hasattr(self._memory_store, "get_usage_summary"):
+                await interaction.response.send_message(
+                    "Usage ledger is not available.", ephemeral=True,
+                )
+                return
+            channel = interaction.channel
+            if channel is None:
+                await interaction.response.send_message(
+                    "Cannot resolve current thread.", ephemeral=True,
+                )
+                return
+            await interaction.response.defer(ephemeral=True)
+            window = max(1, min(int(hours), 24 * 30))
+            since = _hours_ago_utc(window)
+            summary = await self._memory_store.get_usage_summary(
+                since_ts=since,
+                platform=self.platform,
+                channel_id=str(self._channel_id),
+                thread_id=str(channel.id),
+            )
+            await interaction.followup.send(
+                _render_usage_summary(summary, title=f"Usage last {window}h (thread)")[:1900],
+                ephemeral=True,
+            )
 
         # ---- Events --------------------------------------------------------
 

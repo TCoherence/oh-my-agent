@@ -52,6 +52,7 @@ RUNTIME_STATE_TABLES = {
     "ephemeral_workspaces",
     "automation_runtime_state",
     "automation_posts",
+    "usage_events",
 }
 SKILLS_TELEMETRY_TABLES = {
     "skill_provenance",
@@ -470,6 +471,39 @@ class MemoryStore(ABC):
 
     async def purge_expired_automation_posts(self, ttl_days: int) -> int:
         return 0
+
+    # -- usage ledger -----------------------------------------------------
+
+    async def record_usage_event(
+        self,
+        *,
+        agent: str,
+        source: str,
+        platform: str | None = None,
+        channel_id: str | None = None,
+        thread_id: str | None = None,
+        model: str | None = None,
+        input_tokens: int | None = None,
+        output_tokens: int | None = None,
+        cache_read_input_tokens: int | None = None,
+        cache_creation_input_tokens: int | None = None,
+        cost_usd: float | None = None,
+        task_id: str | None = None,
+    ) -> None:
+        """Persist a single usage sample. Default no-op for stores that don't track usage."""
+        return None
+
+    async def get_usage_summary(
+        self,
+        *,
+        since_ts: str,
+        until_ts: str | None = None,
+        platform: str | None = None,
+        channel_id: str | None = None,
+        thread_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Aggregate usage events in the given window. Returns empty dict for stores that don't track usage."""
+        return {"total": {}, "by_agent": [], "by_source": []}
 
     # -- schema version ---------------------------------------------------
 
@@ -934,6 +968,30 @@ CREATE TABLE IF NOT EXISTS skill_evaluations (
 
 CREATE INDEX IF NOT EXISTS idx_skill_evaluations_skill_created
     ON skill_evaluations(skill_name, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS usage_events (
+    id                           INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts                           TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    platform                     TEXT,
+    channel_id                   TEXT,
+    thread_id                    TEXT,
+    agent                        TEXT NOT NULL,
+    model                        TEXT,
+    source                       TEXT NOT NULL,
+    input_tokens                 INTEGER,
+    output_tokens                INTEGER,
+    cache_read_input_tokens      INTEGER,
+    cache_creation_input_tokens  INTEGER,
+    cost_usd                     REAL,
+    task_id                      TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_usage_events_ts
+    ON usage_events(ts);
+CREATE INDEX IF NOT EXISTS idx_usage_events_thread
+    ON usage_events(platform, channel_id, thread_id, ts);
+CREATE INDEX IF NOT EXISTS idx_usage_events_source
+    ON usage_events(source, ts);
 
 CREATE TABLE IF NOT EXISTS schema_version (
     id          INTEGER PRIMARY KEY CHECK (id = 1),
@@ -1541,6 +1599,133 @@ class SQLiteMemoryStore(MemoryStore):
             count = cursor.rowcount or 0
             await db.commit()
         return int(count)
+
+    # -- usage ledger -----------------------------------------------------
+
+    async def record_usage_event(
+        self,
+        *,
+        agent: str,
+        source: str,
+        platform: str | None = None,
+        channel_id: str | None = None,
+        thread_id: str | None = None,
+        model: str | None = None,
+        input_tokens: int | None = None,
+        output_tokens: int | None = None,
+        cache_read_input_tokens: int | None = None,
+        cache_creation_input_tokens: int | None = None,
+        cost_usd: float | None = None,
+        task_id: str | None = None,
+    ) -> None:
+        if not any(
+            v is not None
+            for v in (
+                input_tokens,
+                output_tokens,
+                cache_read_input_tokens,
+                cache_creation_input_tokens,
+                cost_usd,
+            )
+        ):
+            # No numeric signal worth persisting — skip to keep the ledger
+            # signal-dense.
+            return
+        async with self._write_lock:
+            db = await self._conn()
+            await db.execute(
+                "INSERT INTO usage_events ("
+                " platform, channel_id, thread_id, agent, model, source,"
+                " input_tokens, output_tokens, cache_read_input_tokens,"
+                " cache_creation_input_tokens, cost_usd, task_id"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    platform,
+                    channel_id,
+                    thread_id,
+                    agent,
+                    model,
+                    source,
+                    int(input_tokens) if input_tokens is not None else None,
+                    int(output_tokens) if output_tokens is not None else None,
+                    int(cache_read_input_tokens) if cache_read_input_tokens is not None else None,
+                    int(cache_creation_input_tokens) if cache_creation_input_tokens is not None else None,
+                    float(cost_usd) if cost_usd is not None else None,
+                    task_id,
+                ),
+            )
+            await db.commit()
+
+    async def get_usage_summary(
+        self,
+        *,
+        since_ts: str,
+        until_ts: str | None = None,
+        platform: str | None = None,
+        channel_id: str | None = None,
+        thread_id: str | None = None,
+    ) -> dict[str, Any]:
+        filters = ["ts >= ?"]
+        params: list[Any] = [since_ts]
+        if until_ts is not None:
+            filters.append("ts < ?")
+            params.append(until_ts)
+        if platform is not None:
+            filters.append("platform = ?")
+            params.append(platform)
+        if channel_id is not None:
+            filters.append("channel_id = ?")
+            params.append(channel_id)
+        if thread_id is not None:
+            filters.append("thread_id = ?")
+            params.append(thread_id)
+        where = " AND ".join(filters)
+
+        db = await self._conn()
+        total_cursor = await db.execute(
+            f"SELECT COUNT(*) AS events,"
+            f" COALESCE(SUM(input_tokens), 0) AS input_tokens,"
+            f" COALESCE(SUM(output_tokens), 0) AS output_tokens,"
+            f" COALESCE(SUM(cache_read_input_tokens), 0) AS cache_read_input_tokens,"
+            f" COALESCE(SUM(cache_creation_input_tokens), 0) AS cache_creation_input_tokens,"
+            f" COALESCE(SUM(cost_usd), 0) AS cost_usd"
+            f" FROM usage_events WHERE {where}",
+            tuple(params),
+        )
+        total_row = await total_cursor.fetchone()
+        total = dict(total_row) if total_row else {}
+
+        by_agent_cursor = await db.execute(
+            f"SELECT agent,"
+            f" COUNT(*) AS events,"
+            f" COALESCE(SUM(input_tokens), 0) AS input_tokens,"
+            f" COALESCE(SUM(output_tokens), 0) AS output_tokens,"
+            f" COALESCE(SUM(cache_read_input_tokens), 0) AS cache_read_input_tokens,"
+            f" COALESCE(SUM(cache_creation_input_tokens), 0) AS cache_creation_input_tokens,"
+            f" COALESCE(SUM(cost_usd), 0) AS cost_usd"
+            f" FROM usage_events WHERE {where}"
+            f" GROUP BY agent ORDER BY cost_usd DESC, events DESC",
+            tuple(params),
+        )
+        by_agent = [dict(row) for row in await by_agent_cursor.fetchall()]
+
+        by_source_cursor = await db.execute(
+            f"SELECT source,"
+            f" COUNT(*) AS events,"
+            f" COALESCE(SUM(input_tokens), 0) AS input_tokens,"
+            f" COALESCE(SUM(output_tokens), 0) AS output_tokens,"
+            f" COALESCE(SUM(cost_usd), 0) AS cost_usd"
+            f" FROM usage_events WHERE {where}"
+            f" GROUP BY source ORDER BY cost_usd DESC, events DESC",
+            tuple(params),
+        )
+        by_source = [dict(row) for row in await by_source_cursor.fetchall()]
+
+        return {
+            "total": total,
+            "by_agent": by_agent,
+            "by_source": by_source,
+        }
 
     # -- schema version ---------------------------------------------------
 
@@ -2859,6 +3044,13 @@ class SplitSQLiteMemoryStore:
         "get_automation_state",
         "list_automation_states",
         "delete_automation_state",
+        "record_automation_post",
+        "get_automation_post",
+        "set_automation_post_follow_up_thread",
+        "list_automation_posts",
+        "purge_expired_automation_posts",
+        "record_usage_event",
+        "get_usage_summary",
         "get_schema_version",
         "set_schema_version",
     }
