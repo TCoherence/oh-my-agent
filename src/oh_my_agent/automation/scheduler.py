@@ -5,7 +5,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
-from typing import Awaitable, Callable, Literal
+from typing import Any, Awaitable, Callable, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
@@ -722,6 +722,8 @@ class Scheduler:
                 raise ValueError("initial_delay_seconds is not supported with cron")
             _parse_cron_expression(cron)
         else:
+            # The 'cron xor interval_seconds' guard above ensures non-None here.
+            assert interval_seconds is not None
             interval_value = int(interval_seconds)
             if interval_value <= 0:
                 raise ValueError("interval_seconds must be > 0")
@@ -1233,7 +1235,7 @@ def _resolve_configured_timezone(raw: object) -> tuple[tzinfo, str]:
     return tz, value
 
 
-def _parse_positive_optional_int(raw: object, *, field_name: str) -> int | None:
+def _parse_positive_optional_int(raw: Any, *, field_name: str) -> int | None:
     if raw is None:
         return None
     value = int(raw)
