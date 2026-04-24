@@ -107,7 +107,6 @@ def test_codex_resume_command_omits_skip_git_repo_check_when_disabled():
 
 def test_codex_parse_output_session_id_not_captured_by_parse_output():
     """_parse_output does not capture session_id (done in run()); text is extracted normally."""
-    import json
     agent = _agent()
     raw = "\n".join([
         '{"type":"thread.started","thread_id":"019ca7d1-1b1d-7e73-8718-84114cec1905"}',

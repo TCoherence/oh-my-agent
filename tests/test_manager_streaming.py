@@ -7,8 +7,9 @@ fixtures (no Discord) so the tests stay fast and hermetic.
 
 from __future__ import annotations
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 from oh_my_agent.agents.base import AgentResponse
 from oh_my_agent.agents.registry import AgentRegistry

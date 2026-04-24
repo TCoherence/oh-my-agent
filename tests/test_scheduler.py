@@ -1,7 +1,6 @@
 import asyncio
 import textwrap
 from datetime import datetime, timezone
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest

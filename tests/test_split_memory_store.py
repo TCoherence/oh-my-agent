@@ -8,13 +8,13 @@ from pathlib import Path
 import pytest
 
 from oh_my_agent.memory.store import (
-    CONVERSATION_TABLES,
     CONVERSATION_FTS_SHADOW_TABLES,
+    CONVERSATION_TABLES,
     RUNTIME_STATE_TABLES,
     SKILLS_TELEMETRY_TABLES,
+    SplitSQLiteMemoryStore,
     SQLiteMemoryStore,
     SQLiteRuntimeStateStore,
-    SplitSQLiteMemoryStore,
     maybe_split_legacy_memory_db,
 )
 

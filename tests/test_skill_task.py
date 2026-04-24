@@ -12,7 +12,13 @@ from oh_my_agent.agents.registry import AgentRegistry
 from oh_my_agent.gateway.session import ChannelSession
 from oh_my_agent.memory.store import SQLiteMemoryStore
 from oh_my_agent.runtime.service import RuntimeService
-from oh_my_agent.runtime.types import TASK_STATUS_DRAFT, TASK_STATUS_MERGED, TASK_STATUS_PENDING, TASK_STATUS_WAITING_MERGE, TASK_TYPE_SKILL
+from oh_my_agent.runtime.types import (
+    TASK_STATUS_DRAFT,
+    TASK_STATUS_MERGED,
+    TASK_STATUS_PENDING,
+    TASK_STATUS_WAITING_MERGE,
+    TASK_TYPE_SKILL,
+)
 
 
 @dataclass

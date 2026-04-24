@@ -1,10 +1,10 @@
 from oh_my_agent.runtime.policy import (
-    build_skill_prompt,
     build_runtime_prompt,
+    build_skill_prompt,
     evaluate_strict_risk,
     extract_skill_name,
-    is_skill_intent,
     is_long_task_intent,
+    is_skill_intent,
     parse_task_state,
 )
 

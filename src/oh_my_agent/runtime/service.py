@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
 import fnmatch
 import inspect
 import json
@@ -10,52 +9,47 @@ import re
 import shutil
 import time
 import uuid
+from contextlib import suppress
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from oh_my_agent.auth.types import AuthFlow, CredentialHandle
 from oh_my_agent.agents.base import AgentResponse
 from oh_my_agent.agents.cli.base import _bounded_log_excerpt
 from oh_my_agent.agents.registry import AgentRegistry
+from oh_my_agent.auth.types import AuthFlow, CredentialHandle
 from oh_my_agent.control.protocol import (
     AskUserChoice,
     ProtocolError,
     extract_control_frame,
-    parse_auth_challenge,
     parse_ask_user_challenge,
+    parse_auth_challenge,
     parse_control_envelope,
     strip_control_frame_text,
 )
 from oh_my_agent.gateway.base import BaseChannel, IncomingMessage, OutgoingAttachment
 from oh_my_agent.gateway.session import ChannelSession
-from oh_my_agent.skills.frontmatter import read_skill_frontmatter, resolve_skill_frontmatter, skill_execution_limits
 from oh_my_agent.runtime.notifications import NotificationManager
 from oh_my_agent.runtime.policy import (
-    is_artifact_intent,
-    build_skill_prompt,
     build_runtime_prompt,
-    extract_skill_name,
+    build_skill_prompt,
     evaluate_strict_risk,
+    extract_skill_name,
+    is_artifact_intent,
     is_long_task_intent,
     parse_task_state,
 )
 from oh_my_agent.runtime.types import (
-    TASK_COMPLETION_ARTIFACT,
     TASK_COMPLETION_MERGE,
     TASK_COMPLETION_REPLY,
-    TASK_TYPE_ARTIFACT,
-    TASK_TYPE_CODE,
-    TASK_TYPE_REPO_CHANGE,
-    TASK_TYPE_SKILL,
-    TASK_TYPE_SKILL_CHANGE,
     TASK_STATUS_APPLIED,
     TASK_STATUS_BLOCKED,
     TASK_STATUS_COMPLETED,
     TASK_STATUS_DISCARDED,
     TASK_STATUS_DRAFT,
     TASK_STATUS_FAILED,
-    TASK_STATUS_MERGED,
     TASK_STATUS_MERGE_FAILED,
+    TASK_STATUS_MERGED,
     TASK_STATUS_PAUSED,
     TASK_STATUS_PENDING,
     TASK_STATUS_REJECTED,
@@ -63,8 +57,11 @@ from oh_my_agent.runtime.types import (
     TASK_STATUS_STOPPED,
     TASK_STATUS_TIMEOUT,
     TASK_STATUS_VALIDATING,
-    TASK_STATUS_WAITING_USER_INPUT,
     TASK_STATUS_WAITING_MERGE,
+    TASK_STATUS_WAITING_USER_INPUT,
+    TASK_TYPE_ARTIFACT,
+    TASK_TYPE_REPO_CHANGE,
+    TASK_TYPE_SKILL_CHANGE,
     HitlPrompt,
     NotificationEvent,
     RuntimeTask,
@@ -72,6 +69,11 @@ from oh_my_agent.runtime.types import (
     TaskDecisionEvent,
 )
 from oh_my_agent.runtime.worktree import WorktreeError, WorktreeManager
+from oh_my_agent.skills.frontmatter import (
+    read_skill_frontmatter,
+    resolve_skill_frontmatter,
+    skill_execution_limits,
+)
 from oh_my_agent.utils.chunker import chunk_message
 from oh_my_agent.utils.errors import user_safe_agent_error
 from oh_my_agent.utils.usage import append_usage_audit, record_usage_from_response
@@ -1629,7 +1631,8 @@ class RuntimeService:
     def _append_scheduler_liveness(self, lines: list[str], scheduler) -> None:
         """Append scheduler watchdog liveness details to a /doctor report."""
         try:
-            from datetime import datetime, timedelta, timezone as _tz
+            from datetime import datetime, timedelta
+            from datetime import timezone as _tz
 
             now = datetime.now(_tz.utc).astimezone()
             findings = scheduler.evaluate_job_health()
@@ -2662,7 +2665,6 @@ class RuntimeService:
         prior_failure: str | None = None
         total_agent_s = 0.0
         total_test_s = 0.0
-        last_agent_name: str = task.preferred_agent or self._default_agent or ""
         latest = await self._store.get_last_runtime_checkpoint(task.id)
         if latest:
             prior_failure = latest.get("test_result")
@@ -2745,7 +2747,6 @@ class RuntimeService:
                 workspace=workspace,
                 step=step,
             )
-            last_agent_name = agent_name
             elapsed_agent = time.perf_counter() - t_agent
             total_agent_s += elapsed_agent
             if response.error:

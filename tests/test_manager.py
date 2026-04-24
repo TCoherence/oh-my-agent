@@ -1,16 +1,18 @@
 import asyncio
 import sqlite3
-import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
 from pathlib import Path
-from oh_my_agent.gateway.manager import GatewayManager
-from oh_my_agent.gateway.base import IncomingMessage
-from oh_my_agent.gateway.session import ChannelSession
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
 from oh_my_agent.agents.base import AgentResponse, BaseAgent
 from oh_my_agent.agents.registry import AgentRegistry
 from oh_my_agent.automation import ScheduledJob
-from oh_my_agent.memory.store import SQLiteMemoryStore
+from oh_my_agent.gateway.base import IncomingMessage
+from oh_my_agent.gateway.manager import GatewayManager
 from oh_my_agent.gateway.router import RouteDecision
+from oh_my_agent.gateway.session import ChannelSession
+from oh_my_agent.memory.store import SQLiteMemoryStore
 from oh_my_agent.skills.skill_sync import SkillSync
 from oh_my_agent.utils.errors import (
     USER_MSG_AGENT_CRASH,

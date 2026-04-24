@@ -7,14 +7,18 @@
 
 from __future__ import annotations
 
-import asyncio
-from dataclasses import fields
-from pathlib import Path
-
 import pytest
 
-# ── 1A: Service types + BaseChannel ─────────────────────────────────── #
-
+from oh_my_agent.config_validator import (
+    ConfigError,
+    ValidationResult,
+    validate_config,
+)
+from oh_my_agent.gateway.base import (
+    ActionDescriptor,
+    BaseChannel,
+    InteractivePrompt,
+)
 from oh_my_agent.gateway.services.types import (
     AutomationInfo,
     AutomationStatusResult,
@@ -25,12 +29,10 @@ from oh_my_agent.gateway.services.types import (
     TaskListResult,
     TaskSummary,
 )
-from oh_my_agent.gateway.base import (
-    ActionDescriptor,
-    BaseChannel,
-    IncomingMessage,
-    InteractivePrompt,
-    OutgoingAttachment,
+from oh_my_agent.memory.store import (
+    CURRENT_SCHEMA_VERSION,
+    SplitSQLiteMemoryStore,
+    SQLiteMemoryStore,
 )
 
 
@@ -171,12 +173,6 @@ class TestInteractivePromptDataclasses:
 
 
 # ── 1B: Config validator ────────────────────────────────────────────── #
-
-from oh_my_agent.config_validator import (
-    ConfigError,
-    ValidationResult,
-    validate_config,
-)
 
 _MINIMAL_VALID = {
     "gateway": {
@@ -354,8 +350,6 @@ class TestConfigValidator:
 
 # ── 1C: Schema version tracking ─────────────────────────────────────── #
 
-from oh_my_agent.memory.store import SQLiteMemoryStore, CURRENT_SCHEMA_VERSION
-
 
 class TestSchemaVersion:
     @pytest.fixture
@@ -394,8 +388,6 @@ class TestSchemaVersion:
 
 
 # ── 1C bonus: SplitSQLiteMemoryStore routes schema methods ──────────── #
-
-from oh_my_agent.memory.store import SplitSQLiteMemoryStore
 
 
 class TestSplitStoreSchemaVersion:

@@ -22,10 +22,8 @@ from pathlib import Path
 import pytest
 
 from oh_my_agent.automation.scheduler import (
-    HealthFinding,
-    JobRuntimeState,
-    Scheduler,
     ScheduledJob,
+    Scheduler,
 )
 
 

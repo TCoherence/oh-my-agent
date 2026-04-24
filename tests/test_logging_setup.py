@@ -5,9 +5,8 @@ from __future__ import annotations
 import logging
 import logging.handlers
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
-from oh_my_agent.logging_setup import KeyValueFormatter, setup_logging, _cleanup_old_logs
+from oh_my_agent.logging_setup import KeyValueFormatter, _cleanup_old_logs, setup_logging
 
 
 class TestKeyValueFormatter:

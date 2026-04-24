@@ -1,10 +1,14 @@
 from __future__ import annotations
 
-from dataclasses import replace
 from typing import TYPE_CHECKING, Awaitable, Callable
 
 from oh_my_agent.automation.scheduler import FireJobResult
-from oh_my_agent.gateway.services.types import ServiceResult, TaskActionResult, TaskListResult, TaskSummary
+from oh_my_agent.gateway.services.types import (
+    ServiceResult,
+    TaskActionResult,
+    TaskListResult,
+    TaskSummary,
+)
 from oh_my_agent.runtime.types import RuntimeTask, TaskDecisionEvent
 
 if TYPE_CHECKING:

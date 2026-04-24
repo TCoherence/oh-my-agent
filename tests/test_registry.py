@@ -1,4 +1,5 @@
 import pytest
+
 from oh_my_agent.agents.base import AgentResponse, BaseAgent
 from oh_my_agent.agents.registry import AgentRegistry
 

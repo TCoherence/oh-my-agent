@@ -5,8 +5,6 @@ import json
 from datetime import UTC, date, datetime
 from pathlib import Path
 
-import pytest
-
 
 def _load_module():
     path = Path("skills/market-briefing/scripts/report_store.py")

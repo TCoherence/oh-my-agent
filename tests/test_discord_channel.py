@@ -1,11 +1,11 @@
-from types import SimpleNamespace
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
-from oh_my_agent.runtime.types import HitlPrompt
 from oh_my_agent.gateway.base import OutgoingAttachment
 from oh_my_agent.gateway.platforms.discord import DiscordChannel
+from oh_my_agent.runtime.types import HitlPrompt
 
 
 def test_extract_guild_id_prefers_channel_guild():
@@ -429,11 +429,11 @@ async def test_send_task_draft_uses_send_interactive():
 # ---------------------------------------------------------------------------
 
 
+from oh_my_agent.gateway.base import ActionDescriptor, InteractivePrompt  # noqa: E402
 from oh_my_agent.gateway.platforms.discord import (  # noqa: E402
-    _TaskSuggestModal,
     _parse_optional_positive_int,
+    _TaskSuggestModal,
 )
-from oh_my_agent.gateway.base import InteractivePrompt, ActionDescriptor  # noqa: E402
 from oh_my_agent.gateway.services.types import (  # noqa: E402
     InteractiveDecision,
     TaskActionResult,

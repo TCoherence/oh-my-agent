@@ -1,7 +1,8 @@
+
 import pytest
-from pathlib import Path
-from oh_my_agent.skills.skill_sync import SkillSync
+
 from oh_my_agent.main import _setup_workspace
+from oh_my_agent.skills.skill_sync import SkillSync
 
 
 @pytest.fixture

@@ -12,7 +12,11 @@ from oh_my_agent.gateway.base import IncomingMessage
 from oh_my_agent.gateway.manager import GatewayManager
 from oh_my_agent.gateway.session import ChannelSession
 from oh_my_agent.memory.store import SQLiteMemoryStore
-from oh_my_agent.runtime import RuntimeService, TASK_STATUS_COMPLETED, TASK_STATUS_WAITING_USER_INPUT
+from oh_my_agent.runtime import (
+    TASK_STATUS_COMPLETED,
+    TASK_STATUS_WAITING_USER_INPUT,
+    RuntimeService,
+)
 from tests.test_runtime_service import _FakeChannel, _init_git_repo
 
 

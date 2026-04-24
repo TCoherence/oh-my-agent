@@ -1,9 +1,8 @@
 from oh_my_agent.utils.chunker import (
-    chunk_message,
     MAX_CHUNK_SIZE,
     _parse_segments,
+    chunk_message,
 )
-
 
 # ── Original plain-text tests (backward compatibility) ───────────────── #
 
