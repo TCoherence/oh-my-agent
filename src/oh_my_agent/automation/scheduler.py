@@ -389,7 +389,7 @@ class Scheduler:
         if state.phase == "firing":
             logger.info("fire_job_now: %r already firing — skipping manual fire", name)
             return "already_firing"
-        logger.info("Manual fire for job %r", name)
+        logger.info("fire_job_now: dispatching manual fire for job %r", name)
         self._dispatch_due_job(name, on_fire, preserve_next_fire=True)
         return "ok"
 
@@ -474,7 +474,11 @@ class Scheduler:
 
         Firing jobs are intentionally excluded — their ``next_fire_at`` carries
         the prior schedule and would make the loop spin at the lower bound
-        until the fire completes.
+        until the fire completes. Pinned-future ``next_fire_at`` (from manual
+        fires with ``preserve_next_fire=True``) is only honored after the
+        fire completes and ``_mark_job_sleeping`` restores it; during the
+        fire itself the wakeup event drives reconvergence (set by
+        ``_fire_job_once.finally``).
         """
         earliest: datetime | None = None
         for state in self._job_state.values():
@@ -504,7 +508,17 @@ class Scheduler:
     ) -> None:
         state = self._job_state.get(name)
         job = self._jobs_by_name.get(name)
-        if state is None or job is None or state.phase == "firing":
+        if state is None or job is None:
+            return
+        if state.phase == "firing":
+            # Defense in depth: callers (due loop, fire_job_now) already
+            # filter on phase, so hitting this branch means a double-dispatch
+            # attempt. Log and skip rather than silently no-op.
+            logger.debug(
+                "_dispatch_due_job: %r already firing — skipping (preserve=%s)",
+                name,
+                preserve_next_fire,
+            )
             return
         # Capture the pre-fire next_fire_at so manual fires can restore it
         # instead of advancing the regular schedule.

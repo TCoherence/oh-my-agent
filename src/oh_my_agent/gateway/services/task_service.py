@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import TYPE_CHECKING, Awaitable, Callable, Literal
+from typing import TYPE_CHECKING, Awaitable, Callable
 
+from oh_my_agent.automation.scheduler import FireJobResult
 from oh_my_agent.gateway.services.types import ServiceResult, TaskActionResult, TaskListResult, TaskSummary
 from oh_my_agent.runtime.types import RuntimeTask, TaskDecisionEvent
 
@@ -13,7 +14,6 @@ if TYPE_CHECKING:
     from oh_my_agent.runtime.service import RuntimeService
 
 
-FireJobResult = Literal["ok", "not_found", "scheduler_down", "already_firing"]
 FireAutomation = Callable[[str], Awaitable[FireJobResult]]
 
 

@@ -437,6 +437,44 @@ async def test_reload_remove_cancels_in_flight_fire(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_reload_add_does_not_disturb_unrelated_in_flight_fire(tmp_path):
+    """A reload that only adds a new job must not cancel an unrelated in-flight fire."""
+    _seed_interval_job(tmp_path, "tick", interval_seconds=1, initial_delay_seconds=0)
+    scheduler = _mk_scheduler(tmp_path, due_loop_max_tick_seconds=0.05)
+    release = asyncio.Event()
+    fired = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def on_fire(job: ScheduledJob) -> None:
+        if job.name == "tick":
+            fired.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+    run_task = asyncio.create_task(scheduler.run(on_fire))
+    try:
+        await asyncio.wait_for(fired.wait(), timeout=1.5)
+        original_task = scheduler._fire_tasks["tick"]
+
+        # Add an unrelated new job on disk and trigger reload.
+        _seed_interval_job(tmp_path, "other", interval_seconds=60, initial_delay_seconds=60)
+        await scheduler.reload_now()
+
+        # The in-flight "tick" task must still be the same object, not cancelled.
+        assert scheduler._fire_tasks.get("tick") is original_task
+        assert not original_task.cancelled()
+        assert not cancelled.is_set()
+        # And the new job should be registered.
+        assert "other" in scheduler._job_state
+    finally:
+        release.set()
+        await _stop(scheduler, run_task)
+
+
+@pytest.mark.asyncio
 async def test_reload_update_recomputes_next_fire(tmp_path):
     """Changing a cron expression on disk recomputes next_fire_at."""
     path = _seed_cron_job(tmp_path, cron="0 8 * * *")
