@@ -389,11 +389,15 @@ async def _shutdown(
     reason: str,
     diary_writer=None,
     trace_writer=None,
+    diary_reflect_loop=None,
 ) -> None:
     logger.info("Shutdown started reason=%s", reason)
     if scheduler:
         with suppress(Exception):
             scheduler.stop()
+    if diary_reflect_loop is not None:
+        with suppress(Exception):
+            await diary_reflect_loop.stop()
     if gateway_manager:
         await gateway_manager.stop()
     if runtime_service:
@@ -842,6 +846,7 @@ async def ignite(ctx: BootContext) -> None:
         gateway.set_memory_store(memory_store)
 
     diary_writer = None
+    diary_dir: Path | None = None
     diary_cfg = memory_cfg.get("diary", {}) if isinstance(memory_cfg, dict) else {}
     if diary_cfg.get("enabled", True):
         from oh_my_agent.memory.session_diary import SessionDiaryWriter
@@ -855,6 +860,38 @@ async def ignite(ctx: BootContext) -> None:
         diary_writer.start()
         gateway.set_diary_writer(diary_writer)
         logger.info("Session diary enabled at %s", diary_dir)
+
+    diary_reflector = None
+    diary_reflect_loop = None
+    reflection_cfg = memory_cfg.get("diary_reflection", {}) if isinstance(memory_cfg, dict) else {}
+    if (
+        judge_store is not None
+        and diary_dir is not None
+        and reflection_cfg.get("enabled", False)
+    ):
+        from oh_my_agent.memory.diary_reflector import DiaryReflectionLoop, DiaryReflector
+
+        diary_reflector = DiaryReflector(diary_dir=diary_dir, store=judge_store)
+        gateway.set_diary_reflector(diary_reflector)
+        fire_hour = int(reflection_cfg.get("fire_hour_local", 2))
+        if agents and channel_pairs:
+            # Reflection uses any configured agent registry; reuse the first
+            # channel's registry to avoid picking a new model configuration.
+            _channel, reflect_registry = channel_pairs[0]
+            diary_reflect_loop = DiaryReflectionLoop(
+                reflector=diary_reflector,
+                registry=reflect_registry,
+                fire_hour_local=fire_hour,
+            )
+            diary_reflect_loop.start()
+            logger.info(
+                "Diary reflection loop enabled (fires daily at %02d:00 local)",
+                fire_hour,
+            )
+        else:
+            logger.info(
+                "Diary reflector ready for manual /reflect_yesterday (no channel registry to auto-fire)"
+            )
 
     logger.info("Starting gateway with %d channel(s)...", len(channel_pairs))
     loop = asyncio.get_running_loop()
@@ -884,6 +921,7 @@ async def ignite(ctx: BootContext) -> None:
             reason=reason,
             diary_writer=diary_writer,
             trace_writer=trace_writer,
+            diary_reflect_loop=diary_reflect_loop,
         )
 
     try:

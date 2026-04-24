@@ -36,7 +36,7 @@ The system has seven major subsystems.
   - Automations: `/automation_status`, `/automation_reload`, `/automation_enable`, `/automation_disable`, `/automation_run`
   - Auth: `/auth_login`, `/auth_status`, `/auth_clear`
   - Operator: `/doctor`, `/usage_today`, `/usage_thread`
-  - Memory: `/memories`, `/forget`, `/memorize`
+  - Memory: `/memories`, `/forget`, `/memorize`, `/reflect_yesterday`
 - Agent targeting:
   - Thread messages support `@claude` / `@gemini` / `@codex` prefix to force one agent for that turn.
   - Prefix is stripped before dispatch; agent name is passed via `IncomingMessage.preferred_agent`.

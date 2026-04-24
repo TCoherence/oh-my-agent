@@ -147,6 +147,34 @@ def _hours_ago_utc(hours: int) -> str:
     return ts.strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _render_reflection_result(result: Any) -> str:
+    """Render a DiaryReflector.ReflectionResult for Discord ephemeral replies."""
+    lines = [f"**Diary reflection — {result.diary_date.isoformat()}**"]
+    if result.skipped_reason:
+        lines.append(f"_skipped: {result.skipped_reason}_")
+        return "\n".join(lines)
+    if result.error:
+        lines.append(f"❌ error: `{result.error[:200]}`")
+        return "\n".join(lines)
+    stats = result.stats or {}
+    added = int(stats.get("add") or 0)
+    strengthened = int(stats.get("strengthen") or 0)
+    superseded = int(stats.get("supersede") or 0)
+    no_op = int(stats.get("no_op") or 0)
+    rejected = int(stats.get("rejected") or 0)
+    lines.append(
+        f"✅ actions: `{len(result.actions)}` · "
+        f"+{added} ~{strengthened} ↪{superseded} ∅{no_op} rej{rejected}"
+    )
+    if added + strengthened + superseded > 0:
+        for action in (result.actions or [])[:6]:
+            op = str(action.get("op") or "")
+            if op in {"add", "supersede"}:
+                summary = str(action.get("summary") or action.get("new_summary") or "")[:140]
+                lines.append(f"• `{op}` — {summary}")
+    return "\n".join(lines)
+
+
 def _render_usage_summary(summary: dict[str, Any], *, title: str) -> str:
     total = summary.get("total") or {}
     by_agent = summary.get("by_agent") or []
@@ -316,6 +344,7 @@ class DiscordChannel(BaseChannel):
         self._judge_store = None  # JudgeStore
         self._gateway_manager = None  # GatewayManager (for /memorize)
         self._scheduler = None  # Scheduler
+        self._diary_reflector = None  # DiaryReflector
         self._ask_service = AskService()
         self._task_service: TaskService | None = None
         self._doctor_service: DoctorService | None = None
@@ -351,6 +380,10 @@ class DiscordChannel(BaseChannel):
         """Inject runtime service for /task_* commands and decision buttons."""
         self._runtime_service = runtime_service
         self._refresh_services()
+
+    def set_diary_reflector(self, reflector) -> None:
+        """Inject a DiaryReflector so ``/reflect_yesterday`` can run on demand."""
+        self._diary_reflector = reflector
 
     def register_dump_channel(self, channel_id: str) -> None:
         """Record a dump channel id so ``on_message`` will route replies
@@ -1735,6 +1768,23 @@ class DiscordChannel(BaseChannel):
             )
             prefix = "✅ " if result.success else "❌ "
             await interaction.followup.send(prefix + result.message[:1900], ephemeral=True)
+
+        @tree.command(name="reflect_yesterday", description="Run a memory reflection pass over yesterday's diary")
+        async def slash_reflect_yesterday(interaction: discord.Interaction):
+            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
+                await interaction.response.send_message(
+                    "This command is restricted to the configured owner.",
+                    ephemeral=True,
+                )
+                return
+            if self._diary_reflector is None or self._registry is None:
+                await interaction.response.send_message(
+                    "Diary reflector is not enabled.", ephemeral=True,
+                )
+                return
+            await interaction.response.defer(ephemeral=True)
+            result = await self._diary_reflector.reflect_yesterday(registry=self._registry)
+            await interaction.followup.send(_render_reflection_result(result)[:1900], ephemeral=True)
 
         # ---- Usage ledger --------------------------------------------------
 

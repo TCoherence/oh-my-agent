@@ -18,6 +18,15 @@ memory:
       - 记下来
       - remember this
       - memorize this
+  # Optional cross-day reflection — reads yesterday's diary once a day and
+  # feeds memory-judge actions into the store. Requires memory.judge.enabled
+  # and diary (below) to be on.
+  diary_reflection:
+    enabled: false
+    fire_hour_local: 2                        # 0-23, local time; 2am picks up overnight
+  diary:
+    enabled: true                             # per-day markdown of every turn under <runtime>/diary/
+    # path: ~/.oh-my-agent/runtime/diary
 
 skills:
   enabled: true
