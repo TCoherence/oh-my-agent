@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import discord
 from discord import app_commands
@@ -45,7 +45,7 @@ from oh_my_agent.utils.rate_limiter import TokenBucketLimiter
 
 logger = logging.getLogger(__name__)
 
-THREAD_ARCHIVE_MINUTES = 60
+THREAD_ARCHIVE_MINUTES: Literal[60, 1440, 4320, 10080] = 60
 STATUS_MESSAGE_PREFIX = "**Task Status**"
 _MAX_IMAGE_BYTES = 10 * 1024 * 1024  # 10 MB
 _ATTACHMENT_DIR = Path(tempfile.gettempdir()) / "oh-my-agent" / "attachments"
@@ -64,7 +64,7 @@ class _InteractiveView(discord.ui.View):
             "success": discord.ButtonStyle.success,
         }
         for row, action in enumerate(prompt.actions):
-            button = discord.ui.Button(
+            button: discord.ui.Button = discord.ui.Button(
                 label=action.label[:80] or action.id[:80] or "Action",
                 style=style_map.get(action.style, discord.ButtonStyle.secondary),
                 custom_id=self._custom_id(prompt, action.id),
@@ -89,7 +89,8 @@ class _InteractiveView(discord.ui.View):
                     ),
                 )
 
-            button.callback = _callback
+            # discord.py's button-handler pattern reassigns the bound method
+            button.callback = _callback  # type: ignore[method-assign]
             self.add_item(button)
 
     @staticmethod
@@ -261,7 +262,7 @@ class _TaskSuggestModal(discord.ui.Modal):
         self._original_message_id = original_message_id
         self._channel = channel
 
-        self._suggestion_input = discord.ui.TextInput(
+        self._suggestion_input: discord.ui.TextInput = discord.ui.TextInput(
             label="Suggestion",
             style=discord.TextStyle.paragraph,
             placeholder="What should the agent change on the next run?",
@@ -274,14 +275,14 @@ class _TaskSuggestModal(discord.ui.Modal):
         # (``max_steps`` / ``max_minutes``), which this modal does NOT affect.
         # ``step=N/M`` in operator logs is the outer counter; the override here
         # feeds into each inner agent call.
-        self._max_turns_input = discord.ui.TextInput(
+        self._max_turns_input: discord.ui.TextInput = discord.ui.TextInput(
             label="Agent max-turns per call (optional)",
             style=discord.TextStyle.short,
             placeholder="claude --max-turns; e.g. 45",
             required=False,
             max_length=4,
         )
-        self._timeout_input = discord.ui.TextInput(
+        self._timeout_input: discord.ui.TextInput = discord.ui.TextInput(
             label="Agent timeout sec per call (optional)",
             style=discord.TextStyle.short,
             placeholder="per-call timeout; e.g. 900",
@@ -348,15 +349,19 @@ class DiscordChannel(BaseChannel):
         self._scheduler = None  # Scheduler
         self._diary_reflector = None  # DiaryReflector
         self._ask_service = AskService()
-        self._task_service: TaskService | None = None
-        self._doctor_service: DoctorService | None = None
-        self._automation_service: AutomationService | None = None
-        self._memory_service: MemoryService | None = None
-        self._skill_eval_service: SkillEvalService | None = None
         self._skill_eval_enabled = True
         self._skill_stats_recent_days = 7
         self._skill_feedback_emojis = {"👍", "👎"}
         self._rate_limiter = TokenBucketLimiter(rate=5.0, burst=10)
+        # Populate services up-front so type-checkers know they're always set.
+        # Each service tolerates None dependencies; setters below reset the
+        # attributes once real dependencies are injected.
+        self._task_service: TaskService
+        self._doctor_service: DoctorService
+        self._automation_service: AutomationService
+        self._memory_service: MemoryService
+        self._skill_eval_service: SkillEvalService
+        self._refresh_services()
 
     @property
     def platform(self) -> str:
@@ -1042,6 +1047,8 @@ class DiscordChannel(BaseChannel):
             channel_obj = client.get_channel(payload.channel_id)
             if channel_obj is None:
                 channel_obj = await client.fetch_channel(payload.channel_id)
+            if not isinstance(channel_obj, (discord.TextChannel, discord.Thread, discord.DMChannel)):
+                return
             message = await channel_obj.fetch_message(payload.message_id)
 
             active_score = None
@@ -2028,13 +2035,16 @@ class DiscordChannel(BaseChannel):
         *,
         parent_channel_id: str | None = None,
     ) -> str | None:
-        if not self._client:
+        client = self._client
+        if client is None:
             return None
         effective_parent = parent_channel_id or self._channel_id
         try:
-            parent = self._client.get_channel(int(effective_parent))
+            parent = client.get_channel(int(effective_parent))
             if parent is None:
-                parent = await self._client.fetch_channel(int(effective_parent))
+                parent = await client.fetch_channel(int(effective_parent))
+            if not isinstance(parent, (discord.TextChannel, discord.Thread, discord.DMChannel)):
+                return None
             anchor = await parent.fetch_message(int(anchor_message_id))
             thread = await anchor.create_thread(
                 name=name[:100],
@@ -2148,11 +2158,12 @@ class DiscordChannel(BaseChannel):
         message_id: str | None = None,
     ) -> str | None:
         thread = await self._resolve_channel(thread_id)
+        bot_user = self._require_client().user
 
         if message_id:
             try:
                 existing = await thread.fetch_message(int(message_id))
-                if existing.author == self._client.user:
+                if existing.author == bot_user:
                     await self._acquire_outbound_slot()
                     await existing.edit(content=text)
                     return str(existing.id)
@@ -2165,7 +2176,7 @@ class DiscordChannel(BaseChannel):
                 latest = item
             if (
                 latest is not None
-                and latest.author == self._client.user
+                and latest.author == bot_user
                 and (latest.content or "").startswith(STATUS_MESSAGE_PREFIX)
             ):
                 await self._acquire_outbound_slot()
@@ -2184,18 +2195,29 @@ class DiscordChannel(BaseChannel):
         async with thread.typing():
             yield
 
+    def _require_client(self) -> discord.Client:
+        """Return the Discord client, asserting it has been started.
+
+        All callers of this method run inside request/event handlers, which
+        only fire after ``start()`` populated ``self._client``.
+        """
+        assert self._client is not None, "Discord client not initialized; start() must run first"
+        return self._client
+
     async def _resolve_channel(self, thread_id: str):
-        thread = self._client.get_channel(int(thread_id))
+        client = self._require_client()
+        thread = client.get_channel(int(thread_id))
         if thread is None:
-            thread = await self._client.fetch_channel(int(thread_id))
+            thread = await client.fetch_channel(int(thread_id))
         return thread
 
     async def ensure_dm_channel(self, user_id: str) -> str:
         """Return a DM channel id for the target user, creating it if needed."""
+        client = self._require_client()
         uid = int(user_id)
-        user = self._client.get_user(uid)
+        user = client.get_user(uid)
         if user is None:
-            user = await self._client.fetch_user(uid)
+            user = await client.fetch_user(uid)
         dm = user.dm_channel
         if dm is None:
             dm = await user.create_dm()
@@ -2219,10 +2241,11 @@ class DiscordChannel(BaseChannel):
         return "global"
 
     async def _resolve_target_guild_id(self, target_id: int) -> int | None:
-        channel = self._client.get_channel(target_id)
+        client = self._require_client()
+        channel = client.get_channel(target_id)
         if channel is None:
             try:
-                channel = await self._client.fetch_channel(target_id)
+                channel = await client.fetch_channel(target_id)
             except Exception:
                 logger.debug("Failed to fetch target channel %s for guild sync", target_id, exc_info=True)
                 return None
