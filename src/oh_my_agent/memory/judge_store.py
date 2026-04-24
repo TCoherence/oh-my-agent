@@ -16,12 +16,12 @@ import logging
 import os
 import time
 import uuid
-from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import yaml
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 logger = logging.getLogger(__name__)
 
@@ -42,87 +42,146 @@ def _new_id() -> str:
     return uuid.uuid4().hex[:12]
 
 
-@dataclass
-class EvidenceRecord:
+class EvidenceRecord(BaseModel):
+    model_config = ConfigDict(extra="ignore", validate_assignment=False)
+
     thread_id: str = ""
-    ts: str = field(default_factory=_now_iso)
+    ts: str = Field(default_factory=_now_iso)
     snippet: str = ""
+
+    @field_validator("thread_id", "ts", mode="before")
+    @classmethod
+    def _coerce_str(cls, v: Any) -> str:
+        if v is None:
+            return ""
+        return str(v)
+
+    @field_validator("ts", mode="after")
+    @classmethod
+    def _default_ts(cls, v: str) -> str:
+        return v or _now_iso()
+
+    @field_validator("snippet", mode="before")
+    @classmethod
+    def _clip_snippet(cls, v: Any) -> str:
+        if v is None:
+            return ""
+        return str(v)[:280]
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "EvidenceRecord":
-        return cls(
-            thread_id=str(data.get("thread_id", "")),
-            ts=str(data.get("ts") or _now_iso()),
-            snippet=str(data.get("snippet", ""))[:280],
-        )
+        return cls.model_validate(data)
+
+    def to_dict(self) -> dict[str, Any]:
+        return self.model_dump(mode="python")
 
 
-@dataclass
-class MemoryEntry:
-    id: str = field(default_factory=_new_id)
+class MemoryEntry(BaseModel):
+    model_config = ConfigDict(extra="ignore", validate_assignment=False)
+
+    id: str = Field(default_factory=_new_id)
     summary: str = ""
     category: str = "fact"  # preference | workflow | project_knowledge | fact
     scope: str = "global_user"  # global_user | workspace | skill | thread
     confidence: float = 0.7
     observation_count: int = 1
-    evidence_log: list[EvidenceRecord] = field(default_factory=list)
-    source_skills: list[str] = field(default_factory=list)
+    evidence_log: list[EvidenceRecord] = Field(default_factory=list)
+    source_skills: list[str] = Field(default_factory=list)
     source_workspace: str = ""
     status: str = "active"  # active | superseded
     superseded_by: str | None = None
-    created_at: str = field(default_factory=_now_iso)
-    last_observed_at: str = field(default_factory=_now_iso)
+    created_at: str = Field(default_factory=_now_iso)
+    last_observed_at: str = Field(default_factory=_now_iso)
+
+    @field_validator("id", mode="before")
+    @classmethod
+    def _coerce_id(cls, v: Any) -> str:
+        if not v:
+            return _new_id()
+        return str(v)
+
+    @field_validator("summary", mode="before")
+    @classmethod
+    def _coerce_summary(cls, v: Any) -> str:
+        if v is None:
+            return ""
+        return str(v).strip()
+
+    @field_validator("category", mode="before")
+    @classmethod
+    def _coerce_category(cls, v: Any) -> str:
+        s = str(v) if v is not None else "fact"
+        return s if s in VALID_CATEGORIES else "fact"
+
+    @field_validator("scope", mode="before")
+    @classmethod
+    def _coerce_scope(cls, v: Any) -> str:
+        s = str(v) if v is not None else "global_user"
+        return s if s in VALID_SCOPES else "global_user"
+
+    @field_validator("status", mode="before")
+    @classmethod
+    def _coerce_status(cls, v: Any) -> str:
+        s = str(v) if v is not None else "active"
+        return s if s in VALID_STATUS else "active"
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def _coerce_confidence(cls, v: Any) -> float:
+        try:
+            f = float(v) if v is not None else 0.7
+        except (TypeError, ValueError):
+            f = 0.7
+        return max(0.0, min(1.0, f))
+
+    @field_validator("observation_count", mode="before")
+    @classmethod
+    def _coerce_observation_count(cls, v: Any) -> int:
+        try:
+            n = int(v) if v is not None else 1
+        except (TypeError, ValueError):
+            n = 1
+        return max(1, n)
+
+    @field_validator("source_skills", mode="before")
+    @classmethod
+    def _coerce_source_skills(cls, v: Any) -> list[str]:
+        if not isinstance(v, list):
+            return []
+        return [str(s) for s in v if s]
+
+    @field_validator("source_workspace", "created_at", "last_observed_at", mode="before")
+    @classmethod
+    def _coerce_str_field(cls, v: Any) -> str:
+        if v is None or v == "":
+            return ""
+        return str(v)
+
+    @field_validator("created_at", "last_observed_at", mode="after")
+    @classmethod
+    def _default_timestamp(cls, v: str) -> str:
+        return v or _now_iso()
+
+    @field_validator("superseded_by", mode="before")
+    @classmethod
+    def _coerce_superseded_by(cls, v: Any) -> str | None:
+        if not v:
+            return None
+        return str(v)
+
+    @field_validator("evidence_log", mode="before")
+    @classmethod
+    def _coerce_evidence_log(cls, v: Any) -> list[Any]:
+        if not isinstance(v, list):
+            return []
+        return [item for item in v if isinstance(item, (dict, EvidenceRecord))]
 
     def to_dict(self) -> dict[str, Any]:
-        data = asdict(self)
-        return data
+        return self.model_dump(mode="python")
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "MemoryEntry":
-        evidence_raw = data.get("evidence_log") or []
-        evidence_log: list[EvidenceRecord] = []
-        if isinstance(evidence_raw, list):
-            for item in evidence_raw:
-                if isinstance(item, dict):
-                    evidence_log.append(EvidenceRecord.from_dict(item))
-        category = str(data.get("category", "fact"))
-        if category not in VALID_CATEGORIES:
-            category = "fact"
-        scope = str(data.get("scope", "global_user"))
-        if scope not in VALID_SCOPES:
-            scope = "global_user"
-        status = str(data.get("status", "active"))
-        if status not in VALID_STATUS:
-            status = "active"
-        try:
-            confidence = float(data.get("confidence", 0.7))
-        except (TypeError, ValueError):
-            confidence = 0.7
-        confidence = max(0.0, min(1.0, confidence))
-        try:
-            observation_count = int(data.get("observation_count", 1))
-        except (TypeError, ValueError):
-            observation_count = 1
-        observation_count = max(1, observation_count)
-        source_skills = data.get("source_skills") or []
-        if not isinstance(source_skills, list):
-            source_skills = []
-        source_skills = [str(s) for s in source_skills if s]
-        return cls(
-            id=str(data.get("id") or _new_id()),
-            summary=str(data.get("summary", "")).strip(),
-            category=category,
-            scope=scope,
-            confidence=confidence,
-            observation_count=observation_count,
-            evidence_log=evidence_log,
-            source_skills=source_skills,
-            source_workspace=str(data.get("source_workspace", "")),
-            status=status,
-            superseded_by=(str(data["superseded_by"]) if data.get("superseded_by") else None),
-            created_at=str(data.get("created_at") or _now_iso()),
-            last_observed_at=str(data.get("last_observed_at") or _now_iso()),
-        )
+        return cls.model_validate(data)
 
 
 _SYNTHESIS_PROMPT = """\
