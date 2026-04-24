@@ -196,16 +196,27 @@ class CodexCLIAgent(BaseCLIAgent):
         If *thread_id* is given and a session ID exists for it, uses
         ``codex exec resume`` to continue the session (avoiding history flattening).
 
-        When ``on_partial`` is provided and there is no session to resume,
-        the call switches to the streaming path. Session-resume calls stay
-        in block mode (images + resume interact through the non-streaming
-        command construction today).
+        When ``on_partial`` is provided, the call switches to the streaming
+        path on **both** fresh and resume invocations. Only image-bearing
+        turns stay in block mode today (``--image`` argv + streaming fold
+        together but we keep the simple path until we need it).
         """
         prompt = inject_control_protocol(prompt)
         session_id = self._session_ids.get(thread_id) if thread_id else None
 
         if session_id:
             cmd = self._build_resume_command(prompt, session_id, image_paths=image_paths)
+            if on_partial is not None and not image_paths:
+                logger.info("Streaming %s (resume session %s) ...", self.name, session_id[:12])
+                return await self._run_streamed(
+                    prompt=prompt,
+                    history=None,
+                    on_partial=on_partial,
+                    workspace_override=workspace_override,
+                    log_path=log_path,
+                    thread_id=thread_id,
+                    command=cmd,
+                )
             logger.info("Resuming %s session %s ...", self.name, session_id[:12])
         else:
             full_prompt = _build_prompt_with_history(prompt, history)

@@ -332,11 +332,11 @@ class ClaudeAgent(BaseCLIAgent):
         If *thread_id* is given and a session ID exists for it, uses
         ``--resume`` to continue the session (avoiding history flattening).
 
-        When *on_partial* is provided AND there is no existing session to
-        resume, the call switches to the streaming path — each assistant
-        text block fires ``on_partial(accumulated)``. For sessions that do
-        resume, streaming is skipped for v1 to preserve resume semantics;
-        we fall back to the block-mode path.
+        When *on_partial* is provided, the call switches to the streaming
+        path on **both** fresh and resume invocations — each assistant text
+        block fires ``on_partial(accumulated)``. Images attached to resume
+        turns still use the block-mode path because ``_augment_prompt_with_images``
+        is not compatible with the streaming argv today.
         """
         prompt = inject_control_protocol(prompt)
         session_id = self._session_ids.get(thread_id) if thread_id else None
@@ -349,6 +349,17 @@ class ClaudeAgent(BaseCLIAgent):
         if session_id:
             # Resume existing session — send only the new prompt
             cmd = self._build_resume_command(prompt, session_id)
+            if on_partial is not None and not image_paths:
+                logger.info("Streaming %s (resume session %s) ...", self.name, session_id[:12])
+                return await self._run_streamed(
+                    prompt=prompt,
+                    history=None,
+                    on_partial=on_partial,
+                    workspace_override=workspace_override,
+                    log_path=log_path,
+                    thread_id=thread_id,
+                    command=cmd,
+                )
             logger.info("Resuming %s session %s ...", self.name, session_id[:12])
         else:
             # Fresh session — flatten history into prompt

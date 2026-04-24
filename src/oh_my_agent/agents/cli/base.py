@@ -532,11 +532,13 @@ class BaseCLIAgent(BaseAgent):
         workspace_override: Path | None,
         log_path: Path | None,
         thread_id: str | None = None,
+        command: list[str] | None = None,
     ) -> AgentResponse:
         """Drive ``self.stream()`` and build an AgentResponse from the events.
 
         Subclasses with custom command logic (e.g. session resume) can call this
-        directly with ``prompt``/``history`` that already account for resume.
+        directly with ``prompt``/``history`` that already account for resume,
+        or pass ``command`` to bypass the default argv builder entirely.
         """
         accumulated: list[str] = []
         usage: dict | None = None
@@ -549,6 +551,7 @@ class BaseCLIAgent(BaseAgent):
                 history,
                 workspace_override=workspace_override,
                 log_path=log_path,
+                command=command,
             ):
                 if isinstance(event, TextEvent):
                     accumulated.append(event.text)
@@ -628,6 +631,7 @@ class BaseCLIAgent(BaseAgent):
         cancel: asyncio.Event | None = None,
         workspace_override: Path | None = None,
         log_path: Path | None = None,
+        command: list[str] | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """Run the CLI and yield typed :class:`AgentEvent` objects as they arrive.
 
@@ -639,9 +643,17 @@ class BaseCLIAgent(BaseAgent):
 
         ``cancel`` — optional asyncio.Event. When set, the subprocess is killed
         and the generator exits without yielding a CompleteEvent.
+
+        ``command`` — optional pre-built argv. Bypasses the default
+        ``_build_prompt_with_history + _build_command`` path, letting callers
+        drive streaming for resume commands (e.g. ``claude --resume <id>``)
+        that need different argv than a fresh invocation.
         """
-        full_prompt = _build_prompt_with_history(prompt, history)
-        cmd = self._build_command(full_prompt)
+        if command is None:
+            full_prompt = _build_prompt_with_history(prompt, history)
+            cmd = self._build_command(full_prompt)
+        else:
+            cmd = list(command)
         logger.info("Streaming %s: %s ...", self.name, " ".join(cmd[:4]))
 
         collected_text: list[str] = []

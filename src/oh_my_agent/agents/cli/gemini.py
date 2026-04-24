@@ -139,6 +139,17 @@ class GeminiCLIAgent(BaseCLIAgent):
 
         if session_id:
             cmd = self._build_resume_command(prompt, session_id)
+            if on_partial is not None and not image_paths:
+                logger.info("Streaming %s (resume session %s) ...", self.name, session_id[:12])
+                return await self._run_streamed(
+                    prompt=prompt,
+                    history=None,
+                    on_partial=on_partial,
+                    workspace_override=workspace_override,
+                    log_path=log_path,
+                    thread_id=thread_id,
+                    command=cmd,
+                )
             logger.info("Resuming %s session %s ...", self.name, session_id[:12])
         else:
             full_prompt = _build_prompt_with_history(prompt, history)
