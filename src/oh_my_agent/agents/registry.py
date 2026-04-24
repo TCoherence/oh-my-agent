@@ -98,6 +98,7 @@ class AgentRegistry:
         timeout_override_seconds: int | None,
         max_turns_override: int | None,
         on_agent_run=None,
+        on_partial=None,
     ) -> AgentResponse:
         sig = inspect.signature(agent.run)
         kwargs = {}
@@ -111,6 +112,8 @@ class AgentRegistry:
             kwargs["log_path"] = agent_log_path
         if "image_paths" in sig.parameters:
             kwargs["image_paths"] = image_paths
+        if on_partial is not None and "on_partial" in sig.parameters:
+            kwargs["on_partial"] = on_partial
         started_at = time.perf_counter()
         with self._temporary_timeout(agent, timeout_override_seconds):
             with self._temporary_max_turns(agent, max_turns_override):
@@ -140,6 +143,7 @@ class AgentRegistry:
         timeout_override_seconds: int | None = None,
         max_turns_override: int | None = None,
         on_agent_run=None,
+        on_partial=None,
     ) -> tuple[BaseAgent, AgentResponse]:
         """Try each agent in order. Return the first successful (agent, response) pair.
 
@@ -169,6 +173,7 @@ class AgentRegistry:
                 timeout_override_seconds=timeout_override_seconds,
                 max_turns_override=max_turns_override,
                 on_agent_run=on_agent_run,
+                on_partial=on_partial,
             )
             return agent, response
 
@@ -188,6 +193,7 @@ class AgentRegistry:
                 timeout_override_seconds=timeout_override_seconds,
                 max_turns_override=max_turns_override,
                 on_agent_run=on_agent_run,
+                on_partial=on_partial,
             )
             if not response.error:
                 return agent, response

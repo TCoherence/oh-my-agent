@@ -25,6 +25,7 @@ from oh_my_agent.control.protocol import (
 )
 from oh_my_agent.gateway.base import BaseChannel, IncomingMessage
 from oh_my_agent.gateway.session import ChannelSession
+from oh_my_agent.gateway.stream_relay import StreamingRelay
 from oh_my_agent.agents.registry import AgentRegistry
 from oh_my_agent.skills.frontmatter import read_skill_frontmatter, resolve_skill_frontmatter, skill_execution_limits
 from oh_my_agent.runtime.policy import is_artifact_intent, is_long_task_intent, is_skill_intent
@@ -69,6 +70,7 @@ class GatewayManager:
         idle_tracker=None,
         memory_inject_limit: int = 12,
         memory_keyword_patterns: list[str] | None = None,
+        streaming_config: dict | None = None,
     ) -> None:
         self._channels = channels
         self._compressor = compressor
@@ -104,6 +106,18 @@ class GatewayManager:
         ]
         if self._idle_tracker is not None:
             self._idle_tracker._on_fire = self._idle_judge_fire  # type: ignore[attr-defined]
+        stream_cfg = streaming_config or {}
+        self._streaming_enabled = bool(stream_cfg.get("enabled", False))
+        try:
+            interval_ms = int(stream_cfg.get("min_edit_interval_ms", 1000))
+        except (TypeError, ValueError):
+            interval_ms = 1000
+        self._streaming_min_edit_interval = max(0.0, interval_ms / 1000.0)
+        try:
+            placeholder = str(stream_cfg.get("placeholder", "⏳ *thinking…*"))
+        except Exception:
+            placeholder = "⏳ *thinking…*"
+        self._streaming_placeholder = placeholder or "⏳ *thinking…*"
         self._session_index: dict[str, tuple[ChannelSession, AgentRegistry]] = {}
         short_cfg = short_workspace or {}
         self._short_workspace_enabled = bool(short_cfg.get("enabled", True))
@@ -342,6 +356,7 @@ class GatewayManager:
         timeout_override_seconds: int | None,
         max_turns_override: int | None,
         on_agent_run=None,
+        on_partial=None,
     ):
         run_task = asyncio.create_task(
             registry.run(
@@ -355,6 +370,7 @@ class GatewayManager:
                 timeout_override_seconds=timeout_override_seconds,
                 max_turns_override=max_turns_override,
                 on_agent_run=on_agent_run,
+                on_partial=on_partial,
             )
         )
         started_at = time.perf_counter()
@@ -1477,6 +1493,26 @@ class GatewayManager:
             request_id=req_id,
             purpose=agent_purpose,
         )
+        relay: StreamingRelay | None = None
+        on_partial_hook = None
+        if self._streaming_enabled and getattr(channel, "supports_streaming_edit", False):
+            initial_agent_name = msg.preferred_agent or (
+                registry.agents[0].name if registry.agents else "agent"
+            )
+            try:
+                relay = StreamingRelay(
+                    channel=channel,
+                    thread_id=thread_id,
+                    attribution_prefix=f"-# via **{initial_agent_name}**",
+                    min_edit_interval=self._streaming_min_edit_interval,
+                )
+                await relay.start(self._streaming_placeholder)
+                on_partial_hook = relay.update
+            except Exception as exc:
+                logger.warning("[%s] streaming_relay_start_failed err=%s", req_id, exc)
+                relay = None
+                on_partial_hook = None
+
         t_agent = time.perf_counter()
         async with channel.typing(thread_id):
             async def _record_agent_run(*, agent, response, log_path, duration_s):
@@ -1512,6 +1548,7 @@ class GatewayManager:
                 timeout_override_seconds=skill_timeout_override,
                 max_turns_override=self._skill_max_turns_by_name(tracked_skill),
                 on_agent_run=_record_agent_run,
+                on_partial=on_partial_hook,
             )
         elapsed_agent = time.perf_counter() - t_agent
         await self._sync_registry_sessions(session, thread_id, registry)
@@ -1548,7 +1585,15 @@ class GatewayManager:
                 elapsed_agent,
                 response.error,
             )
-            await channel.send(thread_id, self._format_agent_failure_text(response))
+            failure_text = self._format_agent_failure_text(response)
+            if relay is not None:
+                with suppress(Exception):
+                    await relay.finalize(
+                        failure_text,
+                        attribution_override=f"-# via **{agent_used.name}** (error)",
+                    )
+            else:
+                await channel.send(thread_id, failure_text)
             # Remove the failed user turn so history stays clean
             history = await session.get_history(thread_id)
             if history:
@@ -1584,19 +1629,49 @@ class GatewayManager:
             explicit_skill=explicit_skill,
             routed_skill=routed_skill,
         ):
+            if relay is not None:
+                with suppress(Exception):
+                    await relay.finalize(
+                        "_(awaiting confirmation)_",
+                        attribution_override=f"-# via **{agent_used.name}**",
+                    )
             return
 
         # Record assistant response in history
         await session.append_assistant(thread_id, response.text, agent_used.name)
 
         # Send with attribution header + chunked content.
-        delivery = await self._send_agent_response(
-            channel,
-            thread_id,
-            agent_name=agent_used.name,
-            text=response.text,
-            usage=response.usage,
-        )
+        if relay is not None:
+            try:
+                delivered_ids = await relay.finalize(
+                    response.text,
+                    usage=response.usage,
+                    attribution_override=f"-# via **{agent_used.name}**",
+                )
+            except Exception as exc:
+                logger.warning("[%s] streaming_relay_finalize_failed err=%s", req_id, exc)
+                delivered_ids = []
+            if delivered_ids:
+                delivery = ResponseDelivery(
+                    first_message_id=delivered_ids[0],
+                    chunk_count=len(delivered_ids),
+                )
+            else:
+                delivery = await self._send_agent_response(
+                    channel,
+                    thread_id,
+                    agent_name=agent_used.name,
+                    text=response.text,
+                    usage=response.usage,
+                )
+        else:
+            delivery = await self._send_agent_response(
+                channel,
+                thread_id,
+                agent_name=agent_used.name,
+                text=response.text,
+                usage=response.usage,
+            )
         if invocation_id is not None:
             await self._bind_skill_invocation_message(invocation_id, delivery.first_message_id)
 

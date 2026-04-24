@@ -166,6 +166,12 @@ class BaseChannel(ABC):
         """Edit an existing message's text. No-op by default."""
         del thread_id, message_id, text
 
+    # Whether this channel can meaningfully edit a previously sent message.
+    # Streaming relay uses this to gate itself: a channel whose
+    # ``edit_message`` is the default no-op would otherwise silently lose
+    # the final rendered response on the anchor message.
+    supports_streaming_edit: bool = False
+
     # -- interactive messages ---------------------------------------------
 
     async def send_interactive(

@@ -6,7 +6,7 @@ import logging
 import shutil
 from pathlib import Path
 
-from oh_my_agent.agents.base import AgentResponse
+from oh_my_agent.agents.base import AgentResponse, PartialTextHook
 from oh_my_agent.agents.control_prompt import inject_control_protocol
 from oh_my_agent.agents.cli.base import (
     BaseCLIAgent,
@@ -119,11 +119,15 @@ class GeminiCLIAgent(BaseCLIAgent):
         workspace_override: Path | None = None,
         log_path: Path | None = None,
         image_paths: list[Path] | None = None,
+        on_partial: PartialTextHook | None = None,
     ) -> AgentResponse:
         """Run the Gemini CLI.
 
         If *thread_id* is given and a session ID exists for it, uses
         ``--resume`` to continue the session (avoiding history flattening).
+
+        When ``on_partial`` is provided and no session is being resumed and
+        no images are attached, the call switches to the streaming path.
         """
         prompt = inject_control_protocol(prompt)
         session_id = self._session_ids.get(thread_id) if thread_id else None
@@ -138,6 +142,16 @@ class GeminiCLIAgent(BaseCLIAgent):
             logger.info("Resuming %s session %s ...", self.name, session_id[:12])
         else:
             full_prompt = _build_prompt_with_history(prompt, history)
+            if on_partial is not None and not image_paths:
+                logger.info("Streaming %s (new session) ...", self.name)
+                return await self._run_streamed(
+                    prompt=full_prompt,
+                    history=None,
+                    on_partial=on_partial,
+                    workspace_override=workspace_override,
+                    log_path=log_path,
+                    thread_id=thread_id,
+                )
             cmd = self._build_command(full_prompt)
             logger.info("Running %s (new session) ...", self.name)
 

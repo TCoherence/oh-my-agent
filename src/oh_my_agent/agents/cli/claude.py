@@ -6,7 +6,7 @@ import logging
 import shutil
 from pathlib import Path
 
-from oh_my_agent.agents.base import AgentResponse
+from oh_my_agent.agents.base import AgentResponse, PartialTextHook
 from oh_my_agent.agents.control_prompt import inject_control_protocol
 from oh_my_agent.agents.events import (
     AgentEvent,
@@ -325,11 +325,18 @@ class ClaudeAgent(BaseCLIAgent):
         workspace_override: Path | None = None,
         log_path: Path | None = None,
         image_paths: list[Path] | None = None,
+        on_partial: PartialTextHook | None = None,
     ) -> AgentResponse:
         """Run the Claude CLI.
 
         If *thread_id* is given and a session ID exists for it, uses
         ``--resume`` to continue the session (avoiding history flattening).
+
+        When *on_partial* is provided AND there is no existing session to
+        resume, the call switches to the streaming path — each assistant
+        text block fires ``on_partial(accumulated)``. For sessions that do
+        resume, streaming is skipped for v1 to preserve resume semantics;
+        we fall back to the block-mode path.
         """
         prompt = inject_control_protocol(prompt)
         session_id = self._session_ids.get(thread_id) if thread_id else None
@@ -346,6 +353,18 @@ class ClaudeAgent(BaseCLIAgent):
         else:
             # Fresh session — flatten history into prompt
             full_prompt = _build_prompt_with_history(prompt, history)
+            # When streaming is requested, delegate to the base streaming driver
+            # which consumes self.stream() via `--output-format stream-json`.
+            if on_partial is not None:
+                logger.info("Streaming %s (new session) ...", self.name)
+                return await self._run_streamed(
+                    prompt=full_prompt,
+                    history=None,
+                    on_partial=on_partial,
+                    workspace_override=workspace_override,
+                    log_path=log_path,
+                    thread_id=thread_id,
+                )
             cmd = self._base_command(full_prompt)
             cmd.extend(["--output-format", "stream-json", "--verbose"])
             logger.info("Running %s (new session) ...", self.name)

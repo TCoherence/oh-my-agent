@@ -325,6 +325,8 @@ class DiscordChannel(BaseChannel):
     skills / memory / automation command families).
     """
 
+    supports_streaming_edit: bool = True
+
     def __init__(self, token: str, channel_id: str, owner_user_ids: set[str] | None = None) -> None:
         self._token = token
         self._channel_id = channel_id

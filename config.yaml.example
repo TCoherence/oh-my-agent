@@ -141,6 +141,13 @@ runtime:
     commit_message_template: "runtime(task:{task_id}): {goal_short}"
 
 gateway:
+  # Incremental in-place edit of the assistant's reply while the agent streams.
+  # Disabled by default — when on, the gateway edits one anchor message as
+  # partial text arrives (Discord rate-limit aware).
+  streaming:
+    enabled: false
+    min_edit_interval_ms: 1000        # throttle between consecutive edits
+    placeholder: "⏳ *thinking…*"     # initial anchor body before first token
   channels:
     - platform: discord
       token: ${DISCORD_BOT_TOKEN}

@@ -1,7 +1,15 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import TypeAlias
+
+# Streaming hook: called with the *accumulated* assistant text each time the
+# agent emits a new TextEvent. Agents that don't support streaming just never
+# call it. Callers are expected to be cheap / async-safe — agents do not block
+# their own progress on this callback.
+PartialTextHook: TypeAlias = Callable[[str], Awaitable[None]]
 
 
 @dataclass

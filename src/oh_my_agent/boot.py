@@ -841,6 +841,7 @@ async def ignite(ctx: BootContext) -> None:
         idle_tracker=idle_tracker,
         memory_inject_limit=memory_inject_limit,
         memory_keyword_patterns=memory_keyword_patterns,
+        streaming_config=config.get("gateway", {}).get("streaming", {}),
     )
     if memory_store:
         gateway.set_memory_store(memory_store)

@@ -9,12 +9,14 @@ from collections.abc import AsyncIterator
 from contextlib import suppress
 from pathlib import Path
 
-from oh_my_agent.agents.base import AgentResponse, BaseAgent
+from oh_my_agent.agents.base import AgentResponse, BaseAgent, PartialTextHook
 from oh_my_agent.agents.events import (
     AgentEvent,
     CompleteEvent,
     ErrorEvent,
+    SystemInitEvent,
     TextEvent,
+    UsageEvent,
 )
 
 logger = logging.getLogger(__name__)
@@ -473,7 +475,16 @@ class BaseCLIAgent(BaseAgent):
         *,
         workspace_override: Path | None = None,
         log_path: Path | None = None,
+        on_partial: PartialTextHook | None = None,
     ) -> AgentResponse:
+        if on_partial is not None:
+            return await self._run_streamed(
+                prompt=prompt,
+                history=history,
+                on_partial=on_partial,
+                workspace_override=workspace_override,
+                log_path=log_path,
+            )
         full_prompt = _build_prompt_with_history(prompt, history)
         cmd = self._build_command(full_prompt)
         logger.info("Running %s: %s ...", self.name, " ".join(cmd[:4]))
@@ -511,6 +522,82 @@ class BaseCLIAgent(BaseAgent):
             )
 
         return self._parse_output(stdout.decode(errors="replace").strip())
+
+    async def _run_streamed(
+        self,
+        *,
+        prompt: str,
+        history: list[dict] | None,
+        on_partial: PartialTextHook,
+        workspace_override: Path | None,
+        log_path: Path | None,
+        thread_id: str | None = None,
+    ) -> AgentResponse:
+        """Drive ``self.stream()`` and build an AgentResponse from the events.
+
+        Subclasses with custom command logic (e.g. session resume) can call this
+        directly with ``prompt``/``history`` that already account for resume.
+        """
+        accumulated: list[str] = []
+        usage: dict | None = None
+        session_id: str | None = None
+        last_error: ErrorEvent | None = None
+
+        try:
+            async for event in self.stream(
+                prompt,
+                history,
+                workspace_override=workspace_override,
+                log_path=log_path,
+            ):
+                if isinstance(event, TextEvent):
+                    accumulated.append(event.text)
+                    with suppress(Exception):
+                        await on_partial("\n".join(accumulated))
+                elif isinstance(event, SystemInitEvent):
+                    if event.session_id:
+                        session_id = event.session_id
+                elif isinstance(event, UsageEvent):
+                    collected = {
+                        "input_tokens": event.input_tokens,
+                        "output_tokens": event.output_tokens,
+                        "cache_read_input_tokens": event.cache_read_input_tokens,
+                        "cache_creation_input_tokens": event.cache_creation_input_tokens,
+                        "cost_usd": event.cost_usd,
+                    }
+                    cleaned = {k: v for k, v in collected.items() if v is not None}
+                    usage = cleaned or None
+                elif isinstance(event, ErrorEvent):
+                    last_error = event
+                elif isinstance(event, CompleteEvent):
+                    if event.session_id and not session_id:
+                        session_id = event.session_id
+                    if event.text and not accumulated:
+                        accumulated.append(event.text)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("%s streaming failed: %s", self.name, exc, exc_info=True)
+            return AgentResponse(
+                text="\n".join(accumulated),
+                error=f"{self.name} streaming failed: {exc}",
+                error_kind="cli_error",
+            )
+
+        if last_error is not None:
+            return AgentResponse(
+                text="\n".join(accumulated),
+                error=last_error.message,
+                error_kind=last_error.error_kind or "cli_error",
+            )
+
+        text = "\n".join(accumulated)
+        if thread_id and session_id and hasattr(self, "_session_ids"):
+            try:
+                self._session_ids[thread_id] = session_id  # type: ignore[attr-defined]
+            except Exception:  # pragma: no cover - defensive
+                pass
+        return AgentResponse(text=text, usage=usage)
 
     def _parse_output(self, raw: str) -> AgentResponse:
         """Parse subprocess stdout into an AgentResponse.
