@@ -9,10 +9,10 @@ is the middle-man that fixes this:
 - the relay collapses all updates inside the throttle window into a single
   trailing edit scheduled to fire when the window reopens, so the user sees
   ~1 Hz progress without us burning the rate-limit bucket;
-- while no text has arrived yet (the model is reasoning / running tools),
-  a background heartbeat rewrites the placeholder with an elapsed-time suffix
-  and the most recent tool name so the user can tell the run is still alive
-  instead of staring at a frozen ``⏳ *thinking…*``;
+- a background heartbeat rewrites the message every ~3 s for the entire
+  duration of the run so the elapsed-time stamp on the ``-#`` attribution
+  line keeps ticking, both before any text arrives (a ``⏳ *thinking…*``
+  placeholder) and during ongoing text streaming;
 - on ``finalize()`` the relay flushes the last frame and then appends any
   overflow chunks past the platform's 2000-char message cap as fresh messages
   using the existing ``chunk_message`` splitter.
@@ -94,9 +94,9 @@ class StreamingRelay:
         self._start_ts: float = 0.0
         self._heartbeat_task: asyncio.Task | None = None
         self._tool_count: int = 0
-        # Distinct tool names in arrival order (consecutive duplicates
-        # collapsed). Drives the live ``-# 🔧 …`` line; on finalize we
-        # collapse back to a single ``🔧 N tools`` summary.
+        # Tool names in arrival order, no dedup. Drives the live multi-line
+        # ``-# 🔧 …`` block (5 names per line). On finalize the block drops
+        # and the attribution line gets a ``🔧 N tools`` summary.
         self._tool_trail: list[str] = []
 
     # --------------------------------------------------------------------
@@ -138,11 +138,12 @@ class StreamingRelay:
 
         If we're inside the throttle window, a trailing edit is scheduled.
         Callers can fire this as fast as they want — the relay collapses
-        updates.
+        updates. The heartbeat keeps running through the streaming phase
+        so the elapsed-time stamp on the attribution line stays fresh
+        even between text chunks.
         """
         if self._finalized or self._message_id is None:
             return
-        self._cancel_heartbeat()
         async with self._lock:
             self._latest_text = text
             elapsed = time.monotonic() - self._last_edit_ts
@@ -154,24 +155,20 @@ class StreamingRelay:
     async def note_tool_use(self, name: str) -> None:
         """Record that a tool was invoked.
 
-        We track only the name. Every invocation bumps ``_tool_count``; the
-        name gets appended to ``_tool_trail`` unless it duplicates the most
-        recent entry (so N sequential Bash calls render as one ``Bash`` +
-        counter, not ``Bash · Bash · Bash …``). While we're mid-stream this
-        also schedules an anchor edit so the new trail shows up on the
-        ``-# 🔧 …`` line within the next throttle window. On finalize we
-        collapse the trail back to a single ``🔧 N tools`` summary.
+        Every invocation appends to ``_tool_trail`` (no dedup — the trail
+        IS the trace) and bumps ``_tool_count``. While mid-stream this also
+        schedules an anchor edit so the new entry shows up on the next
+        ``-# 🔧 …`` line within the throttle window. On finalize the block
+        drops and the attribution line gets the ``🔧 N tools`` summary.
         """
         if self._finalized:
             return
         cleaned = (name or "").strip()
         if not cleaned:
             return
-        if not self._tool_trail or self._tool_trail[-1] != cleaned:
-            self._tool_trail.append(cleaned)
+        self._tool_trail.append(cleaned)
         self._tool_count += 1
-        # No anchor yet, or heartbeat will pick it up on its next tick.
-        if self._message_id is None or self._heartbeat_task is not None:
+        if self._message_id is None:
             return
         async with self._lock:
             elapsed = time.monotonic() - self._last_edit_ts
@@ -210,7 +207,7 @@ class StreamingRelay:
                 pass
 
         attribution = attribution_override if attribution_override is not None else self._attribution_prefix
-        attribution = self._decorate_attribution_with_tools(attribution)
+        attribution = self._decorate_attribution_for_finalize(attribution)
         if usage:
             try:
                 # Local import to avoid a circular reference during test setup
@@ -262,10 +259,10 @@ class StreamingRelay:
     # Internals
     # --------------------------------------------------------------------
 
-    # Live tool-trail on the ``-# 🔧 …`` line shows at most this many distinct
-    # tool names; anything beyond rolls into a ``(+N)`` overflow marker so the
-    # subtext block doesn't grow unbounded.
-    _TOOL_TRAIL_VISIBLE = 3
+    # The live tool trail wraps onto multiple ``-#`` lines — this many tool
+    # names per line. Below ~5 the line gets too sparse on Discord; above ~6
+    # it starts to wrap on narrower windows.
+    _TOOLS_PER_LINE = 5
 
     def _render(self, body: str) -> str:
         """Join the live (multi-line) attribution block with the body."""
@@ -275,73 +272,94 @@ class StreamingRelay:
         return "\n".join(lines) + "\n" + body
 
     def _build_attribution_lines(self) -> list[str]:
-        """Current attribution block as zero, one, or two ``-#`` lines.
+        """Current attribution block as ``-#`` subtext lines.
 
-        Layout:
-          line 1: ``{attribution_prefix}`` (plus ``· ⏳ (Ns)`` while heartbeat
-                  is still active — i.e. no real text has arrived yet);
-          line 2: ``-# 🔧 T1 · T2 · T3 (+N)`` — only when at least one tool
-                  has been observed, and only pre-finalize.
+        Layout (pre-finalize):
+          line 1: ``{attribution_prefix} · ⏱ Ns`` — elapsed time always
+                  present once ``start()`` has run;
+          lines 2+: ``-# 🔧 T1 · T2 · T3 · T4 · T5`` — every observed tool
+                  call in order (no dedup), wrapped to ``_TOOLS_PER_LINE``
+                  per line.
         """
         lines: list[str] = []
         attrib1 = self._attribution_prefix
-        if (
-            not self._finalized
-            and not self._latest_text
-            and self._heartbeat_task is not None
-            and self._start_ts > 0
-        ):
+        if not self._finalized and self._start_ts > 0:
             elapsed = max(0, int(time.monotonic() - self._start_ts))
-            suffix = f"⏳ ({elapsed}s)"
+            suffix = f"⏱ {self._format_elapsed(elapsed)}"
             attrib1 = f"{attrib1} · {suffix}" if attrib1 else f"-# {suffix}"
         if attrib1:
             lines.append(attrib1)
         if not self._finalized and self._tool_trail:
-            trail = self._format_tool_trail()
-            if trail:
-                lines.append(f"-# {trail}")
+            lines.extend(self._format_tool_trail_lines())
         return lines
 
-    def _format_tool_trail(self) -> str:
-        """Render the ``🔧 A · B · C (+N)`` segment for the live trail line."""
+    def _format_tool_trail_lines(self) -> list[str]:
+        """Multi-line ``-# 🔧 …`` block — every observed tool, no overflow."""
         if not self._tool_trail:
-            return ""
-        shown = self._tool_trail[: self._TOOL_TRAIL_VISIBLE]
-        joined = " · ".join(shown)
-        hidden = len(self._tool_trail) - len(shown)
-        if hidden > 0:
-            joined = f"{joined} (+{hidden})"
-        return f"🔧 {joined}"
+            return []
+        out: list[str] = []
+        for i in range(0, len(self._tool_trail), self._TOOLS_PER_LINE):
+            chunk = self._tool_trail[i : i + self._TOOLS_PER_LINE]
+            out.append(f"-# 🔧 {' · '.join(chunk)}")
+        return out
 
-    def _decorate_attribution_with_tools(self, attribution: str) -> str:
-        """Append ``· 🔧 N tool(s)`` to the *finalized* attribution line."""
-        if self._tool_count <= 0:
+    def _decorate_attribution_for_finalize(self, attribution: str) -> str:
+        """Append ``· 🔧 N tool(s) · ⏱ Ns`` to the finalized attribution line."""
+        parts: list[str] = []
+        if self._tool_count > 0:
+            plural = "s" if self._tool_count != 1 else ""
+            parts.append(f"🔧 {self._tool_count} tool{plural}")
+        if self._start_ts > 0:
+            elapsed = max(0, int(time.monotonic() - self._start_ts))
+            parts.append(f"⏱ {self._format_elapsed(elapsed)}")
+        if not parts:
             return attribution
-        suffix = f" · 🔧 {self._tool_count} tool{'s' if self._tool_count != 1 else ''}"
+        suffix = " · ".join(parts)
         if not attribution:
-            return suffix.lstrip(" ·")
-        return f"{attribution}{suffix}"
+            return suffix
+        return f"{attribution} · {suffix}"
+
+    @staticmethod
+    def _format_elapsed(seconds: int) -> str:
+        """Compact human duration: ``24s`` / ``2m 14s`` / ``1h 03m``."""
+        if seconds < 60:
+            return f"{seconds}s"
+        if seconds < 3600:
+            m, s = divmod(seconds, 60)
+            return f"{m}m {s:02d}s"
+        h, rest = divmod(seconds, 3600)
+        m = rest // 60
+        return f"{h}h {m:02d}m"
 
     def _render_heartbeat_body(self) -> str:
-        """Placeholder body during heartbeat — intentionally static.
+        """Placeholder body when no text has arrived yet.
 
-        Elapsed time + tool trail now live on the ``-#`` attribution lines, so
-        the body just shows a calm ``*thinking…*`` cue. We keep this method so
-        the heartbeat loop can still re-render on every tick and pick up any
-        attribution changes (e.g. a newly-seen tool).
+        Elapsed time + tool trail live on the ``-#`` attribution lines, so the
+        body itself just shows a calm ``*thinking…*`` cue.
         """
         base = self._placeholder_base.strip() or "⏳ *thinking…*"
         return base
 
     async def _heartbeat_loop(self) -> None:
+        """Refresh the anchor every ``heartbeat_interval`` seconds.
+
+        Runs from ``start()`` through ``finalize()`` / ``error()`` so the
+        elapsed-time stamp on the attribution line keeps ticking both before
+        and during text streaming. When text has arrived we re-render via
+        the regular ``_flush_once`` path (which respects the lock and dedup
+        check); when no text yet we re-render the placeholder body.
+        """
         try:
             while True:
                 await asyncio.sleep(self._heartbeat_interval)
-                if self._finalized or self._latest_text:
+                if self._finalized:
                     return
+                if self._latest_text:
+                    await self._flush_once()
+                    continue
                 body = self._render(self._render_heartbeat_body())
                 async with self._lock:
-                    if self._finalized or self._latest_text:
+                    if self._finalized:
                         return
                     if body == self._last_rendered:
                         continue
