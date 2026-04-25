@@ -8,7 +8,7 @@ metadata:
 
 # Seattle Metro Housing Watch
 
-Use this skill for **Seattle metro buy-side housing reporting**. The skill is report-centric and persistence-first: it writes durable Markdown + JSON outputs under `~/.oh-my-agent/reports/seattle-metro-housing-watch/`, then returns a concise chat summary with the storage path.
+Use this skill for **Seattle metro buy-side housing reporting**. The skill is report-centric and persistence-first: it writes durable Markdown + JSON outputs under `~/.oh-my-agent/reports/seattle-metro-housing-watch/`, then returns a structured chat summary (headline conclusion + per-area block + sample picks + storage paths — see **Final answer format** below).
 
 This is not a generic real-estate chatbot and not a login-backed MLS workflow.
 
@@ -183,7 +183,23 @@ For an area deep dive:
 ./.venv/bin/python skills/seattle-metro-housing-watch/scripts/report_store.py persist   --mode weekly_pulse   --markdown-file /tmp/seattle_housing_weekly.md   --json-file /tmp/seattle_housing_weekly.json
 ```
 
-9. Return the final report summary in chat and mention where the files were stored.
+9. Output the final answer — see **Final answer format** below. (Mandatory; the user only sees your final assistant message.)
+
+## Final answer format
+
+Unlike paste-the-full-body skills (e.g. `market-briefing`), this skill is designed for a **structured chat summary** — the full Markdown weekly often runs > 5k chars with listing tables that don't render well inline in Discord, so we keep the substance in chat and the full grid in the file. But "summary" does NOT mean progress notes — it means the substance the user came for.
+
+**Required content in the chat reply:**
+
+1. **Headline metro conclusion** (2–3 sentences): direction of the market this week, the one number that summarizes it (e.g. median price MoM/YoY, inventory delta, rate level), and the main coverage caveat.
+2. **Per-area one-liner block** (one line per area in scope, in fixed order: Seattle / Bellevue / Redmond / Kirkland / Issaquah / Bothell / Lynnwood). Each line: median price + inventory direction + one notable observation. Skip an area only if `coverage_gaps` covers it.
+3. **2–3 representative listing picks** with `[address](listing_url) · price · sqft · short take`. The full sample list of up to 18 lives in the file.
+4. **Storage paths** at the end (weekly + any per-area files generated).
+
+❌ Don't end the turn with "Done.", "Report saved.", "本周报告已写入文件" — those are status notes, not the answer.
+❌ Don't reply with only the storage path — the user can't open files in Discord.
+❌ Don't drop the per-area block in favor of a vague "Eastside 整体平稳" — the user wants the area-by-area read.
+✅ The summary above gives the user enough to make a buyer decision without opening the file; the file is for the full sample grid + raw notes.
 
 ## Output rules
 

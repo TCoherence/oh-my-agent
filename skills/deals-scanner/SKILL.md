@@ -119,7 +119,28 @@ For weekly digest:
   --json-file /tmp/credit-cards_daily.json
 ```
 
-7. In the final answer, return the report content directly and mention where it was stored.
+7. Output the report — see **Final answer format** below. (Mandatory; the user only sees your final assistant message.)
+
+## Final answer format
+
+**You MUST end your turn with the full Markdown report body in your reply** — the same Markdown content you persisted in step 6. The Discord user receives only your final assistant message; they cannot see file contents. If you skip this they only see progress narration ("scanning Doctor of Credit..." / "fetching Slickdeals...") and have no way to read the deals you found.
+
+Layout:
+
+```
+<full Markdown report — every section, every deal item, verbatim from the .md you persisted>
+
+📁 Stored at:
+- ~/.oh-my-agent/reports/deals-scanner/<mode>/<date>/<source>.md
+- ~/.oh-my-agent/reports/deals-scanner/<mode>/<date>/<source>.json
+```
+
+(For broad daily bundles, list every per-source path plus the combined bundle.)
+
+❌ Don't end the turn with "Done.", "Report saved.", or a short progress summary — those are status notes, not the answer.
+❌ Don't reply with only the storage path — the user cannot open files in Discord.
+❌ Don't truncate, paraphrase, or "summarize for chat" because the report is long — the gateway auto-chunks messages > 2000 chars across multiple Discord posts, so paste the full body anyway.
+✅ The exact Markdown body you wrote to the deal store goes into your reply, verbatim, followed by the storage paths.
 
 ### Broad daily bundle workflow
 
@@ -146,7 +167,7 @@ When the user asks for a broad daily scan or leaves the source intentionally bro
    - include explicit links to `references/<source>.md`
    - keep `各渠道快照` as a supporting layer, not the main content
    - make each source snapshot a compact brief of `main opportunity + current caveat`, not a floor-only label
-5. In the final answer, show the summary first and treat per-source files as drill-down references.
+5. In the final answer, paste the full **summary.md** body verbatim (the bundle's primary deliverable), then list the per-source paths under it as drill-down references. The same rules in **Final answer format** above apply — substitute `summary.md` for the per-source `.md`.
 
 ## Storage layout
 
