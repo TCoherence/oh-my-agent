@@ -1,5 +1,6 @@
 .env
 config.yaml
+config.dev.yaml
 .venv/
 logs/
 .workspace/

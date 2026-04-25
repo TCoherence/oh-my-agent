@@ -167,6 +167,7 @@ Skills live in `skills/<name>/SKILL.md`. The `SkillSync` system distributes them
 |----------|----|------|
 | Architecture | [architecture.md](docs/EN/architecture.md) | [architecture.md](docs/CN/architecture.md) |
 | Operator Guide | [operator-guide.md](docs/EN/operator-guide.md) | [operator-guide.md](docs/CN/operator-guide.md) |
+| Dev Environment | [dev-environment.md](docs/EN/dev-environment.md) | [dev-environment.md](docs/CN/dev-environment.md) |
 | Config Reference | [config-reference.md](docs/EN/config-reference.md) | [config-reference.md](docs/CN/config-reference.md) |
 | Troubleshooting | [troubleshooting.md](docs/EN/troubleshooting.md) | [troubleshooting.md](docs/CN/troubleshooting.md) |
 | Monitoring | [monitoring.md](docs/EN/monitoring.md) | [monitoring.md](docs/CN/monitoring.md) |

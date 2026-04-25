@@ -1,0 +1,244 @@
+# ============================================================
+# Dev / local config template.
+#
+# Purpose: run a sandboxed bot inside a worktree without touching the prod bot.
+# All runtime state lands under ~/.oh-my-agent-dev/ (host real home), which
+# does NOT collide with the prod bot's runtime — prod runs in Docker, where
+# the container's $HOME is bind-mounted to host's ~/oh-my-agent-docker-mount/,
+# so prod's effective root is ~/oh-my-agent-docker-mount/.oh-my-agent/.
+#
+# Setup:
+#   1. cp config.dev.yaml.example config.dev.yaml
+#   2. Create a SECOND Discord bot in the Developer Portal (separate from prod).
+#      A single bot token can only hold one active gateway connection — running
+#      prod and dev under the same token would make them kick each other off.
+#   3. Put the dev token + channel id into a worktree-root .env (gitignored):
+#         DISCORD_DEV_BOT_TOKEN=...
+#         DISCORD_DEV_CHANNEL_ID=...
+#      Note: .env must live next to the config file (config.py loads .env from
+#      the config file's directory first, then the cwd default).
+#   4. Validate config:    ./.venv/bin/oh-my-agent --config config.dev.yaml --validate-config
+#   5. Run:                ./.venv/bin/oh-my-agent --config config.dev.yaml
+#
+# See docs/EN/dev-environment.md (中文 docs/CN/dev-environment.md) for the
+# full guide, including how to copy memories from prod and the isolation invariants.
+# ============================================================
+
+memory:
+  backend: sqlite
+  path: ~/.oh-my-agent-dev/runtime/memory.db
+  max_turns: 20
+  summary_max_chars: 500
+  judge:
+    enabled: true
+    memory_dir: ~/.oh-my-agent-dev/memory     # holds memories.yaml + MEMORY.md
+    inject_limit: 12                          # max active memories injected into agent prompt
+    idle_seconds: 900                         # judge fires after this much silence on a thread
+    idle_poll_seconds: 60                     # how often the idle scanner ticks
+    synthesize_after_seconds: 21600           # rebuild MEMORY.md if older than this and dirty
+    max_evidence_per_entry: 8
+    keyword_patterns:                         # natural-language triggers for /memorize
+      - 记一下
+      - 记下
+      - 记住这个
+      - 记下来
+      - remember this
+      - memorize this
+  # Optional cross-day reflection — reads yesterday's diary once a day and
+  # feeds memory-judge actions into the store. Requires memory.judge.enabled
+  # and diary (below) to be on.
+  diary_reflection:
+    enabled: false
+    fire_hour_local: 2                        # 0-23, local time; 2am picks up overnight
+  diary:
+    enabled: true                             # per-day markdown of every turn under <runtime>/diary/
+    # path: ~/.oh-my-agent-dev/runtime/diary  # default derives from runtime.worktree_root.parent
+
+skills:
+  enabled: true
+  path: skills/
+  telemetry_path: ~/.oh-my-agent-dev/runtime/skills.db
+  evaluation:
+    enabled: true
+    stats_recent_days: 7
+    feedback_emojis: ["👍", "👎"]
+    auto_disable:
+      enabled: true
+      rolling_window: 20
+      min_invocations: 5
+      failure_rate_threshold: 0.60
+    overlap_guard:
+      enabled: true
+      review_similarity_threshold: 0.45
+    source_grounded:
+      enabled: true
+      block_auto_merge: true
+
+access:
+  # Optional owner-only mode. When set, only these user IDs can use the bot.
+  # For Discord, use the numeric user ID as string.
+  owner_user_ids: []
+
+auth:
+  enabled: true
+  storage_root: ~/.oh-my-agent-dev/runtime/auth
+  qr_poll_interval_seconds: 3
+  qr_default_timeout_seconds: 180
+  providers:
+    bilibili:
+      enabled: true
+      scope_key: default
+
+# Agent workspace (Layer 0 sandbox). Dev uses an isolated path so skill sync
+# and _attachments do not collide with prod's workspace.
+workspace: ~/.oh-my-agent-dev/agent-workspace
+
+# Short conversation (/ask) artifact workspace:
+# each thread uses a transient subdir under root and is cleaned by TTL.
+short_workspace:
+  enabled: true
+  root: ~/.oh-my-agent-dev/agent-workspace/sessions
+  ttl_hours: 24
+  cleanup_interval_minutes: 1440
+
+router:
+  enabled: false
+  provider: openai_compatible
+  base_url: "https://<openai-compatible-endpoint>/v1"
+  api_key_env: DEEPSEEK_API_KEY
+  model: deepseek-chat            # or deepseek-reasoner — stronger reasoning, ~3x latency
+  timeout_seconds: 15             # bump to >=25 if model is a reasoner
+  max_retries: 1
+  confidence_threshold: 0.55      # below this → heuristic fallback
+  autonomy_threshold: 0.90        # create_skill/repair_skill auto-run only above this; in [conf_thr, auto_thr) it goes to DRAFT awaiting /task_approve
+  context_turns: 10
+  require_user_confirm: true      # enforce borderline-band user confirmation (no longer a dead config)
+  extra_body: {}                  # pass-through to provider, e.g. {reasoning: {effort: medium}}; must not override messages/model/max_tokens/temperature
+
+automations:
+  enabled: false                   # off by default in dev — flip to true only when testing the scheduler
+  storage_dir: ~/.oh-my-agent-dev/automations
+  reload_interval_seconds: 5       # polling-based hot reload for automation files
+  timezone: local                  # 'local' or an IANA zone like 'America/Los_Angeles'
+  # Named "dump" channels for routing automation completion messages to a
+  # separate channel (opt-in per automation via `target_channel: <name>`).
+  # The source channel keeps DRAFT / approval / progress traffic; only the
+  # terminal message + archived automation_posts row land in the dump channel.
+  # Dump channels share the bot's existing gateway connection — they're
+  # send-only aliases, not a second listener.
+  dump_channels: {}
+  #   oma_dump:
+  #     platform: discord
+  #     channel_id: "${DISCORD_OMA_DUMP_CHANNEL_ID}"
+
+runtime:
+  enabled: true
+  state_path: ~/.oh-my-agent-dev/runtime/runtime.db
+  worker_concurrency: 3
+  worktree_root: ~/.oh-my-agent-dev/runtime/tasks
+  reports_dir: ~/.oh-my-agent-dev/reports     # artifact archive root; files land flat in <reports_dir>/artifacts/. Set to "" to disable archiving.
+  default_agent: codex
+  default_test_command: "pytest -q"
+  default_max_steps: 8
+  default_max_minutes: 20
+  skill_auto_approve: true          # skip draft + auto-merge for skill tasks
+  risk_profile: strict
+  path_policy_mode: allow_all_with_denylist
+  denied_paths: [".env", "config.yaml", "config.dev.yaml", ".workspace/**", ".git/**"]
+  decision_ttl_minutes: 1440
+  agent_heartbeat_seconds: 20
+  test_heartbeat_seconds: 15
+  test_timeout_seconds: 600
+  progress_notice_seconds: 30
+  progress_persist_seconds: 60
+  log_event_limit: 12
+  log_tail_chars: 1200
+  cleanup:
+    enabled: true
+    interval_minutes: 60
+    retention_hours: 168
+    prune_git_worktrees: true
+    merged_immediate: true
+  merge_gate:
+    enabled: true
+    auto_commit: true
+    require_clean_repo: true
+    preflight_check: true
+    target_branch_mode: current
+    commit_message_template: "runtime(task:{task_id}): {goal_short}"
+
+gateway:
+  # Incremental in-place edit of the assistant's reply while the agent streams.
+  # Disabled by default — when on, the gateway edits one anchor message as
+  # partial text arrives (Discord rate-limit aware).
+  streaming:
+    enabled: false
+    min_edit_interval_ms: 1000        # throttle between consecutive edits
+    placeholder: "⏳ *thinking…*"     # initial anchor body before first token
+  channels:
+    - platform: discord
+      token: ${DISCORD_DEV_BOT_TOKEN}              # SEPARATE bot from prod
+      channel_id: "${DISCORD_DEV_CHANNEL_ID}"      # dev-only channel
+      agents: [claude, codex, gemini]   # fallback 顺序，第一个失败自动切下一个
+
+agents:
+  claude:
+    type: cli
+    cli_path: claude             # PATH 里的可执行文件名，或绝对路径
+    max_turns: 25
+    model: sonnet
+    timeout: 300                 # 秒，超时后 fallback 下一个 agent
+    allowed_tools: [Bash, Read, Write, Edit, Glob, Grep]
+    dangerously_skip_permissions: false
+    # permission_mode: default    # set to disable bypass, or use other CLI-supported modes
+    extra_args: []
+    # env_passthrough: [ANTHROPIC_API_KEY]  # env vars forwarded when workspace is set
+
+  gemini:
+    type: cli
+    cli_path: gemini
+    max_turns: 10
+    model: gemini-3.0-flash
+    timeout: 120                 # 默认比其他 agent 短，避免长时间卡住 fallback
+    yolo: true
+    extra_args: []
+    # env_passthrough: []
+
+  codex:
+    type: cli
+    cli_path: codex
+    model: gpt-5.3-codex
+    timeout: 300
+    skip_git_repo_check: true    # 非 trusted git 目录时可继续运行
+    sandbox_mode: workspace-write
+    dangerously_bypass_approvals_and_sandbox: false
+    extra_args: []
+    # env_passthrough: [OPENAI_API_KEY]
+
+  # ----- API agents (deprecated since v0.4.0, use CLI agents instead) -----
+  # anthropic_api:
+  #   type: api
+  #   provider: anthropic
+  #   model: claude-sonnet-4-6
+  #   api_key: ${ANTHROPIC_API_KEY}
+  #   max_tokens: 8192
+  #
+  # openai_api:
+  #   type: api
+  #   provider: openai
+  #   model: gpt-4o
+  #   api_key: ${OPENAI_API_KEY}
+  #   max_tokens: 4096
+
+# ============================================================
+# Experiment — short-term features, promoted to top-level sections
+# when they stabilize. Don't depend on these shapes long-term.
+# ============================================================
+experiment:
+  # Opt-in structured trace of every agent event (tool_use, tool_result,
+  # thinking, usage) as JSONL under <path>/YYYY-MM-DD.jsonl. One line per
+  # event, for post-hoc audit / replay / ops debugging. Never read by the
+  # agent. Writes are enqueued + drained by a single background worker.
+  tool_trace:
+    enabled: false
+    # path: ~/.oh-my-agent-dev/runtime/traces   # default derives from runtime.worktree_root.parent
