@@ -163,7 +163,7 @@ short mode 必须显式落到「相对上期的增量观察」章节；long mode
 REPORT_FILE="$REPORT_DIR/<naming_from_table>.md"
 ```
 
-最终 Markdown 写入 `$REPORT_FILE`，回复中直接返回报告内容并注明存储路径。
+最终 Markdown 写入 `$REPORT_FILE`，然后按 **Final answer format**（见下方 "Output rules" 之后的章节）输出最终回复。这是必须的 —— Discord 用户只能看到你的 final assistant message。
 
 ## Report structure
 
@@ -209,3 +209,20 @@ REPORT_FILE="$REPORT_DIR/<naming_from_table>.md"
   - short mode: 2000-4000 字
   - long mode (past-6m / past-1y): 5000-8000 字
   - bootstrap / past-3y: 6000-10000 字
+
+## Final answer format
+
+报告本身（最长 10000 字）直接 paste 到 Discord 体验差 —— 那是 5+ 条消息的"文件 viewer"流。所以这个 skill 走 **结构化摘要 + 文件路径** 模式（不是全文 paste）。但"摘要"绝不等于状态注释 —— 摘要本身必须是用户来这次想看的实质内容。
+
+**回复中必须包含：**
+
+1. **窗口结论（3–5 句）**：本窗口 Jensen 的主线议题、最显眼的 1 个观察点、相对上期的核心变化（rolling/retrospective）或核心论述总览（bootstrap）。
+2. **核心引述精选（3–5 条）**：原文 + 中文翻译 + 出处。从报告 §核心引述 / §经典引述集 里挑最强的几条直接 paste。
+3. **关键事件时间线（5–10 条压缩版）**：日期 + 场合 + 一句话主题 + 重要度。完整版在文件里。
+4. **观点演进 / 增量观察（2–4 条）**：哪些被验证、哪些被强化、哪些首次出现。
+5. **存储路径**：`$REPORT_FILE` 的绝对路径。
+
+❌ 不要用 "Done."、"Report saved."、"报告已写入文件"收尾 —— 那是状态注释，不是 answer。
+❌ 不要只回 storage path —— 用户在 Discord 打不开文件。
+❌ 不要把窗口结论写成 1 句"Jensen 这个窗口讲了 AI"这种空话 —— 摘要要给用户判断"是否要打开 file 读全文"的信息密度。
+✅ 摘要本身要让一个不打开文件的用户也能拿到核心结论；文件用于 deep dive。

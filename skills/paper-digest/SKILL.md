@@ -98,6 +98,21 @@ persist 会：
 
 ### 步骤 5：直接贴 Markdown 正文到 Discord，末尾附一行 `Saved: <path>`
 
+**这是必须的**：Discord 用户只能看到你的 final assistant message，看不到 file 内容。如果跳过这一步，用户只能看到前几个步骤的进度叙述（"loading paper feeds..." / "fetching abstracts..."），完全看不到你产出的 digest。Gateway 自动 chunk 超过 2000 字的消息为多条 Discord posts，所以 paper-digest 报告再长也直接 paste 全文。
+
+格式：
+
+```
+<完整的 Markdown digest 正文 — 所有 sections、所有 picks、verbatim 复制自 .md>
+
+Saved: ~/.oh-my-agent/reports/paper-digest/daily/<DATE>.md
+```
+
+❌ 不要用 "Done."、"Report saved."、一句话总结收尾 —— 那是状态注释，不是 answer。
+❌ 不要只回 storage path —— 用户在 Discord 打不开文件。
+❌ 不要因为报告长就截断 / 改写 / "为聊天精简" —— Gateway 会 chunk。
+✅ 你 persist 到 daily store 的那份 Markdown 正文，原样进 reply。
+
 不要让用户自己去文件里找内容。
 
 ### Turn budget 目标

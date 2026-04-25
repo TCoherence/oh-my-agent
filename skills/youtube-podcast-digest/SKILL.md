@@ -89,6 +89,23 @@ metadata:
 
 7. **最终回复**：直接贴 Markdown 正文 + 存储路径。无需二次总结。
 
+   **这是必须的**：Discord 用户只能看到你的 final assistant message，看不到 file 内容。如果跳过这一步，用户只能看到前几个步骤的进度叙述（"fetching subscriptions..." / "generating per-episode TL;DR..."），完全看不到你产出的 weekly digest。Gateway 自动 chunk 超过 2000 字的消息为多条 Discord posts，所以 weekly digest 再长也直接 paste 全文。
+
+   格式：
+
+   ```
+   <完整的 Markdown weekly digest 正文 — 5 个 group 小节、跨集观察、Coverage Notes，verbatim 复制自 report.md>
+
+   Saved:
+   - ~/.oh-my-agent/reports/youtube-podcast-digest/weekly/<ISO-week>/report.md
+   - ~/.oh-my-agent/reports/youtube-podcast-digest/weekly/<ISO-week>/report.json
+   ```
+
+   ❌ 不要用 "Done."、"Report saved."、"本周报告已写入文件"收尾 —— 那是状态注释，不是 answer。
+   ❌ 不要只回 storage path —— 用户在 Discord 打不开文件。
+   ❌ 不要因为报告长就截断 / 改写 / "二次总结" —— Gateway 会 chunk。
+   ✅ 你 persist 到 weekly store 的那份 `report.md` 正文，原样进 reply。
+
 ## Source rules
 
 严格遵守 [references/source_policy.md](references/source_policy.md)：

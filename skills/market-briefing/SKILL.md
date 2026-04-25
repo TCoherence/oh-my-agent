@@ -74,7 +74,26 @@ The skill is report-centric. It writes durable report files under `~/.oh-my-agen
 5. Do external research for the requested mode/domain.
 6. Fill the Markdown + JSON with the researched content (include prefetched podcast data for AI / finance daily).
 7. Persist both files into the canonical report store.
-8. In the final answer, return the report content directly and mention where it was stored.
+8. Output the report — see **Final answer format** below. (This is mandatory; the user only sees your final assistant message.)
+
+## Final answer format
+
+**You MUST end your turn with the full Markdown report body in your reply** — the same Markdown content you persisted in step 6/7. The Discord user receives only your final assistant message; they cannot see file contents. If you skip this they only see your progress narration ("loading scripts..." / "fetching feeds...") and have no way to read the report you produced.
+
+Layout:
+
+```
+<full Markdown report — every section, every bullet, verbatim from the .md you persisted>
+
+📁 Stored at:
+- ~/.oh-my-agent/reports/market-briefing/daily/<date>/<domain>.md
+- ~/.oh-my-agent/reports/market-briefing/daily/<date>/<domain>.json
+```
+
+❌ Don't end the turn with "Done.", "Report saved.", or a short progress summary — those are status notes, not the answer.
+❌ Don't reply with only the storage path — the user cannot open files in Discord.
+❌ Don't truncate, paraphrase, or "summarize for chat" because the report is long — the gateway auto-chunks messages > 2000 chars across multiple Discord posts, so paste the full body anyway.
+✅ The exact Markdown body you wrote to the daily store goes into your reply, verbatim, followed by the storage paths.
 
 ## Storage layout
 
