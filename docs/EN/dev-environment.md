@@ -16,11 +16,34 @@ A dev bot solves this with three rules of isolation:
 
 ---
 
-## 2. Setup (3 steps)
+## 2. Setup (4 steps)
 
 ### 2.1 Create a Second Discord Bot
 
-In the [Discord Developer Portal](https://discord.com/developers/applications): **New Application** → add a Bot user → copy the bot token. Invite this bot to a test server (or a dedicated test channel in your existing server) and grab the channel id (right-click the channel with Discord developer mode on → Copy Channel ID).
+This bot must be a **completely separate Application** from prod — not just a different invite link.
+
+**a) New Application + token**
+
+In the [Discord Developer Portal](https://discord.com/developers/applications): **New Application** → name it (e.g. `oh-my-agent-dev`) → the Bot user is created automatically. On the **Bot** page:
+
+- Click **Reset Token** → copy the token immediately (it's shown once; reset again if you miss it). This is `DISCORD_DEV_BOT_TOKEN`.
+- Scroll to **Privileged Gateway Intents** and enable:
+  - ✅ **MESSAGE CONTENT INTENT** — required. Without it the bot connects fine and looks healthy, but message content arrives empty and the bot never responds. [discord.py:1028](../../src/oh_my_agent/gateway/discord.py:1028) sets `intents.message_content = True`, which depends on this toggle.
+  - `PRESENCE INTENT` and `SERVER MEMBERS INTENT` are not needed.
+
+**b) Generate invite link with correct scopes + permissions**
+
+**OAuth2 → OAuth2 URL Generator**:
+
+- **Scopes**: `bot` + `applications.commands` (omitting the second one breaks slash-command registration silently).
+- **Bot Permissions** (mirrors prod):
+  - View Channels, Send Messages, Send Messages in Threads, Create Public Threads, Read Message History, Add Reactions, Attach Files, Embed Links, Use Slash Commands.
+
+Copy the **Generated URL**, open it in a browser, and authorize the bot into a **test server** (or a test channel in your existing server — but not a channel where prod is already active, or both bots will respond to the same message).
+
+**c) Copy the channel id**
+
+Discord client → **Settings → Advanced** → enable **Developer Mode**. Right-click the test channel → **Copy Channel ID**. This is `DISCORD_DEV_CHANNEL_ID`.
 
 ### 2.2 Create the Dev Config
 
@@ -107,16 +130,17 @@ Do this only when you want dev to reflect prod's accumulated memory state — mo
 - **One process per dev bot token.** Discord's gateway only allows one active WebSocket per token. If you want to run dev bots in two worktrees simultaneously, create a third Discord bot with its own token.
 - **Dev's `automations.enabled` defaults to `false`** in the template. Flip it to `true` only when you specifically want to test the scheduler — otherwise automations will fire and spam your test channel.
 - **The validator does not check env-var resolution.** `--validate-config` parses YAML and checks schema, but it will not flag a missing `DISCORD_DEV_BOT_TOKEN`; the bot will fail at startup instead. Make sure `.env` is in place before running.
+- **Don't repoint `workspace:` at prod's path.** Section 1's third isolation rule relies on the dev template's default `workspace: ~/.oh-my-agent-dev/agent-workspace`. Changing it to `~/.oh-my-agent/agent-workspace` (or the docker bind path) makes dev's skill sync and `_attachments/` cleanup race prod for the same files — defeats the whole isolation.
+- **Runtime tasks auto-commit to the active branch.** With `runtime.merge_gate.auto_commit: true` (template default, matches prod), autonomous tasks commit their changes to whatever branch you're checked out on. Don't kick off autonomous runtime tasks while sitting on a branch you're about to open a PR from — the runtime commits will pollute your PR history.
 - **Confirm prod is unaffected.** After starting dev, verify the prod docker container is still healthy: `docker compose ps`. Prod should show no restarts, no disconnects.
 
 ---
 
 ## 5. Verifying the Setup
 
-1. Send `hi` in your dev Discord channel — the dev bot should reply normally.
+1. Send `hi` in your dev Discord channel — the dev bot should reply normally. (If it doesn't reply at all but the process is online, you forgot to enable MESSAGE CONTENT INTENT — see 2.1a.)
 2. Run `ls ~/.oh-my-agent-dev/` — you should see `runtime/`, `agent-workspace/`, `memory/`, `reports/` directories created on first use. (`automations/` won't appear unless you flip it on.)
 3. Send a message in the prod channel — the prod bot should still respond as before.
-4. Run `./.venv/bin/pytest` — the existing test suite should still pass; this setup touches only config + docs, so the diff should be 0-impact on tests.
 
 ---
 

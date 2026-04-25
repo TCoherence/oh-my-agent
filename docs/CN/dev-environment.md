@@ -16,11 +16,34 @@ dev bot 通过三条隔离规则解决这个问题：
 
 ---
 
-## 2. 配置（3 步）
+## 2. 配置（4 步）
 
 ### 2.1 创建第二个 Discord bot
 
-进入 [Discord Developer Portal](https://discord.com/developers/applications)：**New Application** → 添加 Bot 用户 → 复制 bot token。把这个 bot 邀请到一个测试服务器（或现有服务器里专门的测试 channel），复制 channel id（在 Discord 里打开"开发者模式"，右键 channel → "复制 ID"）。
+这个 bot 必须是一个**完全独立的 Application**，不只是新发一个邀请链接。
+
+**a) New Application + 拿 token**
+
+打开 [Discord Developer Portal](https://discord.com/developers/applications)：**New Application** → 起名（比如 `oh-my-agent-dev`）→ Bot 用户会自动建好。在 **Bot** 页面：
+
+- 点 **Reset Token** → token 只显示一次，**马上复制**（错过就再 Reset 一次）。这就是 `DISCORD_DEV_BOT_TOKEN`。
+- 往下滑到 **Privileged Gateway Intents**，打开：
+  - ✅ **MESSAGE CONTENT INTENT** —— 必须开。不开的话 bot 能上线、看着正常，但收到的消息内容是空的，永远不回复。代码里 [discord.py:1028](../../src/oh_my_agent/gateway/discord.py:1028) 设置了 `intents.message_content = True`，依赖这个开关。
+  - `PRESENCE INTENT` 和 `SERVER MEMBERS INTENT` 不需要开。
+
+**b) 生成带正确 scope + permission 的邀请链接**
+
+**OAuth2 → OAuth2 URL Generator**：
+
+- **Scopes**：`bot` + `applications.commands`（漏第二个会让 slash command 注册悄悄失败）。
+- **Bot Permissions**（跟 prod 对齐）：
+  - View Channels、Send Messages、Send Messages in Threads、Create Public Threads、Read Message History、Add Reactions、Attach Files、Embed Links、Use Slash Commands。
+
+复制下方 **Generated URL**，浏览器打开 → 选一个**测试服务器**授权（或现有服务器里专门的测试 channel —— 但**不要**选 prod 也在的 channel，否则两个 bot 会同时回复同一条消息）。
+
+**c) 拿 channel id**
+
+Discord 客户端 → **设置 → Advanced** → 打开 **Developer Mode**。右键测试 channel → **Copy Channel ID**。这就是 `DISCORD_DEV_CHANNEL_ID`。
 
 ### 2.2 创建 dev config
 
@@ -107,16 +130,17 @@ cp -r ~/oh-my-agent-docker-mount/.oh-my-agent/memory ~/.oh-my-agent-dev/memory
 - **同一个 dev bot token 只能跑一个进程。** Discord gateway 限制每个 token 一个活跃连接。如果想在两个 worktree 并行跑 dev bot，需要再创建一个 Discord bot 并用独立 token。
 - **dev 模板默认 `automations.enabled: false`。** 只在专门测试调度器时才改成 `true`，否则定时任务会触发并把测试 channel 刷屏。
 - **Validator 不会检查环境变量是否被替换成功。** `--validate-config` 解析 YAML 并校验 schema，但**不会**警告 `DISCORD_DEV_BOT_TOKEN` 缺失；bot 启动时才会失败。所以一定要先把 `.env` 准备好。
+- **不要把 `workspace:` 改回 prod 的路径。** 第 1 节第三条隔离规则依赖模板默认值 `workspace: ~/.oh-my-agent-dev/agent-workspace`。如果你改成 `~/.oh-my-agent/agent-workspace`（或 docker bind 路径），dev 的 skill 同步和 `_attachments/` 清理会跟 prod 抢同一份文件 —— 整个隔离就废了。
+- **Runtime 任务会自动 commit 到当前 branch。** 模板默认 `runtime.merge_gate.auto_commit: true`（跟 prod 一致），自治任务会把改动 commit 到你 checkout 的 branch 上。**不要**在你即将开 PR 的 branch 上跑自治 runtime 任务，runtime 的 commit 会污染你的 PR 历史。
 - **确认 prod 没受影响。** dev 启动后跑 `docker compose ps` 检查 prod 容器仍 healthy。隔离做对了 prod 不会受影响，但确认一下放心。
 
 ---
 
 ## 5. 验证步骤
 
-1. 在 dev Discord channel 发 `hi` — dev bot 应该正常回复。
+1. 在 dev Discord channel 发 `hi` — dev bot 应该正常回复。（如果进程是 online 但完全不回复，多半是忘了开 MESSAGE CONTENT INTENT，回 2.1a 检查。）
 2. 跑 `ls ~/.oh-my-agent-dev/` — 应该看到 `runtime/`、`agent-workspace/`、`memory/`、`reports/` 目录被自动创建。（`automations/` 默认关，不会出现，正常。）
 3. 在 prod channel 发消息 — prod bot 应该照常工作。
-4. 跑 `./.venv/bin/pytest` — 既有测试应全通过；本次改动只动 config + docs，对测试 0 影响。
 
 ---
 
