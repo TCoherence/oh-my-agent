@@ -638,15 +638,17 @@ async def test_scheduler_set_enabled_reconciles_running_jobs(tmp_path):
     task = asyncio.create_task(scheduler.run(on_fire))
     try:
         await asyncio.sleep(0.05)
-        assert "live-toggle" not in scheduler._job_tasks
+        # Under the central due-loop model, "is the job active?" lives in
+        # _job_state (not _fire_tasks, which only holds in-flight fires).
+        assert "live-toggle" not in scheduler._job_state
 
         await scheduler.set_automation_enabled("live-toggle", enabled=True)
         await asyncio.sleep(0.05)
-        assert "live-toggle" in scheduler._job_tasks
+        assert "live-toggle" in scheduler._job_state
 
         await scheduler.set_automation_enabled("live-toggle", enabled=False)
         await asyncio.sleep(0.05)
-        assert "live-toggle" not in scheduler._job_tasks
+        assert "live-toggle" not in scheduler._job_state
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)

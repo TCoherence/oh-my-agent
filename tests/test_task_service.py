@@ -288,9 +288,9 @@ async def test_decide_replace_discards_draft_and_refires_automation():
     runtime.tasks["task-1"] = _task(id="task-1", status="DRAFT", automation_name="daily-news")
     fired: list[str] = []
 
-    async def _fire(name: str) -> bool:
+    async def _fire(name: str) -> str:
         fired.append(name)
-        return True
+        return "ok"
 
     service = TaskService(runtime, fire_automation=_fire)
 
@@ -334,9 +334,9 @@ async def test_decide_replace_fails_when_task_not_draft():
     runtime.tasks["task-1"] = _task(id="task-1", status="RUNNING", automation_name="daily-news")
     fired: list[str] = []
 
-    async def _fire(name: str) -> bool:
+    async def _fire(name: str) -> str:
         fired.append(name)
-        return True
+        return "ok"
 
     service = TaskService(runtime, fire_automation=_fire)
 
@@ -360,9 +360,9 @@ async def test_decide_replace_button_requires_valid_nonce():
     runtime.tasks["task-1"] = _task(id="task-1", status="DRAFT", automation_name="daily-news")
     fired: list[str] = []
 
-    async def _fire(name: str) -> bool:
+    async def _fire(name: str) -> str:
         fired.append(name)
-        return True
+        return "ok"
 
     service = TaskService(runtime, fire_automation=_fire)
 

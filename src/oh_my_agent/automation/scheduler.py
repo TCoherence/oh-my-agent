@@ -5,7 +5,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
@@ -38,6 +38,9 @@ _WEEKDAY_NAMES = {
     "FRI": 5,
     "SAT": 6,
 }
+
+
+FireJobResult = Literal["ok", "not_found", "scheduler_down", "already_firing"]
 
 
 @dataclass(frozen=True)
@@ -150,7 +153,7 @@ class _CronSpec:
 
 @dataclass
 class JobRuntimeState:
-    """Liveness state for one scheduled job. Updated by the job's runner."""
+    """Liveness state for one scheduled job. Updated by the central due loop."""
 
     name: str
     phase: str  # "sleeping" | "firing"
@@ -172,22 +175,53 @@ class ReloadRuntimeState:
     restart_in_progress: bool = False
 
 
+@dataclass
+class DueLoopRuntimeState:
+    """Liveness state for the central due-loop scanner."""
+
+    last_progress_at: datetime
+    last_restart_at: datetime | None = None
+    last_restart_reason: str | None = None
+    restart_in_progress: bool = False
+
+
 @dataclass(frozen=True)
 class HealthFinding:
-    """One stale observation from evaluate_job_health."""
+    """One stale observation from evaluate_job_health.
 
-    scope: str  # "job" | "reload"
-    reason: str  # "task_done_unexpectedly" | "missed_fire" | etc.
-    name: str | None = None  # job name; None for reload scope
+    Scopes:
+      - "job": per-job sleeping/firing finding. ``reason="missed_fire"`` is
+        **informational only** (no auto-restart) under the central due-loop
+        model — overdue jobs are recovered on the next due-loop tick.
+      - "reload": reload-loop staleness or task done. Restart via
+        ``Scheduler.restart_reload_loop()``.
+      - "due_loop": due-loop staleness or task done. Restart via
+        ``Scheduler.restart_due_loop()``.
+    """
+
+    scope: str  # "job" | "reload" | "due_loop"
+    reason: str  # "task_done_unexpectedly" | "missed_fire" | "no_progress"
+    name: str | None = None  # job name; None for reload/due_loop scope
 
 
 _DEFAULT_MIN_RESTART_INTERVAL_SECONDS = 120.0
 _DEFAULT_STALE_GRACE_SECONDS = 90.0
 _DEFAULT_RELOAD_STALE_FACTOR = 10.0  # reload loop stale if no progress for 10x reload_interval_seconds
+_DEFAULT_DUE_LOOP_MAX_TICK_SECONDS = 30.0
+_DEFAULT_DUE_LOOP_STALE_FACTOR = 5.0  # due loop stale if no progress for 5x max_tick
+_DEFAULT_DUE_LOOP_MIN_SLEEP_SECONDS = 0.05
 
 
 class Scheduler:
-    """File-driven scheduler with polling-based hot reload."""
+    """File-driven scheduler with polling-based hot reload.
+
+    Architecture: a single central *due loop* scans ``_job_state`` on every
+    tick (≤ ``due_loop_max_tick_seconds``) and dispatches a short-lived fire
+    task for each job whose ``next_fire_at`` has passed wall-clock now.
+    Per-job long-sleeping asyncio tasks are intentionally avoided so that
+    monotonic-clock pauses (e.g. Docker-on-Mac host suspend) cannot cause
+    fires to be silently skipped — recovery is bounded by one tick.
+    """
 
     def __init__(
         self,
@@ -209,10 +243,15 @@ class Scheduler:
         self._records_by_name: dict[str, AutomationRecord] = {}
         self._jobs_by_name: dict[str, ScheduledJob] = {}
         self._duplicate_paths_by_name: dict[str, tuple[Path, ...]] = {}
-        self._job_tasks: dict[str, asyncio.Task] = {}
+        # Holds in-flight fire tasks only. Sleeping jobs live in _job_state.
+        self._fire_tasks: dict[str, asyncio.Task] = {}
         self._job_state: dict[str, JobRuntimeState] = {}
         self._reload_state: ReloadRuntimeState | None = None
         self._reload_task: asyncio.Task | None = None
+        self._due_loop_state: DueLoopRuntimeState | None = None
+        self._due_loop_task: asyncio.Task | None = None
+        self._due_loop_wakeup: asyncio.Event = asyncio.Event()
+        self.due_loop_max_tick_seconds: float = _DEFAULT_DUE_LOOP_MAX_TICK_SECONDS
         self._snapshot: dict[Path, tuple[int, int]] = {}
         self._reload_lock = asyncio.Lock()
         self._on_fire: Callable[[ScheduledJob], Awaitable[None]] | None = None
@@ -234,9 +273,13 @@ class Scheduler:
     def timezone_name(self) -> str:
         return self._timezone_name
 
+    def _now(self) -> datetime:
+        """Single source of truth for wall-clock reads inside the scheduler."""
+        return datetime.now(self._timezone)
+
     def compute_next_run_at(self, job: ScheduledJob) -> datetime | None:
         """Return the next fire time for *job* from now, or None for interval jobs on first fire."""
-        now = datetime.now(self._timezone)
+        now = self._now()
         if job.cron:
             spec = _parse_cron_expression(job.cron)
             return _next_cron_fire(spec, now)
@@ -247,6 +290,22 @@ class Scheduler:
     def compute_all_next_run_at(self) -> dict[str, datetime | None]:
         """Return ``{name: next_fire_dt | None}`` for every *active* job."""
         return {name: self.compute_next_run_at(job) for name, job in self._jobs_by_name.items()}
+
+    def compute_display_next_run_at(self, name: str) -> datetime | None:
+        """Resolve the user-facing 'next run' time for *name*.
+
+        Trusts the in-memory ``state.next_fire_at`` whenever the scheduler has
+        an active runtime entry for the job. That value reflects what the
+        scheduler actually intends to do next — including pinned manual-fire
+        schedules that should not be displaced by a fresh ``now+interval``
+        recomputation. Falls back to ``compute_job_next_run_at`` only when no
+        runtime state exists (e.g. the job is disabled or scheduler hasn't
+        started yet).
+        """
+        state = self._job_state.get(name)
+        if state is not None and state.next_fire_at is not None:
+            return state.next_fire_at
+        return self.compute_job_next_run_at(name)
 
     def list_automations(self) -> list[AutomationRecord]:
         return [self._records_by_name[name] for name in sorted(self._records_by_name)]
@@ -297,13 +356,16 @@ class Scheduler:
         self,
         on_fire: Callable[[ScheduledJob], Awaitable[None]],
     ) -> None:
-        """Run active jobs and poll for filesystem changes until cancelled."""
+        """Run the central due-loop scanner and reload loop until cancelled."""
         self._stop_event.clear()
         self._on_fire = on_fire
-        now = datetime.now(self._timezone)
+        now = self._now()
         self._reload_state = ReloadRuntimeState(last_progress_at=now)
+        self._due_loop_state = DueLoopRuntimeState(last_progress_at=now)
+        # Re-arm the wakeup event in the running event loop.
+        self._due_loop_wakeup = asyncio.Event()
         for job in self.jobs:
-            self._start_job(job, on_fire)
+            self._start_job(job)
 
         logger.info(
             "Scheduler watching %s (%d active job(s))",
@@ -312,37 +374,57 @@ class Scheduler:
         )
 
         self._reload_task = asyncio.create_task(self._reload_loop(on_fire), name="scheduler:reload")
+        self._due_loop_task = asyncio.create_task(self._due_loop(on_fire), name="scheduler:due")
         try:
             await self._stop_event.wait()
         except asyncio.CancelledError:
             raise
         finally:
+            # 1. Cancel the due loop FIRST so no new fires get dispatched.
+            if self._due_loop_task is not None:
+                self._due_loop_task.cancel()
+                await asyncio.gather(self._due_loop_task, return_exceptions=True)
+                self._due_loop_task = None
+            # 2. Cancel the reload loop.
             if self._reload_task is not None:
                 self._reload_task.cancel()
                 await asyncio.gather(self._reload_task, return_exceptions=True)
                 self._reload_task = None
+            # 3. Drain any in-flight fire tasks and clear state.
             await self._stop_all_jobs()
 
     def stop(self) -> None:
         self._stop_event.set()
 
-    async def fire_job_now(self, name: str) -> bool:
-        """Manually trigger a job by name.  Returns True if fired."""
-        job = self._task_job(name)
-        if job is None:
-            return False
-        on_fire = getattr(self, "_on_fire", None)
+    async def fire_job_now(self, name: str) -> FireJobResult:
+        """Manually trigger a job by name. Returns a result code.
+
+        Returns:
+            "ok": dispatched (fire-and-forget; scheduled cadence preserved).
+            "not_found": no such automation, or scheduler not initialized.
+            "scheduler_down": scheduler is not running.
+            "already_firing": a scheduled or earlier manual fire is in-flight;
+                the manual fire is refused (no concurrent same-job runs).
+        """
+        job = self._jobs_by_name.get(name)
+        state = self._job_state.get(name)
+        if job is None or state is None:
+            return "not_found"
+        on_fire = self._on_fire
         if on_fire is None:
-            logger.warning("Cannot fire job %r: scheduler not running", name)
-            return False
+            return "scheduler_down"
+        if state.phase == "firing":
+            logger.info("fire_job_now: %r already firing — skipping manual fire", name)
+            return "already_firing"
         logger.info("Manual fire for job %r", name)
-        await on_fire(job)
-        return True
+        self._dispatch_due_job(name, on_fire, preserve_next_fire=True)
+        return "ok"
 
     async def _reload_loop(
         self,
         on_fire: Callable[[ScheduledJob], Awaitable[None]],
     ) -> None:
+        del on_fire  # not used directly; _apply_snapshot consults self._on_fire
         while True:
             try:
                 await asyncio.sleep(self._reload_interval_seconds)
@@ -358,7 +440,11 @@ class Scheduler:
 
     def _touch_reload_progress(self) -> None:
         if self._reload_state is not None:
-            self._reload_state.last_progress_at = datetime.now(self._timezone)
+            self._reload_state.last_progress_at = self._now()
+
+    def _touch_due_loop_progress(self) -> None:
+        if self._due_loop_state is not None:
+            self._due_loop_state.last_progress_at = self._now()
 
     def _load_from_disk(
         self,
@@ -580,7 +666,7 @@ class Scheduler:
         }
 
         if self._on_fire is not None:
-            await self._reconcile_running_jobs(self._on_fire)
+            await self._reconcile_running_jobs(added, removed, updated, self._on_fire)
 
         if added or updated or removed:
             logger.info(
@@ -607,39 +693,25 @@ class Scheduler:
 
     async def _reconcile_running_jobs(
         self,
+        added: set[str],
+        removed: set[str],
+        updated: set[str],
         on_fire: Callable[[ScheduledJob], Awaitable[None]],
     ) -> None:
-        current_names = set(self._job_tasks)
-        desired_names = set(self._jobs_by_name)
-
-        removed = current_names - desired_names
-        added = desired_names - current_names
-        updated = {
-            name
-            for name in (current_names & desired_names)
-            if self._jobs_by_name[name] != self._task_job(name)
-        }
-
+        del on_fire  # central due loop owns dispatch; signature kept for symmetry
         for name in sorted(removed | updated):
             await self._stop_job(name)
         for name in sorted(added | updated):
-            self._start_job(self._jobs_by_name[name], on_fire)
+            self._start_job(self._jobs_by_name[name])
+        # Kick the due loop so the new schedule is picked up immediately.
+        self._due_loop_wakeup.set()
 
-    def _task_job(self, name: str) -> ScheduledJob | None:
-        task = self._job_tasks.get(name)
-        if task is None:
-            return None
-        return getattr(task, "_oma_job", None)
-
-    def _start_job(
-        self,
-        job: ScheduledJob,
-        on_fire: Callable[[ScheduledJob], Awaitable[None]],
-    ) -> None:
-        runner = self._run_cron_job if job.cron else self._run_interval_job
-        now = datetime.now(self._timezone)
+    def _start_job(self, job: ScheduledJob) -> None:
+        """Initialize ``JobRuntimeState`` for *job*. The central due loop dispatches fires."""
+        now = self._now()
         if job.cron:
-            initial_next_fire = self.compute_next_run_at(job)
+            spec = _parse_cron_expression(job.cron)
+            initial_next_fire: datetime | None = _next_cron_fire(spec, now)
         else:
             initial_next_fire = now + timedelta(seconds=job.initial_delay_seconds)
 
@@ -653,21 +725,23 @@ class Scheduler:
             last_restart_at=prior.last_restart_at if prior else None,
             last_restart_reason=prior.last_restart_reason if prior else None,
         )
-        task = asyncio.create_task(runner(job, on_fire), name=f"scheduler:{job.name}")
-        setattr(task, "_oma_job", job)
-        self._job_tasks[job.name] = task
+        self._due_loop_wakeup.set()
 
     async def _stop_job(self, name: str) -> None:
-        task = self._job_tasks.pop(name, None)
+        # Order matters: pop the fire-task slot BEFORE cancelling, so the
+        # task's race-guard sees the slot is no longer ours and won't
+        # resurrect _job_state via _mark_job_sleeping.
+        task = self._fire_tasks.pop(name, None)
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        # Drop state after the task is fully gone.
         self._job_state.pop(name, None)
-        if task is None:
-            return
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
+        self._due_loop_wakeup.set()
 
     async def _stop_all_jobs(self) -> None:
-        tasks = list(self._job_tasks.values())
-        self._job_tasks.clear()
+        tasks = list(self._fire_tasks.values())
+        self._fire_tasks.clear()
         self._job_state.clear()
         for task in tasks:
             task.cancel()
@@ -678,7 +752,7 @@ class Scheduler:
         state = self._job_state.get(name)
         if state is None:
             return
-        now = datetime.now(self._timezone)
+        now = self._now()
         state.phase = "firing"
         state.fire_started_at = now
         state.last_progress_at = now
@@ -687,12 +761,142 @@ class Scheduler:
         state = self._job_state.get(name)
         if state is None:
             return
-        now = datetime.now(self._timezone)
+        now = self._now()
         state.phase = "sleeping"
         state.fire_started_at = None
         state.last_progress_at = now
         if next_fire_at is not None:
             state.next_fire_at = next_fire_at
+
+    def _collect_due_jobs(self, now: datetime) -> list[str]:
+        """Return names of sleeping jobs whose ``next_fire_at <= now``."""
+        due: list[str] = []
+        for name in sorted(self._job_state):
+            state = self._job_state[name]
+            if state.phase != "sleeping":
+                continue
+            if state.next_fire_at is None:
+                continue
+            if state.next_fire_at <= now:
+                due.append(name)
+        return due
+
+    def _compute_next_fire_after_completion(
+        self, job: ScheduledJob, post_now: datetime
+    ) -> datetime:
+        if job.cron:
+            return _next_cron_fire(_parse_cron_expression(job.cron), post_now)
+        interval = job.interval_seconds or 0
+        return post_now + timedelta(seconds=interval)
+
+    def _compute_due_loop_sleep(self, now: datetime) -> float:
+        """Compute the next due-loop wait, bounded by ``due_loop_max_tick_seconds``.
+
+        Only considers ``phase=="sleeping"`` jobs. Firing jobs may carry a
+        stale ``next_fire_at`` from before — including them would make the
+        loop spin at the lower bound until the fire completes.
+        """
+        max_tick = self.due_loop_max_tick_seconds
+        soonest: datetime | None = None
+        for state in self._job_state.values():
+            if state.phase != "sleeping":
+                continue
+            if state.next_fire_at is None:
+                continue
+            if soonest is None or state.next_fire_at < soonest:
+                soonest = state.next_fire_at
+        if soonest is None:
+            return max_tick
+        delta = (soonest - now).total_seconds()
+        if delta < _DEFAULT_DUE_LOOP_MIN_SLEEP_SECONDS:
+            return _DEFAULT_DUE_LOOP_MIN_SLEEP_SECONDS
+        return min(max_tick, delta)
+
+    def _dispatch_due_job(
+        self,
+        name: str,
+        on_fire: Callable[[ScheduledJob], Awaitable[None]],
+        *,
+        preserve_next_fire: bool = False,
+    ) -> None:
+        state = self._job_state.get(name)
+        job = self._jobs_by_name.get(name)
+        if state is None or job is None or state.phase == "firing":
+            return
+        # Capture the current scheduled next_fire so manual fires can
+        # restore it after completion (instead of advancing the regular
+        # cadence by the manual-fire's duration).
+        pinned_next_fire = state.next_fire_at if preserve_next_fire else None
+        self._mark_job_firing(name)
+        task = asyncio.create_task(
+            self._fire_job_once(job, on_fire, pinned_next_fire=pinned_next_fire),
+            name=f"scheduler:fire:{name}",
+        )
+        self._fire_tasks[name] = task
+
+    async def _fire_job_once(
+        self,
+        job: ScheduledJob,
+        on_fire: Callable[[ScheduledJob], Awaitable[None]],
+        *,
+        pinned_next_fire: datetime | None = None,
+    ) -> None:
+        try:
+            logger.info(
+                "Scheduler firing job=%s schedule=%s platform=%s channel=%s thread=%s",
+                job.name,
+                job.cron or f"interval={job.interval_seconds}s",
+                job.platform,
+                job.channel_id,
+                job.thread_id or "(new)",
+            )
+            await on_fire(job)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception("Scheduler job %r failed: %s", job.name, exc)
+        finally:
+            # Race guard: a reload/update may have replaced our slot
+            # with a different task while we were running; in that case
+            # the new task owns the entry — don't touch state here.
+            current = asyncio.current_task()
+            if self._fire_tasks.get(job.name) is current:
+                self._fire_tasks.pop(job.name, None)
+                if self._job_state.get(job.name) is not None:
+                    post_now = self._now()
+                    if pinned_next_fire is not None and pinned_next_fire > post_now:
+                        # Manual fire didn't displace a future scheduled fire.
+                        next_fire: datetime = pinned_next_fire
+                    else:
+                        next_fire = self._compute_next_fire_after_completion(job, post_now)
+                    self._mark_job_sleeping(job.name, next_fire_at=next_fire)
+                    self._due_loop_wakeup.set()
+
+    async def _due_loop(
+        self,
+        on_fire: Callable[[ScheduledJob], Awaitable[None]],
+    ) -> None:
+        while True:
+            try:
+                now = self._now()
+                due_names = self._collect_due_jobs(now)
+                for name in due_names:
+                    self._dispatch_due_job(name, on_fire)
+                self._touch_due_loop_progress()
+                # Clear BEFORE compute so a wakeup arriving in the
+                # window between compute and clear can't be silently
+                # dropped — leading to a missed short-interval fire.
+                self._due_loop_wakeup.clear()
+                sleep_for = self._compute_due_loop_sleep(self._now())
+                try:
+                    await asyncio.wait_for(self._due_loop_wakeup.wait(), timeout=sleep_for)
+                except asyncio.TimeoutError:
+                    pass
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Scheduler due_loop iteration failed")
+                await asyncio.sleep(self.due_loop_max_tick_seconds)
 
     def list_job_runtime_state(self) -> list[JobRuntimeState]:
         """Return a snapshot (copy) of liveness state for every active job."""
@@ -738,6 +942,18 @@ class Scheduler:
             restart_in_progress=state.restart_in_progress,
         )
 
+    def get_due_loop_runtime_state(self) -> DueLoopRuntimeState | None:
+        """Return a snapshot (copy) of due-loop liveness, or None if scheduler not running."""
+        state = self._due_loop_state
+        if state is None:
+            return None
+        return DueLoopRuntimeState(
+            last_progress_at=state.last_progress_at,
+            last_restart_at=state.last_restart_at,
+            last_restart_reason=state.last_restart_reason,
+            restart_in_progress=state.restart_in_progress,
+        )
+
     def compute_job_next_run_at(self, name: str) -> datetime | None:
         """Compute the next cron/interval fire time for a known job from now."""
         job = self._jobs_by_name.get(name)
@@ -746,39 +962,38 @@ class Scheduler:
         return self.compute_next_run_at(job)
 
     def evaluate_job_health(self, now: datetime | None = None) -> list[HealthFinding]:
-        """Read-only health evaluation. Returns stale-job / stale-reload findings.
+        """Read-only health evaluation. Returns stale findings for /doctor + supervisor.
 
-        Rules:
-          A. task.done() is True but _stop_event not set  → task_done_unexpectedly
-          B. phase == "sleeping" AND now > next_fire_at + grace AND
-             last_progress_at < next_fire_at               → missed_fire
-          (phase == "firing" is never flagged — long-running legitimate fires.)
+        Job scope:
+          - ``missed_fire`` — ``phase=="sleeping"`` past ``next_fire_at + grace``
+            with ``last_progress_at < next_fire_at``. **Informational only**;
+            the central due loop natively recovers overdue jobs on its next
+            tick (no auto-restart). Surfaced here for /doctor visibility.
 
-        Reload loop: task.done() while not stopped, or no progress for
-        reload_interval * _DEFAULT_RELOAD_STALE_FACTOR.
+        Reload scope:
+          - ``task_done_unexpectedly`` — reload task done while not stopped.
+          - ``no_progress`` — reload loop hasn't ticked for
+            ``reload_interval_seconds * _DEFAULT_RELOAD_STALE_FACTOR``.
+          - Both restart via ``restart_reload_loop()``.
+
+        Due-loop scope:
+          - ``task_done_unexpectedly`` — due-loop task done while not stopped.
+          - ``no_progress`` — due loop hasn't ticked for
+            ``due_loop_max_tick_seconds * _DEFAULT_DUE_LOOP_STALE_FACTOR``.
+          - Both restart via ``restart_due_loop()``.
         """
         if now is None:
-            now = datetime.now(self._timezone)
+            now = self._now()
         findings: list[HealthFinding] = []
         stop_set = self._stop_event.is_set()
         grace = timedelta(seconds=self._stale_grace_seconds)
 
         for name in sorted(self._job_state):
             state = self._job_state[name]
-            task = self._job_tasks.get(name)
-
-            if not stop_set and task is not None and task.done():
-                findings.append(
-                    HealthFinding(scope="job", name=name, reason="task_done_unexpectedly")
-                )
-                continue
-
             if state.phase == "firing":
                 continue
-
             if state.next_fire_at is None:
                 continue
-
             if now > state.next_fire_at + grace and state.last_progress_at < state.next_fire_at:
                 findings.append(HealthFinding(scope="job", name=name, reason="missed_fire"))
 
@@ -799,62 +1014,31 @@ class Scheduler:
                     findings.append(
                         HealthFinding(scope="reload", name=None, reason="no_progress")
                     )
-        return findings
 
-    async def restart_job(self, name: str, *, reason: str) -> bool:
-        """Self-heal a stale or dead per-job task. Rate-limited by min_restart_interval."""
-        job = self._jobs_by_name.get(name)
-        if job is None:
-            logger.debug("restart_job: unknown job %r", name)
-            return False
-
-        state = self._job_state.get(name)
-        now = datetime.now(self._timezone)
-        if state is not None:
-            if state.restart_in_progress:
-                logger.debug("restart_job: %r restart already in progress", name)
-                return False
-            if (
-                state.last_restart_at is not None
-                and (now - state.last_restart_at).total_seconds()
-                < self._min_restart_interval_seconds
-            ):
-                logger.debug(
-                    "restart_job: %r restart rate-limited (last=%s)",
-                    name,
-                    state.last_restart_at.isoformat(),
+        due_loop_task = self._due_loop_task
+        due_loop_state = self._due_loop_state
+        if due_loop_state is not None:
+            if not stop_set and due_loop_task is not None and due_loop_task.done():
+                findings.append(
+                    HealthFinding(
+                        scope="due_loop", name=None, reason="task_done_unexpectedly"
+                    )
                 )
-                return False
-            state.restart_in_progress = True
+            else:
+                stale_threshold = timedelta(
+                    seconds=self.due_loop_max_tick_seconds * _DEFAULT_DUE_LOOP_STALE_FACTOR
+                )
+                if now - due_loop_state.last_progress_at > stale_threshold:
+                    findings.append(
+                        HealthFinding(scope="due_loop", name=None, reason="no_progress")
+                    )
 
-        try:
-            logger.warning("Scheduler restart job=%s reason=%s", name, reason)
-            task = self._job_tasks.pop(name, None)
-            self._job_state.pop(name, None)
-            if task is not None:
-                task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
-
-            on_fire = self._on_fire
-            if on_fire is None:
-                logger.warning("restart_job: scheduler not running, cannot restart %r", name)
-                return False
-
-            self._start_job(job, on_fire)
-            new_state = self._job_state.get(name)
-            if new_state is not None:
-                new_state.last_restart_at = now
-                new_state.last_restart_reason = reason
-            return True
-        finally:
-            current = self._job_state.get(name)
-            if current is not None:
-                current.restart_in_progress = False
+        return findings
 
     async def restart_reload_loop(self, *, reason: str) -> bool:
         """Self-heal a stalled reload loop. Rate-limited by min_restart_interval."""
         reload_state = self._reload_state
-        now = datetime.now(self._timezone)
+        now = self._now()
         if reload_state is not None:
             if reload_state.restart_in_progress:
                 logger.debug("restart_reload_loop: already in progress")
@@ -895,67 +1079,52 @@ class Scheduler:
             if self._reload_state is not None:
                 self._reload_state.restart_in_progress = False
 
-    async def _run_interval_job(
-        self,
-        job: ScheduledJob,
-        on_fire: Callable[[ScheduledJob], Awaitable[None]],
-    ) -> None:
-        if job.initial_delay_seconds > 0:
-            await asyncio.sleep(job.initial_delay_seconds)
-
-        interval = job.interval_seconds or 0
-        while True:
-            self._mark_job_firing(job.name)
-            try:
-                logger.info(
-                    "Scheduler firing interval job=%s platform=%s channel=%s thread=%s",
-                    job.name,
-                    job.platform,
-                    job.channel_id,
-                    job.thread_id or "(new)",
+    async def restart_due_loop(self, *, reason: str) -> bool:
+        """Self-heal a stalled due-loop. Rate-limited by min_restart_interval."""
+        on_fire = self._on_fire
+        if on_fire is None:
+            logger.warning("restart_due_loop: scheduler not running")
+            return False
+        due_state = self._due_loop_state
+        now = self._now()
+        if due_state is not None:
+            if due_state.restart_in_progress:
+                logger.debug("restart_due_loop: already in progress")
+                return False
+            if (
+                due_state.last_restart_at is not None
+                and (now - due_state.last_restart_at).total_seconds()
+                < self._min_restart_interval_seconds
+            ):
+                logger.debug(
+                    "restart_due_loop: rate-limited (last=%s)",
+                    due_state.last_restart_at.isoformat(),
                 )
-                await on_fire(job)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                logger.exception("Scheduler job '%s' failed: %s", job.name, exc)
-            finally:
-                next_fire = datetime.now(self._timezone) + timedelta(seconds=interval)
-                self._mark_job_sleeping(job.name, next_fire_at=next_fire)
-            await asyncio.sleep(interval)
+                return False
+            due_state.restart_in_progress = True
 
-    async def _run_cron_job(
-        self,
-        job: ScheduledJob,
-        on_fire: Callable[[ScheduledJob], Awaitable[None]],
-    ) -> None:
-        spec = _parse_cron_expression(job.cron or "")
+        try:
+            logger.warning("Scheduler restart due_loop reason=%s", reason)
+            task = self._due_loop_task
+            if task is not None:
+                task.cancel()
+                # Must complete cancellation BEFORE creating the new task
+                # to avoid two due loops dispatching simultaneously.
+                await asyncio.gather(task, return_exceptions=True)
 
-        while True:
-            now = datetime.now(self._timezone)
-            next_fire = _next_cron_fire(spec, now)
-            self._mark_job_sleeping(job.name, next_fire_at=next_fire)
-            delay = max((next_fire - now).total_seconds(), 0.0)
-            await asyncio.sleep(delay)
-            self._mark_job_firing(job.name)
-            try:
-                logger.info(
-                    "Scheduler firing cron job=%s schedule=%s platform=%s channel=%s thread=%s",
-                    job.name,
-                    job.cron,
-                    job.platform,
-                    job.channel_id,
-                    job.thread_id or "(new)",
-                )
-                await on_fire(job)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                logger.exception("Scheduler job '%s' failed: %s", job.name, exc)
-            finally:
-                post_fire_now = datetime.now(self._timezone)
-                post_next_fire = _next_cron_fire(spec, post_fire_now)
-                self._mark_job_sleeping(job.name, next_fire_at=post_next_fire)
+            self._due_loop_task = asyncio.create_task(
+                self._due_loop(on_fire), name="scheduler:due"
+            )
+            if due_state is not None:
+                due_state.last_progress_at = now
+                due_state.last_restart_at = now
+                due_state.last_restart_reason = reason
+            # Kick the new loop into immediate iteration.
+            self._due_loop_wakeup.set()
+            return True
+        finally:
+            if self._due_loop_state is not None:
+                self._due_loop_state.restart_in_progress = False
 
 
 def build_scheduler_from_config(

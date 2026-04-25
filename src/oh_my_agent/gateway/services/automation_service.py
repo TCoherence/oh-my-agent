@@ -63,10 +63,20 @@ class AutomationService:
             return ServiceResult(success=False, message=f"Automation `{name}` not found.")
         if not record.enabled:
             return ServiceResult(success=False, message=f"Automation `{name}` is disabled. Enable it first.")
-        fired = await self._scheduler.fire_job_now(name.strip())
-        if fired:
-            return ServiceResult(success=True, message=f"✅ Automation `{name}` fired manually.")
-        return ServiceResult(success=False, message=f"Automation `{name}` could not be fired (scheduler not running?).")
+        result = await self._scheduler.fire_job_now(name.strip())
+        if result == "ok":
+            return ServiceResult(
+                success=True,
+                message=f"Dispatched `{name}` — fire queued, watch the channel for the result.",
+            )
+        if result == "already_firing":
+            return ServiceResult(
+                success=False,
+                message=f"Automation `{name}` is already firing — manual run skipped.",
+            )
+        if result == "scheduler_down":
+            return ServiceResult(success=False, message="Scheduler is not running.")
+        return ServiceResult(success=False, message=f"Automation `{name}` not found.")
 
     async def set_enabled(self, name: str, enabled: bool) -> AutomationStatusResult:
         if self._scheduler is None:

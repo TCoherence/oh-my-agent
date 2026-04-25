@@ -757,7 +757,13 @@ class GatewayManager:
     async def _run_scheduler_supervisor(
         self, *, interval_seconds: float = 60.0
     ) -> None:
-        """Periodic watchdog: evaluate scheduler liveness and self-heal."""
+        """Periodic watchdog: evaluate scheduler liveness and self-heal.
+
+        Per-job ``missed_fire`` findings are informational only — the
+        central due loop natively recovers overdue jobs on its next tick,
+        so we just log and rely on the loop. Reload-loop and due-loop
+        findings still trigger rate-limited restarts.
+        """
         if not self._scheduler:
             return
         while True:
@@ -767,16 +773,14 @@ class GatewayManager:
                     return
                 findings = self._scheduler.evaluate_job_health()
                 for finding in findings:
-                    if finding.scope == "job" and finding.name:
-                        restarted = await self._scheduler.restart_job(
-                            finding.name, reason=finding.reason
+                    if finding.scope == "job":
+                        # Informational: due loop recovers on next tick.
+                        logger.info(
+                            "Supervisor noted scope=job name=%s reason=%s "
+                            "(due loop will recover on next tick)",
+                            finding.name,
+                            finding.reason,
                         )
-                        if restarted:
-                            logger.warning(
-                                "Supervisor restarted job=%s reason=%s",
-                                finding.name,
-                                finding.reason,
-                            )
                     elif finding.scope == "reload":
                         restarted = await self._scheduler.restart_reload_loop(
                             reason=finding.reason
@@ -784,6 +788,15 @@ class GatewayManager:
                         if restarted:
                             logger.warning(
                                 "Supervisor restarted reload-loop reason=%s",
+                                finding.reason,
+                            )
+                    elif finding.scope == "due_loop":
+                        restarted = await self._scheduler.restart_due_loop(
+                            reason=finding.reason
+                        )
+                        if restarted:
+                            logger.warning(
+                                "Supervisor restarted due-loop reason=%s",
                                 finding.reason,
                             )
             except asyncio.CancelledError:
@@ -809,12 +822,18 @@ class GatewayManager:
             )
 
     async def _refresh_automation_next_run_at(self, name: str) -> None:
-        """Refresh persisted next_run_at for a single automation. Never raises."""
+        """Refresh persisted next_run_at for a single automation. Never raises.
+
+        Uses ``compute_display_next_run_at`` so the persisted value matches
+        the in-memory pinned schedule during a manual fire (otherwise the
+        UI would show ``now+interval`` while the scheduler still intends
+        to fire at the original cadence).
+        """
         store = getattr(self, "_memory_store_ref", None)
         if not store or not self._scheduler:
             return
         try:
-            next_dt = self._scheduler.compute_job_next_run_at(name)
+            next_dt = self._scheduler.compute_display_next_run_at(name)
             next_run_iso = next_dt.isoformat() if next_dt else None
             record = self._scheduler.get_automation(name)
             if record is None:
@@ -832,10 +851,14 @@ class GatewayManager:
         """Manually fire a named automation job.  Returns a status message."""
         if not self._scheduler:
             return "Scheduler not configured."
-        fired = await self._scheduler.fire_job_now(name)
-        if fired:
+        result = await self._scheduler.fire_job_now(name)
+        if result == "ok":
             return f"Automation `{name}` fired."
-        return f"Automation `{name}` not found or scheduler not running."
+        if result == "already_firing":
+            return f"Automation `{name}` is already firing — manual run skipped."
+        if result == "scheduler_down":
+            return "Scheduler is not running."
+        return f"Automation `{name}` not found."
 
     async def _dispatch_scheduled_job(self, job: ScheduledJob) -> None:
         try:
