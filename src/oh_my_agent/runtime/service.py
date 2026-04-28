@@ -181,6 +181,7 @@ class RuntimeService:
         skills_path: Path | None = None,
         workspace_skills_dirs: list[Path] | None = None,
         auth_service=None,
+        push_dispatcher=None,
     ) -> None:
         cfg = config or {}
         self._enabled = bool(cfg.get("enabled", True))
@@ -261,12 +262,14 @@ class RuntimeService:
         if self._auth_service is not None:
             self._auth_service.add_listener(self._on_auth_flow_event)
 
+        self._push_dispatcher = push_dispatcher
         self._sessions: dict[str, ChannelSession] = {}
         self._registries: dict[str, AgentRegistry] = {}
         self._notifications = NotificationManager(
             store=self._store,
             owner_user_ids=self._owner_user_ids,
             session_lookup=lambda platform, channel_id: self._sessions.get(self._key(platform, channel_id)),
+            push_dispatcher=push_dispatcher,
         )
         self._running_tasks: dict[str, asyncio.Task] = {}
         self._live_agent_logs: dict[str, Path] = {}
@@ -3211,6 +3214,11 @@ class RuntimeService:
                             last_error=f"notification_failure: {exc!r}"[:1000],
                         )
                     await self._signal_status_by_id(task, TASK_STATUS_FAILED)
+                    self._emit_automation_terminal_push(
+                        task,
+                        kind="automation_failed",
+                        body=f"completion notification failed: {exc!r}",
+                    )
                     return
 
                 # Notify landed — commit the COMPLETED watermark. Ordering
@@ -3257,6 +3265,11 @@ class RuntimeService:
                         last_error=None,
                     )
                 await self._signal_status_by_id(task, TASK_STATUS_COMPLETED)
+                self._emit_automation_terminal_push(
+                    task,
+                    kind="automation_complete",
+                    body=output_summary or "completed",
+                )
                 logger.info("Runtime task=%s COMPLETED step=%d", task.id, step)
                 return
 
@@ -3278,6 +3291,11 @@ class RuntimeService:
             )
         await self._notify(task, f"Task `{task.id}` reached max steps and stopped.")
         await self._signal_status_by_id(task, TASK_STATUS_TIMEOUT)
+        self._emit_automation_terminal_push(
+            task,
+            kind="automation_failed",
+            body=f"task timed out (max_steps={task.max_steps})",
+        )
 
     async def _run_agent(
         self,
@@ -3857,6 +3875,11 @@ class RuntimeService:
             usage=response.usage if response is not None else None,
         )
         await self._signal_status_by_id(task, TASK_STATUS_FAILED)
+        self._emit_automation_terminal_push(
+            task,
+            kind="automation_failed",
+            body=error,
+        )
 
         if response is not None and response.error_kind == "max_turns":
             await self._surface_rerun_bump_turns_button(task)
@@ -5733,6 +5756,34 @@ class RuntimeService:
                 payload={"status": task.status},
             )
         )
+
+    def _emit_automation_terminal_push(
+        self,
+        task: RuntimeTask,
+        *,
+        kind: str,
+        body: str,
+    ) -> None:
+        """Schedule an external push for automation-task terminal states.
+
+        Skipped for non-automation tasks (we never want a manual ``/task_start``
+        invocation to ring the owner's phone) and when no push dispatcher
+        is configured. Dispatcher's allow-list filters by ``events.<kind>``;
+        body is truncated to fit Bark's 200-char limit.
+        """
+        if not task.automation_name or self._push_dispatcher is None:
+            return
+        from oh_my_agent.push_notifications import PushNotificationEvent
+
+        label = kind.removeprefix("automation_") or kind
+        self._push_dispatcher.schedule(PushNotificationEvent(
+            kind=kind,  # type: ignore[arg-type]
+            title=f"Automation {label}: {task.automation_name}",
+            body=(body or "")[:200],
+            group="automation",
+            level=self._push_dispatcher.level_for(kind),
+            deep_link=None,
+        ))
 
     def _tail_text(self, text: str) -> str:
         if not text:

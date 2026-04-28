@@ -8,6 +8,7 @@ structured errors/warnings.  Used by both normal startup and the
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -69,6 +70,7 @@ def validate_config(config: dict[str, Any]) -> ValidationResult:
     _check_logging(config, result)
     _check_sections(config, result)
     _check_router(config, result)
+    _check_notifications(config, result)
     return result
 
 
@@ -328,3 +330,100 @@ def _check_router(config: dict, result: ValidationResult) -> None:
                             "be overridden via extra_body"
                         ),
                     )
+
+
+# ── External push notifications ─────────────────────────────────────── #
+
+_PUSH_PROVIDERS = {"bark", "noop"}
+_PUSH_LEVELS = {"passive", "active", "timeSensitive", "critical"}
+_PUSH_EVENT_KEYS = {
+    "mention_owner",
+    "task_draft",
+    "task_waiting_merge",
+    "ask_user",
+    "automation_complete",
+    "automation_failed",
+}
+
+
+def _check_notifications(config: dict, result: ValidationResult) -> None:
+    """Validate the optional ``notifications`` section."""
+    section = config.get("notifications")
+    if section is None:
+        return
+    if not isinstance(section, dict):
+        result.errors.append(ConfigError("notifications", "must be a mapping", "error"))
+        return
+    if not section.get("enabled", False):
+        return  # skip rest of checks when disabled
+
+    provider = section.get("provider", "bark")
+    if provider not in _PUSH_PROVIDERS:
+        result.errors.append(ConfigError(
+            "notifications.provider",
+            f"unknown provider '{provider}', expected one of {sorted(_PUSH_PROVIDERS)}",
+            "error",
+        ))
+        return
+
+    if provider == "bark":
+        bark = section.get("bark") or {}
+        if not isinstance(bark, dict):
+            result.errors.append(ConfigError(
+                "notifications.bark", "must be a mapping", "error",
+            ))
+            return
+        env_name = bark.get("device_key_env", "")
+        if not env_name or not isinstance(env_name, str):
+            result.errors.append(ConfigError(
+                "notifications.bark.device_key_env",
+                "must be a non-empty env-var name (e.g. \"BARK_DEVICE_KEY\")",
+                "error",
+            ))
+        elif not os.environ.get(env_name):
+            # warning — env may be injected later (e.g. via systemd unit env)
+            result.errors.append(ConfigError(
+                "notifications.bark.device_key_env",
+                f"env var ${env_name} is not set",
+                "warning",
+            ))
+
+    events = section.get("events") or {}
+    if not isinstance(events, dict):
+        result.errors.append(ConfigError(
+            "notifications.events", "must be a mapping", "error",
+        ))
+    else:
+        for key, value in events.items():
+            if key not in _PUSH_EVENT_KEYS:
+                result.errors.append(ConfigError(
+                    f"notifications.events.{key}",
+                    f"unknown event kind, expected one of {sorted(_PUSH_EVENT_KEYS)}",
+                    "warning",
+                ))
+            if not isinstance(value, bool):
+                result.errors.append(ConfigError(
+                    f"notifications.events.{key}",
+                    f"must be a bool, got {type(value).__name__}",
+                    "error",
+                ))
+
+    levels = section.get("levels") or {}
+    if not isinstance(levels, dict):
+        result.errors.append(ConfigError(
+            "notifications.levels", "must be a mapping", "error",
+        ))
+    else:
+        for key, value in levels.items():
+            if key not in _PUSH_EVENT_KEYS:
+                result.errors.append(ConfigError(
+                    f"notifications.levels.{key}",
+                    f"unknown event kind, expected one of {sorted(_PUSH_EVENT_KEYS)}",
+                    "warning",
+                ))
+            if value not in _PUSH_LEVELS:
+                result.errors.append(ConfigError(
+                    f"notifications.levels.{key}",
+                    f"must be one of {sorted(_PUSH_LEVELS)}, got '{value}'",
+                    "error",
+                ))

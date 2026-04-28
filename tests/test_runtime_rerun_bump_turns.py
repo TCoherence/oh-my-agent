@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from types import MethodType, SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -217,6 +217,7 @@ async def test_fail_surfaces_rerun_button_only_on_max_turns():
         stub._signal_status_by_id = AsyncMock(return_value=None)
         stub._format_agent_failure_text = lambda r, prefix: f"{prefix} {r.error or ''}"
         stub._surface_rerun_bump_turns_button = AsyncMock(return_value=None)
+        stub._emit_automation_terminal_push = MagicMock(return_value=None)
         stub._fail = MethodType(RS._fail, stub)
         await stub._fail(parent, "boom", response=response)
         return stub

@@ -10,8 +10,19 @@ from oh_my_agent.runtime.types import NotificationEvent, NotificationRecord
 
 if TYPE_CHECKING:
     from oh_my_agent.memory.store import MemoryStore
+    from oh_my_agent.push_notifications import PushDispatcher, PushKind
 
 logger = logging.getLogger(__name__)
+
+# Mapping internal NotificationKind → external PushKind. Internal kinds
+# not in this map (e.g. ``auth_required``) are deliberately omitted —
+# the external push allow-list defaults to False, so unmapped kinds
+# stay inside the Discord-thread channel.
+_INTERNAL_TO_PUSH_KIND: dict[str, "PushKind"] = {
+    "task_draft": "task_draft",
+    "task_waiting_merge": "task_waiting_merge",
+    "ask_user": "ask_user",
+}
 
 
 class NotificationManager:
@@ -23,10 +34,12 @@ class NotificationManager:
         *,
         owner_user_ids: set[str] | None,
         session_lookup: Callable[[str, str], ChannelSession | None],
+        push_dispatcher: "PushDispatcher | None" = None,
     ) -> None:
         self._store = store
         self._owner_user_ids = set(owner_user_ids or set())
         self._session_lookup = session_lookup
+        self._push_dispatcher = push_dispatcher
 
     async def emit(self, event: NotificationEvent) -> list[NotificationRecord]:
         if not self._owner_user_ids:
@@ -71,7 +84,46 @@ class NotificationManager:
                 dm_message_id=dm_message_id,
             )
             records.append(record)
+
+        # Fan-out to external push (Bark, etc.). Fire-and-forget via
+        # PushDispatcher.schedule(); the dispatcher filters by allow-list
+        # and never awaits the provider, so a slow Bark POST cannot stall
+        # internal notification delivery.
+        if records and self._push_dispatcher is not None:
+            push_event = self._build_push_event(event)
+            if push_event is not None:
+                self._push_dispatcher.schedule(push_event)
+
         return records
+
+    def _build_push_event(self, event: NotificationEvent):
+        """Translate an internal ``NotificationEvent`` to a push event,
+        or return ``None`` if this kind has no external push mapping."""
+        from oh_my_agent.push_notifications import PushNotificationEvent
+
+        push_kind = _INTERNAL_TO_PUSH_KIND.get(event.kind)
+        if push_kind is None:
+            return None
+
+        # Use ``event.body`` as primary content (e.g. ``ask_user`` already
+        # contains "Question: ..."). For ``task_draft`` only, prepend
+        # ``payload.reason_text`` so the push surfaces the actual risk
+        # reason rather than the generic "approve / reject" prompt.
+        body = event.body or ""
+        if event.kind == "task_draft":
+            reason = ((event.payload or {}).get("reason_text") or "").strip()
+            if reason:
+                body = f"{reason}\n{body}".strip()
+
+        assert self._push_dispatcher is not None
+        return PushNotificationEvent(
+            kind=push_kind,
+            title=event.title,
+            body=body[:200],
+            group="hitl",
+            level=self._push_dispatcher.level_for(push_kind),
+            deep_link=None,
+        )
 
     async def resolve(self, dedupe_key: str, *, status: str = "resolved") -> int:
         return await self._store.resolve_notification_events(
