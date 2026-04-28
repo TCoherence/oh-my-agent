@@ -3569,3 +3569,145 @@ async def test_cancel_task_hitl_prompt_blocks_task(tmp_path):
 
     await runtime.stop()
     await store.close()
+
+
+def _make_artifact_task(task_id: str = "task-link-1"):
+    from oh_my_agent.runtime.types import RuntimeTask
+
+    return RuntimeTask(
+        id=task_id,
+        platform="discord",
+        channel_id="100",
+        thread_id="thread-link",
+        created_by="owner-1",
+        goal="link smoke",
+        original_request=None,
+        preferred_agent=None,
+        status="PENDING",
+        step_no=0,
+        max_steps=1,
+        max_minutes=1,
+        agent_timeout_seconds=None,
+        agent_max_turns=None,
+        test_command="true",
+        workspace_path=None,
+        decision_message_id=None,
+        status_message_id=None,
+        blocked_reason=None,
+        error=None,
+        summary=None,
+        resume_instruction=None,
+        merge_commit_hash=None,
+        merge_error=None,
+        completion_mode="reply",
+        output_summary=None,
+        artifact_manifest=None,
+        automation_name=None,
+        workspace_cleaned_at=None,
+        created_at=None,
+        started_at=None,
+        updated_at=None,
+        ended_at=None,
+        task_type="artifact",
+        skill_name=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_prepare_task_workspace_links_agent_workspace_dirs(tmp_path):
+    """`_artifacts/<task_id>/` is bare by design; without these symlinks the
+    CLI agent burns turns probing for SKILL.md / .venv from a cwd that has
+    neither. Verify symlinks resolve `./.venv/bin/python` and Claude's
+    parent-walk skill discovery for free."""
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+
+    agent_ws = tmp_path / "agent-workspace"
+    venv_dir = agent_ws / ".venv" / "bin"
+    venv_dir.mkdir(parents=True)
+    (venv_dir / "python").write_text("#!/bin/sh\n", encoding="utf-8")
+    skills_dir = agent_ws / ".claude" / "skills" / "deals-scanner"
+    skills_dir.mkdir(parents=True)
+    (skills_dir / "SKILL.md").write_text("---\nname: deals-scanner\n---\n", encoding="utf-8")
+
+    db_path = tmp_path / "runtime.db"
+    store = SQLiteMemoryStore(db_path)
+    await store.init()
+    runtime = RuntimeService(
+        store,
+        config={
+            "enabled": True,
+            "worker_concurrency": 1,
+            "worktree_root": str(tmp_path / "worktrees"),
+            "default_test_command": "true",
+            "cleanup": {"enabled": False},
+        },
+        repo_root=repo,
+        agent_workspace=agent_ws,
+    )
+
+    task = _make_artifact_task()
+    workspace = await runtime._prepare_task_workspace(task)  # noqa: SLF001
+
+    venv_link = workspace / ".venv"
+    skills_link = workspace / ".claude" / "skills"
+    assert venv_link.is_symlink()
+    assert skills_link.is_symlink()
+    assert (venv_link / "bin" / "python").exists()
+    assert (skills_link / "deals-scanner" / "SKILL.md").exists()
+
+    workspace2 = await runtime._prepare_task_workspace(task)  # noqa: SLF001
+    assert workspace2 == workspace
+
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_prepare_task_workspace_no_agent_workspace_skips_linking(tmp_path):
+    """Backward-compat: without agent_workspace configured, the artifact dir
+    is still bare (legacy behavior)."""
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    store = SQLiteMemoryStore(tmp_path / "runtime.db")
+    await store.init()
+    runtime = RuntimeService(
+        store,
+        config={
+            "enabled": True,
+            "worktree_root": str(tmp_path / "worktrees"),
+            "default_test_command": "true",
+            "cleanup": {"enabled": False},
+        },
+        repo_root=repo,
+        agent_workspace=None,
+    )
+
+    workspace = await runtime._prepare_task_workspace(_make_artifact_task())  # noqa: SLF001
+    assert workspace.exists()
+    assert not (workspace / ".venv").exists()
+    assert not (workspace / ".claude").exists()
+
+    await store.close()
+
+
+def test_list_workspace_files_skips_symlinks(tmp_path):
+    """`_collect_changed_files` for artifact tasks calls this; if it followed
+    symlinks it would inflate the artifact list with the entire venv +
+    skills tree (50 MB+ of site-packages noise)."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "real_output.md").write_text("real\n", encoding="utf-8")
+    (workspace / "subdir").mkdir()
+    (workspace / "subdir" / "nested.json").write_text("{}\n", encoding="utf-8")
+
+    fake_venv = tmp_path / "linked_target"
+    (fake_venv / "lib" / "python3").mkdir(parents=True)
+    (fake_venv / "lib" / "python3" / "noise.py").write_text("# imaginary deps\n", encoding="utf-8")
+    (fake_venv / "bin").mkdir()
+    (fake_venv / "bin" / "python").write_text("#!/bin/sh\n", encoding="utf-8")
+    (workspace / ".venv").symlink_to(fake_venv, target_is_directory=True)
+
+    listed = RuntimeService._list_workspace_files(workspace)  # noqa: SLF001
+
+    assert listed == ["real_output.md", "subdir/nested.json"]
+    assert not any(entry.startswith(".venv/") for entry in listed)

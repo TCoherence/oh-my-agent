@@ -180,6 +180,7 @@ class RuntimeService:
         skill_syncer=None,
         skills_path: Path | None = None,
         workspace_skills_dirs: list[Path] | None = None,
+        agent_workspace: Path | None = None,
         auth_service=None,
         push_dispatcher=None,
     ) -> None:
@@ -238,6 +239,7 @@ class RuntimeService:
         self._skill_syncer = skill_syncer
         self._skills_path = skills_path
         self._workspace_skills_dirs = workspace_skills_dirs
+        self._agent_workspace = agent_workspace.resolve() if agent_workspace else None
         worktree_root = Path(cfg.get("worktree_root", "~/.oh-my-agent/runtime/tasks")).expanduser().resolve()
         self._runtime_workspace_root = worktree_root
         self._worktree = WorktreeManager(self._repo_root, worktree_root)
@@ -3993,7 +3995,33 @@ class RuntimeService:
 
         workspace = self._runtime_workspace_root / "_artifacts" / task.id
         workspace.mkdir(parents=True, exist_ok=True)
+        self._link_agent_workspace_into(workspace)
         return workspace
+
+    # Without these symlinks, the CLI agent starts from a bare cwd and burns
+    # 5–15 turns probing for SKILL.md / .venv (`find /`, `ls /repo/.venv`, etc.)
+    # before any real work — enough to push aggregation skills past their
+    # max_turns budget. Symlinks let SKILL.md's `./.venv/bin/python` and
+    # Claude's `.claude/skills/` parent-walk discovery resolve immediately.
+    def _link_agent_workspace_into(self, workspace: Path) -> None:
+        if self._agent_workspace is None:
+            return
+        candidates: list[tuple[Path, Path]] = [
+            (workspace / ".venv", self._agent_workspace / ".venv"),
+            (workspace / ".claude" / "skills", self._agent_workspace / ".claude" / "skills"),
+            (workspace / ".gemini" / "skills", self._agent_workspace / ".gemini" / "skills"),
+            (workspace / ".agents" / "skills", self._agent_workspace / ".agents" / "skills"),
+        ]
+        for link, target in candidates:
+            if not target.exists():
+                continue
+            if link.is_symlink() or link.exists():
+                continue
+            try:
+                link.parent.mkdir(parents=True, exist_ok=True)
+                link.symlink_to(target, target_is_directory=True)
+            except OSError as exc:
+                logger.warning("Failed to link %s -> %s: %s", link, target, exc)
 
     async def _collect_changed_files(self, task: RuntimeTask, workspace: Path) -> list[str]:
         if self._uses_merge_flow(task):
@@ -4002,13 +4030,26 @@ class RuntimeService:
 
     @staticmethod
     def _list_workspace_files(workspace: Path) -> list[str]:
+        # Skip symlinks: artifact workspaces link in .venv / .claude/skills
+        # for the agent's convenience; those don't count as task output.
         if not workspace.exists():
             return []
-        return sorted(
-            str(path.relative_to(workspace)).replace("\\", "/")
-            for path in workspace.rglob("*")
-            if path.is_file()
-        )
+        results: list[str] = []
+        stack: list[Path] = [workspace]
+        while stack:
+            current = stack.pop()
+            try:
+                entries = list(current.iterdir())
+            except OSError:
+                continue
+            for entry in entries:
+                if entry.is_symlink():
+                    continue
+                if entry.is_dir():
+                    stack.append(entry)
+                elif entry.is_file():
+                    results.append(str(entry.relative_to(workspace)).replace("\\", "/"))
+        return sorted(results)
 
     @staticmethod
     def _uses_merge_flow(task: RuntimeTask) -> bool:
