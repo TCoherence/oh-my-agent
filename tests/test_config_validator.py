@@ -156,3 +156,103 @@ def test_validate_absent_router_section_is_fine():
     }
     result = validate_config(config)
     assert _router_errors(result) == []
+
+
+# ── Notifications (external push) ──────────────────────────────────── #
+
+
+def _notif_errors(result, severity: str | None = None) -> list:
+    return [
+        e
+        for e in result.errors
+        if e.path.startswith("notifications")
+        and (severity is None or e.severity == severity)
+    ]
+
+
+def _config_with_notifications(notif: dict) -> dict:
+    base = _base_config()
+    base["notifications"] = notif
+    return base
+
+
+def test_notifications_absent_is_fine():
+    result = validate_config(_base_config())
+    assert _notif_errors(result) == []
+
+
+def test_notifications_disabled_is_fine_even_if_other_keys_invalid():
+    # Disabled → other field validation is skipped (the user might have
+    # half-configured the section while turning it off).
+    result = validate_config(_config_with_notifications({
+        "enabled": False,
+        "provider": "garbage",
+    }))
+    assert _notif_errors(result, severity="error") == []
+
+
+def test_notifications_unknown_provider_is_error(monkeypatch):
+    monkeypatch.setenv("BARK_DEVICE_KEY", "abc")
+    result = validate_config(_config_with_notifications({
+        "enabled": True,
+        "provider": "unknown",
+    }))
+    errors = _notif_errors(result, severity="error")
+    assert any(e.path == "notifications.provider" for e in errors)
+
+
+def test_notifications_bark_missing_device_key_env_is_error():
+    result = validate_config(_config_with_notifications({
+        "enabled": True,
+        "provider": "bark",
+        "bark": {"server": "https://api.day.app"},
+    }))
+    errors = _notif_errors(result, severity="error")
+    assert any(e.path == "notifications.bark.device_key_env" for e in errors)
+
+
+def test_notifications_bark_unset_env_is_warning(monkeypatch):
+    monkeypatch.delenv("BARK_DEVICE_KEY", raising=False)
+    result = validate_config(_config_with_notifications({
+        "enabled": True,
+        "provider": "bark",
+        "bark": {"device_key_env": "BARK_DEVICE_KEY"},
+    }))
+    warnings = _notif_errors(result, severity="warning")
+    assert any(e.path == "notifications.bark.device_key_env" for e in warnings)
+
+
+def test_notifications_bark_with_set_env_is_clean(monkeypatch):
+    monkeypatch.setenv("BARK_DEVICE_KEY", "abc")
+    result = validate_config(_config_with_notifications({
+        "enabled": True,
+        "provider": "bark",
+        "bark": {"device_key_env": "BARK_DEVICE_KEY"},
+        "events": {"task_draft": True},
+        "levels": {"task_draft": "timeSensitive"},
+    }))
+    assert _notif_errors(result, severity="error") == []
+
+
+def test_notifications_invalid_level_is_error(monkeypatch):
+    monkeypatch.setenv("BARK_DEVICE_KEY", "abc")
+    result = validate_config(_config_with_notifications({
+        "enabled": True,
+        "provider": "bark",
+        "bark": {"device_key_env": "BARK_DEVICE_KEY"},
+        "levels": {"task_draft": "loud"},  # not a valid Bark level
+    }))
+    errors = _notif_errors(result, severity="error")
+    assert any(e.path == "notifications.levels.task_draft" for e in errors)
+
+
+def test_notifications_unknown_event_kind_is_warning(monkeypatch):
+    monkeypatch.setenv("BARK_DEVICE_KEY", "abc")
+    result = validate_config(_config_with_notifications({
+        "enabled": True,
+        "provider": "bark",
+        "bark": {"device_key_env": "BARK_DEVICE_KEY"},
+        "events": {"unknown_kind": True},
+    }))
+    warnings = _notif_errors(result, severity="warning")
+    assert any(e.path == "notifications.events.unknown_kind" for e in warnings)

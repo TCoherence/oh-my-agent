@@ -39,6 +39,10 @@ from oh_my_agent.gateway.services.types import (
     TaskActionResult,
     TaskListResult,
 )
+from oh_my_agent.push_notifications import (
+    PushCoolDown,
+    PushNotificationEvent,
+)
 from oh_my_agent.runtime.types import HitlPrompt
 from oh_my_agent.utils.errors import user_safe_message
 from oh_my_agent.utils.rate_limiter import TokenBucketLimiter
@@ -328,10 +332,26 @@ class DiscordChannel(BaseChannel):
 
     supports_streaming_edit: bool = True
 
-    def __init__(self, token: str, channel_id: str, owner_user_ids: set[str] | None = None) -> None:
+    def __init__(
+        self,
+        token: str,
+        channel_id: str,
+        owner_user_ids: set[str] | None = None,
+        *,
+        push_dispatcher=None,
+        mention_cool_down_seconds: float = 60.0,
+    ) -> None:
         self._token = token
         self._channel_id = channel_id
         self._owner_user_ids = owner_user_ids or set()
+        # External push (Bark, etc.) — fires when a non-owner mentions an owner
+        # in an accepted channel. Optional; ``None`` means push is fully off.
+        self._push_dispatcher = push_dispatcher
+        # Anti-spam: coalesce bursts of @-mentions from the same author in
+        # the same channel into one push. ``@everyone`` style flooding or
+        # bot-loops mentioning the owner repeatedly should not trigger N
+        # lock-screen alerts.
+        self._mention_cooldown = PushCoolDown(mention_cool_down_seconds)
         # Dump channels are send/reply-only aliases registered by the gateway
         # manager after construction. The bot must still accept replies to
         # messages posted there so follow-up threads can be spawned on them.
@@ -1885,10 +1905,59 @@ class DiscordChannel(BaseChannel):
         async def on_message(message: discord.Message) -> None:
             if message.author == client.user or message.author.bot:
                 return
+
+            # Build accepted channel set first — needed for both mention peek
+            # (below) and the regular message routing further down. Pulled
+            # ahead of the owner gate so a third-party @-mention of the owner
+            # can still trigger an external push notification even though the
+            # message itself is dropped before agent dispatch.
+            ch = message.channel
+            dump_ids = {int(cid) for cid in self._dump_channel_ids if cid.isdigit()}
+            accepted_parent_ids = {target_id, *dump_ids}
+            in_accepted_channel = (
+                (isinstance(ch, discord.Thread) and ch.parent_id in accepted_parent_ids)
+                or (ch.id in accepted_parent_ids)
+            )
+            if not in_accepted_channel:
+                return
+
+            # Mention peek: third-party @owner → external push notification.
+            # Read-only — does NOT lift the owner gate; non-owner messages
+            # still get dropped from the agent dispatch path below.
+            if (
+                self._push_dispatcher is not None
+                and self._push_dispatcher.is_enabled("mention_owner")
+                and self._owner_user_ids
+                and str(message.author.id) not in self._owner_user_ids
+            ):
+                mentioned_owners = [
+                    str(u.id)
+                    for u in getattr(message, "mentions", []) or []
+                    if str(u.id) in self._owner_user_ids
+                ]
+                if mentioned_owners:
+                    cooldown_key = f"{ch.id}:{message.author.id}"
+                    if self._mention_cooldown.should_fire(cooldown_key):
+                        # ``clean_content`` renders raw ``<@123>`` mention
+                        # syntax as @username — push body shows on the lock
+                        # screen, so readability beats fidelity.
+                        body_text = (
+                            getattr(message, "clean_content", None)
+                            or message.content
+                            or "(no text)"
+                        )
+                        self._push_dispatcher.schedule(PushNotificationEvent(
+                            kind="mention_owner",
+                            title=f"{message.author.display_name} mentioned you",
+                            body=body_text[:200],
+                            group="mentions",
+                            level=self._push_dispatcher.level_for("mention_owner"),
+                            deep_link=getattr(message, "jump_url", None),
+                        ))
+
             if self._owner_user_ids and str(message.author.id) not in self._owner_user_ids:
                 return
 
-            ch = message.channel
             content = message.content.strip()
 
             # Download image attachments (non-image and oversized are skipped)
@@ -1904,14 +1973,6 @@ class DiscordChannel(BaseChannel):
                 if first and self._registry.get_agent(first):
                     preferred_agent = first
                     content = rest.strip()
-
-            # Dump channels accepted alongside the primary listening channel:
-            # replies to automation terminal messages spawn follow-up threads
-            # there. The channel_id on IncomingMessage carries the actual
-            # source channel so automation_post lookup + follow-up thread
-            # anchoring resolves against the right channel.
-            dump_ids = {int(cid) for cid in self._dump_channel_ids if cid.isdigit()}
-            accepted_parent_ids = {target_id, *dump_ids}
 
             # Message in a thread whose parent is our target channel (or a dump channel)
             if isinstance(ch, discord.Thread) and ch.parent_id in accepted_parent_ids:

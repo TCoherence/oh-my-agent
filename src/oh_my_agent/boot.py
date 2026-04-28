@@ -124,7 +124,12 @@ def _build_agent(name: str, cfg: dict, workspace: Path | None = None):
     raise ValueError(f"Unknown agent type '{agent_type}' for agent '{name}'")
 
 
-def _build_channel(cfg: dict, *, owner_user_ids: set[str] | None = None):
+def _build_channel(
+    cfg: dict,
+    *,
+    owner_user_ids: set[str] | None = None,
+    push_dispatcher=None,
+):
     """Instantiate a platform channel from its config dict."""
     platform = cfg["platform"]
     channel_id = str(cfg["channel_id"])
@@ -135,9 +140,63 @@ def _build_channel(cfg: dict, *, owner_user_ids: set[str] | None = None):
             token=cfg["token"],
             channel_id=channel_id,
             owner_user_ids=owner_user_ids,
+            push_dispatcher=push_dispatcher,
         )
 
     raise ValueError(f"Unknown platform '{platform}'")
+
+
+def _build_push_dispatcher(cfg: dict | None):
+    """Construct the external push dispatcher from ``notifications`` config.
+
+    Returns a :class:`PushDispatcher` wrapping either ``BarkPushProvider``
+    (when enabled) or ``NoopPushProvider`` (default). Boot calls this once
+    and shares the same dispatcher across DiscordChannel and RuntimeService.
+
+    Raises ``RuntimeError`` if ``provider=bark`` and ``device_key_env``
+    points at an empty/unset env var — fail loud rather than silently
+    degrade to noop.
+    """
+    from oh_my_agent.push_notifications import (
+        BarkPushProvider,
+        NoopPushProvider,
+        PushDispatcher,
+        PushNotificationProvider,
+        PushSettings,
+    )
+
+    if not cfg or not cfg.get("enabled", False):
+        return PushDispatcher(NoopPushProvider(), PushSettings())
+
+    provider_kind = cfg.get("provider", "bark")
+    provider: PushNotificationProvider
+    if provider_kind == "noop":
+        provider = NoopPushProvider()
+    elif provider_kind == "bark":
+        bark_cfg = cfg.get("bark", {}) or {}
+        env_name = bark_cfg.get("device_key_env", "")
+        if not env_name:
+            raise RuntimeError(
+                "notifications.bark.device_key_env is required when provider=bark"
+            )
+        device_key = os.environ.get(env_name, "")
+        if not device_key:
+            raise RuntimeError(
+                f"notifications.bark.device_key_env={env_name!r} is set but env var "
+                f"${env_name} is empty"
+            )
+        provider = BarkPushProvider(
+            server=str(bark_cfg.get("server", "https://api.day.app")),
+            device_key=device_key,
+        )
+    else:
+        raise ValueError(f"Unknown push provider: {provider_kind}")
+
+    settings = PushSettings(
+        enabled_events=dict(cfg.get("events") or {}),
+        level_map=dict(cfg.get("levels") or {}),
+    )
+    return PushDispatcher(provider, settings)
 
 
 # ---------------------------------------------------------------------------
@@ -390,6 +449,7 @@ async def _shutdown(
     diary_writer=None,
     trace_writer=None,
     diary_reflect_loop=None,
+    push_dispatcher=None,
 ) -> None:
     logger.info("Shutdown started reason=%s", reason)
     if scheduler:
@@ -410,6 +470,9 @@ async def _shutdown(
     if trace_writer is not None:
         with suppress(Exception):
             await trace_writer.stop()
+    if push_dispatcher is not None:
+        with suppress(Exception):
+            await push_dispatcher.aclose()
     logger.info("Shutdown complete reason=%s", reason)
 
 
@@ -539,6 +602,18 @@ async def ignite(ctx: BootContext) -> None:
     }
     if owner_user_ids:
         logger.info("Owner-only mode enabled for %d user(s)", len(owner_user_ids))
+
+    notifications_cfg = config.get("notifications") if isinstance(config.get("notifications"), dict) else None
+    try:
+        push_dispatcher = _build_push_dispatcher(notifications_cfg)
+    except Exception as exc:
+        logger.error("Failed to build push notification dispatcher: %s", exc)
+        sys.exit(1)
+    if notifications_cfg and notifications_cfg.get("enabled", False):
+        logger.info(
+            "Push notifications enabled (provider=%s)",
+            notifications_cfg.get("provider", "bark"),
+        )
 
     # Setup workspace (Layer 0 sandbox isolation)
     workspace: Path | None = None
@@ -739,6 +814,7 @@ async def ignite(ctx: BootContext) -> None:
             ),
             workspace_skills_dirs=workspace_skills_dirs,
             auth_service=auth_service,
+            push_dispatcher=push_dispatcher,
         )
         logger.info(
             "Runtime enabled (workers=%s, default_agent=%s)",
@@ -796,7 +872,11 @@ async def ignite(ctx: BootContext) -> None:
 
     channel_pairs = []
     for ch_cfg in config.get("gateway", {}).get("channels", []):
-        channel = _build_channel(ch_cfg, owner_user_ids=owner_user_ids)
+        channel = _build_channel(
+            ch_cfg,
+            owner_user_ids=owner_user_ids,
+            push_dispatcher=push_dispatcher,
+        )
         agent_names: list[str] = ch_cfg.get("agents", [])
         selected = []
         for name in agent_names:
@@ -932,6 +1012,7 @@ async def ignite(ctx: BootContext) -> None:
             diary_writer=diary_writer,
             trace_writer=trace_writer,
             diary_reflect_loop=diary_reflect_loop,
+            push_dispatcher=push_dispatcher,
         )
 
     try:

@@ -118,6 +118,15 @@ See [`docs/EN/task-model.md`](docs/EN/task-model.md) ([中文](docs/CN/task-mode
 - Follow-up thread on reply: each automation-posted channel message is recorded in the `automation_posts` SQLite table (7-day TTL via the runtime janitor). Replying to that message spawns a Discord thread rooted on it, seeded with a system turn listing the original run's published artifact paths; the agent continues there as a normal conversation (CLI session is not resumed — artifact paths are injected as context).
 - **Dump channel routing (opt-in)**: `automations.dump_channels` defines named send-only channel aliases (e.g. `oma_dump: {platform: discord, channel_id: "<id>"}`). An automation YAML that sets `target_channel: oma_dump` resolves to `ScheduledJob.notify_channel_id`, threads through to the `RuntimeTask` row, and only the **completion terminal message** + corresponding `automation_posts` row land in the dump channel. DRAFT / approval / progress traffic stays on the source channel. Single bot token = single gateway connection, so dump channels share the source channel's `DiscordChannel` via `register_dump_channel()` + `RuntimeService.register_session_alias()`; `on_message` accepts replies from either channel, and `create_followup_thread(..., parent_channel_id=...)` anchors the follow-up thread on whichever channel the original message lives in.
 
+**Push notification layer** (`src/oh_my_agent/push_notifications/`)
+
+- `PushNotificationProvider` ABC + `PushDispatcher` wrapper. Distinct from the internal `runtime.notifications.NotificationManager` (which pings owners inside Discord) — this layer fires off-platform pushes (Bark first, future ntfy / wecom / feishu) so OS focus/DND modes can't bury time-critical events.
+- `PushDispatcher.schedule()` is the only entry point call sites use: synchronous, fire-and-forget via `asyncio.create_task`, with a done callback that catches exceptions the provider missed. Provider HTTP timeouts (5s default) never block the main event loop. Allow-list via `PushSettings.is_enabled(kind)` defaults False — unmapped kinds (e.g. `auth_required`) silently stay inside Discord.
+- Six event kinds: `mention_owner` (Discord `on_message` mention peek before owner gate), `task_draft` / `task_waiting_merge` / `ask_user` (fan-out from `NotificationManager.emit()` after dedupe + record creation), `automation_complete` / `automation_failed` (RuntimeService terminal states — covers `_fail()`, TIMEOUT, completion notification-failure; only fires when `task.automation_name` is set, so manual `/task_start` runs never ring).
+- `BarkPushProvider` POSTs JSON to `{server}/{device_key}` via stdlib `urllib.request` in `asyncio.to_thread` (matches `gateway/router.py` / `auth/providers/bilibili.py` patterns; no new dependency). Bark `level` (`passive`/`active`/`timeSensitive`/`critical`) is configured per event under `notifications.levels.<kind>`.
+- Boot constructs the dispatcher once (`_build_push_dispatcher` in `boot.py`) and shares the same instance with `DiscordChannel` (mention peek) and `RuntimeService` (terminal pushes; forwarded to `NotificationManager` via constructor). Single `aclose()` at shutdown.
+- Config under top-level `notifications`: `enabled` (default false), `provider` (`bark` | `noop`), `bark.device_key_env` (env var name — secret never lives in YAML), `events` (per-kind allow-list), `levels` (per-kind Bark level). Validator (`_check_notifications` in `config_validator.py`) errors on unknown providers / missing `device_key_env` / invalid level enum, warns when the named env var is unset.
+
 **Sandbox isolation** (`main.py` + `BaseCLIAgent`)
 
 Three-layer model, activated by the `workspace` config field:
@@ -135,6 +144,7 @@ Without `workspace` in config, the bot runs in backward-compatible mode (full en
 ```yaml
 memory:         # SQLite backend, max_turns, summary_max_chars, judge (idle_seconds, keyword_patterns, inject_limit), diary (enabled, path)
 access:         # optional owner-only mode: owner_user_ids
+notifications:  # optional external push (Bark/etc.); enabled, provider, bark.{server,device_key_env}, events, levels
 skills:         # enabled, path
 automations:    # optional recurring jobs (interval_seconds)
 workspace:      # optional — activates sandbox isolation (Layer 0 + L1)

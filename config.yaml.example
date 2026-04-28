@@ -53,6 +53,32 @@ access:
   # For Discord, use the numeric user ID as string.
   owner_user_ids: []
 
+# Optional external push notifications (Bark / future ntfy / wecom / feishu).
+# Distinct from the internal Discord-thread notifications: this layer breaks
+# through OS-level focus/DND modes when @-mentions or task terminals need
+# urgent owner attention. Disabled by default — enable if Discord native
+# push reliability is not enough for your setup.
+notifications:
+  enabled: false
+  provider: bark               # bark | noop
+  bark:
+    server: "https://api.day.app"      # Bark server (official or self-hosted)
+    device_key_env: "BARK_DEVICE_KEY"  # name of the env var holding your device key
+  events:                      # per-event allow-list (default: nothing fires)
+    mention_owner: true
+    task_draft: true
+    task_waiting_merge: true
+    ask_user: true
+    automation_complete: true
+    automation_failed: true
+  levels:                      # Bark notification level per event
+    mention_owner: timeSensitive
+    task_draft: timeSensitive
+    task_waiting_merge: timeSensitive
+    ask_user: timeSensitive
+    automation_complete: active
+    automation_failed: timeSensitive
+
 auth:
   enabled: true
   storage_root: ~/.oh-my-agent/runtime/auth
