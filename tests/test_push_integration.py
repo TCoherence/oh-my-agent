@@ -328,38 +328,44 @@ async def test_terminal_push_skipped_when_disabled_in_settings():
 
 def test_notification_failure_call_site_does_not_pass_full_exc_repr():
     """The completion notification_failure branch in `_run_task` catches a
-    `_notify` exception and triggers an external push. ``repr(exc)`` for
-    Discord/HTTP exceptions can include URL query strings or request
-    bodies that contain auth tokens — sending that raw to a lock-screen
-    push is a leak. The body must use only ``type(exc).__name__``.
+    `_notify` exception and triggers an external push. ``repr(exc)`` /
+    ``str(exc)`` for Discord/HTTP exceptions can include URL query
+    strings or request bodies that contain auth tokens — sending that
+    raw to a lock-screen push is a leak. The body must use only
+    ``type(exc).__name__``.
 
-    This is a textual regression guard: if someone reverts to ``{exc!r}``
-    or similar near ``_emit_automation_terminal_push`` for the
-    notification_failure case, this test fires before the leak ships.
+    Textual regression guard: in the 250-char window after
+    ``_emit_automation_terminal_push(`` for the notification_failure
+    branch, the only allowed mention of ``exc`` is inside
+    ``type(exc).__name__``. Any other ``exc`` occurrence (``{exc!r}``,
+    ``{exc}``, ``{str(exc)}``, ``str(exc)``, ``+ repr(exc)``, etc.) is
+    flagged.
     """
     import inspect
+    import re
 
     from oh_my_agent.runtime import service
 
     source = inspect.getsource(service)
-    # Find the call sites and check the surrounding 250 chars.
     fragments = source.split("_emit_automation_terminal_push(")
-    # First fragment is everything before the first call — skip
     for chunk in fragments[1:]:
         window = chunk[:250]
-        # Allow ``str(exc)`` or ``type(exc).__name__`` etc., but ``{exc!r}``
-        # and ``{exc}`` (which is ``__str__``, can also leak) inside the
-        # body= kwarg are forbidden for notification_failure.
-        if "notification failed" in window:
-            assert "{exc!r}" not in window, (
-                "notification_failure push body must not include {exc!r} — "
-                "exception repr can leak auth tokens / URL query strings"
-            )
-            assert "{exc}" not in window, (
-                "notification_failure push body must not include {exc} — "
-                "exception str can also include sensitive payload data"
-            )
-            assert "type(exc).__name__" in window, (
-                "Expected sanitized notification_failure push body using "
-                "type(exc).__name__"
-            )
+        if "notification failed" not in window:
+            continue
+        assert "type(exc).__name__" in window, (
+            "Expected sanitized notification_failure push body using "
+            "type(exc).__name__"
+        )
+        # Strip the only allowed reference and verify no other ``exc``
+        # *identifier* remains. ``\bexc\b`` (word boundaries) catches
+        # f-string format specs (``{exc!r}``, ``{exc}``), function calls
+        # (``str(exc)``, ``repr(exc)``), and attribute access
+        # (``exc.args``) without false-positiving on words like
+        # ``exception``, ``execute``, or ``excellent`` in comments.
+        residue = window.replace("type(exc).__name__", "")
+        assert not re.search(r"\bexc\b", residue), (
+            "Found bare 'exc' identifier outside type(exc).__name__ in "
+            "the notification_failure push body — exception repr/str "
+            "can leak auth tokens or sensitive payload data to push "
+            f"lock screen.\nWindow:\n{window}"
+        )

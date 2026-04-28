@@ -175,12 +175,31 @@ def test_cooldown_immediate_repeat_suppressed():
     assert cd.should_fire("channel-A:author-1") is False
 
 
+def test_cooldown_just_inside_window_suppressed():
+    now, advance = _fake_clock()
+    cd = PushCoolDown(60.0, now=now)
+    assert cd.should_fire("channel-A:author-1") is True
+    # 1ms before the cool-down expires — still suppressed
+    advance(59.999)
+    assert cd.should_fire("channel-A:author-1") is False
+
+
+def test_cooldown_at_boundary_fires():
+    """At exactly the cool-down window (delta == cool_down), the
+    suppression check ``delta < cool_down`` is False, so a fire is
+    allowed. Documents the boundary semantics."""
+    now, advance = _fake_clock()
+    cd = PushCoolDown(60.0, now=now)
+    assert cd.should_fire("channel-A:author-1") is True
+    advance(60.0)
+    assert cd.should_fire("channel-A:author-1") is True
+
+
 def test_cooldown_expires_after_window():
     now, advance = _fake_clock()
     cd = PushCoolDown(60.0, now=now)
     assert cd.should_fire("channel-A:author-1") is True
-    advance(60.0)  # exactly at boundary — still suppressed (strict `<`)
-    advance(0.001)
+    advance(60.001)
     assert cd.should_fire("channel-A:author-1") is True
 
 

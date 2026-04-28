@@ -39,6 +39,10 @@ from oh_my_agent.gateway.services.types import (
     TaskActionResult,
     TaskListResult,
 )
+from oh_my_agent.push_notifications import (
+    PushCoolDown,
+    PushNotificationEvent,
+)
 from oh_my_agent.runtime.types import HitlPrompt
 from oh_my_agent.utils.errors import user_safe_message
 from oh_my_agent.utils.rate_limiter import TokenBucketLimiter
@@ -347,7 +351,6 @@ class DiscordChannel(BaseChannel):
         # the same channel into one push. ``@everyone`` style flooding or
         # bot-loops mentioning the owner repeatedly should not trigger N
         # lock-screen alerts.
-        from oh_my_agent.push_notifications import PushCoolDown
         self._mention_cooldown = PushCoolDown(mention_cool_down_seconds)
         # Dump channels are send/reply-only aliases registered by the gateway
         # manager after construction. The bot must still accept replies to
@@ -1935,8 +1938,6 @@ class DiscordChannel(BaseChannel):
                 if mentioned_owners:
                     cooldown_key = f"{ch.id}:{message.author.id}"
                     if self._mention_cooldown.should_fire(cooldown_key):
-                        from oh_my_agent.push_notifications import PushNotificationEvent
-
                         # ``clean_content`` renders raw ``<@123>`` mention
                         # syntax as @username — push body shows on the lock
                         # screen, so readability beats fidelity.
