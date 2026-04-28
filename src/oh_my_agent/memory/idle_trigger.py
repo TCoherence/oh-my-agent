@@ -67,10 +67,12 @@ class IdleTracker:
         self._stop.set()
         if self._task is None:
             return
+        # The run loop polls _stop on every iteration via wait_for, so it exits
+        # cooperatively after at most one outstanding _tick(). No cancel/timeout.
         try:
-            await asyncio.wait_for(self._task, timeout=5.0)
-        except asyncio.TimeoutError:
-            self._task.cancel()
+            await self._task
+        except asyncio.CancelledError:
+            pass
         self._task = None
 
     async def touch(self, thread_key: ThreadKey, *, metadata: dict | None = None) -> None:

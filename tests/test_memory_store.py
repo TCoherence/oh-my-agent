@@ -1,4 +1,6 @@
 
+from pathlib import Path
+
 import pytest
 
 from oh_my_agent.memory.store import SQLiteMemoryStore
@@ -258,3 +260,24 @@ async def test_skill_evaluations_return_latest_per_type(store):
     assert overlap["status"] == "pass"
     assert overlap["summary"] == "better now"
     assert source["details_json"]["missing_fields"] == ["metadata.source_urls"]
+
+
+@pytest.mark.asyncio
+async def test_close_truncates_wal(tmp_path):
+    db_path = tmp_path / "wal_close.db"
+    s = SQLiteMemoryStore(db_path)
+    await s.init()
+    for i in range(20):
+        await s.append(
+            "discord", "ch", f"t{i}",
+            {"role": "user", "content": "x" * 200, "author": "alice"},
+        )
+    wal_path = Path(str(db_path) + "-wal")
+    assert wal_path.exists() and wal_path.stat().st_size > 0, (
+        "preconditions: WAL should be non-empty after writes"
+    )
+    await s.close()
+    assert not wal_path.exists() or wal_path.stat().st_size == 0, (
+        "close() must truncate WAL via PRAGMA wal_checkpoint(TRUNCATE) — leaving "
+        "WAL non-empty risks corruption on next boot if fsync is unreliable"
+    )

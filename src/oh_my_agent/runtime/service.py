@@ -2626,13 +2626,24 @@ class RuntimeService:
                         cleaned_logs,
                         cleaned_posts,
                     )
-                await asyncio.sleep(max(1, self._cleanup_interval_minutes) * 60)
+                try:
+                    await asyncio.wait_for(
+                        self._stop_event.wait(),
+                        timeout=max(1, self._cleanup_interval_minutes) * 60,
+                    )
+                    return
+                except asyncio.TimeoutError:
+                    continue
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 logger.exception("Runtime janitor failed: %s", exc)
                 # Avoid tight error loops when storage is temporarily unavailable during shutdown.
-                await asyncio.sleep(1.5)
+                try:
+                    await asyncio.wait_for(self._stop_event.wait(), timeout=1.5)
+                    return
+                except asyncio.TimeoutError:
+                    pass
 
     async def _run_task(self, task: RuntimeTask) -> None:
         session = self._session_for(task)

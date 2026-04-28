@@ -1034,9 +1034,35 @@ class SQLiteMemoryStore(MemoryStore):
         logger.info("Memory store initialised at %s (schema v%d)", self._db_path, await self.get_schema_version())
 
     async def close(self) -> None:
-        if self._db:
-            await self._db.close()
-            self._db = None
+        if self._db is None:
+            return
+        # Order matters: optimize may write to sqlite_stat*; running it before
+        # the truncating checkpoint ensures those frames also fold into the
+        # main DB, leaving the WAL empty after close.
+        try:
+            await self._db.execute("PRAGMA optimize")
+        except Exception:
+            logger.exception("PRAGMA optimize on close failed (path=%s)", self._db_path)
+        try:
+            cursor = await self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            row = await cursor.fetchone()
+            await cursor.close()
+            if row is not None:
+                busy, log_pages, checkpointed = row[0], row[1], row[2]
+                if busy:
+                    logger.warning(
+                        "WAL checkpoint reported busy on close path=%s log_pages=%s checkpointed=%s",
+                        self._db_path, log_pages, checkpointed,
+                    )
+                else:
+                    logger.info(
+                        "WAL checkpoint complete path=%s log_pages=%s checkpointed=%s",
+                        self._db_path, log_pages, checkpointed,
+                    )
+        except Exception:
+            logger.exception("WAL checkpoint on close failed (path=%s)", self._db_path)
+        await self._db.close()
+        self._db = None
 
     async def _migrate_runtime_schema(self) -> None:
         await self._ensure_column("runtime_tasks", "original_request", "TEXT")

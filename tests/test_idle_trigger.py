@@ -113,3 +113,22 @@ async def test_forget_removes_state(monkeypatch):
     fake_now["value"] += 100
     await tracker._tick()
     assert fired == []
+
+
+@pytest.mark.asyncio
+async def test_stop_returns_promptly_under_long_poll_interval():
+    """stop() must wake the loop via the stop event, not wait out the poll interval."""
+    async def cb(key, meta):
+        pass
+
+    # poll_interval=3600s — under the old contract stop() blocked up to 5s and
+    # then cancelled. Under the new contract the loop's wait_for(stop, interval)
+    # unblocks immediately and stop() awaits the task with no timeout.
+    tracker = IdleTracker(on_fire=cb, idle_seconds=5, poll_interval_seconds=3600)
+    await tracker.start()
+    await asyncio.sleep(0.05)  # let the loop enter its wait_for
+    loop = asyncio.get_event_loop()
+    start = loop.time()
+    await tracker.stop()
+    elapsed = loop.time() - start
+    assert elapsed < 1.0, f"stop() took {elapsed:.2f}s; expected <1s"
