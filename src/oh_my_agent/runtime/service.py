@@ -97,7 +97,7 @@ _TERMINAL_CLEANUP_STATUSES = {
     TASK_STATUS_REJECTED,
 }
 
-_ACTIVE_AUTOMATION_TASK_STATUSES = {
+ACTIVE_AUTOMATION_TASK_STATUSES = {
     TASK_STATUS_DRAFT,
     TASK_STATUS_PENDING,
     TASK_STATUS_RUNNING,
@@ -1114,7 +1114,7 @@ class RuntimeService:
         for task in tasks:
             if task.automation_name != automation_name:
                 continue
-            if task.status in _ACTIVE_AUTOMATION_TASK_STATUSES:
+            if task.status in ACTIVE_AUTOMATION_TASK_STATUSES:
                 logger.info(
                     "Scheduler job '%s' skipped: existing task %s is still %s",
                     automation_name,

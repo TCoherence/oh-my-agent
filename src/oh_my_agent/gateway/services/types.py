@@ -96,6 +96,7 @@ class AutomationInfo:
     next_run_at: str | None = None
     author: str | None = None
     source_path: str | None = None
+    active_tasks: list["RuntimeTask"] = field(default_factory=list)
 
 
 @dataclass
