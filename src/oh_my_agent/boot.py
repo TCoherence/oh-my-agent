@@ -813,6 +813,7 @@ async def ignite(ctx: BootContext) -> None:
                 else None
             ),
             workspace_skills_dirs=workspace_skills_dirs,
+            agent_workspace=workspace,
             auth_service=auth_service,
             push_dispatcher=push_dispatcher,
         )
