@@ -12,7 +12,7 @@ import uuid
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from oh_my_agent.agents.base import AgentResponse
 from oh_my_agent.agents.cli.base import _bounded_log_excerpt
@@ -5761,7 +5761,7 @@ class RuntimeService:
         self,
         task: RuntimeTask,
         *,
-        kind: str,
+        kind: Literal["automation_complete", "automation_failed"],
         body: str,
     ) -> None:
         """Schedule an external push for automation-task terminal states.
@@ -5777,7 +5777,7 @@ class RuntimeService:
 
         label = kind.removeprefix("automation_") or kind
         self._push_dispatcher.schedule(PushNotificationEvent(
-            kind=kind,  # type: ignore[arg-type]
+            kind=kind,
             title=f"Automation {label}: {task.automation_name}",
             body=(body or "")[:200],
             group="automation",

@@ -1928,10 +1928,18 @@ class DiscordChannel(BaseChannel):
                 if mentioned_owners:
                     from oh_my_agent.push_notifications import PushNotificationEvent
 
+                    # ``clean_content`` renders raw ``<@123>`` mention syntax
+                    # as @username — push body shows on the lock screen, so
+                    # readability beats fidelity to the source bytes.
+                    body_text = (
+                        getattr(message, "clean_content", None)
+                        or message.content
+                        or "(no text)"
+                    )
                     self._push_dispatcher.schedule(PushNotificationEvent(
                         kind="mention_owner",
                         title=f"{message.author.display_name} mentioned you",
-                        body=(message.content or "(no text)")[:200],
+                        body=body_text[:200],
                         group="mentions",
                         level=self._push_dispatcher.level_for("mention_owner"),
                         deep_link=getattr(message, "jump_url", None),
