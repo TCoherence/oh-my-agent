@@ -7,6 +7,7 @@ from oh_my_agent.gateway.services.types import AutomationInfo, AutomationStatusR
 if TYPE_CHECKING:
     from oh_my_agent.automation.scheduler import Scheduler
     from oh_my_agent.memory.store import MemoryStore
+    from oh_my_agent.runtime.types import RuntimeTask
 
 
 class AutomationService:
@@ -18,22 +19,24 @@ class AutomationService:
         if self._scheduler is None:
             return AutomationStatusResult(success=False, message="Automation scheduler is not enabled.")
         scheduler_timezone = getattr(self._scheduler, "timezone_name", None)
-        states = await self._load_runtime_states()
         if name:
             record = self._scheduler.get_automation(name.strip())
             if record is None:
                 return AutomationStatusResult(success=False, message=f"Automation `{name}` not found.")
-            return AutomationStatusResult(
-                success=True,
-                message=f"Found automation `{record.name}`.",
-                automations=[self._to_info(record, states.get(record.name))],
-                scheduler_timezone=scheduler_timezone,
-            )
-        records = self._scheduler.list_automations()
+            records = [record]
+            message = f"Found automation `{record.name}`."
+        else:
+            records = self._scheduler.list_automations()
+            message = f"Found {len(records)} automation(s)."
+        states = await self._load_runtime_states()
+        active = await self._load_active_tasks(records)
         return AutomationStatusResult(
             success=True,
-            message=f"Found {len(records)} automation(s).",
-            automations=[self._to_info(record, states.get(record.name)) for record in records],
+            message=message,
+            automations=[
+                self._to_info(record, states.get(record.name), active.get(record.name, []))
+                for record in records
+            ],
             scheduler_timezone=scheduler_timezone,
         )
 
@@ -106,8 +109,33 @@ class AutomationService:
         except Exception:
             return {}
 
+    async def _load_active_tasks(self, records) -> dict[str, list["RuntimeTask"]]:
+        if self._store is None or not hasattr(self._store, "list_runtime_tasks"):
+            return {}
+        from oh_my_agent.runtime.service import ACTIVE_AUTOMATION_TASK_STATUSES
+
+        result: dict[str, list[RuntimeTask]] = {}
+        for record in records:
+            try:
+                tasks = await self._store.list_runtime_tasks(
+                    platform=record.platform,
+                    channel_id=record.channel_id,
+                    limit=200,
+                )
+            except Exception:
+                continue
+            matched = [
+                task
+                for task in tasks
+                if task.automation_name == record.name
+                and task.status in ACTIVE_AUTOMATION_TASK_STATUSES
+            ]
+            if matched:
+                result[record.name] = matched
+        return result
+
     @staticmethod
-    def _to_info(record, runtime_state) -> AutomationInfo:
+    def _to_info(record, runtime_state, active_tasks=None) -> AutomationInfo:
         return AutomationInfo(
             name=record.name,
             enabled=record.enabled,
@@ -125,6 +153,7 @@ class AutomationService:
             next_run_at=getattr(runtime_state, "next_run_at", None),
             author=record.author,
             source_path=str(record.source_path) if record.source_path else None,
+            active_tasks=list(active_tasks or []),
         )
 
     @staticmethod

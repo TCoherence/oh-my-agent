@@ -571,6 +571,17 @@ class DiscordChannel(BaseChannel):
                 )
                 if record.last_error:
                     lines.append(f"- Last error: {record.last_error[:200]}")
+            if record.active_tasks:
+                lines.append("")
+                lines.append(f"**Active tasks** ({len(record.active_tasks)})")
+                for task in record.active_tasks[:5]:
+                    label = "started" if task.started_at else "created"
+                    timestamp = task.started_at or task.created_at or "—"
+                    lines.append(
+                        f"- `{task.id[:12]}` [{task.status}] step {task.step_no} · {label} `{timestamp}`"
+                    )
+                if len(record.active_tasks) > 5:
+                    lines.append(f"_…and {len(record.active_tasks) - 5} more_")
             return "\n".join(lines)[:1900]
 
         enabled_records = [record for record in result.automations if record.enabled]
@@ -587,14 +598,16 @@ class DiscordChannel(BaseChannel):
             lines.append("**Enabled**")
             for record in enabled_records[:12]:
                 suffix = " ⚠️" if record.last_error else (" ✓" if record.last_success_at else "")
+                active_marker = f" · {len(record.active_tasks)} active" if record.active_tasks else ""
                 lines.append(
-                    f"- `{record.name}` · {self._format_automation_schedule(record)} · {self._format_automation_target(record)}{suffix}"
+                    f"- `{record.name}` · {self._format_automation_schedule(record)} · {self._format_automation_target(record)}{active_marker}{suffix}"
                 )
         if disabled_records:
             lines.append("**Disabled**")
             for record in disabled_records[:12]:
+                active_marker = f" · {len(record.active_tasks)} active" if record.active_tasks else ""
                 lines.append(
-                    f"- `{record.name}` · {self._format_automation_schedule(record)} · {self._format_automation_target(record)}"
+                    f"- `{record.name}` · {self._format_automation_schedule(record)} · {self._format_automation_target(record)}{active_marker}"
                 )
         if len(result.automations) > 24:
             lines.append(f"_…and {len(result.automations) - 24} more_")
