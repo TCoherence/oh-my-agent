@@ -164,6 +164,9 @@ class GatewayManager:
         self._stopping = False
         self._background_tasks: list[asyncio.Task] = []
         self._inflight_messages: set[asyncio.Task] = set()
+        # Set on stop() to wake long-sleeping background loops cooperatively,
+        # avoiding cancel-on-sleep that the previous shutdown path relied on.
+        self._shutdown_event: asyncio.Event = asyncio.Event()
 
     def _session_key(self, platform: str, channel_id: str) -> str:
         return f"{platform}:{channel_id}"
@@ -598,6 +601,7 @@ class GatewayManager:
         self._accepting = True
         self._stopping = False
         self._background_tasks = []
+        self._shutdown_event = asyncio.Event()
         for channel, registry in self._channels:
             session = self._get_session(channel, registry)
             self._session_index[self._session_key(channel.platform, channel.channel_id)] = (session, registry)
@@ -721,25 +725,47 @@ class GatewayManager:
         finally:
             self._background_tasks = []
 
-    async def stop(self, *, timeout: float = 10.0) -> None:
+    async def stop(self, *, timeout: float | None = None) -> None:
+        """Cooperative shutdown.
+
+        Sequence (each step waits for the previous to settle):
+          1. Reject new inbound work (``_accepting=False``).
+          2. Signal long-sleep loops (scheduler, idle tracker, our own
+             background loops) to exit on their own.
+          3. Drain in-flight message handlers — they may still need to send
+             responses, so do this before tearing down channels.
+          4. Stop channel transports so each ``channel.start()`` task returns.
+          5. Await all background tasks via ``gather(return_exceptions=True)``;
+             an exception in one must not block the rest of shutdown.
+
+        ``timeout`` is accepted for API compatibility but ignored — shutdown
+        now relies on cooperative event-driven exit, not deadline-based cancel.
+        """
         if self._stopping:
             return
         self._stopping = True
         self._accepting = False
+        if timeout is not None:
+            logger.debug(
+                "GatewayManager.stop timeout=%s ignored under cooperative-shutdown contract",
+                timeout,
+            )
         logger.info("Gateway shutdown requested; draining in-flight work.")
 
+        # 1. Signal cooperative exit to all loops we own or wrap.
+        self._shutdown_event.set()
         if self._scheduler is not None and hasattr(self._scheduler, "stop"):
             try:
                 self._scheduler.stop()
             except Exception:
                 logger.warning("Failed to signal scheduler stop", exc_info=True)
-
         if self._idle_tracker is not None:
             try:
                 await self._idle_tracker.stop()
             except Exception:
                 logger.warning("Failed to stop memory idle tracker", exc_info=True)
 
+        # 2. Drain in-flight message handlers (they may still call channel.send).
         current_task = asyncio.current_task()
         inflight = [
             task
@@ -747,11 +773,16 @@ class GatewayManager:
             if task is not current_task and not task.done()
         ]
         if inflight:
-            logger.info("Waiting for %d in-flight message(s) to finish.", len(inflight))
-            done, pending = await asyncio.wait(inflight, timeout=timeout)
-            if pending:
-                logger.warning("Gateway shutdown timed out with %d in-flight message(s) pending.", len(pending))
+            logger.info("Awaiting %d in-flight message handler(s) to finish.", len(inflight))
+            results = await asyncio.gather(*inflight, return_exceptions=True)
+            for task, result in zip(inflight, results):
+                if isinstance(result, Exception) and not isinstance(result, asyncio.CancelledError):
+                    logger.warning(
+                        "In-flight handler %r raised on shutdown: %r",
+                        task.get_name(), result,
+                    )
 
+        # 3. Stop channel transports — this lets each channel.start() task return.
         for channel, _ in self._channels:
             try:
                 await channel.stop()
@@ -763,23 +794,23 @@ class GatewayManager:
                     exc_info=True,
                 )
 
+        # 4. Await all background tasks — channel runners, scheduler runner,
+        #    scheduler-supervisor, short-workspace-janitor.  No timeout, no
+        #    cancel: a stuck task is a real bug to surface, not silently mask.
         background = [
             task
             for task in self._background_tasks
             if task is not current_task and not task.done()
         ]
         if background:
-            done, pending = await asyncio.wait(background, timeout=timeout)
-            for task in pending:
-                task.cancel()
-            if pending:
-                pending_names = [task.get_name() for task in pending]
-                await asyncio.gather(*pending, return_exceptions=True)
-                logger.warning(
-                    "Gateway shutdown cancelled %d lingering background task(s): %s",
-                    len(pending_names),
-                    ", ".join(pending_names),
-                )
+            logger.info("Awaiting %d background task(s) to exit.", len(background))
+            results = await asyncio.gather(*background, return_exceptions=True)
+            for task, result in zip(background, results):
+                if isinstance(result, Exception) and not isinstance(result, asyncio.CancelledError):
+                    logger.warning(
+                        "Background task %r exited with exception: %r",
+                        task.get_name(), result,
+                    )
 
     async def _notify_user_error(
         self,
@@ -810,10 +841,16 @@ class GatewayManager:
         """Periodic watchdog: evaluate scheduler liveness and self-heal."""
         if not self._scheduler:
             return
-        while True:
+        while not self._shutdown_event.is_set():
             try:
-                await asyncio.sleep(interval_seconds)
-                if not self._scheduler:
+                try:
+                    await asyncio.wait_for(
+                        self._shutdown_event.wait(), timeout=interval_seconds
+                    )
+                    return
+                except asyncio.TimeoutError:
+                    pass
+                if self._shutdown_event.is_set() or not self._scheduler:
                     return
                 findings = self._scheduler.evaluate_job_health()
                 for finding in findings:
@@ -1986,7 +2023,7 @@ class GatewayManager:
         )
 
     async def _run_short_workspace_janitor(self) -> None:
-        while True:
+        while not self._shutdown_event.is_set():
             try:
                 cleaned = await self._cleanup_expired_short_workspaces()
                 if cleaned:
@@ -1995,7 +2032,14 @@ class GatewayManager:
                 raise
             except Exception as exc:
                 logger.warning("Short-workspace janitor failed: %s", exc)
-            await asyncio.sleep(max(1, self._short_workspace_cleanup_interval_minutes) * 60)
+            try:
+                await asyncio.wait_for(
+                    self._shutdown_event.wait(),
+                    timeout=max(1, self._short_workspace_cleanup_interval_minutes) * 60,
+                )
+                return
+            except asyncio.TimeoutError:
+                continue
 
     async def _resolve_short_workspace(
         self,

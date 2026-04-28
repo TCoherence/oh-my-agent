@@ -1898,3 +1898,23 @@ async def test_router_repair_skill_high_confidence_skips_borderline_and_auto_run
     assert kwargs.get("force_draft") is None
     text = _last_send_text(channel)
     assert "/task_stop" in text
+
+
+@pytest.mark.asyncio
+async def test_shutdown_event_wakes_short_workspace_janitor(tmp_path):
+    """Setting _shutdown_event lets the janitor exit cooperatively, no cancel."""
+    gm = GatewayManager([])
+    gm._short_workspace_enabled = True
+    gm._short_workspace_root = tmp_path / "ws"
+    gm._short_workspace_root.mkdir(parents=True, exist_ok=True)
+    # 60 minutes — would block effectively forever on a plain asyncio.sleep.
+    gm._short_workspace_cleanup_interval_minutes = 60
+
+    task = asyncio.create_task(gm._run_short_workspace_janitor())
+    # let the loop run one iteration and enter the wait
+    await asyncio.sleep(0.05)
+    assert not task.done(), "janitor should be sleeping on the shutdown event"
+
+    gm._shutdown_event.set()
+    await asyncio.wait_for(task, timeout=1.0)
+    assert task.done() and task.exception() is None

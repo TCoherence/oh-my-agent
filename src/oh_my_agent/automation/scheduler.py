@@ -368,6 +368,9 @@ class Scheduler:
 
     def stop(self) -> None:
         self._stop_event.set()
+        # Wake the due loop immediately so it can observe the stop event without
+        # waiting out its remaining sleep budget.
+        self._due_loop_wakeup.set()
 
     async def fire_job_now(self, name: str) -> FireJobResult:
         """Manually dispatch a job by name. Returns a result code.
@@ -401,9 +404,16 @@ class Scheduler:
         self,
         on_fire: Callable[[ScheduledJob], Awaitable[None]],
     ) -> None:
-        while True:
+        while not self._stop_event.is_set():
             try:
-                await asyncio.sleep(self._reload_interval_seconds)
+                try:
+                    await asyncio.wait_for(
+                        self._stop_event.wait(),
+                        timeout=self._reload_interval_seconds,
+                    )
+                    return
+                except asyncio.TimeoutError:
+                    pass
                 async with self._reload_lock:
                     snapshot = self._scan_snapshot()
                     if snapshot != self._snapshot:
@@ -432,7 +442,7 @@ class Scheduler:
         so a host suspend that skips monotonic time forward is naturally
         recovered on the next tick (latency ≤ ``due_loop_max_tick_seconds``).
         """
-        while True:
+        while not self._stop_event.is_set():
             try:
                 now = self._now()
                 due_names = self._collect_due_jobs(now)
@@ -444,6 +454,8 @@ class Scheduler:
                 # the window between compute-and-clear would be lost,
                 # stretching a short-interval job's cadence to max_tick.
                 self._due_loop_wakeup.clear()
+                if self._stop_event.is_set():
+                    return
                 sleep_for = self._compute_due_loop_sleep(self._now())
                 try:
                     await asyncio.wait_for(
@@ -451,11 +463,22 @@ class Scheduler:
                     )
                 except asyncio.TimeoutError:
                     pass
+                # stop() pokes _due_loop_wakeup on shutdown to break this wait
+                # without relying on cancellation.
+                if self._stop_event.is_set():
+                    return
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.exception("Scheduler due_loop iteration failed")
-                await asyncio.sleep(self.due_loop_max_tick_seconds)
+                try:
+                    await asyncio.wait_for(
+                        self._stop_event.wait(),
+                        timeout=self.due_loop_max_tick_seconds,
+                    )
+                    return
+                except asyncio.TimeoutError:
+                    pass
 
     def _collect_due_jobs(self, now: datetime) -> list[str]:
         due: list[str] = []

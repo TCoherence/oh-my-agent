@@ -654,3 +654,31 @@ async def test_scheduler_set_enabled_reconciles_running_jobs(tmp_path):
 async def _wait_for_count(items: list[str], expected: int) -> None:
     while len(items) < expected:
         await asyncio.sleep(0.01)
+
+
+@pytest.mark.asyncio
+async def test_run_returns_promptly_after_stop_under_long_intervals(tmp_path):
+    """scheduler.run() must return sub-second after stop() even when reload+due
+    intervals are very long. Validates the cooperative-shutdown contract: the
+    long-sleep loops respond to the stop event without relying on cancellation.
+    """
+    scheduler = Scheduler(
+        storage_dir=tmp_path / "automations",
+        # 1h reload interval — old code blocked here on asyncio.sleep until cancel.
+        reload_interval_seconds=3600,
+    )
+    # 1h due-loop max tick — old code only woke for due fires or cancel.
+    scheduler.due_loop_max_tick_seconds = 3600.0
+
+    async def on_fire(job: ScheduledJob) -> None:
+        pass
+
+    task = asyncio.create_task(scheduler.run(on_fire))
+    await asyncio.sleep(0.1)  # let _reload_loop and _due_loop enter their waits
+    loop = asyncio.get_event_loop()
+    start = loop.time()
+    scheduler.stop()
+    await asyncio.wait_for(task, timeout=2.0)
+    elapsed = loop.time() - start
+    assert elapsed < 1.0, f"scheduler.run() took {elapsed:.2f}s to return; expected <1s"
+    assert task.exception() is None
