@@ -1,4 +1,4 @@
-"""Tests for PushDispatcher.
+"""Tests for PushDispatcher + PushCoolDown.
 
 Validates the dispatcher's three guarantees:
 1. Allow-list filtering (default-False; only declared kinds fire).
@@ -6,6 +6,8 @@ Validates the dispatcher's three guarantees:
    provider's `send()` is slow.
 3. Exception isolation — done callback catches anything the provider
    missed, logs at WARNING, never re-raises.
+
+Plus the cool-down helper used to coalesce mention-peek bursts.
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ import pytest
 
 from oh_my_agent.push_notifications import (
     NoopPushProvider,
+    PushCoolDown,
     PushDispatcher,
     PushNotificationEvent,
     PushNotificationProvider,
@@ -136,3 +139,81 @@ async def test_aclose_delegates_to_provider():
     d = PushDispatcher(spy, PushSettings())
     await d.aclose()
     assert spy.closed
+
+
+# ──────────────────────────────────────────────────────────────────────
+# PushCoolDown
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _fake_clock():
+    """Returns a (now_callable, advance_callable) pair for deterministic
+    time control without monkey-patching globals."""
+    state = {"t": 1000.0}
+
+    def now() -> float:
+        return state["t"]
+
+    def advance(seconds: float) -> None:
+        state["t"] += seconds
+
+    return now, advance
+
+
+def test_cooldown_first_call_fires():
+    now, _ = _fake_clock()
+    cd = PushCoolDown(60.0, now=now)
+    assert cd.should_fire("channel-A:author-1") is True
+
+
+def test_cooldown_immediate_repeat_suppressed():
+    now, advance = _fake_clock()
+    cd = PushCoolDown(60.0, now=now)
+    assert cd.should_fire("channel-A:author-1") is True
+    assert cd.should_fire("channel-A:author-1") is False
+    advance(30.0)
+    assert cd.should_fire("channel-A:author-1") is False
+
+
+def test_cooldown_expires_after_window():
+    now, advance = _fake_clock()
+    cd = PushCoolDown(60.0, now=now)
+    assert cd.should_fire("channel-A:author-1") is True
+    advance(60.0)  # exactly at boundary — still suppressed (strict `<`)
+    advance(0.001)
+    assert cd.should_fire("channel-A:author-1") is True
+
+
+def test_cooldown_independent_keys():
+    now, _ = _fake_clock()
+    cd = PushCoolDown(60.0, now=now)
+    assert cd.should_fire("channel-A:author-1") is True
+    # Same channel, different author — independent
+    assert cd.should_fire("channel-A:author-2") is True
+    # Same author, different channel — independent
+    assert cd.should_fire("channel-B:author-1") is True
+    # All three keys are now in cool-down
+    assert cd.should_fire("channel-A:author-1") is False
+    assert cd.should_fire("channel-A:author-2") is False
+    assert cd.should_fire("channel-B:author-1") is False
+
+
+def test_cooldown_lazy_cleanup_after_threshold():
+    now, advance = _fake_clock()
+    cd = PushCoolDown(60.0, now=now)
+    # Fill past the cleanup threshold with stale entries
+    for i in range(120):
+        cd.should_fire(f"key-{i}")
+    advance(120.0)  # all entries now stale
+    # Triggering a new entry past the threshold should prune stale ones
+    cd.should_fire("fresh-key")
+    # The internal map should have shrunk dramatically
+    # (allowing some headroom — exact size depends on prune timing)
+    assert len(cd._last_fire) < 20
+
+
+def test_cooldown_rejects_invalid_seconds():
+    with pytest.raises(ValueError):
+        PushCoolDown(0)
+    with pytest.raises(ValueError):
+        PushCoolDown(-1.0)

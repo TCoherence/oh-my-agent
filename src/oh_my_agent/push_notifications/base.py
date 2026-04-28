@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -101,3 +103,43 @@ class PushDispatcher:
 
     async def aclose(self) -> None:
         await self._provider.aclose()
+
+
+class PushCoolDown:
+    """Per-key time-window suppression for high-frequency push sources.
+
+    Coalesces bursts (e.g. an ``@everyone`` paste in a busy Discord
+    channel that mentions the owner N times) into a single push. Caller
+    picks the key shape that fits the source —
+    ``f"{channel_id}:{author_id}"`` for mention peek, ``automation_name``
+    for runtime terminals, etc. First call for a given key returns True;
+    subsequent calls within ``cool_down_seconds`` return False. Stale
+    keys are pruned lazily.
+    """
+
+    _CLEANUP_THRESHOLD = 100
+
+    def __init__(
+        self,
+        cool_down_seconds: float = 60.0,
+        *,
+        now: Callable[[], float] = time.monotonic,
+    ) -> None:
+        if cool_down_seconds <= 0:
+            raise ValueError("cool_down_seconds must be > 0")
+        self._cool_down = float(cool_down_seconds)
+        self._now = now
+        self._last_fire: dict[str, float] = {}
+
+    def should_fire(self, key: str) -> bool:
+        now = self._now()
+        last = self._last_fire.get(key)
+        if last is not None and (now - last) < self._cool_down:
+            return False
+        self._last_fire[key] = now
+        if len(self._last_fire) > self._CLEANUP_THRESHOLD:
+            cutoff = now - self._cool_down
+            self._last_fire = {
+                k: v for k, v in self._last_fire.items() if v > cutoff
+            }
+        return True

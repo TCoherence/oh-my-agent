@@ -10,6 +10,7 @@ terminals need urgent owner attention.
 from oh_my_agent.push_notifications.bark import BarkPushProvider
 from oh_my_agent.push_notifications.base import (
     NoopPushProvider,
+    PushCoolDown,
     PushDispatcher,
     PushKind,
     PushLevel,
@@ -21,6 +22,7 @@ from oh_my_agent.push_notifications.base import (
 __all__ = [
     "BarkPushProvider",
     "NoopPushProvider",
+    "PushCoolDown",
     "PushDispatcher",
     "PushKind",
     "PushLevel",

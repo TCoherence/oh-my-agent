@@ -3214,10 +3214,15 @@ class RuntimeService:
                             last_error=f"notification_failure: {exc!r}"[:1000],
                         )
                     await self._signal_status_by_id(task, TASK_STATUS_FAILED)
+                    # Push body uses the exception class name only — full
+                    # ``repr(exc)`` may include URL query strings or request
+                    # bodies that contain auth tokens. The complete trace is
+                    # already preserved in the DB (``error`` field) and the
+                    # ``task.notification_failed`` runtime event for ops dig-in.
                     self._emit_automation_terminal_push(
                         task,
                         kind="automation_failed",
-                        body=f"completion notification failed: {exc!r}",
+                        body=f"completion notification failed: {type(exc).__name__}",
                     )
                     return
 

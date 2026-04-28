@@ -335,6 +335,7 @@ class DiscordChannel(BaseChannel):
         owner_user_ids: set[str] | None = None,
         *,
         push_dispatcher=None,
+        mention_cool_down_seconds: float = 60.0,
     ) -> None:
         self._token = token
         self._channel_id = channel_id
@@ -342,6 +343,12 @@ class DiscordChannel(BaseChannel):
         # External push (Bark, etc.) — fires when a non-owner mentions an owner
         # in an accepted channel. Optional; ``None`` means push is fully off.
         self._push_dispatcher = push_dispatcher
+        # Anti-spam: coalesce bursts of @-mentions from the same author in
+        # the same channel into one push. ``@everyone`` style flooding or
+        # bot-loops mentioning the owner repeatedly should not trigger N
+        # lock-screen alerts.
+        from oh_my_agent.push_notifications import PushCoolDown
+        self._mention_cooldown = PushCoolDown(mention_cool_down_seconds)
         # Dump channels are send/reply-only aliases registered by the gateway
         # manager after construction. The bot must still accept replies to
         # messages posted there so follow-up threads can be spawned on them.
@@ -1926,24 +1933,26 @@ class DiscordChannel(BaseChannel):
                     if str(u.id) in self._owner_user_ids
                 ]
                 if mentioned_owners:
-                    from oh_my_agent.push_notifications import PushNotificationEvent
+                    cooldown_key = f"{ch.id}:{message.author.id}"
+                    if self._mention_cooldown.should_fire(cooldown_key):
+                        from oh_my_agent.push_notifications import PushNotificationEvent
 
-                    # ``clean_content`` renders raw ``<@123>`` mention syntax
-                    # as @username — push body shows on the lock screen, so
-                    # readability beats fidelity to the source bytes.
-                    body_text = (
-                        getattr(message, "clean_content", None)
-                        or message.content
-                        or "(no text)"
-                    )
-                    self._push_dispatcher.schedule(PushNotificationEvent(
-                        kind="mention_owner",
-                        title=f"{message.author.display_name} mentioned you",
-                        body=body_text[:200],
-                        group="mentions",
-                        level=self._push_dispatcher.level_for("mention_owner"),
-                        deep_link=getattr(message, "jump_url", None),
-                    ))
+                        # ``clean_content`` renders raw ``<@123>`` mention
+                        # syntax as @username — push body shows on the lock
+                        # screen, so readability beats fidelity.
+                        body_text = (
+                            getattr(message, "clean_content", None)
+                            or message.content
+                            or "(no text)"
+                        )
+                        self._push_dispatcher.schedule(PushNotificationEvent(
+                            kind="mention_owner",
+                            title=f"{message.author.display_name} mentioned you",
+                            body=body_text[:200],
+                            group="mentions",
+                            level=self._push_dispatcher.level_for("mention_owner"),
+                            deep_link=getattr(message, "jump_url", None),
+                        ))
 
             if self._owner_user_ids and str(message.author.id) not in self._owner_user_ids:
                 return
