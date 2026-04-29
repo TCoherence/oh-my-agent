@@ -34,7 +34,7 @@ async def test_router_real_http_with_config_and_env(tmp_path, monkeypatch):
         seen["payload"] = json.loads(req.data.decode("utf-8"))
         content = json.dumps(
             {
-                "decision": "propose_repo_task",
+                "decision": "propose_repo_change",
                 "confidence": 0.92,
                 "goal": "create docs smoke file and run tests",
                 "risk_hints": ["multi_step", "run_tests"],
@@ -81,7 +81,7 @@ async def test_router_real_http_with_config_and_env(tmp_path, monkeypatch):
 
     decision = await router.route("请在 docs 下新增文件并跑测试")
     assert decision is not None
-    assert decision.decision == "propose_repo_task"
+    assert decision.decision == "propose_repo_change"
     assert decision.confidence == pytest.approx(0.92)
     assert "run tests" in decision.goal
     assert decision.task_type == "repo_change"

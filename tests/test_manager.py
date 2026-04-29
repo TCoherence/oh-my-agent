@@ -1154,7 +1154,7 @@ async def test_router_propose_task_creates_runtime_draft_and_skips_reply():
     router.confidence_threshold = 0.55
     router.route = AsyncMock(
         return_value=RouteDecision(
-            decision="propose_repo_task",
+            decision="propose_repo_change",
             confidence=0.91,
             goal="create a new skill and validate it",
             risk_hints=[],
@@ -1202,7 +1202,7 @@ async def test_router_propose_artifact_task_creates_artifact_runtime_draft():
     router.confidence_threshold = 0.55
     router.route = AsyncMock(
         return_value=RouteDecision(
-            decision="propose_artifact_task",
+            decision="oneoff_artifact",
             confidence=0.91,
             goal="Generate a markdown daily news brief",
             risk_hints=[],
@@ -1414,7 +1414,10 @@ async def test_router_repair_skill_creates_skill_task_with_thread_context(tmp_pa
     router.confidence_threshold = 0.55
     router.route = AsyncMock(
         return_value=RouteDecision(
-            decision="repair_skill",
+            # Canonical ``update_skill`` intent. Repair branch fires
+            # because ``top-5-daily-news`` is registered as a real skill
+            # in the syncer below.
+            decision="update_skill",
             confidence=0.92,
             goal="Update existing skill 'top-5-daily-news' based on recent user feedback.",
             risk_hints=[],
@@ -1477,7 +1480,7 @@ async def test_router_invoke_existing_skill_uses_recent_merged_skill_context(tmp
     router.confidence_threshold = 0.55
     router.route = AsyncMock(
         return_value=RouteDecision(
-            decision="invoke_existing_skill",
+            decision="invoke_skill",
             confidence=0.93,
             goal="",
             risk_hints=[],
@@ -1782,7 +1785,7 @@ async def test_router_create_skill_borderline_forces_draft_and_confirm_text():
     registry = MagicMock(spec=AgentRegistry)
     registry.run = AsyncMock()
     runtime = _make_router_border_runtime()
-    router = _make_router_stub(decision="create_skill", confidence=0.70, skill_name="skill-x")
+    router = _make_router_stub(decision="update_skill", confidence=0.70, skill_name="skill-x")
 
     session = _make_session(channel=channel, registry=registry)
     gm = GatewayManager(
@@ -1809,7 +1812,7 @@ async def test_router_create_skill_high_confidence_skips_borderline_and_auto_run
     registry = MagicMock(spec=AgentRegistry)
     registry.run = AsyncMock()
     runtime = _make_router_border_runtime()
-    router = _make_router_stub(decision="create_skill", confidence=0.95, skill_name="skill-y")
+    router = _make_router_stub(decision="update_skill", confidence=0.95, skill_name="skill-y")
 
     session = _make_session(channel=channel, registry=registry)
     gm = GatewayManager(
@@ -1836,7 +1839,7 @@ async def test_router_repair_skill_borderline_forces_draft_and_confirm_text(tmp_
     registry = MagicMock(spec=AgentRegistry)
     registry.run = AsyncMock()
     runtime = _make_router_border_runtime()
-    router = _make_router_stub(decision="repair_skill", confidence=0.70, skill_name="paper-digest")
+    router = _make_router_stub(decision="update_skill", confidence=0.70, skill_name="paper-digest")
 
     skills_root = tmp_path / "skills"
     (skills_root / "paper-digest").mkdir(parents=True)
@@ -1872,7 +1875,7 @@ async def test_router_repair_skill_high_confidence_skips_borderline_and_auto_run
     registry = MagicMock(spec=AgentRegistry)
     registry.run = AsyncMock()
     runtime = _make_router_border_runtime()
-    router = _make_router_stub(decision="repair_skill", confidence=0.95, skill_name="paper-digest")
+    router = _make_router_stub(decision="update_skill", confidence=0.95, skill_name="paper-digest")
 
     skills_root = tmp_path / "skills"
     (skills_root / "paper-digest").mkdir(parents=True)

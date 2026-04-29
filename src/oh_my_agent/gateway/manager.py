@@ -1276,103 +1276,89 @@ class GatewayManager:
                 )
             if (
                 router_decision
-                and router_decision.decision == "repair_skill"
+                and router_decision.decision == "update_skill"
                 and router_decision.confidence >= threshold
             ):
+                # update_skill collapses the legacy create_skill / repair_skill
+                # intents. Distinguish create-vs-repair by whether the router-
+                # supplied skill_name resolves to a registered skill: known
+                # name → repair (existing skill needs feedback-driven update);
+                # unknown / missing → create (new skill).
                 await self._append_user_turn_if_needed(session, thread_id, msg)
                 user_turn_appended = True
-                repair_skill = router_decision.skill_name or self._recent_invoked_skill(history) or "skill"
-                repair_request = self._build_skill_repair_request(repair_skill, history, msg.content)
-                goal = router_decision.goal or f"Update existing skill '{repair_skill}' based on recent user feedback."
+                known_skills = self._known_skill_names()
+                router_skill = (router_decision.skill_name or "").strip()
+                is_repair = bool(router_skill) and router_skill in known_skills
                 is_borderline = (
                     self._router_require_user_confirm
                     and router_decision.confidence < self._router_autonomy_threshold
                 )
+                if is_repair:
+                    skill_name = router_skill
+                    raw_request = self._build_skill_repair_request(skill_name, history, msg.content)
+                    goal = router_decision.goal or (
+                        f"Update existing skill '{skill_name}' based on recent user feedback."
+                    )
+                    source = "repair_skill"
+                else:
+                    skill_name = router_skill or (router_decision.goal or msg.content)
+                    raw_request = msg.content
+                    goal = router_decision.goal or msg.content
+                    source = "router"
                 await self._runtime_service.create_skill_task(
                     session=session,
                     registry=registry,
                     thread_id=thread_id,
                     goal=goal,
-                    raw_request=repair_request,
+                    raw_request=raw_request,
                     created_by=msg.author_id or msg.author,
                     preferred_agent=msg.preferred_agent,
-                    skill_name=repair_skill,
-                    source="repair_skill",
+                    skill_name=skill_name,
+                    source=source,
                     force_draft=True if is_borderline else None,
                 )
-                if is_borderline:
-                    confirm_msg = (
-                        f"Router thinks this is feedback on skill `{repair_skill}` "
-                        f"(confidence {router_decision.confidence:.2f}), but not confident enough. "
-                        "Created a draft — use `/task_approve` to let the agent update the skill, "
-                        "or `/task_reject` to cancel and rephrase."
-                    )
+                if is_repair:
+                    if is_borderline:
+                        confirm_msg = (
+                            f"Router thinks this is feedback on skill `{skill_name}` "
+                            f"(confidence {router_decision.confidence:.2f}), but not confident enough. "
+                            "Created a draft — use `/task_approve` to let the agent update the skill, "
+                            "or `/task_reject` to cancel and rephrase."
+                        )
+                    else:
+                        confirm_msg = (
+                            f"Router classified this as feedback on skill `{skill_name}` "
+                            f"(confidence {router_decision.confidence:.2f}) and started the update. "
+                            "Use `/task_stop` to stop at any time."
+                        )
                 else:
-                    confirm_msg = (
-                        f"Router classified this as feedback on skill `{repair_skill}` "
-                        f"(confidence {router_decision.confidence:.2f}) and started the update. "
-                        "Use `/task_stop` to stop at any time."
-                    )
+                    if is_borderline:
+                        confirm_msg = (
+                            f"Router thinks this is a skill-creation task "
+                            f"(confidence {router_decision.confidence:.2f}), but not confident enough. "
+                            "Created a draft — use `/task_approve` to start autonomous execution, "
+                            "or `/task_reject` to cancel and rephrase."
+                        )
+                    else:
+                        confirm_msg = (
+                            f"Router classified this as a skill-creation task "
+                            f"(confidence {router_decision.confidence:.2f}) and started execution. "
+                            "Use `/task_stop` to stop at any time."
+                        )
                 await channel.send(thread_id, confirm_msg)
                 logger.info(
-                    "[%s] ROUTER repair_skill confidence=%.2f goal=%r skill_name=%r borderline=%s",
+                    "[%s] ROUTER update_skill mode=%s confidence=%.2f goal=%r skill_name=%r borderline=%s",
                     req_id,
+                    "repair" if is_repair else "create",
                     router_decision.confidence,
                     goal[:120],
-                    repair_skill,
+                    skill_name,
                     is_borderline,
                 )
                 return
             if (
                 router_decision
-                and router_decision.decision == "create_skill"
-                and router_decision.confidence >= threshold
-            ):
-                await self._append_user_turn_if_needed(session, thread_id, msg)
-                user_turn_appended = True
-                goal = router_decision.goal or msg.content
-                is_borderline = (
-                    self._router_require_user_confirm
-                    and router_decision.confidence < self._router_autonomy_threshold
-                )
-                await self._runtime_service.create_skill_task(
-                    session=session,
-                    registry=registry,
-                    thread_id=thread_id,
-                    goal=goal,
-                    raw_request=msg.content,
-                    created_by=msg.author_id or msg.author,
-                    preferred_agent=msg.preferred_agent,
-                    skill_name=router_decision.skill_name or goal,
-                    source="router",
-                    force_draft=True if is_borderline else None,
-                )
-                if is_borderline:
-                    confirm_msg = (
-                        f"Router thinks this is a skill-creation task "
-                        f"(confidence {router_decision.confidence:.2f}), but not confident enough. "
-                        "Created a draft — use `/task_approve` to start autonomous execution, "
-                        "or `/task_reject` to cancel and rephrase."
-                    )
-                else:
-                    confirm_msg = (
-                        f"Router classified this as a skill-creation task "
-                        f"(confidence {router_decision.confidence:.2f}) and started execution. "
-                        "Use `/task_stop` to stop at any time."
-                    )
-                await channel.send(thread_id, confirm_msg)
-                logger.info(
-                    "[%s] ROUTER create_skill confidence=%.2f goal=%r skill_name=%r borderline=%s",
-                    req_id,
-                    router_decision.confidence,
-                    goal[:120],
-                    router_decision.skill_name,
-                    is_borderline,
-                )
-                return
-            if (
-                router_decision
-                and router_decision.decision == "propose_artifact_task"
+                and router_decision.decision == "oneoff_artifact"
                 and router_decision.confidence >= threshold
             ):
                 await self._append_user_turn_if_needed(session, thread_id, msg)
@@ -1397,7 +1383,7 @@ class GatewayManager:
                     ),
                 )
                 logger.info(
-                    "[%s] ROUTER propose_artifact_task confidence=%.2f goal=%r",
+                    "[%s] ROUTER oneoff_artifact confidence=%.2f goal=%r",
                     req_id,
                     router_decision.confidence,
                     goal[:120],
@@ -1405,7 +1391,7 @@ class GatewayManager:
                 return
             if (
                 router_decision
-                and router_decision.decision == "propose_repo_task"
+                and router_decision.decision == "propose_repo_change"
                 and router_decision.confidence >= threshold
             ):
                 await self._append_user_turn_if_needed(session, thread_id, msg)
@@ -1430,7 +1416,7 @@ class GatewayManager:
                     ),
                 )
                 logger.info(
-                    "[%s] ROUTER propose_repo_task confidence=%.2f goal=%r",
+                    "[%s] ROUTER propose_repo_change confidence=%.2f goal=%r",
                     req_id,
                     router_decision.confidence,
                     goal[:120],
@@ -1438,11 +1424,11 @@ class GatewayManager:
                 return
             if (
                 router_decision
-                and router_decision.decision == "invoke_existing_skill"
+                and router_decision.decision == "invoke_skill"
                 and router_decision.confidence >= threshold
             ):
                 logger.info(
-                    "[%s] ROUTER invoke_existing_skill confidence=%.2f skill_name=%r",
+                    "[%s] ROUTER invoke_skill confidence=%.2f skill_name=%r",
                     req_id,
                     router_decision.confidence,
                     router_decision.skill_name,
@@ -2176,14 +2162,17 @@ class GatewayManager:
             return "direct_reply"
         if router_decision.confidence < router_threshold:
             return "direct_reply"
-        if router_decision.decision == "reply_once":
+        if router_decision.decision == "chat_reply":
             return "router_reply_once"
-        if router_decision.decision == "invoke_existing_skill":
+        if router_decision.decision == "invoke_skill":
             return "router_invoke_existing_skill"
         return "direct_reply"
 
     @staticmethod
     def _thread_log_mode_from_purpose(purpose: str) -> str:
+        # Internal purpose labels keep their legacy spellings to preserve
+        # backward-compat with log/metric consumers; the canonical intent
+        # rename happens at the router-decision layer above.
         if purpose in {"explicit_skill", "router_invoke_existing_skill"}:
             return "invoke_existing_skill"
         if purpose in {"hitl_resume", "hitl_resume_fresh"}:
@@ -2415,7 +2404,7 @@ class GatewayManager:
             return None
         if router_decision.confidence < router_threshold:
             return None
-        if router_decision.decision != "invoke_existing_skill":
+        if router_decision.decision != "invoke_skill":
             return None
         known = self._known_skill_names()
         if router_decision.skill_name and router_decision.skill_name in known:
