@@ -192,7 +192,11 @@ async def test_handle_message_logs_direct_reply_purpose(caplog):
 
 
 @pytest.mark.asyncio
-async def test_handle_message_logs_explicit_skill_purpose(caplog, tmp_path):
+async def test_handle_message_logs_explicit_skill_dispatch_to_task(caplog, tmp_path):
+    """Explicit ``/skill_name`` now goes through ``create_artifact_task``
+    (PR2.1: skill paths unification). The router and the inline
+    ``AgentRegistry.run`` are bypassed; the dispatch log records the
+    skill and the create_artifact_task hand-off."""
     channel = MagicMock()
     channel.platform = "discord"
     channel.channel_id = "100"
@@ -211,6 +215,7 @@ async def test_handle_message_logs_explicit_skill_purpose(caplog, tmp_path):
     runtime = MagicMock()
     runtime.maybe_handle_thread_context = AsyncMock(return_value=False)
     runtime.maybe_handle_incoming = AsyncMock(return_value=False)
+    runtime.create_artifact_task = AsyncMock()
     runtime.create_skill_task = AsyncMock()
 
     router = MagicMock()
@@ -238,8 +243,11 @@ async def test_handle_message_logs_explicit_skill_purpose(caplog, tmp_path):
     with caplog.at_level("INFO"):
         await gm.handle_message(session, registry, msg)
 
-    assert "AGENT starting purpose=explicit_skill preferred_agent='claude'" in caplog.text
-    assert "AGENT_OK purpose=explicit_skill agent=claude" in caplog.text
+    assert "SKILL_INVOKE explicit skill=top-5-daily-news" in caplog.text
+    assert "-> create_artifact_task" in caplog.text
+    runtime.create_artifact_task.assert_awaited_once()
+    router.route.assert_not_called()
+    registry.run.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1226,7 +1234,13 @@ async def test_router_propose_artifact_task_creates_artifact_runtime_draft():
 
 
 @pytest.mark.asyncio
-async def test_explicit_skill_invocation_bypasses_router_and_runtime(tmp_path):
+async def test_explicit_skill_invocation_creates_artifact_task(tmp_path):
+    """PR2.1: explicit ``/skill_name`` is now treated as a runtime
+    artifact task (skill paths unification). It bypasses the router but
+    NOT the runtime — the call lands on
+    ``RuntimeService.create_artifact_task`` with ``skill_name``,
+    ``source='explicit_skill'``, and ``auto_approve=True`` (the user
+    invoked the skill explicitly, no second-step approval needed)."""
     channel = MagicMock()
     channel.platform = "discord"
     channel.channel_id = "100"
@@ -1246,6 +1260,7 @@ async def test_explicit_skill_invocation_bypasses_router_and_runtime(tmp_path):
     runtime.maybe_handle_incoming = AsyncMock(return_value=False)
     runtime.create_task = AsyncMock()
     runtime.create_skill_task = AsyncMock()
+    runtime.create_artifact_task = AsyncMock()
 
     router = MagicMock()
     router.confidence_threshold = 0.55
@@ -1270,18 +1285,29 @@ async def test_explicit_skill_invocation_bypasses_router_and_runtime(tmp_path):
     msg.preferred_agent = "claude"
     await gm.handle_message(session, registry, msg)
 
+    # Router and inline AgentRegistry.run are bypassed.
     router.route.assert_not_called()
-    runtime.create_task.assert_not_called()
+    registry.run.assert_not_called()
     runtime.create_skill_task.assert_not_called()
+    runtime.create_task.assert_not_called()
     runtime.maybe_handle_incoming.assert_not_called()
-    registry.run.assert_awaited_once()
-    assert registry.run.call_args.args[0] == "/top-5-daily-news"
-    assert registry.run.call_args.kwargs["force_agent"] == "claude"
-    assert channel.send.await_count >= 1
+
+    # Hand-off lands on create_artifact_task with the right knobs.
+    runtime.create_artifact_task.assert_awaited_once()
+    kwargs = runtime.create_artifact_task.call_args.kwargs
+    assert kwargs["skill_name"] == "top-5-daily-news"
+    assert kwargs["source"] == "explicit_skill"
+    assert kwargs["auto_approve"] is True
+    assert kwargs["preferred_agent"] == "claude"
 
 
 @pytest.mark.asyncio
-async def test_explicit_skill_invocation_passes_skill_timeout_override(tmp_path):
+async def test_explicit_skill_invocation_forwards_skill_timeout_to_task(tmp_path):
+    """SKILL.md ``metadata.timeout_seconds`` / ``max_turns`` used to apply
+    only to the inline ``AgentRegistry.run`` path; with PR2.1's task-
+    routing the manager forwards them as ``agent_timeout_seconds`` /
+    ``agent_max_turns`` to ``create_artifact_task`` so a long-running
+    skill like ``market-briefing`` (1200s) keeps its budget."""
     channel = MagicMock()
     channel.platform = "discord"
     channel.channel_id = "100"
@@ -1301,6 +1327,7 @@ async def test_explicit_skill_invocation_passes_skill_timeout_override(tmp_path)
     runtime.maybe_handle_incoming = AsyncMock(return_value=False)
     runtime.create_task = AsyncMock()
     runtime.create_skill_task = AsyncMock()
+    runtime.create_artifact_task = AsyncMock()
 
     router = MagicMock()
     router.confidence_threshold = 0.55
@@ -1327,68 +1354,19 @@ async def test_explicit_skill_invocation_passes_skill_timeout_override(tmp_path)
     msg = _make_msg(thread_id="thread-1", content="/market-briefing")
     await gm.handle_message(session, registry, msg)
 
-    registry.run.assert_awaited_once()
-    assert registry.run.call_args.kwargs["timeout_override_seconds"] == 900
-    assert registry.run.call_args.kwargs["max_turns_override"] == 80
+    runtime.create_artifact_task.assert_awaited_once()
+    kwargs = runtime.create_artifact_task.call_args.kwargs
+    assert kwargs["agent_timeout_seconds"] == 900
+    assert kwargs["agent_max_turns"] == 80
 
 
 @pytest.mark.asyncio
-async def test_explicit_skill_invocation_chunks_first_message_with_attribution_budget(tmp_path):
-    channel = MagicMock()
-    channel.platform = "discord"
-    channel.channel_id = "100"
-    channel.create_thread = AsyncMock(return_value="t1")
-    channel.send = AsyncMock()
-    channel.typing = MagicMock()
-    channel.typing.return_value.__aenter__ = AsyncMock(return_value=None)
-    channel.typing.return_value.__aexit__ = AsyncMock(return_value=False)
-
-    long_text = "A" * 5000
-    mock_agent = MagicMock()
-    mock_agent.name = "codex"
-    registry = MagicMock(spec=AgentRegistry)
-    registry.run = AsyncMock(
-        return_value=(
-            mock_agent,
-            AgentResponse(
-                text=long_text,
-                usage={
-                    "input_tokens": 1234,
-                    "output_tokens": 567,
-                    "cache_read_input_tokens": 8901,
-                    "cache_creation_input_tokens": 234,
-                    "cost_usd": 0.0123,
-                },
-            ),
-        )
-    )
-
-    runtime = MagicMock()
-    runtime.maybe_handle_thread_context = AsyncMock(return_value=False)
-    runtime.maybe_handle_incoming = AsyncMock(return_value=False)
-    runtime.create_task = AsyncMock()
-    runtime.create_skill_task = AsyncMock()
-
-    skills_root = tmp_path / "skills"
-    skill_dir = skills_root / "top-5-daily-news"
-    skill_dir.mkdir(parents=True)
-    (skill_dir / "SKILL.md").write_text("name: top-5-daily-news\n", encoding="utf-8")
-    syncer = MagicMock()
-    syncer._skills_path = skills_root  # noqa: SLF001
-
-    session = _make_session(channel=channel, registry=registry)
-    gm = GatewayManager([], runtime_service=runtime, skill_syncer=syncer)
-
-    msg = _make_msg(thread_id="thread-1", content="/top-5-daily-news")
-    await gm.handle_message(session, registry, msg)
-
-    sent_messages = [call.args[1] for call in channel.send.await_args_list]
-    assert len(sent_messages) >= 2
-    assert sent_messages[0].startswith("-# via **codex**")
-    assert "1,234 in / 567 out" in sent_messages[0]
-    assert "cache 8,901r/234w" in sent_messages[0]
-    assert "$0.0123" in sent_messages[0]
-    assert max(len(message) for message in sent_messages) <= 2000
+# NOTE: ``test_explicit_skill_invocation_chunks_first_message_with_attribution_budget``
+# was retired with PR2.1. It exercised inline-AgentRegistry.run chat-mode
+# attribution chunking; explicit /skill invocations now flow through
+# ``RuntimeService.create_artifact_task``, where chunking is owned by
+# ``_send_automation_terminal_message`` and covered by the runtime
+# service tests (e.g. ``test_scheduler_automation_*``).
 
 
 @pytest.mark.asyncio
@@ -1452,6 +1430,71 @@ async def test_router_repair_skill_creates_skill_task_with_thread_context(tmp_pa
     routed_context = router.route.call_args.kwargs["context"]
     assert "/top-5-daily-news" in routed_context
     assert "some result" in routed_context
+    registry.run.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_router_invoke_skill_creates_artifact_task_when_skill_name_resolved(tmp_path):
+    """PR2.1: when the router emits ``invoke_skill`` AND ``skill_name``
+    matches a registered skill, the manager dispatches to
+    ``RuntimeService.create_artifact_task`` (no inline AgentRegistry.run).
+    Mirrors the explicit-``/skill_name`` flow."""
+    channel = MagicMock()
+    channel.platform = "discord"
+    channel.channel_id = "100"
+    channel.create_thread = AsyncMock(return_value="t1")
+    channel.send = AsyncMock()
+    channel.typing = MagicMock()
+    channel.typing.return_value.__aenter__ = AsyncMock(return_value=None)
+    channel.typing.return_value.__aexit__ = AsyncMock(return_value=False)
+
+    mock_agent = MagicMock()
+    mock_agent.name = "claude"
+    registry = MagicMock(spec=AgentRegistry)
+    registry.agents = [mock_agent]
+    registry.run = AsyncMock(return_value=(mock_agent, AgentResponse(text="should not fire")))
+
+    runtime = MagicMock()
+    runtime.maybe_handle_thread_context = AsyncMock(return_value=False)
+    runtime.maybe_handle_incoming = AsyncMock(return_value=False)
+    runtime.create_artifact_task = AsyncMock()
+
+    router = MagicMock()
+    router.confidence_threshold = 0.55
+    router.route = AsyncMock(
+        return_value=RouteDecision(
+            decision="invoke_skill",
+            confidence=0.92,
+            goal="",
+            risk_hints=[],
+            raw_text="",
+            skill_name="paper-digest",
+        )
+    )
+
+    skills_root = tmp_path / "skills"
+    skill_dir = skills_root / "paper-digest"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: paper-digest\ndescription: Daily arxiv digest.\nmetadata:\n  timeout_seconds: 600\n  max_turns: 30\n---\n",
+        encoding="utf-8",
+    )
+    syncer = MagicMock()
+    syncer._skills_path = skills_root  # noqa: SLF001
+
+    session = _make_session(channel=channel, registry=registry)
+    gm = GatewayManager([], runtime_service=runtime, intent_router=router, skill_syncer=syncer)
+    msg = _make_msg(thread_id="thread-1", content="今天 arxiv 有什么新的？")
+    await gm.handle_message(session, registry, msg)
+
+    runtime.create_artifact_task.assert_awaited_once()
+    kwargs = runtime.create_artifact_task.call_args.kwargs
+    assert kwargs["skill_name"] == "paper-digest"
+    assert kwargs["source"] == "router_invoke_skill"
+    assert kwargs["auto_approve"] is True
+    assert kwargs["agent_timeout_seconds"] == 600
+    assert kwargs["agent_max_turns"] == 30
+    # Inline path bypassed.
     registry.run.assert_not_called()
 
 
