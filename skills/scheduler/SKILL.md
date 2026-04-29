@@ -21,7 +21,7 @@ Use this skill to manage file-driven automation definitions under `~/.oh-my-agen
 4. Validate the file or directory:
 
 ```bash
-./.venv/bin/python skills/scheduler/scripts/validate_automations.py ~/.oh-my-agent/automations
+./.venv/bin/python ${OMA_AGENT_HOME}/skills/scheduler/scripts/validate_automations.py ~/.oh-my-agent/automations
 ```
 
 5. Tell the user to run `/automation_reload` or wait for the next polling cycle.

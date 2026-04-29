@@ -64,7 +64,41 @@ def _setup_workspace(
             exc_info=True,
         )
 
+    _refresh_workspace_hint_files(project_root, ws)
+
     return ws
+
+
+# Each CLI agent prefers a different filename for its system-context hint
+# (Claude reads CLAUDE.md, Gemini reads GEMINI.md, codex/others read AGENTS.md).
+# We ship one source of truth at the repo root and lay down all three names
+# in the workspace so whichever agent the registry selects picks it up.
+_WORKSPACE_HINT_NAMES: tuple[str, ...] = ("AGENTS.md", "CLAUDE.md", "GEMINI.md")
+
+
+def _refresh_workspace_hint_files(project_root: Path, workspace: Path) -> None:
+    source = project_root / "WORKSPACE_AGENTS.md"
+    if not source.is_file():
+        return
+    try:
+        payload = source.read_bytes()
+    except OSError as exc:
+        logging.getLogger(__name__).warning(
+            "Failed to read WORKSPACE_AGENTS.md from %s: %s", source, exc
+        )
+        return
+    for name in _WORKSPACE_HINT_NAMES:
+        target = workspace / name
+        try:
+            if target.is_symlink() or target.exists():
+                if target.is_file() and not target.is_symlink() and target.read_bytes() == payload:
+                    continue
+                target.unlink()
+            target.write_bytes(payload)
+        except OSError as exc:
+            logging.getLogger(__name__).warning(
+                "Failed to write workspace hint %s: %s", target, exc
+            )
 
 
 def _build_agent(name: str, cfg: dict, workspace: Path | None = None):

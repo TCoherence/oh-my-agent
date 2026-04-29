@@ -160,19 +160,19 @@ Important:
 4. Load prior stored context:
 
 ```bash
-./.venv/bin/python skills/seattle-metro-housing-watch/scripts/report_store.py context   --mode weekly_pulse
+./.venv/bin/python ${OMA_AGENT_HOME}/skills/seattle-metro-housing-watch/scripts/report_store.py context   --mode weekly_pulse
 ```
 
 For an area deep dive:
 
 ```bash
-./.venv/bin/python skills/seattle-metro-housing-watch/scripts/report_store.py context   --mode area_deep_dive   --area bellevue
+./.venv/bin/python ${OMA_AGENT_HOME}/skills/seattle-metro-housing-watch/scripts/report_store.py context   --mode area_deep_dive   --area bellevue
 ```
 
 5. Generate a Markdown + JSON scaffold:
 
 ```bash
-./.venv/bin/python skills/seattle-metro-housing-watch/scripts/report_store.py scaffold   --mode weekly_pulse   --markdown-file /tmp/seattle_housing_weekly.md   --json-file /tmp/seattle_housing_weekly.json
+./.venv/bin/python ${OMA_AGENT_HOME}/skills/seattle-metro-housing-watch/scripts/report_store.py scaffold   --mode weekly_pulse   --markdown-file /tmp/seattle_housing_weekly.md   --json-file /tmp/seattle_housing_weekly.json
 ```
 
 6. Research public sources with the source policy.
@@ -180,7 +180,7 @@ For an area deep dive:
 8. Persist the report:
 
 ```bash
-./.venv/bin/python skills/seattle-metro-housing-watch/scripts/report_store.py persist   --mode weekly_pulse   --markdown-file /tmp/seattle_housing_weekly.md   --json-file /tmp/seattle_housing_weekly.json
+./.venv/bin/python ${OMA_AGENT_HOME}/skills/seattle-metro-housing-watch/scripts/report_store.py persist   --mode weekly_pulse   --markdown-file /tmp/seattle_housing_weekly.md   --json-file /tmp/seattle_housing_weekly.json
 ```
 
 9. Output the final answer — see **Final answer format** below. (Mandatory; the user only sees your final assistant message.)

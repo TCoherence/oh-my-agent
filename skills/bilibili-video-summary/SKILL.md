@@ -15,14 +15,14 @@ Use a transcript-first workflow for Bilibili links. Prefer subtitle or caption t
 2. Extract evidence with the bundled script:
 
 ```bash
-./.venv/bin/python skills/bilibili-video-summary/scripts/extract_bilibili.py \
+./.venv/bin/python ${OMA_AGENT_HOME}/skills/bilibili-video-summary/scripts/extract_bilibili.py \
   --url '<bilibili-url>'
 ```
 
 3. If a valid Bilibili credential exists, pass it explicitly:
 
 ```bash
-./.venv/bin/python skills/bilibili-video-summary/scripts/extract_bilibili.py \
+./.venv/bin/python ${OMA_AGENT_HOME}/skills/bilibili-video-summary/scripts/extract_bilibili.py \
   --url '<bilibili-url>' \
   --cookies-path '<path-to-cookies.txt>'
 ```
@@ -30,7 +30,7 @@ Use a transcript-first workflow for Bilibili links. Prefer subtitle or caption t
 4. If you need the full transcript without truncation, set:
 
 ```bash
-./.venv/bin/python skills/bilibili-video-summary/scripts/extract_bilibili.py \
+./.venv/bin/python ${OMA_AGENT_HOME}/skills/bilibili-video-summary/scripts/extract_bilibili.py \
   --url '<bilibili-url>' \
   --max-transcript-chars 0
 ```

@@ -46,20 +46,20 @@ metadata:
 
 2. **加载历史上下文**（可选但推荐）：
    ```bash
-   ./.venv/bin/python skills/youtube-podcast-digest/scripts/report_store.py context --weeks 4
+   ./.venv/bin/python ${OMA_AGENT_HOME}/skills/youtube-podcast-digest/scripts/report_store.py context --weeks 4
    ```
    读取最近 4 周已存报告的 JSON，作为"跨集主题观察"的参考底。
 
 3. **抓新集**：
    ```bash
-   ./.venv/bin/python skills/youtube-podcast-digest/scripts/channel_fetch.py --since-days <N>
+   ./.venv/bin/python ${OMA_AGENT_HOME}/skills/youtube-podcast-digest/scripts/channel_fetch.py --since-days <N>
    ```
    `N` 按 step 1 决策（默认周报 `7`；catch-up 模式用用户指定的天数）。返回 JSON 数组，每条含 `name / group / video_title / video_url / video_id / published_at / description_snippet` 等字段。若返回空数组，直接写"该窗口订阅频道暂无新集"并跳到 step 6。
 
 4. **逐集生成 TL;DR**（对 step 3 的每条新集独立执行，**不批处理**）：
    - 抓字幕：
      ```bash
-     ./.venv/bin/python skills/youtube-video-summary/scripts/extract_youtube.py --url "<video_url>"
+     ./.venv/bin/python ${OMA_AGENT_HOME}/skills/youtube-video-summary/scripts/extract_youtube.py --url "<video_url>"
      ```
      （脚本永远返回全量字幕，无截断入口。）
    - 根据返回 `status` 字段分支：
@@ -68,7 +68,7 @@ metadata:
      - `error` → 跳过 TL;DR 生成，只记录标题 / 链接 / 时长 / 失败原因
    - 立即把该集 TL;DR 写到单独文件（见 [references/report_schema.md](references/report_schema.md) 里 `_episodes/<slug>.md` 格式）：
      ```bash
-     ./.venv/bin/python skills/youtube-podcast-digest/scripts/report_store.py write-episode \
+     ./.venv/bin/python ${OMA_AGENT_HOME}/skills/youtube-podcast-digest/scripts/report_store.py write-episode \
          --week <ISO-week> --slug <group>__<video_id> --md-stdin < /tmp/episode.md
      ```
    - **关键**：一集处理完再处理下一集。不要把多集字幕同时放在 context 里，那会导致长字幕累积。
@@ -82,7 +82,7 @@ metadata:
 
 6. **持久化**：
    ```bash
-   ./.venv/bin/python skills/youtube-podcast-digest/scripts/report_store.py persist \
+   ./.venv/bin/python ${OMA_AGENT_HOME}/skills/youtube-podcast-digest/scripts/report_store.py persist \
        --week <ISO-week> --md-path /tmp/report.md --json-path /tmp/report.json
    ```
    存到 `~/.oh-my-agent/reports/youtube-podcast-digest/weekly/<ISO-week>/report.md|report.json`。
