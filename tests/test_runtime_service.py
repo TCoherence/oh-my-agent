@@ -1736,7 +1736,11 @@ async def test_scheduler_automation_formats_body_notes_and_done_footer(runtime_e
     sent_texts = [text for _, text in channel.sent]
     assert any("**Output**" in text for text in sent_texts)
     assert any("Hello! This is an automation smoke test" in text for text in sent_texts)
-    assert any("-# I'll fetch the current local time" in text for text in sent_texts)
+    # The unified renderer no longer demotes "prep" or "verb-prefixed" paragraphs
+    # into ``-#`` notes — that heuristic was eating real markdown content. The
+    # full narrative reply lands in the body verbatim.
+    assert any("I'll fetch the current local time" in text for text in sent_texts)
+    assert any("Implemented in `response.txt`." in text for text in sent_texts)
     # ``response.txt`` is not under a ``reports/`` sub-tree in the workspace,
     # so rule 3 fires: published to ``reports_dir/artifacts/response.txt``.
     # The note line uses the absolute published path as the primary handle,
@@ -2813,27 +2817,20 @@ async def test_decide_suggest_promoted_to_request_changes_applies_budget(runtime
     assert payload["suggestion"] == "tighten diff"
 
 
-@pytest.mark.asyncio
-async def test_automation_completion_text_uses_title_case_published_label(runtime_env):
+def test_artifact_reply_text_uses_title_case_published_label(runtime_env):
     """Single-string contract for the primary durable artifact path.
 
-    ``_automation_completed_text`` must emit literal ``Published to:``
+    ``_completed_text`` (reply layout) must emit literal ``Published to:``
     (Title case, trailing colon) and the workspace-fallback lines must
-    use ``Workspace artifact`` / ``Workspace artifacts`` labels — not
-    bare lowercase ``published:`` / ``artifact:`` / ``artifacts:``, which
-    would visually decouple the automation Output block from the task
-    completion block and invite drift back toward "archive copy" mental-
-    model wording.
+    use ``Workspace artifacts (scratch):`` — not bare lowercase
+    ``published:`` / ``artifacts:``, which would visually decouple the
+    Output block from the task completion block and invite drift back
+    toward "archive copy" mental-model wording.
 
-    Covers three branches of the rendering helper:
-
-    1. Primary branch (``delivery.archived_paths`` non-empty) → literal
-       ``Published to:`` substring present; no lowercase ``published:``.
-    2. Fallback branch with a single ``changed_files`` entry (preview path)
-       → uses ``Workspace artifact (scratch):`` label, not bare
-       ``artifact:``.
-    3. Fallback branch with multiple ``changed_files`` → uses
-       ``Workspace artifacts (scratch):`` label, not bare ``artifacts:``.
+    Covers two branches of the unified rendering helper (the third
+    "single-file preview" branch was retired together with the dual-
+    track automation renderer; reply layout now always shows the agent's
+    full output_summary as the body).
     """
     from oh_my_agent.runtime.service import ArtifactDeliveryResult
     from oh_my_agent.runtime.types import RuntimeTask
@@ -2890,35 +2887,98 @@ async def test_automation_completion_text_uses_title_case_published_label(runtim
         attachment_names=["foo.md"],
         archived_paths=["/abs/reports/foo.md"],
     )
-    text = await runtime._automation_completed_text(  # noqa: SLF001
-        task=_mk_task(), changed_files=[], delivery=delivery
+    text = runtime._completed_text(  # noqa: SLF001
+        task=_mk_task(), changed_files=[], test_summary="", delivery=delivery
     )
     assert "Published to:" in text  # Title case, literal substring
     assert "-# published:" not in text  # no lowercase regression
     assert "/abs/reports/foo.md" in text
 
-    # Branch 2: no delivery, single workspace-relative artifact → preview
-    # falls back to ``Workspace artifact (scratch):`` label.
-    text_preview = await runtime._automation_completed_text(  # noqa: SLF001
-        task=_mk_task(workspace_path=None, output_summary=""),
-        changed_files=["reports/daily.md"],
-        delivery=None,
-    )
-    # The preview branch only fires when the file exists — without a real
-    # workspace the fallback list-branch fires instead. Cover both by
-    # asserting the list-branch label and absence of lowercase drift.
-    assert "Workspace artifacts (scratch):" in text_preview
-    assert "-# artifacts: " not in text_preview
-    assert "-# artifact: " not in text_preview
-
-    # Branch 3: multiple changed files → list-branch label.
-    text_multi = await runtime._automation_completed_text(  # noqa: SLF001
+    # Branch 2: no delivery, multiple changed files → list-branch label.
+    text_multi = runtime._completed_text(  # noqa: SLF001
         task=_mk_task(workspace_path=None, output_summary=""),
         changed_files=["reports/a.md", "reports/b.md", "reports/c.md"],
+        test_summary="",
         delivery=None,
     )
     assert "Workspace artifacts (scratch):" in text_multi
     assert "-# artifacts: " not in text_multi
+
+
+def test_artifact_reply_text_renders_full_output_summary_as_body(runtime_env):
+    """Both manual and automation-triggered artifact runs share the same
+    layout: the agent's ``output_summary`` lands in the body verbatim
+    (after stripping TASK_STATE / BLOCK_REASON markers). Regression for
+    the prior automation-only renderer that ate any paragraph mentioning
+    a path."""
+    from oh_my_agent.runtime.service import ArtifactDeliveryResult
+    from oh_my_agent.runtime.types import RuntimeTask
+
+    runtime: RuntimeService = runtime_env["runtime"]
+
+    body = (
+        "# 论文雷达日报｜2026-04-29\n\n"
+        "一句话结论：今日 VLA / 具身安全 是高密度交叉信号。\n\n"
+        "1. **[CF-VLA](http://arxiv.org/abs/2511.12345)** — `VLA` cluster\n\n"
+        "TASK_STATE: DONE"
+    )
+    task = RuntimeTask(
+        id="task-body",
+        platform="discord",
+        channel_id="100",
+        thread_id="thread-body",
+        created_by="owner-1",
+        goal="paper digest",
+        original_request=None,
+        preferred_agent=None,
+        status="COMPLETED",
+        step_no=0,
+        max_steps=5,
+        max_minutes=15,
+        agent_timeout_seconds=None,
+        agent_max_turns=None,
+        test_command=None,
+        workspace_path=None,
+        decision_message_id=None,
+        status_message_id=None,
+        blocked_reason=None,
+        error=None,
+        summary=None,
+        resume_instruction=None,
+        merge_commit_hash=None,
+        merge_error=None,
+        completion_mode="reply",
+        output_summary=body,
+        artifact_manifest=None,
+        automation_name="paper-digest-daily-0830",
+        workspace_cleaned_at=None,
+        created_at=None,
+        started_at=None,
+        updated_at=None,
+        ended_at=None,
+        task_type="artifact",
+        skill_name=None,
+    )
+    delivery = ArtifactDeliveryResult(
+        mode="attachment",
+        delivered_paths=[],
+        message_ids=[],
+        summary_text="",
+        attachment_names=[],
+        archived_paths=["/abs/reports/paper-digest/2026-04-29.md"],
+    )
+    rendered = runtime._completed_text(  # noqa: SLF001
+        task=task, changed_files=[], test_summary="", delivery=delivery
+    )
+
+    # All three markdown body paragraphs survive — no path-eating heuristic.
+    assert "# 论文雷达日报｜2026-04-29" in rendered
+    assert "VLA / 具身安全" in rendered
+    assert "CF-VLA" in rendered
+    # Control-frame markers are stripped out of the body.
+    assert "TASK_STATE: DONE" not in rendered
+    # Automation marker still distinguishes scheduler runs from manual ones.
+    assert "automation run complete" in rendered
 
 
 @pytest.mark.asyncio
@@ -3749,41 +3809,6 @@ def test_list_workspace_files_skips_symlinks(tmp_path):
 
     assert listed == ["real_output.md", "subdir/nested.json"]
     assert not any(entry.startswith(".venv/") for entry in listed)
-
-
-def test_is_automation_note_paragraph_does_not_eat_markdown_with_paths():
-    """Regression: the old ``"`" in text and "/" in text`` heuristic ate any
-    markdown paragraph mentioning an inline-coded path or URL — common in
-    paper-digest / market-briefing report bodies — and silently dropped them
-    from the rendered Output. Now only verb-prefixed status chatter classifies
-    as a note."""
-    body_paragraphs = [
-        "## 摘要\n\n- 三源（arXiv + HF Daily + Semantic Scholar）共抓 129 篇 raw 候选",
-        "1. **[CF-VLA: Coarse-to-Fine VLA](http://arxiv.org/abs/2511.12345)** — `VLA` cluster",
-        "本段今日无高置信度增量信号（S2 相似论文未返回，candidate JSON 缺 `similar_papers` 字段）",
-        "- `s2_similar_unavailable`：候选 JSON 没有 `similar_papers`，延伸阅读段为空",
-    ]
-    for paragraph in body_paragraphs:
-        assert not RuntimeService._is_automation_note_paragraph(paragraph), (  # noqa: SLF001
-            f"markdown body paragraph misclassified as note: {paragraph[:60]!r}"
-        )
-
-
-def test_is_automation_note_paragraph_still_catches_status_chatter():
-    """Verb-prefixed chatter (what the heuristic actually targets) keeps
-    classifying as a note so it gets demoted out of the rendered body."""
-    note_paragraphs = [
-        "Saved /tmp/digest.md and /tmp/digest.json successfully",
-        "Wrote report to `/home/.oh-my-agent/reports/paper-digest/daily/2026-04-28.md`",
-        "Persisted to `~/.oh-my-agent/reports/market-briefing/...` via report_store.py",
-        "Created paper-digest/daily/2026-04-28.json",
-        "Artifacts: /tmp/a.md, /tmp/b.md",
-        "Output: /tmp/done.md",
-    ]
-    for paragraph in note_paragraphs:
-        assert RuntimeService._is_automation_note_paragraph(paragraph), (  # noqa: SLF001
-            f"status chatter not classified as note: {paragraph[:60]!r}"
-        )
 
 
 @pytest.mark.asyncio

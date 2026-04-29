@@ -106,7 +106,7 @@ See [`docs/EN/task-model.md`](docs/EN/task-model.md) ([中文](docs/CN/task-mode
 **Router layer** (`src/oh_my_agent/gateway/router.py`)
 
 - `OpenAICompatibleRouter`: optional LLM-based intent classification for incoming messages.
-- Intents: `reply_once`, `invoke_existing_skill`, `propose_artifact_task`, `propose_repo_task`, `create_skill`, `repair_skill`.
+- Canonical intents (5): `chat_reply`, `invoke_skill`, `oneoff_artifact`, `propose_repo_change`, `update_skill`. Legacy names (`reply_once` / `invoke_existing_skill` / `propose_artifact_task` / `propose_repo_task` / `create_skill` / `repair_skill`) are still accepted from older router models and normalized to canonical at parse time. `update_skill` collapses the old create/repair split — the dispatcher decides create-vs-repair by checking whether `skill_name` matches a registered skill.
 - Confidence threshold gating (default `0.55`); falls back to heuristic detection.
 
 **Automation layer** (`src/oh_my_agent/automation/`)

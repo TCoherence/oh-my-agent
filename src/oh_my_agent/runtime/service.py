@@ -3165,19 +3165,12 @@ class RuntimeService:
                         task=completed_task,
                         changed_files=changed_files,
                     )
-                if task.automation_name:
-                    completion_text = await self._automation_completed_text(
-                        task=completed_task,
-                        changed_files=changed_files,
-                        delivery=delivery,
-                    )
-                else:
-                    completion_text = self._completed_text(
-                        task=completed_task,
-                        changed_files=changed_files,
-                        test_summary=test_summary,
-                        delivery=delivery,
-                    )
+                completion_text = self._completed_text(
+                    task=completed_task,
+                    changed_files=changed_files,
+                    test_summary=test_summary,
+                    delivery=delivery,
+                )
                 automation_artifact_paths: list[str] | None = None
                 if task.automation_name and delivery is not None:
                     # ``archived_paths`` == absolute published paths (durable,
@@ -4168,6 +4161,24 @@ class RuntimeService:
         test_summary: str,
         delivery: ArtifactDeliveryResult | None = None,
     ) -> str:
+        """Format the task completion message.
+
+        Layout depends on ``completion_mode``:
+
+        - ``reply`` (artifact tasks; both manual and automation-triggered
+          live here) — ``**Output**`` header followed by the agent's
+          ``output_summary`` as the body, with subordinate ``-#`` notes
+          for published paths, transport, and the ephemeral scratch dir.
+        - ``merge`` (repo / skill changes) — ``Task <id> completed`` header
+          followed by validation and delivery lines.
+
+        The ``automation_name`` flag only changes the cosmetic completion
+        marker (``automation run complete`` vs ``run complete``); rendering
+        is otherwise unified so both manual artifact runs and scheduler-
+        triggered runs share the same output discipline.
+        """
+        if task.completion_mode == TASK_COMPLETION_REPLY:
+            return self._artifact_reply_text(task, changed_files, delivery)
         lines = [f"Task `{task.id}` completed."]
         if task.output_summary:
             lines.append(task.output_summary)
@@ -4186,6 +4197,102 @@ class RuntimeService:
             lines.append("")
             lines.extend(delivery_lines)
         return "\n".join(lines)[:1900]
+
+    def _artifact_reply_text(
+        self,
+        task: RuntimeTask,
+        changed_files: list[str],
+        delivery: ArtifactDeliveryResult | None,
+    ) -> str:
+        # Body source priority:
+        #  1. Agent reply (``task.output_summary``) — the canonical "what
+        #     happened" text. This is what skills like paper-digest /
+        #     market-briefing populate via SKILL.md "paste markdown back
+        #     in the final reply" instructions.
+        #  2. Single-artifact preview — fallback for agents that produce
+        #     a short confirmation reply ("artifact ready") and write the
+        #     real markdown to a single workspace file. Mirrors the prior
+        #     ``_automation_artifact_preview`` behaviour.
+        #
+        # We deliberately do NOT run any "is this paragraph a path note"
+        # heuristic on the body. The previous ``"`" in text and "/" in text``
+        # rule ate any markdown paragraph mentioning a path or inline-coded
+        # token, which silently swallowed report bodies.
+        artifact_preview_path: str | None = None
+        body_source = (task.output_summary or "").strip()
+        if not body_source:
+            preview = self._artifact_preview_text(task, changed_files)
+            if preview is not None:
+                artifact_preview_path, body_source = preview
+
+        body = _TASK_STATE_LINE_RE.sub("", body_source)
+        body = _BLOCK_REASON_LINE_RE.sub("", body).strip()
+
+        notes: list[str] = []
+        published_paths: list[str] = (
+            list(delivery.archived_paths) if delivery and delivery.archived_paths else []
+        )
+        # Published paths are the durable answer to "where is my artifact?".
+        # Prefer them over scratch when present; fall back to the ephemeral
+        # workspace handles only when publishing was disabled / failed.
+        if published_paths:
+            notes.append(
+                "Published to: " + ", ".join(f"`{p}`" for p in published_paths[:4])
+            )
+            if len(published_paths) > 4:
+                notes[-1] += f" and {len(published_paths) - 4} more"
+        elif artifact_preview_path:
+            notes.append(f"Workspace artifact (scratch): `{artifact_preview_path}`")
+        elif changed_files:
+            notes.append(
+                "Workspace artifacts (scratch): "
+                + ", ".join(f"`{path}`" for path in changed_files[:4])
+            )
+            if len(changed_files) > 4:
+                notes[-1] += f" and {len(changed_files) - 4} more"
+
+        lines: list[str] = ["**Output**"]
+        lines.append(body if body else "Run completed.")
+
+        if notes:
+            lines.append("")
+            for note in notes:
+                lines.append(f"-# {note}")
+
+        lines.append("")
+        marker = "automation run complete" if task.automation_name else "run complete"
+        lines.append(f"-# ✅ {marker}")
+        if delivery:
+            lines.append(f"-# Delivered via: `{delivery.mode}`")
+        if task.workspace_path:
+            run_dir = Path(task.workspace_path).name
+            lines.append(f"-# scratch (ephemeral): `_artifacts/{run_dir}`")
+        return "\n".join(lines)
+
+    def _artifact_preview_text(
+        self,
+        task: RuntimeTask,
+        changed_files: list[str],
+    ) -> tuple[str, str] | None:
+        # Mirrors the legacy ``_automation_artifact_preview``: when the agent
+        # wrote a single small text artifact to the workspace and the reply
+        # itself is empty, surface the file content as the rendered body so
+        # users get actual signal instead of a bare "Run completed." line.
+        if not task.workspace_path or len(changed_files) != 1:
+            return None
+        rel_path = changed_files[0]
+        candidate = Path(rel_path) if Path(rel_path).is_absolute() else Path(task.workspace_path) / rel_path
+        if not candidate.is_file():
+            return None
+        try:
+            if candidate.stat().st_size > 32_000:
+                return None
+            content = candidate.read_text(encoding="utf-8", errors="replace").strip()
+        except (OSError, UnicodeDecodeError):
+            return None
+        if not content or "\x00" in content:
+            return None
+        return rel_path, content[:10000]
 
     def _artifact_paths_for_task(self, task: RuntimeTask, changed_files: list[str]) -> list[Path]:
         """Resolve artifact paths for delivery / publishing.
@@ -4520,177 +4627,6 @@ class RuntimeService:
             attachment_names=[],
             archived_paths=archived,
         )
-
-    async def _automation_completed_text(
-        self,
-        *,
-        task: RuntimeTask,
-        changed_files: list[str],
-        delivery: ArtifactDeliveryResult | None = None,
-    ) -> str:
-        artifact_preview = self._automation_artifact_preview(task, changed_files)
-        source_text = ""
-        artifact_path: str | None = None
-        if artifact_preview:
-            artifact_path, source_text = artifact_preview
-        elif task.output_summary:
-            source_text = task.output_summary
-
-        body, notes = self._split_automation_output(source_text)
-
-        # ``delivery.archived_paths`` is the list of absolute **published** paths
-        # (one durable location per artifact); identifier kept for API stability.
-        # Use the published path(s) as the PRIMARY answer to "where is my
-        # artifact?" — it's the single stable location. Workspace-relative
-        # ``changed_files`` / ``artifact_path`` refer to ephemeral scratch and
-        # are demoted to subordinate context when a published path is present.
-        published_paths: list[str] = (
-            list(delivery.archived_paths) if delivery and delivery.archived_paths else []
-        )
-        if published_paths:
-            notes.append(
-                "Published to: " + ", ".join(f"`{p}`" for p in published_paths[:4])
-            )
-            if len(published_paths) > 4:
-                notes[-1] += f" and {len(published_paths) - 4} more"
-        elif artifact_path:
-            # Fallback: no published path (reports_dir disabled) → use workspace
-            # relative path so users still have a handle.
-            notes.append(f"Workspace artifact (scratch): `{artifact_path}`")
-        elif changed_files:
-            notes.append(
-                "Workspace artifacts (scratch): " + ", ".join(f"`{path}`" for path in changed_files[:4])
-            )
-            if len(changed_files) > 4:
-                notes[-1] += f" and {len(changed_files) - 4} more"
-
-        lines: list[str] = []
-        if body:
-            lines.append("**Output**")
-            lines.append(body)
-        elif notes:
-            lines.append("**Output**")
-            lines.append("Automation run completed.")
-        else:
-            lines.append("**Output**")
-            lines.append("Automation run completed.")
-
-        if notes:
-            lines.append("")
-            for note in notes:
-                lines.append(f"-# {note}")
-
-        lines.append("")
-        lines.append("-# ✅ automation run complete")
-        # Transport-layer detail: subordinate to the published-path note above.
-        if delivery:
-            lines.append(f"-# delivered via: `{delivery.mode}`")
-        # Scratch (ephemeral) dir: labeled explicitly so it's not mistaken for
-        # the primary artifact location. The janitor prunes this tree.
-        if task.workspace_path:
-            run_dir = Path(task.workspace_path).name
-            lines.append(f"-# scratch (ephemeral): `_artifacts/{run_dir}`")
-        return "\n".join(lines)
-
-    def _automation_artifact_preview(
-        self,
-        task: RuntimeTask,
-        changed_files: list[str],
-    ) -> tuple[str, str] | None:
-        if not task.workspace_path or len(changed_files) != 1:
-            return None
-        rel_path = changed_files[0]
-        candidate = Path(task.workspace_path) / rel_path
-        if not candidate.is_file():
-            return None
-        if candidate.stat().st_size > 32_000:
-            return None
-        try:
-            content = candidate.read_text(encoding="utf-8", errors="replace").strip()
-        except Exception:
-            return None
-        if not content or "\x00" in content:
-            return None
-        return rel_path, content[:10000]
-
-    @staticmethod
-    def _split_automation_output(text: str) -> tuple[str, list[str]]:
-        cleaned = _TASK_STATE_LINE_RE.sub("", text or "")
-        cleaned = _BLOCK_REASON_LINE_RE.sub("", cleaned)
-        cleaned = cleaned.strip()
-        if not cleaned:
-            return "", []
-
-        paragraphs = [part.strip() for part in re.split(r"\n\s*\n", cleaned) if part.strip()]
-        if not paragraphs:
-            return "", []
-
-        body_parts: list[str] = []
-        notes: list[str] = []
-        for paragraph in paragraphs:
-            if RuntimeService._is_automation_note_paragraph(paragraph):
-                notes.append(RuntimeService._normalize_automation_note(paragraph))
-                continue
-            body_parts.append(paragraph)
-
-        if not body_parts and notes:
-            return "", notes
-
-        if len(body_parts) > 1:
-            leading = body_parts[0]
-            if RuntimeService._is_automation_prep_paragraph(leading):
-                notes.insert(0, RuntimeService._normalize_automation_note(leading))
-                body_parts = body_parts[1:]
-
-        body = "\n\n".join(body_parts).strip()
-        return body, notes
-
-    @staticmethod
-    def _is_automation_note_paragraph(text: str) -> bool:
-        # Match only paragraphs that are clearly status chatter — verbs that
-        # signal "I just persisted/created X" plus tag-like prefixes. The old
-        # ``"`" in text and "/" in text`` rule was too broad: any markdown
-        # paragraph mentioning a path or inline-code token (very common in
-        # report bodies) got classified as a note and silently dropped from
-        # the rendered Output.
-        lowered = " ".join(text.split()).lower()
-        return lowered.startswith(
-            (
-                "created ",
-                "implemented in ",
-                "saved ",
-                "wrote ",
-                "written to ",
-                "persisted to ",
-                "persisted at ",
-                "artifact:",
-                "artifacts:",
-                "output:",
-            )
-        )
-
-    @staticmethod
-    def _is_automation_prep_paragraph(text: str) -> bool:
-        lowered = " ".join(text.split()).lower()
-        return lowered.startswith(
-            (
-                "i'll ",
-                "i will ",
-                "i’m going to ",
-                "i'm going to ",
-                "the workspace is empty",
-                "the directory is empty",
-                "i have the current ",
-                "i'll fetch ",
-                "i will fetch ",
-                "i'm generating ",
-                "i am generating ",
-            )
-        )
-
-    @staticmethod
-    def _normalize_automation_note(text: str) -> str:
-        return " ".join(text.split())
 
     async def _resolve_last_agent_name(self, task: RuntimeTask) -> str:
         events = await self._store.list_runtime_events(task.id, limit=20)

@@ -13,7 +13,25 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class RouteDecision:
-    decision: str  # "reply_once" | "invoke_existing_skill" | "propose_artifact_task" | "propose_repo_task" | "create_skill" | "repair_skill"
+    """Router classification result.
+
+    The canonical intent set has 5 values:
+
+    - ``chat_reply`` — single-turn chat answer; no task is created.
+    - ``invoke_skill`` — invoke an existing skill (router supplies
+      ``skill_name`` when known).
+    - ``oneoff_artifact`` — generate a one-off deliverable (report,
+      summary, brief) that is not derived from a known skill.
+    - ``propose_repo_change`` — multi-step repository edit task.
+    - ``update_skill`` — create-or-repair a skill. The dispatcher
+      decides between create and repair by checking whether
+      ``skill_name`` matches a registered skill.
+
+    Older intent names are accepted as aliases at parse time and
+    normalized to the canonical form above. See ``_INTENT_ALIASES``.
+    """
+
+    decision: str
     confidence: float
     goal: str
     risk_hints: list[str]
@@ -24,6 +42,43 @@ class RouteDecision:
 
 
 _RESERVED_PAYLOAD_KEYS = frozenset({"messages", "model", "max_tokens", "temperature"})
+
+# Canonical intents — what the router prompt asks the model to output.
+_CANONICAL_INTENTS = frozenset({
+    "chat_reply",
+    "invoke_skill",
+    "oneoff_artifact",
+    "propose_repo_change",
+    "update_skill",
+})
+
+# Legacy intent names accepted from older router models / test fixtures /
+# users typing in raw decision strings. Normalized to canonical at parse
+# time so ``RouteDecision.decision`` is always one of ``_CANONICAL_INTENTS``.
+_INTENT_ALIASES: dict[str, str] = {
+    "reply_once": "chat_reply",
+    "invoke_existing_skill": "invoke_skill",
+    "propose_artifact_task": "oneoff_artifact",
+    "propose_repo_task": "propose_repo_change",
+    "propose_task": "propose_repo_change",
+    "create_skill": "update_skill",
+    "repair_skill": "update_skill",
+}
+
+
+def normalize_intent(raw: str) -> str:
+    """Map a raw intent string (canonical or legacy) to canonical form.
+
+    Returns ``"chat_reply"`` for unknown values — the safe default that
+    keeps the runtime in chat mode rather than spawning a task.
+    """
+    cleaned = raw.strip().lower()
+    if cleaned in _CANONICAL_INTENTS:
+        return cleaned
+    aliased = _INTENT_ALIASES.get(cleaned)
+    if aliased is not None:
+        return aliased
+    return "chat_reply"
 
 
 class OpenAICompatibleRouter:
@@ -63,52 +118,50 @@ class OpenAICompatibleRouter:
 
     async def route(self, message: str, *, context: str | None = None) -> RouteDecision | None:
         system_prompt = (
-            "Classify whether the user message should be handled as "
-            "a one-off chat reply, a direct invocation of an existing skill, "
-            "a multi-step artifact task, a multi-step repository-change task, "
-            "a skill-creation task, or a repair request for an existing skill.\n\n"
+            "Classify the user message into one of five intents:\n"
+            "  chat_reply         — single-turn chat answer (no task spawned)\n"
+            "  invoke_skill       — run an existing skill on this request\n"
+            "  oneoff_artifact    — produce a one-off deliverable (report, summary, brief)\n"
+            "  propose_repo_change — multi-step repository edit\n"
+            "  update_skill       — create or repair a skill (the dispatcher decides "
+            "create-vs-repair from the skill_name)\n\n"
             "DISAMBIGUATION RULES (read first):\n"
             "- For one-time deliverables like research reports, summaries, analyses, "
             "briefs, news digests (keywords: 报告/总结/调研/分析/research/summary/brief/report), "
-            "choose `propose_artifact_task`. This is the default for 'do this research "
-            "and give me a report' requests.\n"
-            "- Choose `create_skill` ONLY when (a) the user explicitly asks to "
-            "create/build/make a skill (keywords: create a skill / 创建/新建/生成 skill / "
-            "package as a workflow), OR (b) the workflow is clearly recurring or "
-            "parameterizable (scheduled, templated with variable inputs like 'for any "
-            "ticker I give', 'every morning').\n"
-            "- Never infer skill-creation intent just because the word 'skill' appears "
-            "in prior context or the known-skills list.\n"
-            "- When both artifact and skill could apply, prefer artifact (lower blast "
-            "radius).\n\n"
+            "choose `oneoff_artifact`. This is the default for 'do this research and give me a report' requests.\n"
+            "- Choose `update_skill` ONLY when (a) the user explicitly asks to create/build/"
+            "make a skill (keywords: create a skill / 创建/新建/生成 skill / package as a workflow), "
+            "OR (b) the workflow is clearly recurring or parameterizable (scheduled, templated "
+            "with variable inputs like 'for any ticker I give', 'every morning'), OR (c) the "
+            "user is giving feedback on a recently invoked skill and asking to fix/improve/adapt it. "
+            "In the feedback case keep `skill_name` pointed at the existing skill — do not invent a "
+            "parallel new skill just because the user mentions an external repo, project, or tool.\n"
+            "- Never infer skill-creation intent just because the word 'skill' appears in prior "
+            "context or the known-skills list.\n"
+            "- When both artifact and skill could apply, prefer `oneoff_artifact` (lower blast radius).\n\n"
             "Output strict JSON only with keys: decision, confidence, goal, risk_hints, skill_name, task_type, completion_mode.\n"
-            "decision must be 'reply_once', 'invoke_existing_skill', 'propose_artifact_task', 'propose_repo_task', 'create_skill', or 'repair_skill'.\n"
-            "If invoke_existing_skill, keep goal empty when possible and provide skill_name if obvious.\n"
-            "Known skills may be provided as name plus description. Prefer invoke_existing_skill when the current "
-            "message semantically matches one of those skill descriptions.\n"
-            "Prefer invoke_existing_skill when recent context shows a known skill was just merged, synced, or recently used, "
-            "and the current message is a follow-up asking to try again, analyze now, run it now, or continue with that skill.\n"
-            "Prefer repair_skill instead of create_skill when recent context identifies a most recently invoked skill and the user "
-            "is asking to fix, improve, adapt, internalize, refine, or base that skill on another reference project/tool/output.\n"
-            "Do not create a parallel new skill just because the user mentions an external repo, project, or tool; if they want "
-            "to upgrade the existing skill, keep skill_name pointed at the existing skill unless they explicitly ask for a separate skill.\n"
-            "If propose_artifact_task, propose_repo_task, create_skill, or repair_skill, write a concise executable goal.\n"
-            "If create_skill or repair_skill, also provide skill_name as a hyphen-case slug.\n"
-            "Use repair_skill when the user is giving feedback on an existing skill or asking to fix/update one based on recent skill output.\n"
-            "If propose_artifact_task, task_type should be 'artifact' and completion_mode should be 'reply' or 'artifact'.\n"
-            "If propose_repo_task, task_type should be 'repo_change' and completion_mode should be 'merge'.\n"
-            "If create_skill or repair_skill, task_type should be 'skill_change' and completion_mode should be 'merge'.\n"
-            "If reply_once, goal can be empty string and skill_name should be empty string.\n"
+            "decision must be one of: chat_reply, invoke_skill, oneoff_artifact, propose_repo_change, update_skill.\n"
+            "If invoke_skill, keep goal empty when possible and provide skill_name if obvious. "
+            "Known skills may be provided as name plus description; prefer invoke_skill when the "
+            "current message semantically matches one of those skill descriptions, or when recent "
+            "context shows a known skill was just merged / synced / recently used and the current "
+            "message is a follow-up asking to run it / try again / continue with that skill.\n"
+            "If oneoff_artifact, propose_repo_change, or update_skill, write a concise executable goal.\n"
+            "If update_skill, also provide skill_name as a hyphen-case slug.\n"
+            "If oneoff_artifact, task_type should be 'artifact' and completion_mode should be 'reply'.\n"
+            "If propose_repo_change, task_type should be 'repo_change' and completion_mode should be 'merge'.\n"
+            "If update_skill, task_type should be 'skill_change' and completion_mode should be 'merge'.\n"
+            "If chat_reply, goal can be empty string and skill_name should be empty string.\n"
             "confidence must be a float between 0 and 1.\n\n"
             "EXAMPLES:\n"
             "- User: \"调研 Jensen Huang 过去 3 年所有公开演讲，整理成报告\"\n"
-            "  → {\"decision\":\"propose_artifact_task\",\"task_type\":\"artifact\",\"completion_mode\":\"reply\"}\n"
+            "  → {\"decision\":\"oneoff_artifact\",\"task_type\":\"artifact\",\"completion_mode\":\"reply\"}\n"
             "- User: \"帮我做一个 skill，每天总结 AI 领域的新论文\"\n"
-            "  → {\"decision\":\"create_skill\",\"skill_name\":\"ai-paper-daily-digest\",\"task_type\":\"skill_change\",\"completion_mode\":\"merge\"}\n"
+            "  → {\"decision\":\"update_skill\",\"skill_name\":\"ai-paper-daily-digest\",\"task_type\":\"skill_change\",\"completion_mode\":\"merge\"}\n"
             "- User: \"paper-digest 这个 skill 昨天输出的 summary 太短了，改一下\"\n"
-            "  → {\"decision\":\"repair_skill\",\"skill_name\":\"paper-digest\",\"task_type\":\"skill_change\",\"completion_mode\":\"merge\"}\n"
+            "  → {\"decision\":\"update_skill\",\"skill_name\":\"paper-digest\",\"task_type\":\"skill_change\",\"completion_mode\":\"merge\"}\n"
             "- User: \"用 paper-digest 看一下今天 arxiv 的 LLM 板块\"\n"
-            "  → {\"decision\":\"invoke_existing_skill\",\"skill_name\":\"paper-digest\"}"
+            "  → {\"decision\":\"invoke_skill\",\"skill_name\":\"paper-digest\"}"
         )
         core_payload: dict[str, Any] = {
             "model": self._model,
@@ -163,11 +216,7 @@ class OpenAICompatibleRouter:
             )
             return None
 
-        decision = str(parsed.get("decision", "reply_once")).strip().lower()
-        if decision not in {"reply_once", "invoke_existing_skill", "propose_artifact_task", "propose_repo_task", "create_skill", "repair_skill", "propose_task"}:
-            decision = "reply_once"
-        if decision == "propose_task":
-            decision = "propose_repo_task"
+        decision = normalize_intent(str(parsed.get("decision", "")))
 
         confidence = self._to_float(parsed.get("confidence", 0.0))
         goal = str(parsed.get("goal", "")).strip()

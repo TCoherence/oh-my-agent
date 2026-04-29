@@ -1,6 +1,50 @@
 import pytest
 
-from oh_my_agent.gateway.router import OpenAICompatibleRouter
+from oh_my_agent.gateway.router import OpenAICompatibleRouter, normalize_intent
+
+
+def test_normalize_intent_passes_through_canonical_names():
+    """All five canonical intents must round-trip identical."""
+    for canonical in (
+        "chat_reply",
+        "invoke_skill",
+        "oneoff_artifact",
+        "propose_repo_change",
+        "update_skill",
+    ):
+        assert normalize_intent(canonical) == canonical
+
+
+def test_normalize_intent_maps_legacy_aliases_to_canonical():
+    """Legacy router-output names from older models / fixtures must resolve
+    to the canonical intent set so the dispatcher only needs five arms."""
+    cases = {
+        "reply_once": "chat_reply",
+        "invoke_existing_skill": "invoke_skill",
+        "propose_artifact_task": "oneoff_artifact",
+        "propose_repo_task": "propose_repo_change",
+        "propose_task": "propose_repo_change",
+        "create_skill": "update_skill",
+        "repair_skill": "update_skill",
+    }
+    for legacy, expected in cases.items():
+        assert normalize_intent(legacy) == expected, f"{legacy!r} did not normalize"
+
+
+def test_normalize_intent_is_case_and_whitespace_insensitive():
+    """Robustness against router models that emit ``CREATE_SKILL`` /
+    leading whitespace / etc."""
+    assert normalize_intent("  CREATE_SKILL ") == "update_skill"
+    assert normalize_intent("Reply_Once") == "chat_reply"
+    assert normalize_intent("INVOKE_SKILL") == "invoke_skill"
+
+
+def test_normalize_intent_unknown_falls_back_to_chat_reply():
+    """Unknown / empty / garbage inputs fall back to chat_reply — the
+    safe default that keeps the runtime in chat mode rather than
+    spawning a task."""
+    for bad in ("", "   ", "garbage", "destroy_database", "1234"):
+        assert normalize_intent(bad) == "chat_reply"
 
 
 @pytest.mark.asyncio
@@ -19,7 +63,7 @@ async def test_router_parses_valid_json_decision(monkeypatch):
                 {
                     "message": {
                         "content": (
-                            '{"decision":"propose_repo_task","confidence":0.88,'
+                            '{"decision":"propose_repo_change","confidence":0.88,'
                             '"goal":"fix tests and docs","risk_hints":["multi-step"],'
                             '"task_type":"repo_change","completion_mode":"merge"}'
                         )
@@ -31,7 +75,7 @@ async def test_router_parses_valid_json_decision(monkeypatch):
     monkeypatch.setattr(router, "_post_json", _fake_post)
     out = await router.route("please fix and run tests")
     assert out is not None
-    assert out.decision == "propose_repo_task"
+    assert out.decision == "propose_repo_change"
     assert out.confidence == 0.88
     assert out.goal == "fix tests and docs"
     assert out.risk_hints == ["multi-step"]
@@ -55,7 +99,7 @@ async def test_router_extracts_json_from_wrapped_text(monkeypatch):
                     "message": {
                         "content": (
                             "Here is result:\\n"
-                            '{"decision":"reply_once","confidence":0.74,"goal":"","risk_hints":[]}'
+                            '{"decision":"chat_reply","confidence":0.74,"goal":"","risk_hints":[]}'
                         )
                     }
                 }
@@ -65,7 +109,7 @@ async def test_router_extracts_json_from_wrapped_text(monkeypatch):
     monkeypatch.setattr(router, "_post_json", _fake_post)
     out = await router.route("hi")
     assert out is not None
-    assert out.decision == "reply_once"
+    assert out.decision == "chat_reply"
     assert out.confidence == 0.74
     assert out.skill_name is None
 
@@ -90,7 +134,7 @@ async def test_router_retries_once_then_succeeds(monkeypatch):
                 {
                     "message": {
                         "content": (
-                            '{"decision":"propose_repo_task","confidence":0.66,"goal":"do x",'
+                            '{"decision":"propose_repo_change","confidence":0.66,"goal":"do x",'
                             '"risk_hints":[],"task_type":"repo_change","completion_mode":"merge"}'
                         )
                     }
@@ -102,7 +146,7 @@ async def test_router_retries_once_then_succeeds(monkeypatch):
     out = await router.route("please do x")
     assert calls["n"] == 2
     assert out is not None
-    assert out.decision == "propose_repo_task"
+    assert out.decision == "propose_repo_change"
     assert out.skill_name is None
 
 
@@ -133,7 +177,11 @@ async def test_router_parses_create_skill_decision(monkeypatch):
     monkeypatch.setattr(router, "_post_json", _fake_post)
     out = await router.route("create a skill for checking weather")
     assert out is not None
-    assert out.decision == "create_skill"
+    # Legacy router models still emit "create_skill"; the parser
+    # normalizes that to the canonical ``update_skill`` intent so the
+    # dispatcher only needs one match arm. Distinguishing create vs
+    # repair happens downstream via the registered skill list.
+    assert out.decision == "update_skill"
     assert out.skill_name == "weather"
 
 
@@ -151,7 +199,7 @@ async def test_router_parses_artifact_task_decision(monkeypatch):
                 {
                     "message": {
                         "content": (
-                            '{"decision":"propose_artifact_task","confidence":0.83,'
+                            '{"decision":"oneoff_artifact","confidence":0.83,'
                             '"goal":"Generate a daily news markdown report",'
                             '"risk_hints":["multi_step"],'
                             '"task_type":"artifact","completion_mode":"reply"}'
@@ -164,7 +212,7 @@ async def test_router_parses_artifact_task_decision(monkeypatch):
     monkeypatch.setattr(router, "_post_json", _fake_post)
     out = await router.route("生成一份今日新闻速读并整理成 markdown")
     assert out is not None
-    assert out.decision == "propose_artifact_task"
+    assert out.decision == "oneoff_artifact"
     assert out.task_type == "artifact"
     assert out.completion_mode == "reply"
 
@@ -184,7 +232,7 @@ async def test_router_prompt_carries_disambiguation_and_examples(monkeypatch):
             "choices": [
                 {
                     "message": {
-                        "content": '{"decision":"reply_once","confidence":0.9,"goal":"","risk_hints":[]}'
+                        "content": '{"decision":"chat_reply","confidence":0.9,"goal":"","risk_hints":[]}'
                     }
                 }
             ]
@@ -197,8 +245,8 @@ async def test_router_prompt_carries_disambiguation_and_examples(monkeypatch):
     assert "DISAMBIGUATION RULES" in system_content
     assert "EXAMPLES:" in system_content
     assert "Jensen Huang" in system_content
-    assert "propose_artifact_task" in system_content
-    assert "create_skill" in system_content
+    assert "oneoff_artifact" in system_content
+    assert "update_skill" in system_content
 
 
 @pytest.mark.asyncio
@@ -223,7 +271,7 @@ async def test_router_extra_body_cannot_override_reserved_keys(monkeypatch):
             "choices": [
                 {
                     "message": {
-                        "content": '{"decision":"reply_once","confidence":0.9,"goal":"","risk_hints":[]}'
+                        "content": '{"decision":"chat_reply","confidence":0.9,"goal":"","risk_hints":[]}'
                     }
                 }
             ]
@@ -274,7 +322,10 @@ async def test_router_parses_repair_skill_decision(monkeypatch):
         context="Recent thread context:\n- user: /top-5-daily-news",
     )
     assert out is not None
-    assert out.decision == "repair_skill"
+    # Legacy ``repair_skill`` from older router models is normalized to
+    # the canonical ``update_skill`` intent. Repair-vs-create is decided
+    # downstream by checking ``skill_name`` against registered skills.
+    assert out.decision == "update_skill"
     assert out.skill_name == "top-5-daily-news"
     assert out.task_type == "skill_change"
     assert out.completion_mode == "merge"

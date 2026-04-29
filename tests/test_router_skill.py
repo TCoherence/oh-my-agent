@@ -58,7 +58,11 @@ async def test_manager_routes_create_skill_from_router():
     router.confidence_threshold = 0.55
     router.route = AsyncMock(
         return_value=RouteDecision(
-            decision="create_skill",
+            # Canonical intent — the dispatcher decides create-vs-repair
+            # by checking ``skill_name`` against registered skills. Here
+            # ``weather`` is not registered (no skill_syncer in this test
+            # setup), so the create branch fires.
+            decision="update_skill",
             confidence=0.9,
             goal="Create a reusable weather skill",
             risk_hints=[],
@@ -92,7 +96,7 @@ async def test_manager_high_confidence_reply_once_skips_skill_heuristic():
     router.confidence_threshold = 0.55
     router.route = AsyncMock(
         return_value=RouteDecision(
-            decision="reply_once",
+            decision="chat_reply",
             confidence=0.95,
             goal="",
             risk_hints=[],
@@ -121,7 +125,7 @@ async def test_manager_low_confidence_reply_once_falls_back_to_skill_heuristic()
     router.confidence_threshold = 0.55
     router.route = AsyncMock(
         return_value=RouteDecision(
-            decision="reply_once",
+            decision="chat_reply",
             confidence=0.2,
             goal="",
             risk_hints=[],
