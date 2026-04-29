@@ -1055,6 +1055,7 @@ async def ignite(ctx: BootContext) -> None:
         )
 
         weekly_reflector = WeeklyReflector(diary_dir=diary_dir, store=judge_store)
+        gateway.set_weekly_reflector(weekly_reflector)
         fire_dow = int(weekly_cfg.get("fire_dow_local", 1))
         fire_hour_w = int(weekly_cfg.get("fire_hour_local", 3))
         if channel_pairs:

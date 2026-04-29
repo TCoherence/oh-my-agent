@@ -93,6 +93,26 @@ async def test_reflect_last_week_window_is_yesterday_minus_six_through_yesterday
     assert "2026-04-21" not in prompt, "day before window must be excluded"
 
 
+@pytest.mark.asyncio
+async def test_reflect_last_week_accepts_plain_date_for_now(tmp_path: Path):
+    """`now` accepts both ``datetime`` (loop path) and ``date`` (manual /
+    test callers). Anchors the same way."""
+    diary_dir = tmp_path / "diary"
+    diary_dir.mkdir()
+    today_as_date = date(2026, 4, 29)
+    for d in [date(2026, 4, 22) + timedelta(days=i) for i in range(7)]:
+        _write_diary(diary_dir, d, f"user: hi on {d}\n")
+    store = JudgeStore(memory_dir=tmp_path / "memory")
+    await store.load()
+    registry = StubRegistry([json.dumps({"actions": [{"op": "no_op", "reason": "n/a"}]})])
+    reflector = WeeklyReflector(diary_dir=diary_dir, store=store)
+
+    result = await reflector.reflect_last_week(registry=registry, now=today_as_date)
+
+    assert result.diary_date == date(2026, 4, 28)
+    assert result.skipped_reason is None
+
+
 # --------------------------------------------------------------------------
 # _collect_week_text composition
 # --------------------------------------------------------------------------
@@ -285,6 +305,8 @@ async def test_reflect_returns_error_when_agent_raises(tmp_path: Path):
 
     assert result.error is not None
     assert "agent_exception" in result.error
+    assert result.actions == []
+    assert store.get_active() == []
 
 
 # --------------------------------------------------------------------------

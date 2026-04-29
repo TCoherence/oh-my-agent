@@ -137,22 +137,22 @@ class WeeklyReflector:
             path = self._path_for(day)
             header = f"## --- {day.isoformat()} ---"
             if not path.exists():
-                sections.append(f"{header} (no diary)\n")
+                sections.append(f"{header} (no diary)")
                 continue
             try:
                 body = path.read_text(encoding="utf-8").strip()
             except OSError as exc:
                 logger.warning("weekly_reflect read_failed date=%s err=%s", day, exc)
-                sections.append(f"{header} (read error)\n")
+                sections.append(f"{header} (read error)")
                 continue
             if not body:
-                sections.append(f"{header} (empty)\n")
+                sections.append(f"{header} (empty)")
                 continue
             if len(body) > self._per_day_chars:
                 body = body[: self._per_day_chars] + "\n...[day truncated]"
-            sections.append(f"{header}\n{body}\n")
+            sections.append(f"{header}\n{body}")
             present += 1
-        text = "\n".join(sections).strip()
+        text = "\n\n".join(sections)
         if len(text) > self._max_diary_chars:
             text = text[: self._max_diary_chars] + "\n...[week truncated]"
         return text, present
@@ -239,7 +239,7 @@ class WeeklyReflector:
         self,
         *,
         registry: Any,
-        now: datetime | None = None,
+        now: datetime | date | None = None,
     ) -> ReflectionResult:
         """Reflect over the 7 complete days ending **yesterday** (inclusive).
 
@@ -248,8 +248,17 @@ class WeeklyReflector:
         as :meth:`DiaryReflector.reflect_yesterday`. Boundary expectation:
         called at any time on 2026-04-29 → reads files for 2026-04-22 …
         2026-04-28 (7 days).
+
+        Accepts ``datetime`` or plain ``date`` for ``now`` so callers can
+        anchor on either; the loop passes datetime, manual / test callers
+        often have a date.
         """
-        today = (now or datetime.now()).date()
+        if now is None:
+            today = datetime.now().date()
+        elif isinstance(now, datetime):
+            today = now.date()
+        else:
+            today = now
         return await self.reflect(
             week_end_date=today - timedelta(days=1),
             registry=registry,
