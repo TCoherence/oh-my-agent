@@ -3711,3 +3711,191 @@ def test_list_workspace_files_skips_symlinks(tmp_path):
 
     assert listed == ["real_output.md", "subdir/nested.json"]
     assert not any(entry.startswith(".venv/") for entry in listed)
+
+
+def test_is_automation_note_paragraph_does_not_eat_markdown_with_paths():
+    """Regression: the old ``"`" in text and "/" in text`` heuristic ate any
+    markdown paragraph mentioning an inline-coded path or URL — common in
+    paper-digest / market-briefing report bodies — and silently dropped them
+    from the rendered Output. Now only verb-prefixed status chatter classifies
+    as a note."""
+    body_paragraphs = [
+        "## 摘要\n\n- 三源（arXiv + HF Daily + Semantic Scholar）共抓 129 篇 raw 候选",
+        "1. **[CF-VLA: Coarse-to-Fine VLA](http://arxiv.org/abs/2511.12345)** — `VLA` cluster",
+        "本段今日无高置信度增量信号（S2 相似论文未返回，candidate JSON 缺 `similar_papers` 字段）",
+        "- `s2_similar_unavailable`：候选 JSON 没有 `similar_papers`，延伸阅读段为空",
+    ]
+    for paragraph in body_paragraphs:
+        assert not RuntimeService._is_automation_note_paragraph(paragraph), (  # noqa: SLF001
+            f"markdown body paragraph misclassified as note: {paragraph[:60]!r}"
+        )
+
+
+def test_is_automation_note_paragraph_still_catches_status_chatter():
+    """Verb-prefixed chatter (what the heuristic actually targets) keeps
+    classifying as a note so it gets demoted out of the rendered body."""
+    note_paragraphs = [
+        "Saved /tmp/digest.md and /tmp/digest.json successfully",
+        "Wrote report to `/home/.oh-my-agent/reports/paper-digest/daily/2026-04-28.md`",
+        "Persisted to `~/.oh-my-agent/reports/market-briefing/...` via report_store.py",
+        "Created paper-digest/daily/2026-04-28.json",
+        "Artifacts: /tmp/a.md, /tmp/b.md",
+        "Output: /tmp/done.md",
+    ]
+    for paragraph in note_paragraphs:
+        assert RuntimeService._is_automation_note_paragraph(paragraph), (  # noqa: SLF001
+            f"status chatter not classified as note: {paragraph[:60]!r}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_scan_reports_dir_writes_picks_up_new_files(tmp_path):
+    """Skills like paper-digest write into ``reports_dir/<skill>/...``
+    directly (absolute paths outside the task workspace). The workspace
+    scan can't see them; this hook recovers them so the artifact_manifest
+    is non-empty and downstream publish/preview rules can run."""
+    import dataclasses
+    import os
+    from datetime import datetime, timezone
+
+    from oh_my_agent.runtime.service import RuntimeService
+
+    reports = tmp_path / "reports"
+    reports.mkdir()
+
+    # Anchor: simulate the task starting at 2026-04-28 12:00 UTC.
+    # SQLite ``CURRENT_TIMESTAMP`` is naive UTC; format matches.
+    started_iso = "2026-04-28 12:00:00"
+    started_ts = datetime(2026, 4, 28, 12, 0, 0, tzinfo=timezone.utc).timestamp()
+
+    # File written before the task started — should NOT appear (it's stale).
+    old_file = reports / "paper-digest" / "daily" / "2026-04-27.md"
+    old_file.parent.mkdir(parents=True)
+    old_file.write_text("yesterday\n", encoding="utf-8")
+    stale_ts = started_ts - 86400  # 1 day before
+    os.utime(old_file, (stale_ts, stale_ts))
+
+    db_path = tmp_path / "runtime.db"
+    store = SQLiteMemoryStore(db_path)
+    await store.init()
+    runtime = RuntimeService(
+        store,
+        config={
+            "enabled": True,
+            "worker_concurrency": 1,
+            "worktree_root": str(tmp_path / "worktrees"),
+            "reports_dir": str(reports),
+            "cleanup": {"enabled": False},
+        },
+        repo_root=tmp_path,
+        agent_workspace=None,
+    )
+
+    # Files written after task start — should appear (absolute paths).
+    new_md = reports / "paper-digest" / "daily" / "2026-04-28.md"
+    new_md.write_text("today md\n", encoding="utf-8")
+    new_json = reports / "paper-digest" / "daily" / "2026-04-28.json"
+    new_json.write_text("{}\n", encoding="utf-8")
+    fresh_ts = started_ts + 60  # 1 minute after task start
+    os.utime(new_md, (fresh_ts, fresh_ts))
+    os.utime(new_json, (fresh_ts, fresh_ts))
+
+    task = dataclasses.replace(
+        _make_artifact_task("scan-task"),
+        started_at=started_iso,
+    )
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+
+    found = runtime._scan_reports_dir_writes(task, workspace)  # noqa: SLF001
+
+    found_set = {Path(p).name for p in found}
+    assert found_set == {"2026-04-28.md", "2026-04-28.json"}
+    # Absolute-path entries — required for ``_publish_artifact_files`` Rule 1
+    # (already-stable reuse) and ``_artifact_paths_for_task``.
+    assert all(Path(p).is_absolute() for p in found)
+
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_scan_reports_dir_writes_returns_empty_when_disabled(tmp_path):
+    """``reports_dir: ""`` disables publishing; the scan must respect that
+    and return empty regardless of mtime — otherwise the manifest grows
+    paths that downstream publish rules will refuse to use."""
+    db_path = tmp_path / "runtime.db"
+    store = SQLiteMemoryStore(db_path)
+    await store.init()
+    runtime = RuntimeService(
+        store,
+        config={
+            "enabled": True,
+            "worker_concurrency": 1,
+            "worktree_root": str(tmp_path / "worktrees"),
+            "reports_dir": "",
+            "cleanup": {"enabled": False},
+        },
+        repo_root=tmp_path,
+        agent_workspace=None,
+    )
+
+    import dataclasses
+    task = dataclasses.replace(
+        _make_artifact_task("scan-disabled"),
+        started_at="2026-04-28 15:00:00",
+    )
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+
+    assert runtime._scan_reports_dir_writes(task, workspace) == []  # noqa: SLF001
+
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_scan_reports_dir_writes_skips_files_inside_workspace(tmp_path):
+    """If ``reports_dir`` happens to live under the task workspace (legal
+    but unusual), the workspace scan already captures those entries as
+    relative paths — re-emitting them as absolute paths would
+    double-count after publish."""
+    import dataclasses
+    import os
+    from datetime import datetime, timezone
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    reports = workspace / "nested-reports"
+    reports.mkdir()
+    inside = reports / "inside.md"
+    inside.write_text("hi\n", encoding="utf-8")
+
+    started_iso = "2026-04-28 12:00:00"
+    started_ts = datetime(2026, 4, 28, 12, 0, 0, tzinfo=timezone.utc).timestamp()
+    fresh_ts = started_ts + 60
+    os.utime(inside, (fresh_ts, fresh_ts))
+
+    db_path = tmp_path / "runtime.db"
+    store = SQLiteMemoryStore(db_path)
+    await store.init()
+    runtime = RuntimeService(
+        store,
+        config={
+            "enabled": True,
+            "worker_concurrency": 1,
+            "worktree_root": str(tmp_path / "worktrees"),
+            "reports_dir": str(reports),
+            "cleanup": {"enabled": False},
+        },
+        repo_root=tmp_path,
+        agent_workspace=None,
+    )
+
+    task = dataclasses.replace(
+        _make_artifact_task("scan-overlap"),
+        started_at=started_iso,
+    )
+
+    found = runtime._scan_reports_dir_writes(task, workspace)  # noqa: SLF001
+
+    assert found == []
+    await store.close()

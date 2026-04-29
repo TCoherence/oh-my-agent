@@ -4037,7 +4037,73 @@ class RuntimeService:
     async def _collect_changed_files(self, task: RuntimeTask, workspace: Path) -> list[str]:
         if self._uses_merge_flow(task):
             return await self._worktree.changed_files(workspace)
-        return self._list_workspace_files(workspace)
+        files = self._list_workspace_files(workspace)
+        files.extend(self._scan_reports_dir_writes(task, workspace))
+        return files
+
+    def _scan_reports_dir_writes(self, task: RuntimeTask, workspace: Path) -> list[str]:
+        # Skills like paper-digest / market-briefing call ``report_store.py
+        # persist`` to write directly into ``reports_dir/<skill>/...`` —
+        # absolute paths that live outside the task workspace, so the
+        # workspace scan above misses them entirely. Without these the
+        # downstream artifact_manifest is empty: publish short-circuits, the
+        # automation message preview falls back to the literal "Automation
+        # run completed.", and the user never sees what was produced.
+        #
+        # We pick them up by scanning ``reports_dir`` for files newer than
+        # the task start. Returned as absolute paths; ``_publish_artifact_files``
+        # Rule 1 will recognize them as already-stable and reuse in place.
+        if not self._reports_dir:
+            return []
+        threshold_iso = task.started_at or task.created_at
+        if not threshold_iso:
+            return []
+        from datetime import datetime, timezone
+        try:
+            dt = datetime.fromisoformat(threshold_iso)
+        except (ValueError, TypeError):
+            return []
+        if dt.tzinfo is None:
+            # SQLite ``CURRENT_TIMESTAMP`` is UTC; mtime is epoch UTC.
+            dt = dt.replace(tzinfo=timezone.utc)
+        threshold = dt.timestamp()
+        try:
+            if not self._reports_dir.is_dir():
+                return []
+        except OSError:
+            return []
+        # Files inside the workspace are already covered by the workspace
+        # scan; if reports_dir happens to live under workspace_path
+        # (unusual but legal) we'd otherwise double-count.
+        try:
+            workspace_resolved = workspace.resolve()
+        except OSError:
+            workspace_resolved = None
+        found: list[str] = []
+        try:
+            for path in self._reports_dir.rglob("*"):
+                try:
+                    if not path.is_file():
+                        continue
+                    if path.stat().st_mtime <= threshold:
+                        continue
+                except OSError:
+                    continue
+                if workspace_resolved is not None:
+                    try:
+                        path.resolve().relative_to(workspace_resolved)
+                        continue
+                    except (OSError, ValueError):
+                        pass
+                found.append(str(path.resolve()))
+        except OSError:
+            logger.warning(
+                "Failed to scan reports_dir %s for task %s artifact writes",
+                self._reports_dir,
+                task.id,
+                exc_info=True,
+            )
+        return sorted(found)
 
     @staticmethod
     def _list_workspace_files(workspace: Path) -> list[str]:
@@ -4568,9 +4634,13 @@ class RuntimeService:
 
     @staticmethod
     def _is_automation_note_paragraph(text: str) -> bool:
+        # Match only paragraphs that are clearly status chatter — verbs that
+        # signal "I just persisted/created X" plus tag-like prefixes. The old
+        # ``"`" in text and "/" in text`` rule was too broad: any markdown
+        # paragraph mentioning a path or inline-code token (very common in
+        # report bodies) got classified as a note and silently dropped from
+        # the rendered Output.
         lowered = " ".join(text.split()).lower()
-        if "`" in text and "/" in text:
-            return True
         return lowered.startswith(
             (
                 "created ",
@@ -4578,6 +4648,8 @@ class RuntimeService:
                 "saved ",
                 "wrote ",
                 "written to ",
+                "persisted to ",
+                "persisted at ",
                 "artifact:",
                 "artifacts:",
                 "output:",
