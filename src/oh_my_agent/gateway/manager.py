@@ -1239,12 +1239,52 @@ class GatewayManager:
         await self._refresh_auto_disabled_skills()
 
         explicit_skill = self._detect_explicit_skill_invocation(msg.content)
-        if explicit_skill:
+        if explicit_skill and self._runtime_service:
+            # Skill invocation paths unification: ``/skill_name``,
+            # router-detected ``invoke_skill``, and scheduler cron-fired
+            # automations all converge on ``create_artifact_task``. This
+            # gives every skill run a workspace, a manifest, and the
+            # unified completion message — instead of the prior split
+            # where explicit / router invocations went through
+            # ``AgentRegistry.run`` (no workspace) and only scheduler
+            # ran as a task. ``auto_approve=True`` because the user
+            # already invoked the skill explicitly; no second-step
+            # approval needed.
             logger.info(
-                "[%s] SKILL_INVOKE explicit skill=%s preferred_agent=%r thread=%s",
+                "[%s] SKILL_INVOKE explicit skill=%s preferred_agent=%r thread=%s -> create_artifact_task",
                 req_id,
                 explicit_skill,
                 msg.preferred_agent,
+                thread_id,
+            )
+            await self._append_user_turn_if_needed(session, thread_id, msg)
+            await self._runtime_service.create_artifact_task(
+                session=session,
+                registry=registry,
+                thread_id=thread_id,
+                goal=msg.content,
+                raw_request=msg.content,
+                created_by=msg.author_id or msg.author,
+                preferred_agent=msg.preferred_agent,
+                skill_name=explicit_skill,
+                source="explicit_skill",
+                auto_approve=True,
+                # SKILL.md ``metadata.timeout_seconds`` / ``max_turns``
+                # used to apply only on the inline AgentRegistry.run path.
+                # Forward them so a long-running skill like
+                # ``market-briefing`` (1200s) still gets its budget when
+                # the runtime hosts the call.
+                agent_timeout_seconds=self._skill_timeout_seconds_by_name(explicit_skill),
+                agent_max_turns=self._skill_max_turns_by_name(explicit_skill),
+            )
+            return
+        if explicit_skill:
+            # No runtime configured — fall through to the legacy inline
+            # AgentRegistry.run path so chat-only deployments still work.
+            logger.info(
+                "[%s] SKILL_INVOKE explicit skill=%s (no runtime; legacy inline path) thread=%s",
+                req_id,
+                explicit_skill,
                 thread_id,
             )
 
@@ -1427,11 +1467,45 @@ class GatewayManager:
                 and router_decision.decision == "invoke_skill"
                 and router_decision.confidence >= threshold
             ):
+                # Router-detected skill invocation goes through the same
+                # create_artifact_task pipeline as explicit /skill_name
+                # and scheduler cron jobs. Resolves to a registered
+                # skill via skill_syncer; falls back to inline AgentRegistry.run
+                # if the router couldn't pin a known skill_name.
+                router_skill = (router_decision.skill_name or "").strip()
+                known_skills = self._known_skill_names()
+                if router_skill and router_skill in known_skills:
+                    logger.info(
+                        "[%s] ROUTER invoke_skill confidence=%.2f skill_name=%r -> create_artifact_task",
+                        req_id,
+                        router_decision.confidence,
+                        router_skill,
+                    )
+                    await self._append_user_turn_if_needed(session, thread_id, msg)
+                    user_turn_appended = True
+                    await self._runtime_service.create_artifact_task(
+                        session=session,
+                        registry=registry,
+                        thread_id=thread_id,
+                        goal=msg.content,
+                        raw_request=msg.content,
+                        created_by=msg.author_id or msg.author,
+                        preferred_agent=msg.preferred_agent,
+                        skill_name=router_skill,
+                        source="router_invoke_skill",
+                        auto_approve=True,
+                        agent_timeout_seconds=self._skill_timeout_seconds_by_name(router_skill),
+                        agent_max_turns=self._skill_max_turns_by_name(router_skill),
+                    )
+                    return
+                # Skill name unresolved or unknown — fall through to
+                # inline AgentRegistry.run so the agent can still answer
+                # using whatever context is available.
                 logger.info(
-                    "[%s] ROUTER invoke_skill confidence=%.2f skill_name=%r",
+                    "[%s] ROUTER invoke_skill confidence=%.2f skill_name=%r (unresolved; inline)",
                     req_id,
                     router_decision.confidence,
-                    router_decision.skill_name,
+                    router_skill or None,
                 )
 
             should_try_heuristic = (
