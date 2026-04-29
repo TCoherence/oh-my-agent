@@ -4933,15 +4933,24 @@ class RuntimeService:
         if record_history:
             await session.append_assistant(task.thread_id, text[:4000], "runtime")
         if terminal:
-            # Chunk long terminal text rather than hard-truncating at 1900.
-            # PR2.1 routes explicit ``/skill_name`` and router-resolved
+            # Chunk only when the terminal text exceeds Discord's
+            # single-message budget. Short text takes the single-await
+            # path (equivalent to the prior ``[:1900]`` hard cut, which
+            # is a no-op for sub-1900 strings) so we don't perturb the
+            # await-scheduling timing relative to status updates that
+            # tests like ``_wait_for_status`` poll on. PR2.1 routes
+            # explicit ``/skill_name`` and router-resolved
             # ``invoke_skill`` through ``create_artifact_task`` — those
             # replies can be a full markdown report (paper-digest etc.)
-            # that previously chunked on the inline chat path. Without
-            # chunking here the body would silently lose its tail.
+            # that previously chunked on the inline chat path; long
+            # terminal text falls through to ``chunk_message`` so the
+            # body doesn't silently lose its tail.
             terminal_text = self._format_terminal_message(text)
-            for chunk in chunk_message(terminal_text):
-                await session.channel.send(task.thread_id, chunk)
+            if len(terminal_text) <= 1900:
+                await session.channel.send(task.thread_id, terminal_text)
+            else:
+                for chunk in chunk_message(terminal_text):
+                    await session.channel.send(task.thread_id, chunk)
 
     async def _send_automation_terminal_message(
         self,
