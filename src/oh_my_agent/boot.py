@@ -497,6 +497,7 @@ async def _shutdown(
     diary_writer=None,
     trace_writer=None,
     diary_reflect_loop=None,
+    weekly_reflect_loop=None,
     push_dispatcher=None,
 ) -> None:
     logger.info("Shutdown started reason=%s", reason)
@@ -506,6 +507,9 @@ async def _shutdown(
     if diary_reflect_loop is not None:
         with suppress(Exception):
             await diary_reflect_loop.stop()
+    if weekly_reflect_loop is not None:
+        with suppress(Exception):
+            await weekly_reflect_loop.stop()
     if gateway_manager:
         await gateway_manager.stop()
     if runtime_service:
@@ -1031,6 +1035,46 @@ async def ignite(ctx: BootContext) -> None:
             logger.info(
                 "Diary reflector ready for manual /reflect_yesterday (no channel registry to auto-fire)"
             )
+    elif judge_store is not None and diary_dir is not None:
+        logger.info(
+            "Diary reflection disabled (set memory.diary_reflection.enabled=true "
+            "in config.yaml to enable cross-day memory extraction)"
+        )
+
+    weekly_reflector = None
+    weekly_reflect_loop = None
+    weekly_cfg = memory_cfg.get("weekly_reflection", {}) if isinstance(memory_cfg, dict) else {}
+    if (
+        judge_store is not None
+        and diary_dir is not None
+        and weekly_cfg.get("enabled", False)
+    ):
+        from oh_my_agent.memory.weekly_reflector import (
+            WeeklyReflectionLoop,
+            WeeklyReflector,
+        )
+
+        weekly_reflector = WeeklyReflector(diary_dir=diary_dir, store=judge_store)
+        fire_dow = int(weekly_cfg.get("fire_dow_local", 1))
+        fire_hour_w = int(weekly_cfg.get("fire_hour_local", 3))
+        if channel_pairs:
+            _channel, weekly_registry = channel_pairs[0]
+            weekly_reflect_loop = WeeklyReflectionLoop(
+                reflector=weekly_reflector,
+                registry=weekly_registry,
+                fire_dow_local=fire_dow,
+                fire_hour_local=fire_hour_w,
+            )
+            weekly_reflect_loop.start()
+            logger.info(
+                "Weekly reflection loop enabled (fires dow=%d at %02d:00 local)",
+                fire_dow,
+                fire_hour_w,
+            )
+        else:
+            logger.info(
+                "Weekly reflector ready (no channel registry to auto-fire)"
+            )
 
     logger.info("Starting gateway with %d channel(s)...", len(channel_pairs))
     loop = asyncio.get_running_loop()
@@ -1061,6 +1105,7 @@ async def ignite(ctx: BootContext) -> None:
             diary_writer=diary_writer,
             trace_writer=trace_writer,
             diary_reflect_loop=diary_reflect_loop,
+            weekly_reflect_loop=weekly_reflect_loop,
             push_dispatcher=push_dispatcher,
         )
 
