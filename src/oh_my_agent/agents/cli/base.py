@@ -386,6 +386,13 @@ class BaseCLIAgent(BaseAgent):
             is set; ignored in legacy (no-workspace) mode.
     """
 
+    # Workspace-relative dir holding this agent's skill bundle (e.g.
+    # ``.claude`` for Claude, ``.gemini`` for Gemini, ``.agents`` for codex).
+    # Exposed to the CLI subprocess as ``OMA_AGENT_HOME`` so SKILL.md scripts
+    # can reference ``$OMA_AGENT_HOME/skills/<name>/...`` and stay portable
+    # across the three agents (default agent → fallback agent both work).
+    _oma_agent_home: str | None = None
+
     def __init__(
         self,
         cli_path: str,
@@ -454,19 +461,23 @@ class BaseCLIAgent(BaseAgent):
         whitelist model: only ``_SAFE_ENV_KEYS`` plus explicit
         ``passthrough_env`` keys are forwarded.  Otherwise falls back to the
         full inherited environment (backward-compatible default).
+
+        When ``_oma_agent_home`` is set on the subclass, ``OMA_AGENT_HOME``
+        is exported so SKILL.md scripts (``$OMA_AGENT_HOME/skills/...``)
+        resolve to the right per-agent dir.
         """
         if self._workspace is None and self._passthrough_env is None:
             # Legacy mode: no workspace configured → inherit full environment.
             env = os.environ.copy()
-            env.pop("CLAUDECODE", None)
-            return env
-
-        # Whitelist mode: strip secrets from the subprocess environment.
-        env = {k: v for k, v in os.environ.items() if k in _SAFE_ENV_KEYS}
-        for key in (self._passthrough_env or []):
-            if key in os.environ:
-                env[key] = os.environ[key]
+        else:
+            # Whitelist mode: strip secrets from the subprocess environment.
+            env = {k: v for k, v in os.environ.items() if k in _SAFE_ENV_KEYS}
+            for key in (self._passthrough_env or []):
+                if key in os.environ:
+                    env[key] = os.environ[key]
         env.pop("CLAUDECODE", None)
+        if self._oma_agent_home:
+            env["OMA_AGENT_HOME"] = self._oma_agent_home
         return env
 
     async def run(

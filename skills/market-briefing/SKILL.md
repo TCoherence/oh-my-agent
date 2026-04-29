@@ -64,8 +64,8 @@ The skill is report-centric. It writes durable report files under `~/.oh-my-agen
 1. Pick the explicit mode and domain.
 2. **(AI / finance daily) Prefetch podcasts** — run the podcast fetch script to get latest episodes from subscribed channels:
    ```bash
-   ./.venv/bin/python skills/market-briefing/scripts/podcast_fetch.py --domain ai
-   ./.venv/bin/python skills/market-briefing/scripts/podcast_fetch.py --domain finance
+   ./.venv/bin/python ${OMA_AGENT_HOME}/skills/market-briefing/scripts/podcast_fetch.py --domain ai
+   ./.venv/bin/python ${OMA_AGENT_HOME}/skills/market-briefing/scripts/podcast_fetch.py --domain finance
    ```
    Use `--domain ai` for AI daily, `--domain finance` for finance daily. The script outputs a JSON array of episodes updated within the last 48 hours. Use this output directly for the `🎙️ 播客动态` section — do not run a separate web search for podcasts.
    If the script returns an empty array or fails, write "今日订阅播客暂无更新" in the podcast section and move on.

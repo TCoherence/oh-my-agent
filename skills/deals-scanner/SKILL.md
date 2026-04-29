@@ -84,7 +84,7 @@ When `daily_scan` runs without an explicit `--days` override, use these defaults
 2. Load prior stored context with the helper script:
 
 ```bash
-./.venv/bin/python skills/deals-scanner/scripts/deal_store.py context \
+./.venv/bin/python ${OMA_AGENT_HOME}/skills/deals-scanner/scripts/deal_store.py context \
   --mode daily_scan \
   --source credit-cards
 ```
@@ -92,7 +92,7 @@ When `daily_scan` runs without an explicit `--days` override, use these defaults
 For weekly digest:
 
 ```bash
-./.venv/bin/python skills/deals-scanner/scripts/deal_store.py context \
+./.venv/bin/python ${OMA_AGENT_HOME}/skills/deals-scanner/scripts/deal_store.py context \
   --mode weekly_digest \
   --source all-sources
 ```
@@ -100,7 +100,7 @@ For weekly digest:
 3. Generate a starter Markdown + JSON scaffold:
 
 ```bash
-./.venv/bin/python skills/deals-scanner/scripts/deal_store.py scaffold \
+./.venv/bin/python ${OMA_AGENT_HOME}/skills/deals-scanner/scripts/deal_store.py scaffold \
   --mode daily_scan \
   --source credit-cards \
   --markdown-file /tmp/credit-cards_daily.md \
@@ -112,7 +112,7 @@ For weekly digest:
 6. Persist both files into the canonical report store:
 
 ```bash
-./.venv/bin/python skills/deals-scanner/scripts/deal_store.py persist \
+./.venv/bin/python ${OMA_AGENT_HOME}/skills/deals-scanner/scripts/deal_store.py persist \
   --mode daily_scan \
   --source credit-cards \
   --markdown-file /tmp/credit-cards_daily.md \

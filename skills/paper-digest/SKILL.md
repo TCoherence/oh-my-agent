@@ -38,10 +38,10 @@ metadata:
 
 ```bash
 DATE=$(date +%F) && \
-./.venv/bin/python skills/paper-digest/scripts/paper_fetch.py --source all --output json > /tmp/paper_candidates.json 2>/tmp/paper_fetch.err && \
-./.venv/bin/python skills/paper-digest/scripts/report_store.py context --days 7 > /tmp/paper_context.json && \
-./.venv/bin/python skills/paper-digest/scripts/paper_seen_pool.py context > /tmp/paper_seen.json && \
-./.venv/bin/python skills/paper-digest/scripts/report_store.py scaffold --report-date "$DATE" --markdown-file /tmp/paper-digest.md --json-file /tmp/paper-digest.json && \
+./.venv/bin/python ${OMA_AGENT_HOME}/skills/paper-digest/scripts/paper_fetch.py --source all --output json > /tmp/paper_candidates.json 2>/tmp/paper_fetch.err && \
+./.venv/bin/python ${OMA_AGENT_HOME}/skills/paper-digest/scripts/report_store.py context --days 7 > /tmp/paper_context.json && \
+./.venv/bin/python ${OMA_AGENT_HOME}/skills/paper-digest/scripts/paper_seen_pool.py context > /tmp/paper_seen.json && \
+./.venv/bin/python ${OMA_AGENT_HOME}/skills/paper-digest/scripts/report_store.py scaffold --report-date "$DATE" --markdown-file /tmp/paper-digest.md --json-file /tmp/paper-digest.json && \
 echo "prep done; date=$DATE; candidates_bytes=$(wc -c < /tmp/paper_candidates.json)"
 ```
 
@@ -86,7 +86,7 @@ Write 两份文件：`/tmp/paper-digest.md` 和 `/tmp/paper-digest.json`。JSON 
 ### 步骤 4：落盘 + 自动 record seen-pool
 
 ```bash
-./.venv/bin/python skills/paper-digest/scripts/report_store.py persist \
+./.venv/bin/python ${OMA_AGENT_HOME}/skills/paper-digest/scripts/report_store.py persist \
   --report-date "$DATE" \
   --markdown-file /tmp/paper-digest.md \
   --json-file /tmp/paper-digest.json

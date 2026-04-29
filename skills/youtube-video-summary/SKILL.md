@@ -15,14 +15,14 @@ Use a transcript-first workflow for YouTube links. Prefer subtitles or auto-gene
 2. Extract evidence with the bundled script:
 
 ```bash
-./.venv/bin/python skills/youtube-video-summary/scripts/extract_youtube.py \
+./.venv/bin/python ${OMA_AGENT_HOME}/skills/youtube-video-summary/scripts/extract_youtube.py \
   --url '<youtube-url>'
 ```
 
 3. If the video needs a logged-in session, pass cookies explicitly:
 
 ```bash
-./.venv/bin/python skills/youtube-video-summary/scripts/extract_youtube.py \
+./.venv/bin/python ${OMA_AGENT_HOME}/skills/youtube-video-summary/scripts/extract_youtube.py \
   --url '<youtube-url>' \
   --cookies-path '<path-to-cookies.txt>'
 ```

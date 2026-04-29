@@ -218,8 +218,14 @@ class SkillSync:
             )
         return len(skills)
 
-    def refresh_workspace(self, workspace_root: Path) -> Path:
-        """Refresh workspace skills and regenerate AGENTS.md as one unit."""
+    def refresh_workspace(self, workspace_root: Path, *, write_agents_md: bool = True) -> Path:
+        """Refresh workspace skills and regenerate AGENTS.md as one unit.
+
+        Pass ``write_agents_md=False`` when the caller will write its own
+        ``AGENTS.md`` (e.g. ``boot._refresh_workspace_hint_files`` when
+        ``WORKSPACE_AGENTS.md`` is present). Avoids a double-write on every
+        boot — the SkillSync-generated content would only get clobbered.
+        """
         workspace_root.mkdir(parents=True, exist_ok=True)
         for relative in (
             Path(".claude/skills"),
@@ -228,7 +234,8 @@ class SkillSync:
         ):
             self._replace_workspace_skills_dir(workspace_root / relative)
         self._remove_path(workspace_root / ".codex")
-        self.write_workspace_agents_md(workspace_root)
+        if write_agents_md:
+            self.write_workspace_agents_md(workspace_root)
         self._write_workspace_state(workspace_root)
         return workspace_root
 

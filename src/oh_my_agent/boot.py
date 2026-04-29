@@ -52,11 +52,16 @@ def _setup_workspace(
     ws = Path(workspace_path).expanduser().resolve()
     ws.mkdir(parents=True, exist_ok=True)
 
+    has_workspace_hint = (project_root / "WORKSPACE_AGENTS.md").is_file()
+
     try:
         from oh_my_agent.skills.skill_sync import SkillSync
 
         syncer = SkillSync(skills_path or (project_root / "skills"), project_root=project_root)
-        syncer.refresh_workspace(ws)
+        # When WORKSPACE_AGENTS.md exists, _refresh_workspace_hint_files writes
+        # AGENTS.md directly — let SkillSync skip its own pass to avoid the
+        # immediate clobber on every boot.
+        syncer.refresh_workspace(ws, write_agents_md=not has_workspace_hint)
     except Exception:
         logging.getLogger(__name__).warning(
             "Failed to refresh workspace contents for %s",
@@ -64,7 +69,50 @@ def _setup_workspace(
             exc_info=True,
         )
 
+    _refresh_workspace_hint_files(project_root, ws)
+
     return ws
+
+
+# Each CLI agent prefers a different filename for its system-context hint
+# (Claude reads CLAUDE.md, Gemini reads GEMINI.md, codex/others read AGENTS.md).
+# We ship one source of truth at the repo root and lay down all three names
+# in the workspace so whichever agent the registry selects picks it up.
+_WORKSPACE_HINT_NAMES: tuple[str, ...] = ("AGENTS.md", "CLAUDE.md", "GEMINI.md")
+
+
+def _refresh_workspace_hint_files(project_root: Path, workspace: Path) -> None:
+    source = project_root / "WORKSPACE_AGENTS.md"
+    if not source.is_file():
+        return
+    try:
+        payload = source.read_bytes()
+    except OSError as exc:
+        logging.getLogger(__name__).warning(
+            "Failed to read WORKSPACE_AGENTS.md from %s: %s", source, exc
+        )
+        return
+    for name in _WORKSPACE_HINT_NAMES:
+        target = workspace / name
+        try:
+            if target.is_symlink() or target.exists():
+                # Degenerate case: a real directory at workspace/<name> would
+                # OSError on `unlink()`. Log + skip rather than silently
+                # corrupt the workspace by recursive-deleting an unknown dir.
+                if target.is_dir() and not target.is_symlink():
+                    logging.getLogger(__name__).warning(
+                        "Workspace hint path %s is a directory; refusing to overwrite",
+                        target,
+                    )
+                    continue
+                if target.is_file() and not target.is_symlink() and target.read_bytes() == payload:
+                    continue
+                target.unlink()
+            target.write_bytes(payload)
+        except OSError as exc:
+            logging.getLogger(__name__).warning(
+                "Failed to write workspace hint %s: %s", target, exc
+            )
 
 
 def _build_agent(name: str, cfg: dict, workspace: Path | None = None):

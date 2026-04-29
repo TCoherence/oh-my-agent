@@ -3663,6 +3663,44 @@ async def test_prepare_task_workspace_links_agent_workspace_dirs(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_prepare_task_workspace_links_workspace_hint_files(tmp_path):
+    """Once ``_setup_workspace`` deposits AGENTS.md / CLAUDE.md / GEMINI.md
+    in the agent workspace, ``_prepare_task_workspace`` symlinks them into
+    the task cwd so the agent reads its own per-agent hint file at start-up
+    (Claude reads CLAUDE.md, Gemini reads GEMINI.md, codex reads AGENTS.md)."""
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+
+    agent_ws = tmp_path / "agent-workspace"
+    agent_ws.mkdir(parents=True)
+    for name in ("AGENTS.md", "CLAUDE.md", "GEMINI.md"):
+        (agent_ws / name).write_text(f"# {name}\n", encoding="utf-8")
+
+    store = SQLiteMemoryStore(tmp_path / "runtime.db")
+    await store.init()
+    runtime = RuntimeService(
+        store,
+        config={
+            "enabled": True,
+            "worktree_root": str(tmp_path / "worktrees"),
+            "default_test_command": "true",
+            "cleanup": {"enabled": False},
+        },
+        repo_root=repo,
+        agent_workspace=agent_ws,
+    )
+
+    workspace = await runtime._prepare_task_workspace(_make_artifact_task())  # noqa: SLF001
+
+    for name in ("AGENTS.md", "CLAUDE.md", "GEMINI.md"):
+        link = workspace / name
+        assert link.is_symlink(), f"{name} should be a symlink"
+        assert link.read_text(encoding="utf-8") == f"# {name}\n"
+
+    await store.close()
+
+
+@pytest.mark.asyncio
 async def test_prepare_task_workspace_no_agent_workspace_skips_linking(tmp_path):
     """Backward-compat: without agent_workspace configured, the artifact dir
     is still bare (legacy behavior)."""

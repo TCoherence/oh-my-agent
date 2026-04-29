@@ -102,6 +102,8 @@ class ClaudeAgent(BaseCLIAgent):
       session without re-flattening history.
     """
 
+    _oma_agent_home = ".claude"
+
     def __init__(
         self,
         cli_path: str = "claude",

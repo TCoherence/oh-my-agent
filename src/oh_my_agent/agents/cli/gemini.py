@@ -34,6 +34,8 @@ class GeminiCLIAgent(BaseCLIAgent):
     https://github.com/google-gemini/gemini-cli
     """
 
+    _oma_agent_home = ".gemini"
+
     def __init__(
         self,
         cli_path: str = "gemini",

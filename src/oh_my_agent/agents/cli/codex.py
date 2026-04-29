@@ -87,6 +87,8 @@ class CodexCLIAgent(BaseCLIAgent):
     https://github.com/openai/codex
     """
 
+    _oma_agent_home = ".agents"
+
     def __init__(
         self,
         cli_path: str = "codex",

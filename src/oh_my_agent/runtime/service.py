@@ -4017,13 +4017,13 @@ class RuntimeService:
     def _link_agent_workspace_into(self, workspace: Path) -> None:
         if self._agent_workspace is None:
             return
-        candidates: list[tuple[Path, Path]] = [
+        dir_links: list[tuple[Path, Path]] = [
             (workspace / ".venv", self._agent_workspace / ".venv"),
             (workspace / ".claude" / "skills", self._agent_workspace / ".claude" / "skills"),
             (workspace / ".gemini" / "skills", self._agent_workspace / ".gemini" / "skills"),
             (workspace / ".agents" / "skills", self._agent_workspace / ".agents" / "skills"),
         ]
-        for link, target in candidates:
+        for link, target in dir_links:
             if not target.exists():
                 continue
             if link.is_symlink() or link.exists():
@@ -4031,6 +4031,19 @@ class RuntimeService:
             try:
                 link.parent.mkdir(parents=True, exist_ok=True)
                 link.symlink_to(target, target_is_directory=True)
+            except OSError as exc:
+                logger.warning("Failed to link %s -> %s: %s", link, target, exc)
+        # Workspace hint files (AGENTS.md / CLAUDE.md / GEMINI.md) — symlinked
+        # so SKILL invocations and "where am I" questions resolve at turn 1.
+        for name in ("AGENTS.md", "CLAUDE.md", "GEMINI.md"):
+            link = workspace / name
+            target = self._agent_workspace / name
+            if not target.is_file():
+                continue
+            if link.is_symlink() or link.exists():
+                continue
+            try:
+                link.symlink_to(target)
             except OSError as exc:
                 logger.warning("Failed to link %s -> %s: %s", link, target, exc)
 

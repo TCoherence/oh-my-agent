@@ -253,3 +253,28 @@ async def test_claude_ndjson_without_result_frame_falls_back_to_cli_error(monkey
 
     assert response.error_kind == "api_5xx"
     assert response.terminal_reason is None
+
+
+def test_claude_build_env_exports_oma_agent_home():
+    """SKILL.md scripts use ``$OMA_AGENT_HOME/skills/<name>/scripts/...``;
+    Bash subprocesses spawned by claude-cli inherit env from the parent, so
+    setting the var here is what makes the substitution resolve at runtime."""
+    agent = ClaudeAgent(cli_path="claude", model="sonnet-test")
+    env = agent._build_env()  # noqa: SLF001
+    assert env.get("OMA_AGENT_HOME") == ".claude"
+
+
+def test_gemini_build_env_exports_oma_agent_home():
+    from oh_my_agent.agents.cli.gemini import GeminiCLIAgent
+
+    agent = GeminiCLIAgent(cli_path="gemini")
+    env = agent._build_env()  # noqa: SLF001
+    assert env.get("OMA_AGENT_HOME") == ".gemini"
+
+
+def test_codex_build_env_exports_oma_agent_home():
+    from oh_my_agent.agents.cli.codex import CodexCLIAgent
+
+    agent = CodexCLIAgent(cli_path="codex")
+    env = agent._build_env()  # noqa: SLF001
+    assert env.get("OMA_AGENT_HOME") == ".agents"
