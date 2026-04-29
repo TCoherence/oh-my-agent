@@ -164,11 +164,12 @@ def test_setup_workspace_writes_workspace_agents_hint_files(skill_dir, tmp_path)
         assert target.read_text(encoding="utf-8") == workspace_hint
 
 
-def test_setup_workspace_workspace_agents_overwrites_skillsync_agents(skill_dir, tmp_path):
-    """``_refresh_workspace_hint_files`` runs after ``SkillSync.refresh_workspace``
-    in the boot order, so ``WORKSPACE_AGENTS.md`` content wins over the
-    SkillSync-generated AGENTS.md (which mixed dev-time repo rules with
-    workspace skill listings — neither correct for runtime agent guidance)."""
+def test_setup_workspace_skips_skillsync_agents_when_workspace_agents_present(skill_dir, tmp_path):
+    """When ``WORKSPACE_AGENTS.md`` exists, ``_setup_workspace`` passes
+    ``write_agents_md=False`` to ``SkillSync.refresh_workspace`` so SkillSync's
+    own AGENTS.md generator no longer runs — avoiding a write-then-clobber on
+    every boot. ``_refresh_workspace_hint_files`` is the sole writer of
+    workspace AGENTS.md / CLAUDE.md / GEMINI.md in this path."""
     project_root = tmp_path / "project"
     project_root.mkdir(parents=True, exist_ok=True)
     (project_root / "AGENTS.md").write_text("# Repo Rules\n", encoding="utf-8")
@@ -179,6 +180,9 @@ def test_setup_workspace_workspace_agents_overwrites_skillsync_agents(skill_dir,
 
     agents_md = workspace / "AGENTS.md"
     assert agents_md.read_text(encoding="utf-8") == workspace_hint
+    # SkillSync's "# Generated Workspace AGENTS" header would have been the
+    # only producer of AGENTS.md before _refresh_workspace_hint_files ran;
+    # confirm SkillSync is now skipped (not just shadowed).
     assert "# Generated Workspace AGENTS" not in agents_md.read_text(encoding="utf-8")
 
 
@@ -213,3 +217,26 @@ def test_setup_workspace_skips_hint_files_when_source_missing(skill_dir, tmp_pat
     # AGENTS.md still exists from SkillSync's generation, but it's the legacy
     # "# Generated Workspace AGENTS" content.
     assert (workspace / "AGENTS.md").exists()
+
+
+def test_refresh_workspace_hint_files_skips_directory_target(skill_dir, tmp_path):
+    """If a workspace path that should hold a hint file is unexpectedly a
+    directory (corrupted state, manual mistake, prior failed run), refuse to
+    rmtree it — log + skip and leave the other two hint files writable."""
+    from oh_my_agent.boot import _refresh_workspace_hint_files
+
+    project_root = tmp_path / "project"
+    project_root.mkdir(parents=True, exist_ok=True)
+    (project_root / "WORKSPACE_AGENTS.md").write_text("# WS guide\n", encoding="utf-8")
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "CLAUDE.md").mkdir()  # degenerate: dir at hint path
+
+    _refresh_workspace_hint_files(project_root, workspace)
+
+    # Directory left in place (not rmtree'd).
+    assert (workspace / "CLAUDE.md").is_dir()
+    # AGENTS.md and GEMINI.md still get written.
+    assert (workspace / "AGENTS.md").read_text(encoding="utf-8") == "# WS guide\n"
+    assert (workspace / "GEMINI.md").read_text(encoding="utf-8") == "# WS guide\n"
