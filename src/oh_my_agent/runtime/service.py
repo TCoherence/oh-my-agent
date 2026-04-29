@@ -4933,7 +4933,15 @@ class RuntimeService:
         if record_history:
             await session.append_assistant(task.thread_id, text[:4000], "runtime")
         if terminal:
-            await session.channel.send(task.thread_id, self._format_terminal_message(text)[:1900])
+            # Chunk long terminal text rather than hard-truncating at 1900.
+            # PR2.1 routes explicit ``/skill_name`` and router-resolved
+            # ``invoke_skill`` through ``create_artifact_task`` — those
+            # replies can be a full markdown report (paper-digest etc.)
+            # that previously chunked on the inline chat path. Without
+            # chunking here the body would silently lose its tail.
+            terminal_text = self._format_terminal_message(text)
+            for chunk in chunk_message(terminal_text):
+                await session.channel.send(task.thread_id, chunk)
 
     async def _send_automation_terminal_message(
         self,

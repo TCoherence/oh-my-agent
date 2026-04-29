@@ -1434,6 +1434,71 @@ async def test_router_repair_skill_creates_skill_task_with_thread_context(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_router_invoke_skill_creates_artifact_task_when_skill_name_resolved(tmp_path):
+    """PR2.1: when the router emits ``invoke_skill`` AND ``skill_name``
+    matches a registered skill, the manager dispatches to
+    ``RuntimeService.create_artifact_task`` (no inline AgentRegistry.run).
+    Mirrors the explicit-``/skill_name`` flow."""
+    channel = MagicMock()
+    channel.platform = "discord"
+    channel.channel_id = "100"
+    channel.create_thread = AsyncMock(return_value="t1")
+    channel.send = AsyncMock()
+    channel.typing = MagicMock()
+    channel.typing.return_value.__aenter__ = AsyncMock(return_value=None)
+    channel.typing.return_value.__aexit__ = AsyncMock(return_value=False)
+
+    mock_agent = MagicMock()
+    mock_agent.name = "claude"
+    registry = MagicMock(spec=AgentRegistry)
+    registry.agents = [mock_agent]
+    registry.run = AsyncMock(return_value=(mock_agent, AgentResponse(text="should not fire")))
+
+    runtime = MagicMock()
+    runtime.maybe_handle_thread_context = AsyncMock(return_value=False)
+    runtime.maybe_handle_incoming = AsyncMock(return_value=False)
+    runtime.create_artifact_task = AsyncMock()
+
+    router = MagicMock()
+    router.confidence_threshold = 0.55
+    router.route = AsyncMock(
+        return_value=RouteDecision(
+            decision="invoke_skill",
+            confidence=0.92,
+            goal="",
+            risk_hints=[],
+            raw_text="",
+            skill_name="paper-digest",
+        )
+    )
+
+    skills_root = tmp_path / "skills"
+    skill_dir = skills_root / "paper-digest"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: paper-digest\ndescription: Daily arxiv digest.\nmetadata:\n  timeout_seconds: 600\n  max_turns: 30\n---\n",
+        encoding="utf-8",
+    )
+    syncer = MagicMock()
+    syncer._skills_path = skills_root  # noqa: SLF001
+
+    session = _make_session(channel=channel, registry=registry)
+    gm = GatewayManager([], runtime_service=runtime, intent_router=router, skill_syncer=syncer)
+    msg = _make_msg(thread_id="thread-1", content="今天 arxiv 有什么新的？")
+    await gm.handle_message(session, registry, msg)
+
+    runtime.create_artifact_task.assert_awaited_once()
+    kwargs = runtime.create_artifact_task.call_args.kwargs
+    assert kwargs["skill_name"] == "paper-digest"
+    assert kwargs["source"] == "router_invoke_skill"
+    assert kwargs["auto_approve"] is True
+    assert kwargs["agent_timeout_seconds"] == 600
+    assert kwargs["agent_max_turns"] == 30
+    # Inline path bypassed.
+    registry.run.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_router_invoke_existing_skill_uses_recent_merged_skill_context(tmp_path):
     channel = MagicMock()
     channel.platform = "discord"
