@@ -1,6 +1,50 @@
 import pytest
 
-from oh_my_agent.gateway.router import OpenAICompatibleRouter
+from oh_my_agent.gateway.router import OpenAICompatibleRouter, normalize_intent
+
+
+def test_normalize_intent_passes_through_canonical_names():
+    """All five canonical intents must round-trip identical."""
+    for canonical in (
+        "chat_reply",
+        "invoke_skill",
+        "oneoff_artifact",
+        "propose_repo_change",
+        "update_skill",
+    ):
+        assert normalize_intent(canonical) == canonical
+
+
+def test_normalize_intent_maps_legacy_aliases_to_canonical():
+    """Legacy router-output names from older models / fixtures must resolve
+    to the canonical intent set so the dispatcher only needs five arms."""
+    cases = {
+        "reply_once": "chat_reply",
+        "invoke_existing_skill": "invoke_skill",
+        "propose_artifact_task": "oneoff_artifact",
+        "propose_repo_task": "propose_repo_change",
+        "propose_task": "propose_repo_change",
+        "create_skill": "update_skill",
+        "repair_skill": "update_skill",
+    }
+    for legacy, expected in cases.items():
+        assert normalize_intent(legacy) == expected, f"{legacy!r} did not normalize"
+
+
+def test_normalize_intent_is_case_and_whitespace_insensitive():
+    """Robustness against router models that emit ``CREATE_SKILL`` /
+    leading whitespace / etc."""
+    assert normalize_intent("  CREATE_SKILL ") == "update_skill"
+    assert normalize_intent("Reply_Once") == "chat_reply"
+    assert normalize_intent("INVOKE_SKILL") == "invoke_skill"
+
+
+def test_normalize_intent_unknown_falls_back_to_chat_reply():
+    """Unknown / empty / garbage inputs fall back to chat_reply — the
+    safe default that keeps the runtime in chat mode rather than
+    spawning a task."""
+    for bad in ("", "   ", "garbage", "destroy_database", "1234"):
+        assert normalize_intent(bad) == "chat_reply"
 
 
 @pytest.mark.asyncio
