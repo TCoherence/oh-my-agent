@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from oh_my_agent.memory.judge_store import JudgeStore, parse_judge_actions
+from oh_my_agent.memory.session_diary import strip_system_blocks
 
 logger = logging.getLogger(__name__)
 
@@ -143,6 +144,18 @@ class DiaryReflector:
                 skipped_reason="diary_missing",
             )
         diary_text = path.read_text(encoding="utf-8").strip()
+        if not diary_text:
+            return ReflectionResult(
+                diary_date=diary_date,
+                diary_path=path,
+                actions=[],
+                stats={"add": 0, "strengthen": 0, "supersede": 0, "no_op": 0, "rejected": 0},
+                skipped_reason="diary_empty",
+            )
+        # Drop ``system:`` blocks (automation status pings) before reflection
+        # so task metadata cannot leak back into long-term memory via the
+        # apply_actions path.
+        diary_text = strip_system_blocks(diary_text).strip()
         if not diary_text:
             return ReflectionResult(
                 diary_date=diary_date,

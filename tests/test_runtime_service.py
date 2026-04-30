@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import os
 import subprocess
+import time
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -3962,3 +3964,475 @@ async def test_scan_reports_dir_writes_skips_files_inside_workspace(tmp_path):
 
     assert found == []
     await store.close()
+
+
+# ---------------------------------------------------------------------------
+# Status-aware retention (Plan A)
+# ---------------------------------------------------------------------------
+
+
+def _make_status_aware_runtime(tmp_path, *, by_outcome: dict | None = None):
+    cleanup_cfg: dict = {
+        "enabled": True,
+        "interval_minutes": 60,
+        "retention_hours": 168,
+        "prune_git_worktrees": False,
+        "merged_immediate": True,
+    }
+    if by_outcome is not None:
+        cleanup_cfg["retention_hours_by_outcome"] = by_outcome
+    runtime = RuntimeService.__new__(RuntimeService)
+    cleanup = cleanup_cfg
+    runtime._cleanup_enabled = True
+    runtime._cleanup_interval_minutes = 60
+    runtime._cleanup_retention_hours = int(cleanup["retention_hours"])
+    runtime._cleanup_prune_worktrees = False
+    runtime._cleanup_merged_immediately = True
+    bo = cleanup.get("retention_hours_by_outcome") or {}
+    runtime._retention_hours_default = int(bo.get("default", runtime._cleanup_retention_hours))
+    runtime._retention_hours_success = int(bo.get("success", runtime._retention_hours_default))
+    runtime._retention_hours_failure = int(bo.get("failure", runtime._retention_hours_default))
+    return runtime
+
+
+def test_retention_resolver_buckets_status(tmp_path):
+    runtime = _make_status_aware_runtime(
+        tmp_path, by_outcome={"success": 72, "failure": 336, "default": 168}
+    )
+    assert runtime._retention_hours_for_status(TASK_STATUS_COMPLETED) == 72  # noqa: SLF001
+    assert runtime._retention_hours_for_status(TASK_STATUS_MERGED) == 72  # noqa: SLF001
+    assert runtime._retention_hours_for_status(TASK_STATUS_FAILED) == 336  # noqa: SLF001
+    assert runtime._retention_hours_for_status(TASK_STATUS_TIMEOUT) == 336  # noqa: SLF001
+    assert runtime._retention_hours_for_status(TASK_STATUS_RUNNING) == 168  # noqa: SLF001
+    assert runtime._retention_hours_for_status(None) == 168  # noqa: SLF001
+
+
+def test_retention_resolver_back_compat_without_by_outcome(tmp_path):
+    runtime = _make_status_aware_runtime(tmp_path)
+    # Without ``retention_hours_by_outcome``, every bucket falls back to the
+    # legacy flat retention_hours value.
+    assert runtime._retention_hours_for_status(TASK_STATUS_COMPLETED) == 168  # noqa: SLF001
+    assert runtime._retention_hours_for_status(TASK_STATUS_FAILED) == 168  # noqa: SLF001
+    assert runtime._retention_hours_for_status(None) == 168  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_cleanup_logs_status_aware_per_file(tmp_path):
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    store = SQLiteMemoryStore(tmp_path / "log-buckets.db")
+    await store.init()
+
+    runtime = RuntimeService(
+        store,
+        config={
+            "enabled": True,
+            "worker_concurrency": 1,
+            "worktree_root": str(tmp_path / "worktrees"),
+            "default_agent": "done-agent",
+            "default_test_command": "true",
+            "cleanup": {
+                "enabled": True,
+                "interval_minutes": 60,
+                "retention_hours": 168,
+                "prune_git_worktrees": False,
+                "merged_immediate": True,
+                "retention_hours_by_outcome": {
+                    "success": 72,
+                    "failure": 336,
+                    "default": 168,
+                },
+            },
+        },
+        owner_user_ids={"owner-1"},
+        repo_root=repo,
+    )
+
+    success_id = "aaaa11112222"
+    failure_id = "bbbb33334444"
+    running_id = "cccc55556666"
+    orphan_id = "dddd77778888"
+    for tid, status in (
+        (success_id, TASK_STATUS_COMPLETED),
+        (failure_id, TASK_STATUS_FAILED),
+        (running_id, TASK_STATUS_RUNNING),
+    ):
+        await store.create_runtime_task(
+            task_id=tid,
+            platform="discord",
+            channel_id="100",
+            thread_id="t-9",
+            created_by="owner-1",
+            goal="x",
+            preferred_agent="done-agent",
+            status=status,
+            max_steps=8,
+            max_minutes=20,
+            test_command="true",
+        )
+
+    logs_root = runtime._agent_logs_root  # noqa: SLF001
+    logs_root.mkdir(parents=True, exist_ok=True)
+    success_log = logs_root / f"thread-t9-{success_id}-step1-claude.log"
+    failure_log = logs_root / f"thread-t9-{failure_id}-step1-claude.log"
+    running_log = logs_root / f"thread-t9-{running_id}-step1-claude.log"
+    chat_log = logs_root / "thread-t9-router_reply_once-req-1-claude.log"
+    orphan_log = logs_root / f"thread-t9-{orphan_id}-step1-claude.log"
+    for path in (success_log, failure_log, running_log, chat_log, orphan_log):
+        path.write_text("payload", encoding="utf-8")
+        # Age all files to 100h old.
+        ts = time.time() - 100 * 3600
+        os.utime(path, (ts, ts))
+
+    cleaned = await runtime._cleanup_expired_agent_logs()  # noqa: SLF001
+
+    # success bucket = 72h, 100h old → cleaned
+    assert not success_log.exists()
+    # failure bucket = 336h, 100h old → kept
+    assert failure_log.exists()
+    # running task → never cleaned regardless of age
+    assert running_log.exists()
+    # chat log (no task_id) uses default 168h → 100h old → kept
+    assert chat_log.exists()
+    # orphan task_id (DB row absent) uses default 168h → 100h old → kept
+    assert orphan_log.exists()
+    assert cleaned == 1
+
+    # Bump retention to verify failure/orphan/chat eventually get cleaned
+    # under default (168h). Re-age to 200h.
+    for path in (failure_log, chat_log, orphan_log):
+        ts = time.time() - 200 * 3600
+        os.utime(path, (ts, ts))
+    cleaned2 = await runtime._cleanup_expired_agent_logs()  # noqa: SLF001
+    # failure_log still kept (336h budget), chat + orphan crossed default 168h
+    assert failure_log.exists()
+    assert not chat_log.exists()
+    assert not orphan_log.exists()
+    assert cleaned2 == 2
+
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_automation_completion_writes_diary_only_with_output_summary(runtime_env):
+    """Plan B regression: automation completion → diary entry includes
+    output_summary detail; MemoryStore receives no append for that thread.
+    """
+    from oh_my_agent.gateway.session import ChannelSession
+    from oh_my_agent.runtime.types import RuntimeTask
+
+    store: SQLiteMemoryStore = runtime_env["store"]
+    runtime: RuntimeService = runtime_env["runtime"]
+    channel: _FakeChannel = runtime_env["channel"]
+
+    diary_entries: list[dict] = []
+
+    class _RecordingDiary:
+        async def append(self, **kwargs):  # noqa: ANN003
+            diary_entries.append(kwargs)
+
+    registry = AgentRegistry([_DoneAgent()])
+    session = ChannelSession(
+        platform="discord",
+        channel_id="100",
+        channel=channel,
+        registry=registry,
+        memory_store=store,
+        diary_writer=_RecordingDiary(),
+    )
+    runtime.register_session(session, registry)
+
+    task = RuntimeTask(
+        id="auto-completed-1",
+        platform="discord",
+        channel_id="100",
+        thread_id="thread-auto",
+        created_by="scheduler",
+        goal="x",
+        original_request=None,
+        preferred_agent="done-agent",
+        status=TASK_STATUS_COMPLETED,
+        step_no=0,
+        max_steps=8,
+        max_minutes=20,
+        agent_timeout_seconds=None,
+        agent_max_turns=None,
+        test_command=None,
+        workspace_path=None,
+        decision_message_id=None,
+        status_message_id=None,
+        blocked_reason=None,
+        error=None,
+        summary=None,
+        resume_instruction=None,
+        merge_commit_hash=None,
+        merge_error=None,
+        completion_mode="reply",
+        output_summary="rich body of automation output",
+        artifact_manifest=None,
+        automation_name="daily-digest",
+        workspace_cleaned_at=None,
+        created_at=None,
+        started_at=None,
+        updated_at=None,
+        ended_at=None,
+        task_type="artifact",
+        skill_name=None,
+    )
+
+    await runtime._notify(  # noqa: SLF001
+        task,
+        "Automation run completed.",
+        record_history=True,
+        terminal=True,
+        diary_detail="rich body of automation output",
+    )
+
+    # MemoryStore must not receive any new turns for this thread.
+    history = await store.load_history("discord", "100", "thread-auto")
+    assert history == []
+
+    # Diary received exactly one entry with the system role and detail body.
+    assert len(diary_entries) == 1
+    entry = diary_entries[0]
+    assert entry["role"] == "system"
+    assert entry["author"] == "runtime"
+    assert "Automation run completed." in entry["content"]
+    assert "**Output detail**" in entry["content"]
+    assert "rich body of automation output" in entry["content"]
+
+
+@pytest.mark.asyncio
+async def test_manual_task_completion_still_persists_memory(runtime_env):
+    """Regression: when task.automation_name is None (manual /task_start),
+    _notify must still go through append_assistant so the user sees the
+    completion in conversation history."""
+    from oh_my_agent.gateway.session import ChannelSession
+    from oh_my_agent.runtime.types import RuntimeTask
+
+    store: SQLiteMemoryStore = runtime_env["store"]
+    runtime: RuntimeService = runtime_env["runtime"]
+    channel: _FakeChannel = runtime_env["channel"]
+
+    registry = AgentRegistry([_DoneAgent()])
+    session = ChannelSession(
+        platform="discord",
+        channel_id="100",
+        channel=channel,
+        registry=registry,
+        memory_store=store,
+    )
+    runtime.register_session(session, registry)
+
+    task = RuntimeTask(
+        id="manual-task-1",
+        platform="discord",
+        channel_id="100",
+        thread_id="thread-manual",
+        created_by="user",
+        goal="x",
+        original_request=None,
+        preferred_agent="done-agent",
+        status=TASK_STATUS_COMPLETED,
+        step_no=0,
+        max_steps=8,
+        max_minutes=20,
+        agent_timeout_seconds=None,
+        agent_max_turns=None,
+        test_command=None,
+        workspace_path=None,
+        decision_message_id=None,
+        status_message_id=None,
+        blocked_reason=None,
+        error=None,
+        summary=None,
+        resume_instruction=None,
+        merge_commit_hash=None,
+        merge_error=None,
+        completion_mode="reply",
+        output_summary="manual output",
+        artifact_manifest=None,
+        automation_name=None,
+        workspace_cleaned_at=None,
+        created_at=None,
+        started_at=None,
+        updated_at=None,
+        ended_at=None,
+        task_type="artifact",
+        skill_name=None,
+    )
+
+    await runtime._notify(  # noqa: SLF001
+        task,
+        "Manual task completed.",
+        record_history=True,
+        terminal=True,
+    )
+
+    history = await store.load_history("discord", "100", "thread-manual")
+    assert any(turn["role"] == "assistant" for turn in history)
+
+
+@pytest.mark.asyncio
+async def test_automation_ask_user_progress_writes_diary_only_with_author(runtime_env):
+    """Plan B 5314 gate: ask-user progress for automation tasks goes via
+    append_diary_only (preserving author=agent_name) and does NOT touch
+    MemoryStore."""
+    from oh_my_agent.gateway.session import ChannelSession
+    from oh_my_agent.runtime.types import RuntimeTask
+
+    store: SQLiteMemoryStore = runtime_env["store"]
+    runtime: RuntimeService = runtime_env["runtime"]
+    channel: _FakeChannel = runtime_env["channel"]
+
+    diary_entries: list[dict] = []
+
+    class _RecordingDiary:
+        async def append(self, **kwargs):  # noqa: ANN003
+            diary_entries.append(kwargs)
+
+    registry = AgentRegistry([_DoneAgent()])
+    session = ChannelSession(
+        platform="discord",
+        channel_id="100",
+        channel=channel,
+        registry=registry,
+        memory_store=store,
+        diary_writer=_RecordingDiary(),
+    )
+    runtime.register_session(session, registry)
+
+    task = RuntimeTask(
+        id="auto-ask-1",
+        platform="discord",
+        channel_id="100",
+        thread_id="thread-ask",
+        created_by="scheduler",
+        goal="x",
+        original_request=None,
+        preferred_agent="claude",
+        status=TASK_STATUS_RUNNING,
+        step_no=0,
+        max_steps=8,
+        max_minutes=20,
+        agent_timeout_seconds=None,
+        agent_max_turns=None,
+        test_command=None,
+        workspace_path=None,
+        decision_message_id=None,
+        status_message_id=None,
+        blocked_reason=None,
+        error=None,
+        summary=None,
+        resume_instruction=None,
+        merge_commit_hash=None,
+        merge_error=None,
+        completion_mode="reply",
+        output_summary=None,
+        artifact_manifest=None,
+        automation_name="daily-digest",
+        workspace_cleaned_at=None,
+        created_at=None,
+        started_at=None,
+        updated_at=None,
+        ended_at=None,
+        task_type="artifact",
+        skill_name=None,
+    )
+
+    await runtime._send_runtime_ask_user_progress(  # noqa: SLF001
+        task=task,
+        agent_name="claude",
+        text="Need clarification on X.",
+        usage=None,
+    )
+
+    history = await store.load_history("discord", "100", "thread-ask")
+    assert history == []
+    assert len(diary_entries) == 1
+    entry = diary_entries[0]
+    assert entry["author"] == "claude"  # preserves agent_name
+    assert entry["role"] == "system"
+    assert "Need clarification on X." in entry["content"]
+
+
+@pytest.mark.asyncio
+async def test_cleanup_tasks_uses_per_outcome_retention(tmp_path):
+    """Failure tasks aged 200h survive (336h budget); aged 400h get cleaned.
+    Success tasks aged 100h get cleaned (72h budget); aged 50h survive.
+    """
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    store = SQLiteMemoryStore(tmp_path / "task-buckets.db")
+    await store.init()
+
+    runtime = RuntimeService(
+        store,
+        config={
+            "enabled": True,
+            "worker_concurrency": 1,
+            "worktree_root": str(tmp_path / "worktrees"),
+            "default_agent": "done-agent",
+            "default_test_command": "true",
+            "cleanup": {
+                "enabled": True,
+                "interval_minutes": 60,
+                "retention_hours": 168,
+                "prune_git_worktrees": False,
+                "merged_immediate": True,
+                "retention_hours_by_outcome": {
+                    "success": 72,
+                    "failure": 336,
+                },
+            },
+        },
+        owner_user_ids={"owner-1"},
+        repo_root=repo,
+    )
+
+    worktree_root = tmp_path / "worktrees"
+    worktree_root.mkdir(parents=True, exist_ok=True)
+
+    cases = [
+        ("success-young", TASK_STATUS_COMPLETED, 50, True),    # 50h < 72h → keep
+        ("success-old",   TASK_STATUS_COMPLETED, 100, False),  # 100h > 72h → drop
+        ("failure-young", TASK_STATUS_FAILED, 200, True),      # 200h < 336h → keep
+        ("failure-old",   TASK_STATUS_FAILED, 400, False),     # 400h > 336h → drop
+    ]
+    for tid, status, age_hours, expected_kept in cases:
+        ws = worktree_root / tid
+        ws.mkdir(parents=True, exist_ok=True)
+        await store.create_runtime_task(
+            task_id=tid,
+            platform="discord",
+            channel_id="100",
+            thread_id="t-1",
+            created_by="owner-1",
+            goal="x",
+            preferred_agent="done-agent",
+            status=status,
+            max_steps=8,
+            max_minutes=20,
+            test_command="true",
+        )
+        ended = (
+            datetime.now(timezone.utc) - timedelta(hours=age_hours)
+        ).strftime("%Y-%m-%d %H:%M:%S")
+        await store.update_runtime_task(
+            tid,
+            workspace_path=str(ws),
+            ended_at=ended,
+        )
+
+    cleaned = await runtime._cleanup_expired_tasks()  # noqa: SLF001
+
+    rows = {tid: await store.get_runtime_task(tid) for tid, _, _, _ in cases}
+    assert rows["success-young"].workspace_path is not None
+    assert rows["failure-young"].workspace_path is not None
+    assert rows["success-old"].workspace_path is None
+    assert rows["failure-old"].workspace_path is None
+    assert cleaned == 2
+
+    await store.close()
+
+

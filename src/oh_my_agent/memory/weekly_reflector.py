@@ -28,6 +28,7 @@ from typing import Any, Awaitable, Callable
 
 from oh_my_agent.memory.diary_reflector import ReflectionResult
 from oh_my_agent.memory.judge_store import JudgeStore, parse_judge_actions
+from oh_my_agent.memory.session_diary import strip_system_blocks
 
 logger = logging.getLogger(__name__)
 
@@ -147,6 +148,10 @@ class WeeklyReflector:
                 continue
             if not body:
                 sections.append(f"{header} (empty)")
+                continue
+            body = strip_system_blocks(body).strip()
+            if not body:
+                sections.append(f"{header} (no user content)")
                 continue
             if len(body) > self._per_day_chars:
                 body = body[: self._per_day_chars] + "\n...[day truncated]"

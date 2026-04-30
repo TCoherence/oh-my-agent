@@ -71,6 +71,7 @@ def validate_config(config: dict[str, Any]) -> ValidationResult:
     _check_sections(config, result)
     _check_router(config, result)
     _check_notifications(config, result)
+    _check_runtime_cleanup(config, result)
     return result
 
 
@@ -427,3 +428,53 @@ def _check_notifications(config: dict, result: ValidationResult) -> None:
                     f"must be one of {sorted(_PUSH_LEVELS)}, got '{value}'",
                     "error",
                 ))
+
+
+# ── Runtime cleanup ─────────────────────────────────────────────────── #
+
+def _check_runtime_cleanup(config: dict, result: ValidationResult) -> None:
+    """Validate ``runtime.cleanup`` retention shape.
+
+    Hard-errors when ``runtime`` or ``runtime.cleanup`` are present but
+    not mappings — boot-time defaulting calls ``setdefault`` on them and
+    would crash before validation reports the issue.
+    """
+    runtime = config.get("runtime")
+    if runtime is None:
+        return
+    if not isinstance(runtime, dict):
+        result.errors.append(ConfigError(
+            "runtime", "must be a mapping if present", "error",
+        ))
+        return
+    cleanup = runtime.get("cleanup")
+    if cleanup is None:
+        return
+    if not isinstance(cleanup, dict):
+        result.errors.append(ConfigError(
+            "runtime.cleanup", "must be a mapping if present", "error",
+        ))
+        return
+    by_outcome = cleanup.get("retention_hours_by_outcome")
+    if by_outcome is None:
+        return
+    if not isinstance(by_outcome, dict):
+        result.errors.append(ConfigError(
+            "runtime.cleanup.retention_hours_by_outcome",
+            "must be a mapping if present",
+            "error",
+        ))
+        return
+    for key in ("success", "failure", "default"):
+        v = by_outcome.get(key)
+        if v is None:
+            continue
+        try:
+            if int(v) < 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            result.errors.append(ConfigError(
+                f"runtime.cleanup.retention_hours_by_outcome.{key}",
+                f"must be a non-negative integer, got '{v}'",
+                "error",
+            ))

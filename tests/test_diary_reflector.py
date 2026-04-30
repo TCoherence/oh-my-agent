@@ -368,3 +368,68 @@ async def test_loop_start_is_idempotent():
     loop.start()
     assert loop._task is first_task
     await loop.stop()
+
+
+# --------------------------------------------------------------------------
+# System-block stripping (Plan B.5.1)
+# --------------------------------------------------------------------------
+
+
+def _build_diary(*blocks: str) -> str:
+    return "\n\n".join(blocks)
+
+
+SYSTEM_BLOCK = (
+    "## 09:00:00 · discord#100 · thread:t · system:runtime\n"
+    "Task `abc` queued.\n\n**Output detail**\nrich automation result"
+)
+USER_BLOCK = (
+    "## 10:00:00 · discord#100 · thread:t · user:alice\n"
+    "> we should ship sooner"
+)
+ASSIST_BLOCK = (
+    "## 10:01:00 · discord#100 · thread:t · assistant:claude\n"
+    "ok"
+)
+
+
+@pytest.mark.asyncio
+async def test_reflect_strips_system_blocks_before_prompt(tmp_path: Path):
+    diary_dir = tmp_path / "diary"
+    diary_dir.mkdir()
+    target_date = date(2026, 4, 21)
+    (diary_dir / f"{target_date.isoformat()}.md").write_text(
+        _build_diary(SYSTEM_BLOCK, USER_BLOCK, ASSIST_BLOCK), encoding="utf-8"
+    )
+    store = JudgeStore(memory_dir=tmp_path / "memory")
+    await store.load()
+    registry = StubRegistry(['{"actions":[{"op":"no_op","reason":"x"}]}'])
+    reflector = DiaryReflector(diary_dir=diary_dir, store=store)
+
+    result = await reflector.reflect(diary_date=target_date, registry=registry)
+
+    assert result.skipped_reason is None
+    prompt = registry.calls[0][0]
+    assert "system:runtime" not in prompt
+    assert "rich automation result" not in prompt
+    # User and assistant content survives the strip pass.
+    assert "we should ship sooner" in prompt
+    assert "assistant:claude" in prompt
+
+
+@pytest.mark.asyncio
+async def test_reflect_skips_when_only_system_blocks(tmp_path: Path):
+    diary_dir = tmp_path / "diary"
+    diary_dir.mkdir()
+    target_date = date(2026, 4, 22)
+    sys_only = _build_diary(SYSTEM_BLOCK, SYSTEM_BLOCK.replace("09:00:00", "10:00:00"))
+    (diary_dir / f"{target_date.isoformat()}.md").write_text(sys_only, encoding="utf-8")
+    store = JudgeStore(memory_dir=tmp_path / "memory")
+    await store.load()
+    registry = StubRegistry(["should not be called"])
+    reflector = DiaryReflector(diary_dir=diary_dir, store=store)
+
+    result = await reflector.reflect(diary_date=target_date, registry=registry)
+
+    assert result.skipped_reason == "diary_empty"
+    assert registry.calls == []

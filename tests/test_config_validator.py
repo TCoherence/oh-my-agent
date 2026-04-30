@@ -256,3 +256,88 @@ def test_notifications_unknown_event_kind_is_warning(monkeypatch):
     }))
     warnings = _notif_errors(result, severity="warning")
     assert any(e.path == "notifications.events.unknown_kind" for e in warnings)
+
+
+# ── Runtime cleanup retention_hours_by_outcome ────────────────────────── #
+
+
+def _config_with_runtime(runtime: object) -> dict:
+    cfg = _base_config()
+    cfg["runtime"] = runtime
+    return cfg
+
+
+def _runtime_errors(result, *, severity: str | None = None) -> list:
+    matches = [e for e in result.errors if e.path.startswith("runtime")]
+    if severity is not None:
+        matches = [e for e in matches if e.severity == severity]
+    return matches
+
+
+def test_runtime_non_dict_is_error():
+    result = validate_config(_config_with_runtime("garbage"))
+    errs = _runtime_errors(result, severity="error")
+    assert any(e.path == "runtime" for e in errs)
+    assert not result.ok
+
+
+def test_runtime_cleanup_non_dict_is_error():
+    result = validate_config(_config_with_runtime({"cleanup": "broken"}))
+    errs = _runtime_errors(result, severity="error")
+    assert any(e.path == "runtime.cleanup" for e in errs)
+    assert not result.ok
+
+
+def test_runtime_cleanup_null_passes_validator():
+    # YAML "cleanup: null" → Python None. Boot's normalizer fills it in;
+    # the validator should not error on the None case.
+    result = validate_config(_config_with_runtime({"cleanup": None}))
+    errs = _runtime_errors(result, severity="error")
+    assert not errs
+    assert result.ok
+
+
+def test_runtime_cleanup_by_outcome_non_dict_is_error():
+    result = validate_config(_config_with_runtime({
+        "cleanup": {"retention_hours_by_outcome": "x"}
+    }))
+    errs = _runtime_errors(result, severity="error")
+    assert any(e.path == "runtime.cleanup.retention_hours_by_outcome" for e in errs)
+
+
+def test_runtime_cleanup_by_outcome_negative_is_error():
+    result = validate_config(_config_with_runtime({
+        "cleanup": {"retention_hours_by_outcome": {"success": -5}}
+    }))
+    errs = _runtime_errors(result, severity="error")
+    assert any(
+        e.path == "runtime.cleanup.retention_hours_by_outcome.success" for e in errs
+    )
+
+
+def test_runtime_cleanup_by_outcome_non_int_is_error():
+    result = validate_config(_config_with_runtime({
+        "cleanup": {"retention_hours_by_outcome": {"failure": "twelve"}}
+    }))
+    errs = _runtime_errors(result, severity="error")
+    assert any(
+        e.path == "runtime.cleanup.retention_hours_by_outcome.failure" for e in errs
+    )
+
+
+def test_runtime_cleanup_by_outcome_valid_passes():
+    result = validate_config(_config_with_runtime({
+        "cleanup": {"retention_hours_by_outcome": {
+            "success": 72, "failure": 336, "default": 168,
+        }}
+    }))
+    errs = _runtime_errors(result, severity="error")
+    assert not errs
+    assert result.ok
+
+
+def test_runtime_cleanup_missing_section_passes():
+    result = validate_config(_config_with_runtime({}))
+    errs = _runtime_errors(result, severity="error")
+    assert not errs
+    assert result.ok

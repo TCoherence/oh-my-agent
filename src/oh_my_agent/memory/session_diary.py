@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -39,6 +40,25 @@ logger = logging.getLogger(__name__)
 
 
 Role = Literal["user", "assistant", "system"]
+
+
+_DIARY_BLOCK_SPLIT_RE = re.compile(r"\n\n(?=## \d{2}:\d{2}:\d{2} · )")
+_DIARY_SYSTEM_HEADER_RE = re.compile(r"## \d{2}:\d{2}:\d{2} · [^·]+ · [^·]+ · system:")
+
+
+def strip_system_blocks(diary_text: str) -> str:
+    """Remove ``system:``-headed entries from a rendered diary text.
+
+    Diary readers (DiaryReflector, WeeklyReflector) feed diary text into
+    a memory-mutating agent. Automation status pings live as ``system:``
+    entries; stripping them programmatically prevents task-side metadata
+    from leaking back into the long-term memory store via reflection.
+    """
+    if not diary_text:
+        return diary_text
+    blocks = _DIARY_BLOCK_SPLIT_RE.split(diary_text)
+    kept = [b for b in blocks if not _DIARY_SYSTEM_HEADER_RE.match(b)]
+    return "\n\n".join(kept)
 
 
 @dataclass

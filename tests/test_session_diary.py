@@ -6,7 +6,7 @@ from datetime import datetime
 
 import pytest
 
-from oh_my_agent.memory.session_diary import SessionDiaryWriter
+from oh_my_agent.memory.session_diary import SessionDiaryWriter, strip_system_blocks
 
 
 @pytest.mark.asyncio
@@ -191,3 +191,58 @@ async def test_diary_append_after_stop_is_noop(tmp_path) -> None:
     )
     # No file should be written since the worker is dead.
     assert not (tmp_path / "2026-04-24.md").exists()
+
+
+# ── strip_system_blocks ───────────────────────────────────────────── #
+
+
+def _user_block(time: str = "14:03:21", author: str = "alice") -> str:
+    return (
+        f"## {time} · discord#100 · thread:t · user:{author}\n"
+        f"> hi from user"
+    )
+
+
+def _assistant_block(time: str = "14:03:24") -> str:
+    return (
+        f"## {time} · discord#100 · thread:t · assistant:claude\n"
+        f"agent reply"
+    )
+
+
+def _system_block(time: str = "14:03:30") -> str:
+    return (
+        f"## {time} · discord#100 · thread:t · system:runtime\n"
+        f"Task `abc123` queued.\n\n**Output detail**\nrich automation result"
+    )
+
+
+def test_strip_system_blocks_removes_system_entries():
+    diary = "\n\n".join([_user_block(), _system_block(), _assistant_block()])
+    out = strip_system_blocks(diary)
+    assert "user:alice" in out
+    assert "assistant:claude" in out
+    assert "system:runtime" not in out
+    assert "rich automation result" not in out
+
+
+def test_strip_system_blocks_handles_first_block_no_prefix():
+    # A diary file content always starts with the first ``##`` header — no
+    # leading blank line. The split regex must still produce all blocks.
+    diary = _system_block() + "\n\n" + _user_block()
+    out = strip_system_blocks(diary)
+    assert "system:runtime" not in out
+    assert "user:alice" in out
+
+
+def test_strip_system_blocks_empty_or_no_system():
+    assert strip_system_blocks("") == ""
+    user_only = _user_block()
+    assert strip_system_blocks(user_only) == user_only
+
+
+def test_strip_system_blocks_all_system_returns_empty():
+    diary = "\n\n".join([_system_block("10:00:00"), _system_block("11:00:00")])
+    out = strip_system_blocks(diary)
+    # All blocks dropped → empty
+    assert out.strip() == ""

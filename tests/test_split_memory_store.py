@@ -434,3 +434,35 @@ async def test_existing_runtime_db_creates_missing_tables_on_init(tmp_path):
         assert state.name == "test-job"
     finally:
         await store.close()
+
+
+@pytest.mark.asyncio
+async def test_split_store_forwards_get_task_statuses(tmp_path):
+    """Regression: _RUNTIME_METHODS must include get_task_statuses so the
+    SplitSQLiteMemoryStore.__getattr__ wrapper forwards it to the runtime
+    state store. Otherwise production cleanup paths AttributeError."""
+    store = SplitSQLiteMemoryStore(
+        conversation_path=tmp_path / "memory.db",
+        runtime_state_path=tmp_path / "runtime.db",
+        skills_telemetry_path=tmp_path / "skills.db",
+    )
+    await store.init()
+    try:
+        await store.create_runtime_task(
+            task_id="ttt-1",
+            platform="discord",
+            channel_id="100",
+            thread_id="thread-1",
+            created_by="user",
+            goal="do",
+            status="PENDING",
+            max_steps=1,
+            max_minutes=10,
+            test_command="true",
+        )
+        statuses = await store.get_task_statuses(["ttt-1", "missing"])
+        assert statuses == {"ttt-1": "PENDING"}
+        # Empty input remains empty
+        assert await store.get_task_statuses([]) == {}
+    finally:
+        await store.close()

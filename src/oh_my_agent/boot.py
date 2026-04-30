@@ -330,6 +330,10 @@ def _apply_v052_defaults(config: dict) -> None:
     codex_cfg.setdefault("extra_args", [])
 
     runtime_cfg = config.setdefault("runtime", {})
+    if runtime_cfg is None:
+        config["runtime"] = runtime_cfg = {}
+    if not isinstance(runtime_cfg, dict):
+        return  # validate_config will surface the type error
     runtime_cfg.setdefault("enabled", True)
     runtime_cfg.setdefault("state_path", "~/.oh-my-agent/runtime/runtime.db")
     runtime_cfg.setdefault("worker_concurrency", 3)
@@ -350,7 +354,11 @@ def _apply_v052_defaults(config: dict) -> None:
     runtime_cfg.setdefault("log_event_limit", 12)
     runtime_cfg.setdefault("log_tail_chars", 1200)
 
-    cleanup_cfg = runtime_cfg.setdefault("cleanup", {})
+    cleanup_cfg = runtime_cfg.get("cleanup")
+    if cleanup_cfg is None:
+        runtime_cfg["cleanup"] = cleanup_cfg = {}
+    if not isinstance(cleanup_cfg, dict):
+        return  # validate_config will surface the type error
     cleanup_cfg.setdefault("enabled", True)
     cleanup_cfg.setdefault("interval_minutes", 60)
     cleanup_cfg.setdefault("retention_hours", 168)
@@ -609,14 +617,17 @@ def verify_integrity(
         print(validation.summary())
         sys.exit(0 if validation.ok else 1)
 
+    if not validation.ok:
+        # Logger is not yet configured — _setup_logging needs runtime_root
+        # which may be unsafe to compute against an invalid config.
+        print(validation.summary(), file=sys.stderr)
+        sys.exit(1)
+
     runtime_root = _runtime_root(config)
     _setup_logging(config, runtime_root)
     logger = logging.getLogger(__name__)
 
-    if not validation.ok:
-        logger.error("Config validation failed:\n%s", validation.summary())
-        sys.exit(1)
-    elif validation.errors:
+    if validation.errors:
         logger.warning("Config validation warnings:\n%s", validation.summary())
 
     project_root = config_path.parent.resolve()

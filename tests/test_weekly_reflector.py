@@ -497,3 +497,63 @@ async def test_loop_fires_when_wait_completes(monkeypatch):
 def test_constants_are_reasonable():
     assert _WINDOW_DAYS == 7
     assert _MAX_DIARY_CHARS >= _PER_DAY_CHARS
+
+
+# --------------------------------------------------------------------------
+# System-block stripping (Plan B.5.1)
+# --------------------------------------------------------------------------
+
+
+_SYS_BLOCK_TPL = (
+    "## {time} · discord#100 · thread:t · system:runtime\n"
+    "Task `xyz` queued.\n\n**Output detail**\nautomation pile of text"
+)
+_USER_BLOCK_TPL = (
+    "## {time} · discord#100 · thread:t · user:alice\n"
+    "> shared signal across days"
+)
+
+
+@pytest.mark.asyncio
+async def test_collect_week_text_strips_system_blocks(tmp_path: Path):
+    diary_dir = tmp_path / "diary"
+    diary_dir.mkdir()
+    fixed_now = datetime(2026, 4, 29, 3, 0, 0)
+    expected_dates = [date(2026, 4, 22) + timedelta(days=i) for i in range(7)]
+    for d in expected_dates:
+        body = "\n\n".join([
+            _SYS_BLOCK_TPL.format(time="09:00:00"),
+            _USER_BLOCK_TPL.format(time="10:00:00"),
+        ])
+        _write_diary(diary_dir, d, body)
+    store = JudgeStore(memory_dir=tmp_path / "memory")
+    await store.load()
+    registry = StubRegistry([json.dumps({"actions": [{"op": "no_op", "reason": "n/a"}]})])
+    reflector = WeeklyReflector(diary_dir=diary_dir, store=store)
+
+    result = await reflector.reflect_last_week(registry=registry, now=fixed_now)
+
+    assert result.skipped_reason is None
+    prompt = registry.calls[0][0]
+    assert "system:runtime" not in prompt
+    assert "automation pile of text" not in prompt
+    assert "shared signal across days" in prompt
+
+
+def test_collect_week_text_marks_no_user_content_when_only_system(tmp_path: Path):
+    diary_dir = tmp_path / "diary"
+    diary_dir.mkdir()
+    expected_dates = [date(2026, 4, 22) + timedelta(days=i) for i in range(7)]
+    for d in expected_dates:
+        body = _SYS_BLOCK_TPL.format(time="09:00:00")
+        _write_diary(diary_dir, d, body)
+    store = JudgeStore(memory_dir=tmp_path / "memory")
+    reflector = WeeklyReflector(diary_dir=diary_dir, store=store)
+
+    text, present = reflector._collect_week_text(date(2026, 4, 28))  # noqa: SLF001
+    # Each day strips to empty, so (no user content) marker fires per day
+    # and present count stays at 0 — preventing reflect from sending an
+    # empty prompt.
+    assert "automation pile of text" not in text
+    assert text.count("(no user content)") == 7
+    assert present == 0
