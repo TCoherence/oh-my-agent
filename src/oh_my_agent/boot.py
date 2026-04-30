@@ -325,7 +325,9 @@ def _apply_v052_defaults(config: dict) -> None:
     router_cfg.setdefault("autonomy_threshold", 0.90)
     router_cfg.setdefault("context_turns", 10)
     router_cfg.setdefault("require_user_confirm", True)
-    router_cfg.setdefault("extra_body", {})
+    extra_body_cfg = _ensure_dict(router_cfg, "extra_body")
+    if extra_body_cfg is None:
+        return
 
     automations_cfg = _ensure_dict(config, "automations")
     if automations_cfg is None:

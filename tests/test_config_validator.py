@@ -344,12 +344,70 @@ def test_runtime_cleanup_retention_hours_non_int_is_error():
     assert any(e.path == "runtime.cleanup.retention_hours" for e in errs)
 
 
+def test_runtime_cleanup_retention_hours_float_is_error():
+    result = validate_config(_config_with_runtime({
+        "cleanup": {"retention_hours": 168.5}
+    }))
+    errs = _runtime_errors(result, severity="error")
+    assert any(e.path == "runtime.cleanup.retention_hours" for e in errs)
+
+
+def test_runtime_cleanup_retention_hours_bool_is_error():
+    # int(True) == 1 silently coerces; reject so misconfig surfaces.
+    result = validate_config(_config_with_runtime({
+        "cleanup": {"retention_hours": True}
+    }))
+    errs = _runtime_errors(result, severity="error")
+    assert any(e.path == "runtime.cleanup.retention_hours" for e in errs)
+
+
+def test_runtime_cleanup_retention_hours_zero_is_ok():
+    result = validate_config(_config_with_runtime({
+        "cleanup": {"retention_hours": 0}
+    }))
+    errs = _runtime_errors(result, severity="error")
+    assert not errs
+
+
 def test_runtime_cleanup_interval_minutes_negative_is_error():
     result = validate_config(_config_with_runtime({
         "cleanup": {"interval_minutes": -1}
     }))
     errs = _runtime_errors(result, severity="error")
     assert any(e.path == "runtime.cleanup.interval_minutes" for e in errs)
+
+
+def test_runtime_cleanup_interval_minutes_zero_is_ok():
+    # Runtime clamps to a 1-minute floor; validator accepts 0.
+    result = validate_config(_config_with_runtime({
+        "cleanup": {"interval_minutes": 0}
+    }))
+    errs = _runtime_errors(result, severity="error")
+    assert not errs
+
+
+def test_runtime_merge_gate_non_dict_is_error():
+    result = validate_config(_config_with_runtime({"merge_gate": "broken"}))
+    errs = _runtime_errors(result, severity="error")
+    assert any(e.path == "runtime.merge_gate" for e in errs)
+
+
+def test_short_workspace_non_dict_is_error():
+    cfg = _base_config()
+    cfg["short_workspace"] = "broken"
+    result = validate_config(cfg)
+    errs = [e for e in result.errors if e.path == "short_workspace" and e.severity == "error"]
+    assert errs
+    assert not result.ok
+
+
+def test_automations_non_dict_is_error():
+    cfg = _base_config()
+    cfg["automations"] = "broken"
+    result = validate_config(cfg)
+    errs = [e for e in result.errors if e.path == "automations" and e.severity == "error"]
+    assert errs
+    assert not result.ok
 
 
 def test_runtime_cleanup_missing_section_passes():

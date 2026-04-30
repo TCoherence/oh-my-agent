@@ -171,7 +171,12 @@ def _check_agents(config: dict, result: ValidationResult) -> None:
 
 def _check_automations(config: dict, result: ValidationResult) -> None:
     automations = config.get("automations")
-    if automations is None or not isinstance(automations, dict):
+    if automations is None:
+        return
+    if not isinstance(automations, dict):
+        result.errors.append(ConfigError(
+            "automations", "must be a mapping if present", "error",
+        ))
         return
 
     dump_channels = automations.get("dump_channels")
@@ -254,7 +259,14 @@ def _check_sections(config: dict, result: ValidationResult) -> None:
     crash on them; refusing the config in the validator gives a clean
     message instead of a Python ``AttributeError``.
     """
-    for section in ("runtime", "memory", "skills", "router", "auth"):
+    for section in (
+        "runtime",
+        "memory",
+        "skills",
+        "router",
+        "auth",
+        "short_workspace",
+    ):
         val = config.get(section)
         if val is not None and not isinstance(val, dict):
             result.errors.append(ConfigError(section, "must be a mapping if present", "error"))
@@ -437,18 +449,30 @@ def _check_notifications(config: dict, result: ValidationResult) -> None:
 
 # ── Runtime cleanup ─────────────────────────────────────────────────── #
 
-def _check_runtime_cleanup(config: dict, result: ValidationResult) -> None:
-    """Validate ``runtime.cleanup`` shape and scalar fields.
+def _is_strict_non_negative_int(v: Any) -> bool:
+    """Reject bool/float/str even though ``int()`` would coerce them.
 
-    Top-level ``runtime`` non-dict is already covered by
-    ``_check_sections``. Here we drill into ``runtime.cleanup``: shape,
-    plus scalar fields that ``RuntimeService.__init__`` casts with
-    ``int()`` (so a malformed YAML value crashes runtime construction
-    instead of being rejected at boot).
+    ``int(True) == 1`` and ``int(1.5) == 1`` would silently truncate the
+    user's value; we'd rather hard-error so the misconfiguration surfaces.
+    """
+    return isinstance(v, int) and not isinstance(v, bool) and v >= 0
+
+
+def _check_runtime_cleanup(config: dict, result: ValidationResult) -> None:
+    """Validate ``runtime.cleanup`` and ``runtime.merge_gate`` shape and
+    scalar fields. Top-level ``runtime`` non-dict is already covered by
+    ``_check_sections``.
     """
     runtime = config.get("runtime")
     if not isinstance(runtime, dict):
         return  # _check_sections handled the type error
+
+    merge_gate = runtime.get("merge_gate")
+    if merge_gate is not None and not isinstance(merge_gate, dict):
+        result.errors.append(ConfigError(
+            "runtime.merge_gate", "must be a mapping if present", "error",
+        ))
+
     cleanup = runtime.get("cleanup")
     if cleanup is None:
         return
@@ -462,13 +486,10 @@ def _check_runtime_cleanup(config: dict, result: ValidationResult) -> None:
         v = cleanup.get(scalar)
         if v is None:
             continue
-        try:
-            if int(v) < 0:
-                raise ValueError
-        except (TypeError, ValueError):
+        if not _is_strict_non_negative_int(v):
             result.errors.append(ConfigError(
                 f"runtime.cleanup.{scalar}",
-                f"must be a non-negative integer, got '{v}'",
+                f"must be a non-negative integer, got '{v}' ({type(v).__name__})",
                 "error",
             ))
 
@@ -486,12 +507,9 @@ def _check_runtime_cleanup(config: dict, result: ValidationResult) -> None:
         v = by_outcome.get(key)
         if v is None:
             continue
-        try:
-            if int(v) < 0:
-                raise ValueError
-        except (TypeError, ValueError):
+        if not _is_strict_non_negative_int(v):
             result.errors.append(ConfigError(
                 f"runtime.cleanup.retention_hours_by_outcome.{key}",
-                f"must be a non-negative integer, got '{v}'",
+                f"must be a non-negative integer, got '{v}' ({type(v).__name__})",
                 "error",
             ))
