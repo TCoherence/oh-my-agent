@@ -4352,6 +4352,91 @@ async def test_manual_task_completion_still_persists_memory(runtime_env):
 
 
 @pytest.mark.asyncio
+async def test_automation_auth_challenge_writes_diary_only(runtime_env):
+    """Plan B in-band gate: when an automation task hits an auth wall,
+    `_send_auth_challenge_progress` must NOT persist into MemoryStore;
+    it should land in the diary only with role=system + author=agent_name.
+    """
+    from oh_my_agent.gateway.session import ChannelSession
+
+    store: SQLiteMemoryStore = runtime_env["store"]
+    runtime: RuntimeService = runtime_env["runtime"]
+    channel: _FakeChannel = runtime_env["channel"]
+
+    diary_entries: list[dict] = []
+
+    class _RecordingDiary:
+        async def append(self, **kwargs):  # noqa: ANN003
+            diary_entries.append(kwargs)
+
+    registry = AgentRegistry([_DoneAgent()])
+    session = ChannelSession(
+        platform="discord",
+        channel_id="100",
+        channel=channel,
+        registry=registry,
+        memory_store=store,
+        diary_writer=_RecordingDiary(),
+    )
+    runtime.register_session(session, registry)
+
+    await runtime._send_auth_challenge_progress(  # noqa: SLF001
+        session=session,
+        thread_id="thread-auth",
+        agent_name="claude",
+        text="auth challenge text",
+        provider="bilibili",
+        skill_name="bilibili-video-summary",
+        original_user_content="summarize this video",
+        usage=None,
+        automation_name="daily-digest",
+    )
+
+    history = await store.load_history("discord", "100", "thread-auth")
+    assert history == []
+    assert len(diary_entries) == 1
+    entry = diary_entries[0]
+    assert entry["role"] == "system"
+    assert entry["author"] == "claude"
+
+
+@pytest.mark.asyncio
+async def test_manual_auth_challenge_still_persists_memory(runtime_env):
+    """Regression: when automation_name is None (manual reply path), auth
+    challenge progress must still go through append_assistant so the
+    user sees it in conversation history."""
+    from oh_my_agent.gateway.session import ChannelSession
+
+    store: SQLiteMemoryStore = runtime_env["store"]
+    runtime: RuntimeService = runtime_env["runtime"]
+    channel: _FakeChannel = runtime_env["channel"]
+
+    registry = AgentRegistry([_DoneAgent()])
+    session = ChannelSession(
+        platform="discord",
+        channel_id="100",
+        channel=channel,
+        registry=registry,
+        memory_store=store,
+    )
+    runtime.register_session(session, registry)
+
+    await runtime._send_auth_challenge_progress(  # noqa: SLF001
+        session=session,
+        thread_id="thread-manual-auth",
+        agent_name="claude",
+        text="auth challenge text",
+        provider="bilibili",
+        skill_name=None,
+        original_user_content="user said this",
+        usage=None,
+    )
+
+    history = await store.load_history("discord", "100", "thread-manual-auth")
+    assert any(turn["role"] == "assistant" for turn in history)
+
+
+@pytest.mark.asyncio
 async def test_automation_ask_user_progress_writes_diary_only_with_author(runtime_env):
     """Plan B 5314 gate: ask-user progress for automation tasks goes via
     append_diary_only (preserving author=agent_name) and does NOT touch

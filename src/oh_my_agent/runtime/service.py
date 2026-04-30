@@ -2821,6 +2821,7 @@ class RuntimeService:
                     skill_name=task.skill_name,
                     original_user_content=task.original_request,
                     usage=response.usage,
+                    automation_name=task.automation_name,
                 )
                 await self._store.add_runtime_event(
                     task.id,
@@ -5349,6 +5350,7 @@ class RuntimeService:
         skill_name: str | None,
         original_user_content: str | None,
         usage: dict[str, Any] | None,
+        automation_name: str | None = None,
     ) -> None:
         if session is None:
             return
@@ -5360,7 +5362,12 @@ class RuntimeService:
         )
         if not visible_text:
             return
-        await session.append_assistant(thread_id, visible_text, agent_name)
+        if automation_name:
+            await session.append_diary_only(
+                thread_id, visible_text, author=agent_name,
+            )
+        else:
+            await session.append_assistant(thread_id, visible_text, agent_name)
         await self._send_thread_agent_response(
             session=session,
             thread_id=thread_id,
