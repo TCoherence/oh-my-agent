@@ -336,6 +336,22 @@ def test_runtime_cleanup_by_outcome_valid_passes():
     assert result.ok
 
 
+def test_runtime_cleanup_retention_hours_non_int_is_error():
+    result = validate_config(_config_with_runtime({
+        "cleanup": {"retention_hours": "abc"}
+    }))
+    errs = _runtime_errors(result, severity="error")
+    assert any(e.path == "runtime.cleanup.retention_hours" for e in errs)
+
+
+def test_runtime_cleanup_interval_minutes_negative_is_error():
+    result = validate_config(_config_with_runtime({
+        "cleanup": {"interval_minutes": -1}
+    }))
+    errs = _runtime_errors(result, severity="error")
+    assert any(e.path == "runtime.cleanup.interval_minutes" for e in errs)
+
+
 def test_runtime_cleanup_missing_section_passes():
     result = validate_config(_config_with_runtime({}))
     errs = _runtime_errors(result, severity="error")

@@ -336,15 +336,12 @@ async def test_get_task_statuses_returns_subset(store):
         test_command="pytest",
     )
 
-    # Empty input → empty dict
     assert await store.get_task_statuses([]) == {}
 
-    # Subset query: known + unknown ids
     statuses = await store.get_task_statuses(["t-success", "t-running", "ghost"])
     assert statuses == {
         "t-success": TASK_STATUS_DRAFT,
         "t-running": TASK_STATUS_RUNNING,
     }
 
-    # Unknown only → empty dict, not error
     assert await store.get_task_statuses(["ghost-1", "ghost-2"]) == {}

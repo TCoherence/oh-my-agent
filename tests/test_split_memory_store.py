@@ -462,7 +462,6 @@ async def test_split_store_forwards_get_task_statuses(tmp_path):
         )
         statuses = await store.get_task_statuses(["ttt-1", "missing"])
         assert statuses == {"ttt-1": "PENDING"}
-        # Empty input remains empty
         assert await store.get_task_statuses([]) == {}
     finally:
         await store.close()

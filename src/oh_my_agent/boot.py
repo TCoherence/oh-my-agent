@@ -252,35 +252,68 @@ def _build_push_dispatcher(cfg: dict | None):
 # ---------------------------------------------------------------------------
 
 
+def _ensure_dict(parent: dict, key: str) -> dict | None:
+    """Get parent[key] as a dict, creating an empty one if missing/None.
+
+    YAML ``key:`` with no value parses to None and ``setdefault`` won't
+    overwrite it; treat that the same as a missing key. Returns None if
+    parent[key] exists but isn't a mapping — callers should bail so
+    validate_config (which runs before this) can surface the type error.
+    """
+    val = parent.get(key)
+    if val is None:
+        parent[key] = val = {}
+    if not isinstance(val, dict):
+        return None
+    return val
+
+
 def _apply_v052_defaults(config: dict) -> None:
-    skills_cfg = config.setdefault("skills", {})
+    skills_cfg = _ensure_dict(config, "skills")
+    if skills_cfg is None:
+        return
     skills_cfg.setdefault("enabled", True)
     skills_cfg.setdefault("path", "skills/")
     skills_cfg.setdefault("telemetry_path", "~/.oh-my-agent/runtime/skills.db")
-    skill_eval_cfg = skills_cfg.setdefault("evaluation", {})
+    skills_cfg.setdefault("enabled", True)
+    skills_cfg.setdefault("path", "skills/")
+    skills_cfg.setdefault("telemetry_path", "~/.oh-my-agent/runtime/skills.db")
+    skill_eval_cfg = _ensure_dict(skills_cfg, "evaluation")
+    if skill_eval_cfg is None:
+        return
     skill_eval_cfg.setdefault("enabled", True)
     skill_eval_cfg.setdefault("stats_recent_days", 7)
     skill_eval_cfg.setdefault("feedback_emojis", ["👍", "👎"])
-    auto_disable_cfg = skill_eval_cfg.setdefault("auto_disable", {})
+    auto_disable_cfg = _ensure_dict(skill_eval_cfg, "auto_disable")
+    if auto_disable_cfg is None:
+        return
     auto_disable_cfg.setdefault("enabled", True)
     auto_disable_cfg.setdefault("rolling_window", 20)
     auto_disable_cfg.setdefault("min_invocations", 5)
     auto_disable_cfg.setdefault("failure_rate_threshold", 0.60)
-    overlap_cfg = skill_eval_cfg.setdefault("overlap_guard", {})
+    overlap_cfg = _ensure_dict(skill_eval_cfg, "overlap_guard")
+    if overlap_cfg is None:
+        return
     overlap_cfg.setdefault("enabled", True)
     overlap_cfg.setdefault("review_similarity_threshold", 0.45)
-    source_cfg = skill_eval_cfg.setdefault("source_grounded", {})
+    source_cfg = _ensure_dict(skill_eval_cfg, "source_grounded")
+    if source_cfg is None:
+        return
     source_cfg.setdefault("enabled", True)
     source_cfg.setdefault("block_auto_merge", True)
 
     config.setdefault("workspace", "~/.oh-my-agent/agent-workspace")
-    short_ws_cfg = config.setdefault("short_workspace", {})
+    short_ws_cfg = _ensure_dict(config, "short_workspace")
+    if short_ws_cfg is None:
+        return
     short_ws_cfg.setdefault("enabled", True)
     short_ws_cfg.setdefault("ttl_hours", 24)
     short_ws_cfg.setdefault("cleanup_interval_minutes", 1440)
     short_ws_cfg.setdefault("root", "~/.oh-my-agent/agent-workspace/sessions")
 
-    router_cfg = config.setdefault("router", {})
+    router_cfg = _ensure_dict(config, "router")
+    if router_cfg is None:
+        return
     router_cfg.setdefault("enabled", False)
     router_cfg.setdefault("provider", "openai_compatible")
     router_cfg.setdefault("base_url", "https://api.deepseek.com/v1")
@@ -294,46 +327,62 @@ def _apply_v052_defaults(config: dict) -> None:
     router_cfg.setdefault("require_user_confirm", True)
     router_cfg.setdefault("extra_body", {})
 
-    automations_cfg = config.setdefault("automations", {})
+    automations_cfg = _ensure_dict(config, "automations")
+    if automations_cfg is None:
+        return
     automations_cfg.setdefault("enabled", True)
     automations_cfg.setdefault("storage_dir", "~/.oh-my-agent/automations")
     automations_cfg.setdefault("reload_interval_seconds", 5)
     automations_cfg.setdefault("timezone", "local")
 
-    memory_cfg = config.setdefault("memory", {})
+    memory_cfg = _ensure_dict(config, "memory")
+    if memory_cfg is None:
+        return
     memory_cfg.setdefault("backend", "sqlite")
     memory_cfg.setdefault("path", "~/.oh-my-agent/runtime/memory.db")
 
-    auth_cfg = config.setdefault("auth", {})
+    auth_cfg = _ensure_dict(config, "auth")
+    if auth_cfg is None:
+        return
     auth_cfg.setdefault("enabled", True)
     auth_cfg.setdefault("storage_root", "~/.oh-my-agent/runtime/auth")
     auth_cfg.setdefault("qr_poll_interval_seconds", 3)
     auth_cfg.setdefault("qr_default_timeout_seconds", 180)
-    auth_providers_cfg = auth_cfg.setdefault("providers", {})
-    auth_bili_cfg = auth_providers_cfg.setdefault("bilibili", {})
+    auth_providers_cfg = _ensure_dict(auth_cfg, "providers")
+    if auth_providers_cfg is None:
+        return
+    auth_bili_cfg = _ensure_dict(auth_providers_cfg, "bilibili")
+    if auth_bili_cfg is None:
+        return
     auth_bili_cfg.setdefault("enabled", True)
     auth_bili_cfg.setdefault("scope_key", "default")
 
-    agents_cfg = config.setdefault("agents", {})
-    claude_cfg = agents_cfg.setdefault("claude", {})
+    agents_cfg = _ensure_dict(config, "agents")
+    if agents_cfg is None:
+        return
+    claude_cfg = _ensure_dict(agents_cfg, "claude")
+    if claude_cfg is None:
+        return
     claude_cfg.setdefault("dangerously_skip_permissions", False)
     claude_cfg.setdefault("permission_mode", None)
     claude_cfg.setdefault("extra_args", [])
 
-    gemini_cfg = agents_cfg.setdefault("gemini", {})
+    gemini_cfg = _ensure_dict(agents_cfg, "gemini")
+    if gemini_cfg is None:
+        return
     gemini_cfg.setdefault("yolo", True)
     gemini_cfg.setdefault("extra_args", [])
 
-    codex_cfg = agents_cfg.setdefault("codex", {})
+    codex_cfg = _ensure_dict(agents_cfg, "codex")
+    if codex_cfg is None:
+        return
     codex_cfg.setdefault("sandbox_mode", "workspace-write")
     codex_cfg.setdefault("dangerously_bypass_approvals_and_sandbox", False)
     codex_cfg.setdefault("extra_args", [])
 
-    runtime_cfg = config.setdefault("runtime", {})
+    runtime_cfg = _ensure_dict(config, "runtime")
     if runtime_cfg is None:
-        config["runtime"] = runtime_cfg = {}
-    if not isinstance(runtime_cfg, dict):
-        return  # validate_config will surface the type error
+        return
     runtime_cfg.setdefault("enabled", True)
     runtime_cfg.setdefault("state_path", "~/.oh-my-agent/runtime/runtime.db")
     runtime_cfg.setdefault("worker_concurrency", 3)
@@ -354,18 +403,18 @@ def _apply_v052_defaults(config: dict) -> None:
     runtime_cfg.setdefault("log_event_limit", 12)
     runtime_cfg.setdefault("log_tail_chars", 1200)
 
-    cleanup_cfg = runtime_cfg.get("cleanup")
+    cleanup_cfg = _ensure_dict(runtime_cfg, "cleanup")
     if cleanup_cfg is None:
-        runtime_cfg["cleanup"] = cleanup_cfg = {}
-    if not isinstance(cleanup_cfg, dict):
-        return  # validate_config will surface the type error
+        return
     cleanup_cfg.setdefault("enabled", True)
     cleanup_cfg.setdefault("interval_minutes", 60)
     cleanup_cfg.setdefault("retention_hours", 168)
     cleanup_cfg.setdefault("prune_git_worktrees", True)
     cleanup_cfg.setdefault("merged_immediate", True)
 
-    merge_cfg = runtime_cfg.setdefault("merge_gate", {})
+    merge_cfg = _ensure_dict(runtime_cfg, "merge_gate")
+    if merge_cfg is None:
+        return
     merge_cfg.setdefault("enabled", True)
     merge_cfg.setdefault("auto_commit", True)
     merge_cfg.setdefault("require_clean_repo", True)
@@ -387,9 +436,13 @@ def _parse_env_bool(name: str) -> bool | None:
 
 
 def _apply_agent_env_overrides(config: dict) -> None:
-    agents_cfg = config.setdefault("agents", {})
+    agents_cfg = _ensure_dict(config, "agents")
+    if agents_cfg is None:
+        return
 
-    claude_cfg = agents_cfg.setdefault("claude", {})
+    claude_cfg = _ensure_dict(agents_cfg, "claude")
+    if claude_cfg is None:
+        return
     claude_skip = _parse_env_bool("OMA_AGENT_CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS")
     if claude_skip is not None:
         claude_cfg["dangerously_skip_permissions"] = claude_skip
@@ -397,12 +450,16 @@ def _apply_agent_env_overrides(config: dict) -> None:
         value = os.environ.get("OMA_AGENT_CLAUDE_PERMISSION_MODE", "").strip()
         claude_cfg["permission_mode"] = value or None
 
-    gemini_cfg = agents_cfg.setdefault("gemini", {})
+    gemini_cfg = _ensure_dict(agents_cfg, "gemini")
+    if gemini_cfg is None:
+        return
     gemini_yolo = _parse_env_bool("OMA_AGENT_GEMINI_YOLO")
     if gemini_yolo is not None:
         gemini_cfg["yolo"] = gemini_yolo
 
-    codex_cfg = agents_cfg.setdefault("codex", {})
+    codex_cfg = _ensure_dict(agents_cfg, "codex")
+    if codex_cfg is None:
+        return
     if "OMA_AGENT_CODEX_SANDBOX_MODE" in os.environ:
         codex_cfg["sandbox_mode"] = os.environ["OMA_AGENT_CODEX_SANDBOX_MODE"].strip()
     codex_bypass = _parse_env_bool("OMA_AGENT_CODEX_DANGEROUSLY_BYPASS_APPROVALS_AND_SANDBOX")
@@ -607,9 +664,9 @@ def verify_integrity(
         logger.error("Failed to load config %s: %s", config_path, exc)
         sys.exit(1)
 
-    _apply_v052_defaults(config)
-    _apply_agent_env_overrides(config)
-
+    # Validation runs before defaulting so malformed nested sections (e.g.
+    # ``agents: "string"``) are rejected before any ``setdefault`` chain
+    # would crash on them.
     from oh_my_agent.config_validator import validate_config
     validation = validate_config(config)
 
@@ -622,6 +679,9 @@ def verify_integrity(
         # which may be unsafe to compute against an invalid config.
         print(validation.summary(), file=sys.stderr)
         sys.exit(1)
+
+    _apply_v052_defaults(config)
+    _apply_agent_env_overrides(config)
 
     runtime_root = _runtime_root(config)
     _setup_logging(config, runtime_root)

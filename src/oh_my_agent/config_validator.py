@@ -248,11 +248,16 @@ def _check_logging(config: dict, result: ValidationResult) -> None:
 # ── Generic section checks ──────────────────────────────────────────── #
 
 def _check_sections(config: dict, result: ValidationResult) -> None:
-    """Light type-checks for optional sections."""
+    """Type-check optional top-level sections.
+
+    Non-dict values are hard errors because boot ``setdefault`` chains
+    crash on them; refusing the config in the validator gives a clean
+    message instead of a Python ``AttributeError``.
+    """
     for section in ("runtime", "memory", "skills", "router", "auth"):
         val = config.get(section)
         if val is not None and not isinstance(val, dict):
-            result.errors.append(ConfigError(section, "must be a mapping if present", "warning"))
+            result.errors.append(ConfigError(section, "must be a mapping if present", "error"))
 
 
 # ── Router ──────────────────────────────────────────────────────────── #
@@ -433,20 +438,17 @@ def _check_notifications(config: dict, result: ValidationResult) -> None:
 # ── Runtime cleanup ─────────────────────────────────────────────────── #
 
 def _check_runtime_cleanup(config: dict, result: ValidationResult) -> None:
-    """Validate ``runtime.cleanup`` retention shape.
+    """Validate ``runtime.cleanup`` shape and scalar fields.
 
-    Hard-errors when ``runtime`` or ``runtime.cleanup`` are present but
-    not mappings — boot-time defaulting calls ``setdefault`` on them and
-    would crash before validation reports the issue.
+    Top-level ``runtime`` non-dict is already covered by
+    ``_check_sections``. Here we drill into ``runtime.cleanup``: shape,
+    plus scalar fields that ``RuntimeService.__init__`` casts with
+    ``int()`` (so a malformed YAML value crashes runtime construction
+    instead of being rejected at boot).
     """
     runtime = config.get("runtime")
-    if runtime is None:
-        return
     if not isinstance(runtime, dict):
-        result.errors.append(ConfigError(
-            "runtime", "must be a mapping if present", "error",
-        ))
-        return
+        return  # _check_sections handled the type error
     cleanup = runtime.get("cleanup")
     if cleanup is None:
         return
@@ -455,6 +457,21 @@ def _check_runtime_cleanup(config: dict, result: ValidationResult) -> None:
             "runtime.cleanup", "must be a mapping if present", "error",
         ))
         return
+
+    for scalar in ("interval_minutes", "retention_hours"):
+        v = cleanup.get(scalar)
+        if v is None:
+            continue
+        try:
+            if int(v) < 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            result.errors.append(ConfigError(
+                f"runtime.cleanup.{scalar}",
+                f"must be a non-negative integer, got '{v}'",
+                "error",
+            ))
+
     by_outcome = cleanup.get("retention_hours_by_outcome")
     if by_outcome is None:
         return

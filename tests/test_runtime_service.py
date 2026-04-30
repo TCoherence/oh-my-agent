@@ -4017,6 +4017,67 @@ def test_retention_resolver_back_compat_without_by_outcome(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_cleanup_logs_back_compat_without_by_outcome(tmp_path):
+    """Without retention_hours_by_outcome, status-aware cleanup must
+    behave exactly like the legacy flat retention path."""
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    store = SQLiteMemoryStore(tmp_path / "back-compat.db")
+    await store.init()
+
+    runtime = RuntimeService(
+        store,
+        config={
+            "enabled": True,
+            "worker_concurrency": 1,
+            "worktree_root": str(tmp_path / "worktrees"),
+            "default_agent": "done-agent",
+            "default_test_command": "true",
+            "cleanup": {
+                "enabled": True,
+                "interval_minutes": 60,
+                "retention_hours": 168,
+                "prune_git_worktrees": False,
+                "merged_immediate": True,
+                # NO retention_hours_by_outcome — exercise legacy path
+            },
+        },
+        owner_user_ids={"owner-1"},
+        repo_root=repo,
+    )
+
+    success_id = "abcdef111122"
+    await store.create_runtime_task(
+        task_id=success_id, platform="discord", channel_id="100",
+        thread_id="t-9", created_by="owner-1", goal="x",
+        preferred_agent="done-agent", status=TASK_STATUS_COMPLETED,
+        max_steps=8, max_minutes=20, test_command="true",
+    )
+
+    logs_root = runtime._agent_logs_root  # noqa: SLF001
+    logs_root.mkdir(parents=True, exist_ok=True)
+    success_log = logs_root / f"thread-t9-{success_id}-step1-claude.log"
+    success_log.write_text("payload", encoding="utf-8")
+    # 100h old: under flat 168h, file should be kept (vs 72h success
+    # bucket where it'd be cleaned).
+    ts = time.time() - 100 * 3600
+    os.utime(success_log, (ts, ts))
+
+    cleaned = await runtime._cleanup_expired_agent_logs()  # noqa: SLF001
+    assert success_log.exists()
+    assert cleaned == 0
+
+    # Past 168h, both legacy and new code clean it.
+    ts = time.time() - 200 * 3600
+    os.utime(success_log, (ts, ts))
+    cleaned2 = await runtime._cleanup_expired_agent_logs()  # noqa: SLF001
+    assert not success_log.exists()
+    assert cleaned2 == 1
+
+    await store.close()
+
+
+@pytest.mark.asyncio
 async def test_cleanup_logs_status_aware_per_file(tmp_path):
     repo = tmp_path / "repo"
     _init_git_repo(repo)
@@ -4071,44 +4132,61 @@ async def test_cleanup_logs_status_aware_per_file(tmp_path):
             test_command="true",
         )
 
-    logs_root = runtime._agent_logs_root  # noqa: SLF001
-    logs_root.mkdir(parents=True, exist_ok=True)
-    success_log = logs_root / f"thread-t9-{success_id}-step1-claude.log"
-    failure_log = logs_root / f"thread-t9-{failure_id}-step1-claude.log"
-    running_log = logs_root / f"thread-t9-{running_id}-step1-claude.log"
-    chat_log = logs_root / "thread-t9-router_reply_once-req-1-claude.log"
-    orphan_log = logs_root / f"thread-t9-{orphan_id}-step1-claude.log"
+    # Build filenames via the production helper so a future format change
+    # in _agent_log_path (filename schema) breaks this test alongside the
+    # regex it exercises.
+    def _make_log_path(task_id, status):
+        from oh_my_agent.runtime.types import RuntimeTask
+        task = RuntimeTask(
+            id=task_id, platform="discord", channel_id="100", thread_id="t-9",
+            created_by="owner-1", goal="x", original_request=None,
+            preferred_agent="done-agent", status=status, step_no=0,
+            max_steps=8, max_minutes=20, agent_timeout_seconds=None,
+            agent_max_turns=None, test_command=None, workspace_path=None,
+            decision_message_id=None, status_message_id=None,
+            blocked_reason=None, error=None, summary=None,
+            resume_instruction=None, merge_commit_hash=None,
+            merge_error=None, completion_mode="reply", output_summary=None,
+            artifact_manifest=None, automation_name=None,
+            workspace_cleaned_at=None, created_at=None, started_at=None,
+            updated_at=None, ended_at=None, task_type="artifact",
+            skill_name=None,
+        )
+        return runtime._agent_log_path(task, 1, "claude")  # noqa: SLF001
+
+    success_log = _make_log_path(success_id, TASK_STATUS_COMPLETED)
+    failure_log = _make_log_path(failure_id, TASK_STATUS_FAILED)
+    running_log = _make_log_path(running_id, TASK_STATUS_RUNNING)
+    orphan_log = _make_log_path(orphan_id, TASK_STATUS_COMPLETED)  # status irrelevant; DB row absent
+    success_log.parent.mkdir(parents=True, exist_ok=True)
+    chat_log = success_log.parent / "thread-t-9-router_reply_once-req-1-claude.log"
     for path in (success_log, failure_log, running_log, chat_log, orphan_log):
         path.write_text("payload", encoding="utf-8")
-        # Age all files to 100h old.
         ts = time.time() - 100 * 3600
         os.utime(path, (ts, ts))
 
     cleaned = await runtime._cleanup_expired_agent_logs()  # noqa: SLF001
 
-    # success bucket = 72h, 100h old → cleaned
-    assert not success_log.exists()
-    # failure bucket = 336h, 100h old → kept
-    assert failure_log.exists()
-    # running task → never cleaned regardless of age
-    assert running_log.exists()
-    # chat log (no task_id) uses default 168h → 100h old → kept
-    assert chat_log.exists()
-    # orphan task_id (DB row absent) uses default 168h → 100h old → kept
-    assert orphan_log.exists()
+    assert not success_log.exists()  # success budget 72h < 100h
+    assert failure_log.exists()      # failure budget 336h > 100h
+    assert running_log.exists()      # live status: never cleaned
+    assert chat_log.exists()         # chat default 168h > 100h
+    assert orphan_log.exists()       # orphan uses default 168h > 100h
     assert cleaned == 1
 
-    # Bump retention to verify failure/orphan/chat eventually get cleaned
-    # under default (168h). Re-age to 200h.
-    for path in (failure_log, chat_log, orphan_log):
-        ts = time.time() - 200 * 3600
+    # Age the RUNNING log far past the failure budget (largest) to prove
+    # the live-status guard is what's keeping it, not retention. A
+    # regression that treated RUNNING tasks as default-eligible would
+    # delete the file at this aging.
+    for path in (failure_log, chat_log, orphan_log, running_log):
+        ts = time.time() - 1000 * 3600
         os.utime(path, (ts, ts))
     cleaned2 = await runtime._cleanup_expired_agent_logs()  # noqa: SLF001
-    # failure_log still kept (336h budget), chat + orphan crossed default 168h
-    assert failure_log.exists()
+    assert running_log.exists()      # 1000h > all budgets, but live-status skip wins
+    assert not failure_log.exists()  # 1000h > 336h
     assert not chat_log.exists()
     assert not orphan_log.exists()
-    assert cleaned2 == 2
+    assert cleaned2 == 3
 
     await store.close()
 
