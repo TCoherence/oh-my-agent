@@ -6,6 +6,20 @@ The format is intentionally lightweight and release-oriented rather than exhaust
 
 ## Unreleased
 
+### Added
+
+- **Weekly memory reflection — multi-scale "dream" pass on top of daily**. Where `DiaryReflector` (line 226-294 in `src/oh_my_agent/memory/diary_reflector.py`) reads a single day, the new `WeeklyReflector` (`src/oh_my_agent/memory/weekly_reflector.py`) reads the **trailing 7 complete days ending yesterday** — concretely `end_date = today - 1`, window `[end_date - 6, end_date]` inclusive. Targets the patterns daily can't see: recurring preferences across multiple days, evolving workflows, "the third time the user has asked about X" signals. Reuses the `JudgeStore.apply_actions` pipeline so dedup / supersede / confidence machinery is shared with the existing single-thread Judge. Strict-than-daily prompt rules: `add` requires evidence from **≥ 2 distinct dated diary sections** (single-day evidence forces `no_op` or `strengthen`); each evidence snippet must carry a `[YYYY-MM-DD]` citation; PR / issue / commit numbers and library versions explicitly banned alongside daily's existing blocklist; missing days render as `## --- YYYY-MM-DD --- (no diary)` placeholders so the prompt knows whether evidence is continuous. `WeeklyReflectionLoop` mirrors `DiaryReflectionLoop` with `(fire_dow_local, fire_hour_local)` instead of just hour — defaults to Tuesday 03:00 local (Monday activity lands in the window, offset from daily's 02:00 to avoid the same-clock-tick concurrency case). Naive local-time arithmetic shares daily's DST gotcha, scheduled to be fixed together when daily moves to timezone-aware. Wired into `boot.py` next to the existing diary-reflection block (gated on `judge_store`, `diary_dir`, and `memory.weekly_reflection.enabled=true`); `_shutdown` accepts and stops the new loop. Covered by 21 new tests in `tests/test_weekly_reflector.py`: window-boundary lock-down (`test_reflect_last_week_window_is_yesterday_minus_six_through_yesterday` — Codex-flagged most important test), missing-day placeholder, oversized-day truncation, total-length cap, fire-time math for four `(dow, hour)` corners, dow=7/-1 validation, loop lifecycle.
+- **Daily memory reflection now defaults to enabled** in `config.yaml.example`. The `DiaryReflector` code has been in tree but gated behind `memory.diary_reflection.enabled=false` since v0.8 — meaning cross-thread memory consolidation never landed for any operator who hadn't explicitly flipped the bit. Default flipped to `true`; comment expanded to explain why. `boot.py` now logs an INFO hint when daily is detected disabled but `judge_store` and `diary_dir` are otherwise ready, surfacing the migration path in the console for operators upgrading from older configs.
+
+### Migration
+
+Two `config.yaml` changes need manual application to existing local configs (template-only edits do **not** propagate):
+
+1. **Daily reflection default flip**: in your `config.yaml`, set `memory.diary_reflection.enabled: true`. Without this, daily memory consolidation stays off — the loop never starts. The new boot-time INFO log will surface the same hint.
+2. **Weekly reflection section**: copy the new `memory.weekly_reflection` block from `config.yaml.example` into your local `config.yaml`. Default `enabled: false` is intentional — opt in once daily has been running for at least a week so weekly has 7 days of diary to chew on. Defaults: `fire_dow_local: 1` (Tuesday), `fire_hour_local: 3` (03:00 local).
+
+No automatic migration is performed. Settings layout is otherwise unchanged.
+
 ## v0.9.4 - 2026-04-29
 
 ### Added

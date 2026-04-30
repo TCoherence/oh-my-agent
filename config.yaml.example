@@ -18,12 +18,22 @@ memory:
       - 记下来
       - remember this
       - memorize this
-  # Optional cross-day reflection — reads yesterday's diary once a day and
-  # feeds memory-judge actions into the store. Requires memory.judge.enabled
-  # and diary (below) to be on.
+  # Cross-day reflection — reads yesterday's diary once a day at
+  # fire_hour_local (local time) and feeds memory-judge actions into the
+  # store. Requires memory.judge.enabled and diary (below) to be on.
+  # Default ON: cross-thread patterns won't reach long-term memory without it.
   diary_reflection:
-    enabled: false
+    enabled: true
     fire_hour_local: 2                        # 0-23, local time; 2am picks up overnight
+  # 7-day reflection — fires once a week to extract long-term patterns and
+  # preference shifts the daily reflector can't see in a single day. Shares
+  # the diary directory and JudgeStore with daily reflection. Default OFF:
+  # opt in once daily has been running for at least a week so there are
+  # enough diary days to make weekly meaningful.
+  weekly_reflection:
+    enabled: false
+    fire_dow_local: 1                         # 0=Mon ... 6=Sun; Tuesday lets Monday activity land in the window
+    fire_hour_local: 3                        # offset from daily's 02:00
   diary:
     enabled: true                             # per-day markdown of every turn under <runtime>/diary/
     # path: ~/.oh-my-agent/runtime/diary

@@ -87,6 +87,7 @@ class GatewayManager:
         self._memory_store_ref = None  # set by set_memory_store()
         self._diary_writer = None  # set by set_diary_writer()
         self._diary_reflector = None  # set by set_diary_reflector()
+        self._weekly_reflector = None  # set by set_weekly_reflector()
         self._skill_syncer = skill_syncer
         self._workspace_skills_dirs = workspace_skills_dirs  # list[Path] | None
         self._runtime_service = runtime_service
@@ -228,6 +229,15 @@ class GatewayManager:
         for channel, _registry in self._channels:
             if hasattr(channel, "set_diary_reflector"):
                 channel.set_diary_reflector(reflector)
+
+    def set_weekly_reflector(self, reflector) -> None:
+        """Inject a WeeklyReflector. v1 has no manual command, but channels
+        opting into ``/reflect_week`` later can pick this up via the same
+        forwarding pattern as :meth:`set_diary_reflector`."""
+        self._weekly_reflector = reflector
+        for channel, _registry in self._channels:
+            if hasattr(channel, "set_weekly_reflector"):
+                channel.set_weekly_reflector(reflector)
 
     async def _refresh_auto_disabled_skills(self) -> None:
         store = getattr(self, "_memory_store_ref", None)
