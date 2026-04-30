@@ -146,6 +146,29 @@ Layout:
 
 When the user asks for a broad daily scan or leaves the source intentionally broad:
 
+**Execution strategy (parallel preferred)**: the 5 source `daily_scan`s
+are independent — none of them needs to read another source's output to
+do its job. If your runtime exposes a sub-agent / Task / Agent tool
+(Claude Code's `Task` tool, Gemini CLI's `@agent_name`, or equivalent),
+prefer fanning out the 5 source scans as parallel sub-agent calls so
+they run concurrently and each gets its own context window. Each
+sub-agent should:
+
+- be told its single `source` (one of the 5 names below)
+- own the full per-source workflow end-to-end (web research → JSON +
+  Markdown via the helper script → write under `references/<source>.{md,json}`)
+- return only a short success/failure summary + the persisted file path
+
+The cross-source dedupe / multi-link aggregation (a deal showing up on
+multiple sources → one entry with multiple links) happens in the
+**summary step (Step 3)**, which reads the 5 per-source JSON files
+back from disk — so isolated sub-agent contexts do **not** weaken
+cross-source verification.
+
+If sub-agent tooling is not available, fall back to running the 5
+source scans sequentially in the parent context — same outputs, same
+filesystem layout, just slower.
+
 1. Run five `daily_scan` source reports for:
    - `credit-cards`
    - `uscardforum`

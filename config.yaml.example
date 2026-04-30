@@ -204,6 +204,11 @@ agents:
     max_turns: 25
     model: sonnet
     timeout: 300                 # 秒，超时后 fallback 下一个 agent
+    # allowed_tools: 通过 --allowedTools 传给 claude，让这些"危险" tool（碰文件系
+    # 统/shell 的）免 permission prompt。不能删 — 留空 + dangerously_skip_permissions=false
+    # 时，autonomous task 第一次跑 Bash 就会卡在 prompt 上 hang。dangerously_skip_permissions=true
+    # 时这个列表是硬白名单（unlisted 的不让跑）。注：claude 内置的 meta tool（TodoWrite /
+    # AskUserQuestion / EnterPlanMode / Task / ToolSearch 等）不走这一层，都能用。
     allowed_tools: [Bash, Read, Write, Edit, Glob, Grep]
     dangerously_skip_permissions: false
     # permission_mode: default    # set to disable bypass, or use other CLI-supported modes
