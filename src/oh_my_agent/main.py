@@ -32,6 +32,7 @@ from oh_my_agent.boot import (
     _shutdown,
     _warn_if_legacy_memory_config,
     _warn_if_legacy_memory_layout,
+    clear_slash_commands,
     ignite,
     verify_integrity,
 )
@@ -54,6 +55,7 @@ __all__ = [
     "_shutdown",
     "_warn_if_legacy_memory_config",
     "_warn_if_legacy_memory_layout",
+    "clear_slash_commands",
     "ignite",
     "main",
     "verify_integrity",
@@ -79,9 +81,23 @@ def main() -> None:
         default=False,
         help="Validate config and exit (exit 0 = ok, exit 1 = errors)",
     )
+    parser.add_argument(
+        "--clear-commands",
+        action="store_true",
+        default=False,
+        help=(
+            "One-shot: clear all slash commands on the Discord application(s) "
+            "the active config points at, then exit. Pair with --config to "
+            "scope to a specific app (e.g. dev vs prod). Next normal start "
+            "re-registers whatever commands the current code defines."
+        ),
+    )
     args = parser.parse_args()
 
     ctx = verify_integrity(args.config, validate_only=args.validate_config)
+    if args.clear_commands:
+        rc = asyncio.run(clear_slash_commands(ctx))
+        raise SystemExit(rc)
     asyncio.run(ignite(ctx))
 
 

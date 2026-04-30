@@ -1141,3 +1141,53 @@ async def _async_main(config: dict, logger: logging.Logger, *, project_root: Pat
         logger=logger,
     )
     await ignite(ctx)
+
+
+async def clear_slash_commands(ctx: BootContext) -> int:
+    """One-shot: connect each configured Discord channel, clear all slash
+    commands on its application, exit.
+
+    Operates on whichever Discord application(s) the active config's tokens
+    belong to — `--config dev-config.yaml --clear-commands` clears the dev
+    app, the default config clears prod. Non-Discord channels are skipped
+    with a log line.
+
+    Returns 0 on success, 1 if any channel failed.
+    """
+    from oh_my_agent.gateway.platforms.discord import clear_application_commands
+
+    config = ctx.config
+    logger = ctx.logger
+
+    channels_cfg = config.get("gateway", {}).get("channels", []) or []
+    if not channels_cfg:
+        logger.error("No gateway channels configured; nothing to clear.")
+        return 1
+
+    failures = 0
+    cleared = 0
+    for ch_cfg in channels_cfg:
+        platform = str(ch_cfg.get("platform", "")).strip().lower()
+        if platform != "discord":
+            logger.info("Skipping non-discord channel (platform=%s)", platform or "<unset>")
+            continue
+        token = ch_cfg.get("token")
+        channel_id = ch_cfg.get("channel_id")
+        if not token or not channel_id:
+            logger.error(
+                "Discord channel config missing token or channel_id; cannot clear commands"
+            )
+            failures += 1
+            continue
+        try:
+            scope = await clear_application_commands(str(token), str(channel_id))
+            logger.info("[discord] Slash commands cleared (%s)", scope)
+            cleared += 1
+        except Exception as exc:
+            logger.error("Failed to clear slash commands for channel %s: %s", channel_id, exc)
+            failures += 1
+
+    if cleared == 0 and failures == 0:
+        logger.warning("No discord channels found in gateway.channels; nothing cleared.")
+        return 0
+    return 0 if failures == 0 else 1

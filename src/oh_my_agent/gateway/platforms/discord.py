@@ -2334,3 +2334,67 @@ class DiscordChannel(BaseChannel):
         if guild_id:
             return int(guild_id)
         return None
+
+
+async def clear_application_commands(token: str, channel_id: str) -> str:
+    """Connect once, clear all slash commands for the application, then exit.
+
+    Operates on whichever Discord application owns ``token``. Pair with the
+    matching config (`--config dev-config.yaml --clear-commands`) to scope to
+    dev vs prod. Resolves the configured channel to a guild and clears both
+    the guild-scoped and global command sets so leftover stale registrations
+    disappear regardless of where they were originally synced.
+
+    Returns a short scope string (`"guild:<id>+global"` or `"global"`) for log
+    visibility.
+    """
+    intents = discord.Intents.default()
+    client = discord.Client(intents=intents)
+    tree = app_commands.CommandTree(client)
+    scope_holder: dict[str, str] = {"scope": "global"}
+    error_holder: dict[str, BaseException] = {}
+
+    @client.event
+    async def on_ready() -> None:
+        try:
+            target_id = int(channel_id)
+            channel = client.get_channel(target_id)
+            if channel is None:
+                try:
+                    channel = await client.fetch_channel(target_id)
+                except Exception:
+                    logger.debug(
+                        "Could not fetch channel %s while clearing commands; "
+                        "falling back to global-only clear",
+                        target_id,
+                        exc_info=True,
+                    )
+                    channel = None
+            guild_id = DiscordChannel._extract_guild_id(channel) if channel is not None else None
+
+            if guild_id is not None:
+                guild = discord.Object(id=guild_id)
+                tree.clear_commands(guild=guild)
+                await tree.sync(guild=guild)
+                logger.info("[discord] Cleared guild-scoped commands for guild %s", guild_id)
+                scope_holder["scope"] = f"guild:{guild_id}+global"
+
+            tree.clear_commands(guild=None)
+            await tree.sync()
+            logger.info("[discord] Cleared global application commands")
+        except BaseException as exc:
+            error_holder["error"] = exc
+        finally:
+            await client.close()
+
+    try:
+        await client.start(token)
+    except discord.LoginFailure:
+        raise
+    finally:
+        if not client.is_closed():
+            await client.close()
+
+    if "error" in error_holder:
+        raise error_holder["error"]
+    return scope_holder["scope"]
