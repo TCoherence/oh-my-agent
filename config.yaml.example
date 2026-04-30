@@ -168,6 +168,13 @@ runtime:
     retention_hours: 168
     prune_git_worktrees: true
     merged_immediate: true
+    # Optional per-outcome retention. Missing keys fall back to retention_hours.
+    # success: completed/applied/merged tasks → cleaned faster; failures kept
+    # longer so the operator can debug.
+    # retention_hours_by_outcome:
+    #   success: 72   # 3 days
+    #   failure: 336  # 14 days
+    #   default: 168  # fallback for non-task chat logs (router/direct_reply/etc.)
   merge_gate:
     enabled: true
     auto_commit: true

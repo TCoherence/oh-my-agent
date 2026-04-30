@@ -4,6 +4,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from oh_my_agent.memory.session_diary import Role
+
 if TYPE_CHECKING:
     from oh_my_agent.agents.registry import AgentRegistry
     from oh_my_agent.gateway.base import BaseChannel
@@ -104,6 +106,33 @@ class ChannelSession:
                 )
             except Exception:
                 logger.debug("diary_writer.append(assistant) failed", exc_info=True)
+
+    async def append_diary_only(
+        self,
+        thread_id: str,
+        content: str,
+        *,
+        role: Role = "system",
+        author: str = "runtime",
+    ) -> None:
+        """Write a turn to the diary without touching MemoryStore or _cache.
+
+        Used by automation status pings so they remain operator-visible
+        in the diary without polluting Judge memory inputs.
+        """
+        if self.diary_writer is None:
+            return
+        try:
+            await self.diary_writer.append(
+                role=role,
+                platform=self.platform,
+                channel_id=self.channel_id,
+                thread_id=thread_id,
+                author=author,
+                content=content,
+            )
+        except Exception:
+            logger.debug("diary_writer.append_diary_only failed", exc_info=True)
 
     async def clear_history(self, thread_id: str) -> None:
         """Delete all history for a thread (cache + store)."""

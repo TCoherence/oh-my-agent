@@ -256,3 +256,233 @@ def test_notifications_unknown_event_kind_is_warning(monkeypatch):
     }))
     warnings = _notif_errors(result, severity="warning")
     assert any(e.path == "notifications.events.unknown_kind" for e in warnings)
+
+
+# ── Runtime cleanup retention_hours_by_outcome ────────────────────────── #
+
+
+def _config_with_runtime(runtime: object) -> dict:
+    cfg = _base_config()
+    cfg["runtime"] = runtime
+    return cfg
+
+
+def _runtime_errors(result, *, severity: str | None = None) -> list:
+    matches = [e for e in result.errors if e.path.startswith("runtime")]
+    if severity is not None:
+        matches = [e for e in matches if e.severity == severity]
+    return matches
+
+
+def test_runtime_non_dict_is_error():
+    result = validate_config(_config_with_runtime("garbage"))
+    errs = _runtime_errors(result, severity="error")
+    assert any(e.path == "runtime" for e in errs)
+    assert not result.ok
+
+
+def test_runtime_cleanup_non_dict_is_error():
+    result = validate_config(_config_with_runtime({"cleanup": "broken"}))
+    errs = _runtime_errors(result, severity="error")
+    assert any(e.path == "runtime.cleanup" for e in errs)
+    assert not result.ok
+
+
+def test_runtime_cleanup_null_passes_validator():
+    # YAML "cleanup: null" → Python None. Boot's normalizer fills it in;
+    # the validator should not error on the None case.
+    result = validate_config(_config_with_runtime({"cleanup": None}))
+    errs = _runtime_errors(result, severity="error")
+    assert not errs
+    assert result.ok
+
+
+def test_runtime_cleanup_by_outcome_non_dict_is_error():
+    result = validate_config(_config_with_runtime({
+        "cleanup": {"retention_hours_by_outcome": "x"}
+    }))
+    errs = _runtime_errors(result, severity="error")
+    assert any(e.path == "runtime.cleanup.retention_hours_by_outcome" for e in errs)
+
+
+def test_runtime_cleanup_by_outcome_negative_is_error():
+    result = validate_config(_config_with_runtime({
+        "cleanup": {"retention_hours_by_outcome": {"success": -5}}
+    }))
+    errs = _runtime_errors(result, severity="error")
+    assert any(
+        e.path == "runtime.cleanup.retention_hours_by_outcome.success" for e in errs
+    )
+
+
+def test_runtime_cleanup_by_outcome_non_int_is_error():
+    result = validate_config(_config_with_runtime({
+        "cleanup": {"retention_hours_by_outcome": {"failure": "twelve"}}
+    }))
+    errs = _runtime_errors(result, severity="error")
+    assert any(
+        e.path == "runtime.cleanup.retention_hours_by_outcome.failure" for e in errs
+    )
+
+
+def test_runtime_cleanup_by_outcome_valid_passes():
+    result = validate_config(_config_with_runtime({
+        "cleanup": {"retention_hours_by_outcome": {
+            "success": 72, "failure": 336, "default": 168,
+        }}
+    }))
+    errs = _runtime_errors(result, severity="error")
+    assert not errs
+    assert result.ok
+
+
+def test_runtime_cleanup_retention_hours_non_int_is_error():
+    result = validate_config(_config_with_runtime({
+        "cleanup": {"retention_hours": "abc"}
+    }))
+    errs = _runtime_errors(result, severity="error")
+    assert any(e.path == "runtime.cleanup.retention_hours" for e in errs)
+
+
+def test_runtime_cleanup_retention_hours_float_is_error():
+    result = validate_config(_config_with_runtime({
+        "cleanup": {"retention_hours": 168.5}
+    }))
+    errs = _runtime_errors(result, severity="error")
+    assert any(e.path == "runtime.cleanup.retention_hours" for e in errs)
+
+
+def test_runtime_cleanup_retention_hours_bool_is_error():
+    # int(True) == 1 silently coerces; reject so misconfig surfaces.
+    result = validate_config(_config_with_runtime({
+        "cleanup": {"retention_hours": True}
+    }))
+    errs = _runtime_errors(result, severity="error")
+    assert any(e.path == "runtime.cleanup.retention_hours" for e in errs)
+
+
+def test_runtime_cleanup_retention_hours_zero_is_ok():
+    result = validate_config(_config_with_runtime({
+        "cleanup": {"retention_hours": 0}
+    }))
+    errs = _runtime_errors(result, severity="error")
+    assert not errs
+
+
+def test_runtime_cleanup_interval_minutes_negative_is_error():
+    result = validate_config(_config_with_runtime({
+        "cleanup": {"interval_minutes": -1}
+    }))
+    errs = _runtime_errors(result, severity="error")
+    assert any(e.path == "runtime.cleanup.interval_minutes" for e in errs)
+
+
+def test_runtime_cleanup_interval_minutes_zero_is_ok():
+    # Runtime clamps to a 1-minute floor; validator accepts 0.
+    result = validate_config(_config_with_runtime({
+        "cleanup": {"interval_minutes": 0}
+    }))
+    errs = _runtime_errors(result, severity="error")
+    assert not errs
+
+
+def test_runtime_merge_gate_non_dict_is_error():
+    result = validate_config(_config_with_runtime({"merge_gate": "broken"}))
+    errs = _runtime_errors(result, severity="error")
+    assert any(e.path == "runtime.merge_gate" for e in errs)
+
+
+def test_short_workspace_non_dict_is_error():
+    cfg = _base_config()
+    cfg["short_workspace"] = "broken"
+    result = validate_config(cfg)
+    errs = [e for e in result.errors if e.path == "short_workspace" and e.severity == "error"]
+    assert errs
+    assert not result.ok
+
+
+def test_automations_non_dict_is_error():
+    cfg = _base_config()
+    cfg["automations"] = "broken"
+    result = validate_config(cfg)
+    errs = [e for e in result.errors if e.path == "automations" and e.severity == "error"]
+    assert errs
+    assert not result.ok
+
+
+def test_runtime_cleanup_enabled_string_is_error():
+    """``bool("false")`` returns True silently; reject string YAML
+    intended as bool."""
+    result = validate_config(_config_with_runtime({
+        "cleanup": {"enabled": "false"}
+    }))
+    errs = _runtime_errors(result, severity="error")
+    assert any(e.path == "runtime.cleanup.enabled" for e in errs)
+
+
+def test_runtime_cleanup_prune_git_worktrees_int_is_error():
+    result = validate_config(_config_with_runtime({
+        "cleanup": {"prune_git_worktrees": 1}
+    }))
+    errs = _runtime_errors(result, severity="error")
+    assert any(e.path == "runtime.cleanup.prune_git_worktrees" for e in errs)
+
+
+def test_runtime_merge_gate_enabled_string_is_error():
+    result = validate_config(_config_with_runtime({
+        "merge_gate": {"enabled": "yes"}
+    }))
+    errs = _runtime_errors(result, severity="error")
+    assert any(e.path == "runtime.merge_gate.enabled" for e in errs)
+
+
+def test_short_workspace_enabled_string_is_error():
+    cfg = _base_config()
+    cfg["short_workspace"] = {"enabled": "false"}
+    result = validate_config(cfg)
+    errs = [e for e in result.errors if e.path == "short_workspace.enabled" and e.severity == "error"]
+    assert errs
+
+
+def test_short_workspace_ttl_hours_float_is_error():
+    cfg = _base_config()
+    cfg["short_workspace"] = {"ttl_hours": 24.5}
+    result = validate_config(cfg)
+    errs = [e for e in result.errors if e.path == "short_workspace.ttl_hours" and e.severity == "error"]
+    assert errs
+
+
+def test_short_workspace_root_int_is_error():
+    cfg = _base_config()
+    cfg["short_workspace"] = {"root": 12345}
+    result = validate_config(cfg)
+    errs = [e for e in result.errors if e.path == "short_workspace.root" and e.severity == "error"]
+    assert errs
+
+
+def test_automations_dump_channels_non_dict_is_error():
+    cfg = _base_config()
+    cfg["automations"] = {"dump_channels": "broken"}
+    result = validate_config(cfg)
+    errs = [e for e in result.errors if e.path == "automations.dump_channels" and e.severity == "error"]
+    assert errs
+    assert not result.ok
+
+
+def test_automations_dump_channels_missing_platform_is_error():
+    cfg = _base_config()
+    cfg["automations"] = {"dump_channels": {"oma_dump": {"channel_id": "123"}}}
+    result = validate_config(cfg)
+    errs = [
+        e for e in result.errors
+        if e.path == "automations.dump_channels.oma_dump.platform"
+        and e.severity == "error"
+    ]
+    assert errs
+
+
+def test_runtime_cleanup_missing_section_passes():
+    result = validate_config(_config_with_runtime({}))
+    errs = _runtime_errors(result, severity="error")
+    assert not errs
+    assert result.ok

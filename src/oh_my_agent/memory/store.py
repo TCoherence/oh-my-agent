@@ -277,6 +277,9 @@ class MemoryStore(ABC):
     ) -> list[RuntimeTask]:
         return []
 
+    async def get_task_statuses(self, task_ids: list[str]) -> dict[str, str]:
+        return {}
+
     # -- auth persistence -------------------------------------------------
 
     async def upsert_auth_credential(self, **kwargs) -> CredentialHandle:
@@ -1998,6 +2001,18 @@ class SQLiteMemoryStore(MemoryStore):
         rows = await cursor.fetchall()
         return [RuntimeTask.from_row(dict(r)) for r in rows]
 
+    async def get_task_statuses(self, task_ids: list[str]) -> dict[str, str]:
+        if not task_ids:
+            return {}
+        db = await self._conn()
+        placeholders = ", ".join("?" for _ in task_ids)
+        cursor = await db.execute(
+            f"SELECT id, status FROM runtime_tasks WHERE id IN ({placeholders})",
+            tuple(task_ids),
+        )
+        rows = await cursor.fetchall()
+        return {row["id"]: row["status"] for row in rows}
+
     async def upsert_auth_credential(self, **kwargs) -> CredentialHandle:
         async with self._write_lock:
             db = await self._conn()
@@ -3039,6 +3054,7 @@ class SplitSQLiteMemoryStore:
         "get_active_runtime_decision_nonce",
         "consume_runtime_decision_nonce",
         "list_runtime_cleanup_candidates",
+        "get_task_statuses",
         "upsert_auth_credential",
         "get_auth_credential",
         "delete_auth_credential",

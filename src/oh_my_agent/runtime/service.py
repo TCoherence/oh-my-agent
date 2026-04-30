@@ -97,6 +97,23 @@ _TERMINAL_CLEANUP_STATUSES = {
     TASK_STATUS_REJECTED,
 }
 
+_SUCCESS_CLEANUP_STATUSES = frozenset({
+    TASK_STATUS_COMPLETED,
+    TASK_STATUS_APPLIED,
+    TASK_STATUS_MERGED,
+})
+
+_FAILURE_CLEANUP_STATUSES = frozenset({
+    TASK_STATUS_FAILED,
+    TASK_STATUS_TIMEOUT,
+    TASK_STATUS_STOPPED,
+    TASK_STATUS_REJECTED,
+    TASK_STATUS_MERGE_FAILED,
+    TASK_STATUS_DISCARDED,
+})
+
+_TASK_LOG_ID_RE = re.compile(r"-([0-9a-f]{12})-step\d+-")
+
 ACTIVE_AUTOMATION_TASK_STATUSES = {
     TASK_STATUS_DRAFT,
     TASK_STATUS_PENDING,
@@ -212,6 +229,11 @@ class RuntimeService:
         self._cleanup_retention_hours = int(cleanup_cfg.get("retention_hours", 168))
         self._cleanup_prune_worktrees = bool(cleanup_cfg.get("prune_git_worktrees", True))
         self._cleanup_merged_immediately = bool(cleanup_cfg.get("merged_immediate", True))
+
+        by_outcome = cleanup_cfg.get("retention_hours_by_outcome") or {}
+        self._retention_hours_default = int(by_outcome.get("default", self._cleanup_retention_hours))
+        self._retention_hours_success = int(by_outcome.get("success", self._retention_hours_default))
+        self._retention_hours_failure = int(by_outcome.get("failure", self._retention_hours_default))
 
         merge_cfg = cfg.get("merge_gate", {})
         self._merge_gate_enabled = bool(merge_cfg.get("enabled", True))
@@ -2799,6 +2821,7 @@ class RuntimeService:
                     skill_name=task.skill_name,
                     original_user_content=task.original_request,
                     usage=response.usage,
+                    automation_name=task.automation_name,
                 )
                 await self._store.add_runtime_event(
                     task.id,
@@ -3191,6 +3214,7 @@ class RuntimeService:
                         terminal=True,
                         usage=response.usage,
                         automation_artifact_paths=automation_artifact_paths,
+                        diary_detail=output_summary,
                     )
                 except Exception as exc:
                     logger.exception(
@@ -3683,21 +3707,33 @@ class RuntimeService:
         await self._signal_status_by_id(blocked_task, TASK_STATUS_WAITING_MERGE)
         return f"Task `{task.id}` merge blocked: {error[:200]}"
 
+    def _retention_hours_for_status(self, status: str | None) -> int:
+        if status in _SUCCESS_CLEANUP_STATUSES:
+            return self._retention_hours_success
+        if status in _FAILURE_CLEANUP_STATUSES:
+            return self._retention_hours_failure
+        return self._retention_hours_default
+
     async def _cleanup_expired_tasks(self) -> int:
         candidates: list[RuntimeTask] = []
-        delayed_statuses = sorted(
-            status
-            for status in _TERMINAL_CLEANUP_STATUSES
-            if not (self._cleanup_merged_immediately and status == TASK_STATUS_MERGED)
+        success_statuses = sorted(
+            _SUCCESS_CLEANUP_STATUSES - ({TASK_STATUS_MERGED} if self._cleanup_merged_immediately else set())
         )
-        if delayed_statuses:
+        if success_statuses:
             candidates.extend(
                 await self._store.list_runtime_cleanup_candidates(
-                    statuses=delayed_statuses,
-                    older_than_hours=self._cleanup_retention_hours,
+                    statuses=success_statuses,
+                    older_than_hours=self._retention_hours_success,
                     limit=200,
                 )
             )
+        candidates.extend(
+            await self._store.list_runtime_cleanup_candidates(
+                statuses=sorted(_FAILURE_CLEANUP_STATUSES),
+                older_than_hours=self._retention_hours_failure,
+                limit=200,
+            )
+        )
         if self._cleanup_merged_immediately:
             candidates.extend(
                 await self._store.list_runtime_cleanup_candidates(
@@ -3725,22 +3761,51 @@ class RuntimeService:
         roots = [root for root in (self._agent_logs_root, self._thread_logs_root) if root.exists()]
         if not roots:
             return 0
-        cutoff_ts = time.time() - (max(0, self._cleanup_retention_hours) * 3600)
-        cleaned = 0
+
+        files: list[tuple[Path, float, str | None]] = []
+        task_ids: set[str] = set()
         for root in roots:
             for path in root.rglob("*"):
                 if not path.is_file():
                     continue
                 try:
-                    if path.stat().st_mtime > cutoff_ts:
-                        continue
-                    path.unlink(missing_ok=True)
-                    cleaned += 1
+                    mtime = path.stat().st_mtime
                 except Exception as exc:
-                    logger.warning("Failed to remove stale agent log %s: %s", path, exc)
+                    logger.warning("Failed to stat agent log %s: %s", path, exc)
+                    continue
+                match = _TASK_LOG_ID_RE.search(path.name)
+                task_id = match.group(1) if match else None
+                if task_id:
+                    task_ids.add(task_id)
+                files.append((path, mtime, task_id))
+
+        status_map = await self._store.get_task_statuses(sorted(task_ids)) if task_ids else {}
+        now = time.time()
+        cleaned = 0
+        for path, mtime, task_id in files:
+            if task_id:
+                status = status_map.get(task_id)
+                if status is not None and status not in _TERMINAL_CLEANUP_STATUSES:
+                    continue
+                retention_hours = (
+                    self._retention_hours_for_status(status)
+                    if status is not None
+                    else self._retention_hours_default
+                )
+            else:
+                retention_hours = self._retention_hours_default
+            cutoff_ts = now - max(0, retention_hours) * 3600
+            if mtime > cutoff_ts:
+                continue
+            try:
+                path.unlink(missing_ok=True)
+                cleaned += 1
+            except Exception as exc:
+                logger.warning("Failed to remove stale agent log %s: %s", path, exc)
+
         self._live_agent_logs = {
-            task_id: path
-            for task_id, path in self._live_agent_logs.items()
+            tid: path
+            for tid, path in self._live_agent_logs.items()
             if path.exists()
         }
         for root in roots:
@@ -3884,6 +3949,7 @@ class RuntimeService:
             record_history=True,
             terminal=True,
             usage=response.usage if response is not None else None,
+            diary_detail=error,
         )
         await self._signal_status_by_id(task, TASK_STATUS_FAILED)
         self._emit_automation_terminal_push(
@@ -4898,13 +4964,20 @@ class RuntimeService:
         terminal: bool = False,
         usage: dict[str, Any] | None = None,
         automation_artifact_paths: list[str] | None = None,
+        diary_detail: str | None = None,
     ) -> None:
         session = self._session_for(task)
         if session is None:
             return
         if task.automation_name:
             if record_history:
-                await session.append_assistant(task.thread_id, text[:4000], "runtime")
+                # Automation status pings stay operator-visible in the diary
+                # but bypass MemoryStore so Judge/reflectors don't re-ingest
+                # task-side metadata as user signal.
+                diary_text = text
+                if diary_detail:
+                    diary_text = f"{text}\n\n**Output detail**\n{diary_detail[:2000]}"
+                await session.append_diary_only(task.thread_id, diary_text[:6000])
             if terminal:
                 await self._send_automation_terminal_message(
                     task,
@@ -5277,6 +5350,7 @@ class RuntimeService:
         skill_name: str | None,
         original_user_content: str | None,
         usage: dict[str, Any] | None,
+        automation_name: str | None = None,
     ) -> None:
         if session is None:
             return
@@ -5288,7 +5362,12 @@ class RuntimeService:
         )
         if not visible_text:
             return
-        await session.append_assistant(thread_id, visible_text, agent_name)
+        if automation_name:
+            await session.append_diary_only(
+                thread_id, visible_text, author=agent_name,
+            )
+        else:
+            await session.append_assistant(thread_id, visible_text, agent_name)
         await self._send_thread_agent_response(
             session=session,
             thread_id=thread_id,
@@ -5311,10 +5390,13 @@ class RuntimeService:
         cleaned = self._clean_hitl_visible_text(text)
         if not cleaned:
             return
-        await session.append_assistant(task.thread_id, cleaned, agent_name)
         if task.automation_name:
+            await session.append_diary_only(
+                task.thread_id, cleaned, author=agent_name,
+            )
             await self._send_automation_terminal_message(task, cleaned, usage=usage)
             return
+        await session.append_assistant(task.thread_id, cleaned, agent_name)
         await self._send_thread_agent_response(
             session=session,
             thread_id=task.thread_id,

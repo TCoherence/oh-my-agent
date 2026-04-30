@@ -305,3 +305,43 @@ async def test_auth_credential_and_flow_crud(store):
 
     active_after = await store.get_active_auth_flow("bilibili", "owner-1")
     assert active_after is None
+
+
+@pytest.mark.asyncio
+async def test_get_task_statuses_returns_subset(store):
+    await store.create_runtime_task(
+        task_id="t-success",
+        platform="discord",
+        channel_id="100",
+        thread_id="100",
+        created_by="u1",
+        goal="x",
+        preferred_agent="codex",
+        status=TASK_STATUS_DRAFT,
+        max_steps=8,
+        max_minutes=20,
+        test_command="pytest",
+    )
+    await store.create_runtime_task(
+        task_id="t-running",
+        platform="discord",
+        channel_id="100",
+        thread_id="100",
+        created_by="u1",
+        goal="y",
+        preferred_agent="codex",
+        status=TASK_STATUS_RUNNING,
+        max_steps=8,
+        max_minutes=20,
+        test_command="pytest",
+    )
+
+    assert await store.get_task_statuses([]) == {}
+
+    statuses = await store.get_task_statuses(["t-success", "t-running", "ghost"])
+    assert statuses == {
+        "t-success": TASK_STATUS_DRAFT,
+        "t-running": TASK_STATUS_RUNNING,
+    }
+
+    assert await store.get_task_statuses(["ghost-1", "ghost-2"]) == {}

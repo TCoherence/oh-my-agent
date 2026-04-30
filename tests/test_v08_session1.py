@@ -315,12 +315,15 @@ class TestConfigValidator:
         assert any("service_retention_days" in e.path for e in r.errors)
 
     def test_optional_sections_must_be_mappings(self):
+        # Non-dict top-level sections are hard errors so boot exits before
+        # _apply_v052_defaults' setdefault chains crash.
         cfg = {**_MINIMAL_VALID, "runtime": "bad", "memory": [1, 2]}
         r = validate_config(cfg)
-        warnings = [e for e in r.errors if e.severity == "warning"]
-        sections_warned = {e.path for e in warnings}
-        assert "runtime" in sections_warned
-        assert "memory" in sections_warned
+        errors = [e for e in r.errors if e.severity == "error"]
+        sections_with_errors = {e.path for e in errors}
+        assert "runtime" in sections_with_errors
+        assert "memory" in sections_with_errors
+        assert not r.ok
 
     def test_empty_channels_list(self):
         cfg = {

@@ -125,3 +125,85 @@ async def test_diary_writer_failures_do_not_break_session(tmp_path):
     await s.append_user("t1", "hi", "alice")
     history = await s.get_history("t1")
     assert history and history[0]["content"] == "hi"
+
+
+class _RecordingDiary:
+    def __init__(self) -> None:
+        self.entries: list[dict] = []
+
+    async def append(self, **kwargs) -> None:
+        self.entries.append(kwargs)
+
+
+@pytest.mark.asyncio
+async def test_append_diary_only_skips_memory_and_cache():
+    from oh_my_agent.gateway.session import ChannelSession
+
+    diary = _RecordingDiary()
+    memory = MagicMock()
+    memory.append = MagicMock()
+    s = ChannelSession(
+        platform="discord",
+        channel_id="100",
+        channel=MagicMock(),
+        registry=MagicMock(),
+        memory_store=memory,
+        diary_writer=diary,
+    )
+
+    await s.append_diary_only("thread-X", "automation status text")
+
+    assert diary.entries and diary.entries[-1]["role"] == "system"
+    assert diary.entries[-1]["author"] == "runtime"
+    assert diary.entries[-1]["content"] == "automation status text"
+    memory.append.assert_not_called()
+    assert "thread-X" not in s._cache  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_append_diary_only_default_role_is_system():
+    from oh_my_agent.gateway.session import ChannelSession
+
+    diary = _RecordingDiary()
+    s = ChannelSession(
+        platform="discord",
+        channel_id="100",
+        channel=MagicMock(),
+        registry=MagicMock(),
+        diary_writer=diary,
+    )
+    await s.append_diary_only("t-1", "ping")
+    assert diary.entries[-1]["role"] == "system"
+
+
+@pytest.mark.asyncio
+async def test_append_diary_only_passes_author_and_role():
+    from oh_my_agent.gateway.session import ChannelSession
+
+    diary = _RecordingDiary()
+    s = ChannelSession(
+        platform="discord",
+        channel_id="100",
+        channel=MagicMock(),
+        registry=MagicMock(),
+        diary_writer=diary,
+    )
+    await s.append_diary_only("t-2", "agent text", role="assistant", author="claude")
+    assert diary.entries[-1]["role"] == "assistant"
+    assert diary.entries[-1]["author"] == "claude"
+    assert diary.entries[-1]["content"] == "agent text"
+
+
+@pytest.mark.asyncio
+async def test_append_diary_only_no_writer_is_noop():
+    from oh_my_agent.gateway.session import ChannelSession
+
+    s = ChannelSession(
+        platform="discord",
+        channel_id="100",
+        channel=MagicMock(),
+        registry=MagicMock(),
+        diary_writer=None,
+    )
+    # Should not raise.
+    await s.append_diary_only("t-3", "ping")

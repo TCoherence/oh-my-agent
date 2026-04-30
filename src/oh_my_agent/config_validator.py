@@ -71,6 +71,8 @@ def validate_config(config: dict[str, Any]) -> ValidationResult:
     _check_sections(config, result)
     _check_router(config, result)
     _check_notifications(config, result)
+    _check_runtime_cleanup(config, result)
+    _check_short_workspace(config, result)
     return result
 
 
@@ -170,7 +172,12 @@ def _check_agents(config: dict, result: ValidationResult) -> None:
 
 def _check_automations(config: dict, result: ValidationResult) -> None:
     automations = config.get("automations")
-    if automations is None or not isinstance(automations, dict):
+    if automations is None:
+        return
+    if not isinstance(automations, dict):
+        result.errors.append(ConfigError(
+            "automations", "must be a mapping if present", "error",
+        ))
         return
 
     dump_channels = automations.get("dump_channels")
@@ -179,7 +186,7 @@ def _check_automations(config: dict, result: ValidationResult) -> None:
             result.errors.append(ConfigError(
                 "automations.dump_channels",
                 "must be a mapping of name → {platform, channel_id}",
-                "warning",
+                "error",
             ))
         else:
             for name, entry in dump_channels.items():
@@ -187,20 +194,20 @@ def _check_automations(config: dict, result: ValidationResult) -> None:
                     result.errors.append(ConfigError(
                         f"automations.dump_channels.{name}",
                         "must be a mapping with platform/channel_id",
-                        "warning",
+                        "error",
                     ))
                     continue
                 if not entry.get("platform"):
                     result.errors.append(ConfigError(
                         f"automations.dump_channels.{name}.platform",
                         "is required",
-                        "warning",
+                        "error",
                     ))
                 if not entry.get("channel_id"):
                     result.errors.append(ConfigError(
                         f"automations.dump_channels.{name}.channel_id",
                         "is required",
-                        "warning",
+                        "error",
                     ))
 
     storage_dir = automations.get("storage_dir")
@@ -247,11 +254,23 @@ def _check_logging(config: dict, result: ValidationResult) -> None:
 # ── Generic section checks ──────────────────────────────────────────── #
 
 def _check_sections(config: dict, result: ValidationResult) -> None:
-    """Light type-checks for optional sections."""
-    for section in ("runtime", "memory", "skills", "router", "auth"):
+    """Type-check optional top-level sections.
+
+    Non-dict values are hard errors because boot ``setdefault`` chains
+    crash on them; refusing the config in the validator gives a clean
+    message instead of a Python ``AttributeError``.
+    """
+    for section in (
+        "runtime",
+        "memory",
+        "skills",
+        "router",
+        "auth",
+        "short_workspace",
+    ):
         val = config.get(section)
         if val is not None and not isinstance(val, dict):
-            result.errors.append(ConfigError(section, "must be a mapping if present", "warning"))
+            result.errors.append(ConfigError(section, "must be a mapping if present", "error"))
 
 
 # ── Router ──────────────────────────────────────────────────────────── #
@@ -427,3 +446,131 @@ def _check_notifications(config: dict, result: ValidationResult) -> None:
                     f"must be one of {sorted(_PUSH_LEVELS)}, got '{value}'",
                     "error",
                 ))
+
+
+# ── Short workspace ─────────────────────────────────────────────────── #
+
+def _check_short_workspace(config: dict, result: ValidationResult) -> None:
+    """Validate ``short_workspace`` interior types.
+
+    Top-level ``short_workspace`` non-dict is already covered by
+    ``_check_sections``. Here we drill into the scalar fields the
+    runtime feeds to ``bool()`` and ``int()`` so silent coercion can't
+    flip operator intent.
+    """
+    section = config.get("short_workspace")
+    if not isinstance(section, dict):
+        return  # _check_sections handled the type error
+    _check_bool_field(section, "enabled", path="short_workspace", result=result)
+    for scalar in ("ttl_hours", "cleanup_interval_minutes"):
+        v = section.get(scalar)
+        if v is None:
+            continue
+        if not _is_strict_non_negative_int(v):
+            result.errors.append(ConfigError(
+                f"short_workspace.{scalar}",
+                f"must be a non-negative integer, got '{v}' ({type(v).__name__})",
+                "error",
+            ))
+    root = section.get("root")
+    if root is not None and not isinstance(root, str):
+        result.errors.append(ConfigError(
+            "short_workspace.root",
+            f"must be a string path, got '{root}' ({type(root).__name__})",
+            "error",
+        ))
+
+
+# ── Runtime cleanup ─────────────────────────────────────────────────── #
+
+def _is_strict_non_negative_int(v: Any) -> bool:
+    """Reject bool/float/str even though ``int()`` would coerce them.
+
+    ``int(True) == 1`` and ``int(1.5) == 1`` would silently truncate the
+    user's value; we'd rather hard-error so the misconfiguration surfaces.
+    """
+    return isinstance(v, int) and not isinstance(v, bool) and v >= 0
+
+
+def _check_bool_field(
+    cfg: dict, key: str, *, path: str, result: ValidationResult,
+) -> None:
+    """Reject non-bool values for fields the runtime feeds to ``bool()``.
+
+    ``bool("false")`` returns ``True`` (non-empty string is truthy), so a
+    YAML scalar like ``enabled: "false"`` silently inverts the operator's
+    intent. Hard-error instead.
+    """
+    v = cfg.get(key)
+    if v is None or isinstance(v, bool):
+        return
+    result.errors.append(ConfigError(
+        f"{path}.{key}",
+        f"must be a boolean, got '{v}' ({type(v).__name__})",
+        "error",
+    ))
+
+
+def _check_runtime_cleanup(config: dict, result: ValidationResult) -> None:
+    """Validate ``runtime.cleanup`` and ``runtime.merge_gate`` shape and
+    scalar fields. Top-level ``runtime`` non-dict is already covered by
+    ``_check_sections``.
+    """
+    runtime = config.get("runtime")
+    if not isinstance(runtime, dict):
+        return  # _check_sections handled the type error
+
+    merge_gate = runtime.get("merge_gate")
+    if merge_gate is not None and not isinstance(merge_gate, dict):
+        result.errors.append(ConfigError(
+            "runtime.merge_gate", "must be a mapping if present", "error",
+        ))
+    elif isinstance(merge_gate, dict):
+        for bool_key in (
+            "enabled", "auto_commit", "require_clean_repo", "preflight_check",
+        ):
+            _check_bool_field(merge_gate, bool_key, path="runtime.merge_gate", result=result)
+
+    cleanup = runtime.get("cleanup")
+    if cleanup is None:
+        return
+    if not isinstance(cleanup, dict):
+        result.errors.append(ConfigError(
+            "runtime.cleanup", "must be a mapping if present", "error",
+        ))
+        return
+
+    for bool_key in ("enabled", "prune_git_worktrees", "merged_immediate"):
+        _check_bool_field(cleanup, bool_key, path="runtime.cleanup", result=result)
+
+    for scalar in ("interval_minutes", "retention_hours"):
+        v = cleanup.get(scalar)
+        if v is None:
+            continue
+        if not _is_strict_non_negative_int(v):
+            result.errors.append(ConfigError(
+                f"runtime.cleanup.{scalar}",
+                f"must be a non-negative integer, got '{v}' ({type(v).__name__})",
+                "error",
+            ))
+
+    by_outcome = cleanup.get("retention_hours_by_outcome")
+    if by_outcome is None:
+        return
+    if not isinstance(by_outcome, dict):
+        result.errors.append(ConfigError(
+            "runtime.cleanup.retention_hours_by_outcome",
+            "must be a mapping if present",
+            "error",
+        ))
+        return
+    for key in ("success", "failure", "default"):
+        v = by_outcome.get(key)
+        if v is None:
+            continue
+        if not _is_strict_non_negative_int(v):
+            result.errors.append(ConfigError(
+                f"runtime.cleanup.retention_hours_by_outcome.{key}",
+                f"must be a non-negative integer, got '{v}' ({type(v).__name__})",
+                "error",
+            ))
