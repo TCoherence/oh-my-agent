@@ -410,6 +410,77 @@ def test_automations_non_dict_is_error():
     assert not result.ok
 
 
+def test_runtime_cleanup_enabled_string_is_error():
+    """``bool("false")`` returns True silently; reject string YAML
+    intended as bool."""
+    result = validate_config(_config_with_runtime({
+        "cleanup": {"enabled": "false"}
+    }))
+    errs = _runtime_errors(result, severity="error")
+    assert any(e.path == "runtime.cleanup.enabled" for e in errs)
+
+
+def test_runtime_cleanup_prune_git_worktrees_int_is_error():
+    result = validate_config(_config_with_runtime({
+        "cleanup": {"prune_git_worktrees": 1}
+    }))
+    errs = _runtime_errors(result, severity="error")
+    assert any(e.path == "runtime.cleanup.prune_git_worktrees" for e in errs)
+
+
+def test_runtime_merge_gate_enabled_string_is_error():
+    result = validate_config(_config_with_runtime({
+        "merge_gate": {"enabled": "yes"}
+    }))
+    errs = _runtime_errors(result, severity="error")
+    assert any(e.path == "runtime.merge_gate.enabled" for e in errs)
+
+
+def test_short_workspace_enabled_string_is_error():
+    cfg = _base_config()
+    cfg["short_workspace"] = {"enabled": "false"}
+    result = validate_config(cfg)
+    errs = [e for e in result.errors if e.path == "short_workspace.enabled" and e.severity == "error"]
+    assert errs
+
+
+def test_short_workspace_ttl_hours_float_is_error():
+    cfg = _base_config()
+    cfg["short_workspace"] = {"ttl_hours": 24.5}
+    result = validate_config(cfg)
+    errs = [e for e in result.errors if e.path == "short_workspace.ttl_hours" and e.severity == "error"]
+    assert errs
+
+
+def test_short_workspace_root_int_is_error():
+    cfg = _base_config()
+    cfg["short_workspace"] = {"root": 12345}
+    result = validate_config(cfg)
+    errs = [e for e in result.errors if e.path == "short_workspace.root" and e.severity == "error"]
+    assert errs
+
+
+def test_automations_dump_channels_non_dict_is_error():
+    cfg = _base_config()
+    cfg["automations"] = {"dump_channels": "broken"}
+    result = validate_config(cfg)
+    errs = [e for e in result.errors if e.path == "automations.dump_channels" and e.severity == "error"]
+    assert errs
+    assert not result.ok
+
+
+def test_automations_dump_channels_missing_platform_is_error():
+    cfg = _base_config()
+    cfg["automations"] = {"dump_channels": {"oma_dump": {"channel_id": "123"}}}
+    result = validate_config(cfg)
+    errs = [
+        e for e in result.errors
+        if e.path == "automations.dump_channels.oma_dump.platform"
+        and e.severity == "error"
+    ]
+    assert errs
+
+
 def test_runtime_cleanup_missing_section_passes():
     result = validate_config(_config_with_runtime({}))
     errs = _runtime_errors(result, severity="error")
