@@ -2,8 +2,8 @@
 name: deals-scanner
 description: Produce Chinese-first deal/discount scanning reports covering US credit cards (Doctor of Credit, NerdWallet, TPG, issuer sites), uscardforum (美卡论坛), Rakuten cashback, Slickdeals, and Dealmoon (北美省钱快报). Persists Markdown and JSON outputs under ~/.oh-my-agent/reports/deals-scanner/. Use this skill for daily deal scans per source channel and weekly cross-source deal digests that reuse prior stored reports.
 metadata:
-  timeout_seconds: 1500
-  max_turns: 60
+  timeout_seconds: 2400
+  max_turns: 100
 ---
 
 # Deals Scanner

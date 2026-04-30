@@ -443,10 +443,28 @@ class ClaudeAgent(BaseCLIAgent):
             if error_kind == "cli_error":
                 error_kind = classify_cli_error_kind(err_msg)
             partial_text = partial_text or _bounded_log_excerpt(log_path)
+            # Self-describing error string for terminal kinds. The default
+            # ``"<agent> exited 1: <raw stdout head>"`` leaks the
+            # ``{"type":"system","subtype":"init",...}`` NDJSON prefix into
+            # the task error column on every max_turns failure, masking the
+            # real cause and making operator surfaces look like cli_error.
+            # Build a typed message instead; ``raw`` and ``partial_text``
+            # still carry the original stdout for forensic inspection.
+            if error_kind == "max_turns":
+                num_turns = (
+                    raw_error.get("num_turns") if isinstance(raw_error, dict) else None
+                )
+                error_text = (
+                    f"{self.name}: max_turns reached ({num_turns} turns)"
+                    if isinstance(num_turns, int)
+                    else f"{self.name}: max_turns reached"
+                )
+            else:
+                error_text = f"{self.name} exited {returncode}: {err_msg[:400]}"
             return AgentResponse(
                 text="",
                 raw=raw_error,
-                error=f"{self.name} exited {returncode}: {err_msg[:400]}",
+                error=error_text,
                 error_kind=error_kind,
                 partial_text=partial_text,
                 terminal_reason=terminal_reason,

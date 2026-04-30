@@ -234,6 +234,69 @@ async def test_claude_error_max_turns_with_ndjson_stdout(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_claude_max_turns_error_message_is_self_describing(monkeypatch):
+    """Regression: the ``error`` field on a max_turns failure must read
+    ``"claude: max_turns reached (<N> turns)"`` — not ``"claude exited 1:
+    {"type":"system","subtype":"init",..."`` which is the raw NDJSON head.
+
+    Before this fix the stdout-prefix leak made every max_turns task look
+    like a cli_error in the runtime_tasks.error column / Discord task card,
+    masking the real cause even though ``error_kind`` was already correctly
+    classified. ``raw`` and ``partial_text`` still carry the original frame
+    for forensic inspection.
+    """
+    ndjson = "\n".join([
+        json.dumps({"type": "system", "subtype": "init", "session_id": "sess-mt"}),
+        json.dumps({
+            "type": "result",
+            "subtype": "error_max_turns",
+            "num_turns": 61,
+            "result": "partial",
+            "terminal_reason": "max_turns",
+            "session_id": "sess-mt",
+        }),
+    ])
+
+    async def _fail(*args, **kwargs):
+        return 1, ndjson.encode(), b""
+
+    monkeypatch.setattr("oh_my_agent.agents.cli.claude._stream_cli_process", _fail)
+
+    agent = ClaudeAgent(cli_path="claude", model="sonnet-test")
+    response = await agent.run("hello")
+
+    assert response.error_kind == "max_turns"
+    assert response.error == "claude: max_turns reached (61 turns)"
+    # raw frame and partial_text still carry the original signal for debugging.
+    assert isinstance(response.raw, dict)
+    assert response.raw.get("subtype") == "error_max_turns"
+    assert response.partial_text == "partial"
+
+
+@pytest.mark.asyncio
+async def test_claude_max_turns_error_message_omits_count_when_unknown(monkeypatch):
+    """If ``num_turns`` is missing from the result frame, the message gracefully
+    drops the count instead of rendering ``(None turns)``."""
+    payload = {
+        "type": "result",
+        "subtype": "error_max_turns",
+        "result": "partial",
+        "terminal_reason": "max_turns",
+    }
+
+    async def _fail(*args, **kwargs):
+        return 1, json.dumps(payload).encode(), b""
+
+    monkeypatch.setattr("oh_my_agent.agents.cli.claude._stream_cli_process", _fail)
+
+    agent = ClaudeAgent(cli_path="claude", model="sonnet-test")
+    response = await agent.run("hello")
+
+    assert response.error_kind == "max_turns"
+    assert response.error == "claude: max_turns reached"
+
+
+@pytest.mark.asyncio
 async def test_claude_ndjson_without_result_frame_falls_back_to_cli_error(monkeypatch):
     """If the stream has no ``result`` event (e.g. CLI killed mid-stream),
     ``error_kind`` should fall back to ``classify_cli_error_kind`` on stderr —
