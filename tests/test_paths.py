@@ -162,6 +162,46 @@ def test_judge_memory_dir_judge_without_memory_dir_falls_to_default() -> None:
     assert paths.judge_memory_dir(cfg) == Path("~/.oh-my-agent/memory").expanduser().resolve()
 
 
+def test_judge_memory_dir_judge_present_does_not_leak_to_adaptive(tmp_path: Path) -> None:
+    """Regression test for Codex round-7 review.
+
+    boot.py:803 picks the block ONCE: ``memory.judge`` wins if present, even
+    without ``memory_dir``. Adaptive's ``memory_dir`` must NOT bleed through.
+    The helper falls back to the **default**, not to adaptive's value.
+    """
+
+    cfg = {
+        "memory": {
+            "judge": {"enabled": True},  # no memory_dir
+            "adaptive": {"memory_dir": str(tmp_path / "should_not_be_used")},
+        }
+    }
+    assert paths.judge_memory_dir(cfg) == Path("~/.oh-my-agent/memory").expanduser().resolve()
+
+
+def test_judge_memory_dir_handles_non_dict_block_gracefully() -> None:
+    """If memory.judge is set to a non-dict (config bug), do not crash."""
+
+    cfg = {"memory": {"judge": "not-a-dict"}}
+    # Falls through to default like an empty block.
+    assert paths.judge_memory_dir(cfg) == Path("~/.oh-my-agent/memory").expanduser().resolve()
+
+
+def test_judge_memory_dir_handles_explicit_none_block() -> None:
+    """If memory.judge is explicitly None, do not crash; treat as empty.
+
+    boot.py:803 uses ``.get("judge", default)`` — when the key exists with
+    value ``None``, ``.get`` returns ``None`` (not the default), so adaptive
+    is NOT consulted. boot.py would then crash on ``None.get(...)``; the
+    helper is defensive and treats it as an empty block, returning the
+    default path.
+    """
+
+    cfg = {"memory": {"judge": None, "adaptive": {"memory_dir": "/tmp/from-adaptive"}}}
+    result = paths.judge_memory_dir(cfg)
+    assert result == Path("~/.oh-my-agent/memory").expanduser().resolve()
+
+
 # ---------------------------------------------------------------------------
 # Absolute-path invariants
 # ---------------------------------------------------------------------------

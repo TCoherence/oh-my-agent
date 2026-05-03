@@ -31,7 +31,6 @@ any ``oh_my_agent.*`` modules to avoid circular imports.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 # ---------------------------------------------------------------------------
 # Defaults — kept in lockstep with boot.py:_apply_defaults setdefault chain.
@@ -40,7 +39,7 @@ from typing import Any
 
 _DEFAULT_WORKTREE_ROOT = "~/.oh-my-agent/runtime/tasks"
 _DEFAULT_STATE_PATH = "~/.oh-my-agent/runtime/runtime.db"
-_DEFAULT_REPORTS_DIR: Any = "~/.oh-my-agent/reports"
+_DEFAULT_REPORTS_DIR = "~/.oh-my-agent/reports"
 _DEFAULT_MEMORY_DB = "~/.oh-my-agent/runtime/memory.db"
 _DEFAULT_SKILLS_TELEMETRY = "~/.oh-my-agent/runtime/skills.db"
 _DEFAULT_JUDGE_MEMORY_DIR = "~/.oh-my-agent/memory"
@@ -147,22 +146,26 @@ def skills_telemetry_path(config: dict) -> Path:
 def judge_memory_dir(config: dict) -> Path:
     """Directory holding ``memories.yaml`` + ``MEMORY.md``.
 
-    Three-level fallback per ``boot.py:809-812``:
+    Mirrors ``boot.py:803`` exactly:
 
-    1. ``memory.judge.memory_dir``
-    2. ``memory.adaptive.memory_dir`` (legacy adaptive-memory key)
-    3. default ``~/.oh-my-agent/memory``
+    .. code:: python
+
+        memory_cfg_block = memory_cfg.get("judge", memory_cfg.get("adaptive", {}))
+        memory_dir = memory_cfg_block.get("memory_dir", "~/.oh-my-agent/memory")
+
+    The "block" is picked **once**: ``memory.judge`` if present, else
+    ``memory.adaptive``, else ``{}``. Then ``memory_dir`` comes from that block.
+    Crucially, if ``memory.judge`` exists **without** a ``memory_dir`` key,
+    we do NOT fall through to ``memory.adaptive`` — we fall through to the
+    default. This matches boot.py's semantics; an earlier helper version
+    leaked adaptive's value into the judge case (caught by Codex review).
     """
 
     memory_cfg = config.get("memory", {}) or {}
-    judge_cfg = memory_cfg.get("judge")
-    adaptive_cfg = memory_cfg.get("adaptive")
-
-    if isinstance(judge_cfg, dict) and "memory_dir" in judge_cfg:
-        return _abs(judge_cfg["memory_dir"])
-    if isinstance(adaptive_cfg, dict) and "memory_dir" in adaptive_cfg:
-        return _abs(adaptive_cfg["memory_dir"])
-    return _abs(_DEFAULT_JUDGE_MEMORY_DIR)
+    block = memory_cfg.get("judge", memory_cfg.get("adaptive", {})) or {}
+    if not isinstance(block, dict):
+        block = {}
+    return _abs(block.get("memory_dir", _DEFAULT_JUDGE_MEMORY_DIR))
 
 
 def judge_memories_yaml_path(config: dict) -> Path:
