@@ -78,12 +78,37 @@ The skill is report-centric. It writes durable report files under `~/.oh-my-agen
 
 ## Final answer format
 
-**You MUST end your turn with the full Markdown report body in your reply** — the same Markdown content you persisted in step 6/7. The Discord user receives only your final assistant message; they cannot see file contents. If you skip this they only see your progress narration ("loading scripts..." / "fetching feeds...") and have no way to read the report you produced.
+The full Markdown report is on disk; **do NOT re-paste it verbatim in chat**. Re-streaming a 5–30 KB report as output tokens wastes wall-clock budget late in the run (real incident: weekly `bdcf9908d735` 2026-05-03 — persist succeeded at 18:16, the trailing chat-body re-stream was killed by the 1500s wall at 18:22). The proper systemic fix lives in the runtime backlog under "Long-output final delivery" — until that lands, return a structured chat summary that gives the user enough to act without opening the file.
+
+**Required content in the chat reply:**
+
+1. **Headline conclusion (1–3 sentences)**: today's main read for this domain — the call/judgment, plus the single most important driver and its main caveat.
+2. **Per-section highlights (one short bullet per section in the canonical order for the domain)**: 1–2 sentences each. For AI daily: frontier_radar / paper_layer / people_pool / 5-layer / cross-layer. For finance daily: 中国宏观 / 美国宏观 / 美国波动 / 中港市场 / 持仓动态 / 播客. For politics daily: 中国中央政策 / 美国联邦政策 / 中美地缘 / 影响判断. For weekly synthesis: cross-domain trend summary + the 3–5 strongest cross-references between domains.
+3. **Top picks / signals (3–5 highest-impact items)**: paste the actual entries with their inline citations from the body — these are what the reader needs to see in chat without opening the file.
+4. **Coverage notes**: any non-empty `coverage_gaps` / `confidence_flags` / source-mix caveats from the JSON, in 1–2 sentences. Skip if empty.
+5. **Storage paths** at the end (the published `.md` / `.json` pair).
 
 Layout:
 
 ```
-<full Markdown report — every section, every bullet, verbatim from the .md you persisted>
+<headline conclusion>
+
+**[<domain>] 各 section 速览**
+
+- frontier_radar / 中国宏观 / 中国中央政策 / 跨域趋势: <1–2 sentences>
+- paper_layer / 美国宏观 / 美国联邦政策 / 跨域链接: <1–2 sentences>
+- ... (continue per the domain's section order)
+
+**Top picks**
+
+- <entry 1, with inline link>
+- <entry 2, with inline link>
+- <entry 3, with inline link>
+
+**Coverage notes** (skip if empty)
+
+- <gap 1>
+- <flag 1>
 
 📁 Stored at:
 - ~/.oh-my-agent/reports/market-briefing/daily/<date>/<domain>.md
@@ -91,9 +116,10 @@ Layout:
 ```
 
 ❌ Don't end the turn with "Done.", "Report saved.", or a short progress summary — those are status notes, not the answer.
-❌ Don't reply with only the storage path — the user cannot open files in Discord.
-❌ Don't truncate, paraphrase, or "summarize for chat" because the report is long — the gateway auto-chunks messages > 2000 chars across multiple Discord posts, so paste the full body anyway.
-✅ The exact Markdown body you wrote to the daily store goes into your reply, verbatim, followed by the storage paths.
+❌ Don't reply with ONLY the storage path — the user can't open files in Discord; they need the summary above.
+❌ Don't paste the full Markdown body verbatim — that's wasted output tokens and wall-clock; the file is the canonical artifact.
+❌ Don't drop the per-section block in favor of a vague "今日整体平稳" — the reader wants the section-by-section read.
+✅ The summary above gives the reader enough to make a decision without opening the file; the file is for full detail + citations.
 
 ## Storage layout
 

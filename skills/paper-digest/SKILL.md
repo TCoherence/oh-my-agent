@@ -96,24 +96,45 @@ persist 会：
 - 原子落到 `~/.oh-my-agent/reports/paper-digest/daily/<DATE>.md|json`
 - 动态 import `paper_seen_pool.py record`（**无需单独调用**）
 
-### 步骤 5：直接贴 Markdown 正文到 Discord，末尾附一行 `Saved: <path>`
+### 步骤 5：在 chat 中给出结构化摘要 + 存储路径
 
-**这是必须的**：Discord 用户只能看到你的 final assistant message，看不到 file 内容。如果跳过这一步，用户只能看到前几个步骤的进度叙述（"loading paper feeds..." / "fetching abstracts..."），完全看不到你产出的 digest。Gateway 自动 chunk 超过 2000 字的消息为多条 Discord posts，所以 paper-digest 报告再长也直接 paste 全文。
+完整 digest 已经落盘；**不要再把整篇 Markdown verbatim 贴到 chat**。把 5–30 KB 的报告再以 output token 重生一遍，会在 run 末尾吃掉大量 wall-clock 预算（系统级修复跟踪在 runtime backlog 的 "Long-output final delivery" 条目里）。这一步要回的是结构化摘要——让用户**不打开 file 也能拿到核心结论**。
+
+**chat reply 必含内容：**
+
+1. **一句话结论（1-2 句）**：今日论文层的主线判断 + 最强的 1 个观察点（如某主题命中多篇、某 lab 当日多产、某 benchmark 结果反转等）。
+2. **Top picks（3 条，复制自 JSON `top_picks[0:3]`）**：每条一行，格式 `- [<arxiv_id>](<arxiv_url>) <title> — <tldr_cn>`。这是用户来这次想看的实质内容，必须在 chat 里。
+3. **🏷 Watchlist 命中 / 🧑‍🔬 新作者 简报（可选）**：如果当日有 watchlist 主题命中或新作者发现，1-2 句概述（不展开列表，详情在文件里）。
+4. **📉 Coverage gaps（如非空）**：列 `coverage_gaps[]` 里的 slug（`arxiv_unavailable` / `hf_daily_unavailable` / `s2_unavailable` 等）+ 1 句解释。如果都没有 gap 就跳过。
+5. **存储路径**：`Saved: ~/.oh-my-agent/reports/paper-digest/daily/<DATE>.md`。
 
 格式：
 
 ```
-<完整的 Markdown digest 正文 — 所有 sections、所有 picks、verbatim 复制自 .md>
+<一句话结论>
+
+**Top picks**
+
+- [<arxiv_id>](<arxiv_url>) <title> — <tldr_cn>
+- [<arxiv_id>](<arxiv_url>) <title> — <tldr_cn>
+- [<arxiv_id>](<arxiv_url>) <title> — <tldr_cn>
+
+**Watchlist 命中 / 新作者**（可选）
+
+- <主题或团队 + 1 句话>
+
+**Coverage gaps**（如非空）
+
+- <slug>: <1 句话>
 
 Saved: ~/.oh-my-agent/reports/paper-digest/daily/<DATE>.md
 ```
 
 ❌ 不要用 "Done."、"Report saved."、一句话总结收尾 —— 那是状态注释，不是 answer。
-❌ 不要只回 storage path —— 用户在 Discord 打不开文件。
-❌ 不要因为报告长就截断 / 改写 / "为聊天精简" —— Gateway 会 chunk。
-✅ 你 persist 到 daily store 的那份 Markdown 正文，原样进 reply。
-
-不要让用户自己去文件里找内容。
+❌ 不要只回 storage path —— 用户在 Discord 打不开文件，需要看到摘要。
+❌ 不要把整篇 Markdown 正文 verbatim 贴 chat —— 浪费 output token + wall-clock，文件已经是 canonical artifact。
+❌ 不要把一句话结论写成 "今日论文层无明显信号" 这种空话 —— 哪怕日子薄，也要给 1 个具体观察点（或明确说 "三源都返回空" 并指出原因）。
+✅ 摘要本身要让一个不打开文件的读者也能拿到核心结论；文件用于 deep dive。
 
 ### Turn budget 目标
 
