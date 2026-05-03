@@ -221,21 +221,100 @@ Do not treat `/search` as an external news source. In this repo, `/search` is in
 - If a section has no high-confidence incremental signal, say so explicitly with `no high-confidence incremental signal` and explain what remains worth watching.
 - Use `coverage_gaps` and `confidence_flags` instead of pretending a thin section is complete.
 
-## AI people-pool workflow
+## AI daily workflow
 
-For `daily_digest` with `domain=ai`:
+For `daily_digest` with `domain=ai`. The AI daily run produces **4 sub-section files plus a final aggregate**, persisted into the canonical store. Sub-sections are persisted **immediately as each one is written** so a max_turns or timeout failure mid-run preserves whatever has already landed; the bumped re-run skips already-complete sections via `section-status`. See [`references/section_schemas.md`](references/section_schemas.md) for the schema contract.
 
-1. Load prior report context with `report_store.py context`.
-2. Load the current people pool with `ai_people_pool.py context`.
-3. Research:
-   - frontier-lab radar
-   - five-layer AI developments
-   - tracked people / community / X.com signals
-   - **people discovery sweep** (see rules below)
-4. Fill the AI Markdown + JSON — include `new_candidate_people` and `promoted_people` arrays.
-5. Persist the report with `report_store.py persist`. The persist command **automatically calls `ai_people_pool.py record`** for AI daily reports — no separate manual step needed.
+### Steps
 
-Only use `sync-repo` for explicit curated maintenance. Do not rewrite the repo seed file during a normal daily run.
+In every command below, omit `--report-date` so the script uses today's local date (resolved via `OMA_REPORT_TIMEZONE` / `TZ` / system). Pass `--report-date YYYY-MM-DD` only when you need to override (e.g., a backfill run for a specific past day).
+
+0. **(Re-run path) Check for already-complete sub-sections.** Before drafting anything, run:
+
+   ```bash
+   ./.venv/bin/python ${OMA_AGENT_HOME}/skills/market-briefing/scripts/report_store.py section-status \
+       --domain ai
+   ```
+
+   Read the `sections` map in the JSON output. For any section with `complete: true`, skip the corresponding research + draft + persist steps below — the file pair is already on disk and will be picked up by the aggregator. Only redo sections marked `complete: false`. (On a fresh first-run all four are missing; this is a no-op.)
+
+1. **Prefetch podcasts** (always run, fast):
+
+   ```bash
+   ./.venv/bin/python ${OMA_AGENT_HOME}/skills/market-briefing/scripts/podcast_fetch.py --domain ai
+   ```
+
+   Save the output for the `🎙️ 播客动态` section in the final aggregate. If the script returns an empty array or fails, plan to write `今日订阅播客暂无更新` in the aggregate and move on. Podcasts are not a sub-section — they live only in the final aggregate.
+
+2. **Load historical context + people pool**:
+
+   ```bash
+   ./.venv/bin/python ${OMA_AGENT_HOME}/skills/market-briefing/scripts/report_store.py context --mode daily_digest --domain ai
+   ./.venv/bin/python ${OMA_AGENT_HOME}/skills/market-briefing/scripts/ai_people_pool.py context
+   ```
+
+3. **Draft + persist each sub-section, immediately**. The 4 sub-sections are largely independent; do NOT batch their persists. Each one is `write Markdown` → `write JSON matching schema` → `persist-section` → move to next.
+
+   For each section in `[frontier_radar, paper_layer, people_pool, macro_news]` (skip if step 0 marked it complete):
+
+   ```bash
+   # 1. Write the section's draft to /tmp scratch files
+   #    (use the schema in references/section_schemas.md)
+   # 2. Persist immediately:
+   ./.venv/bin/python ${OMA_AGENT_HOME}/skills/market-briefing/scripts/report_store.py persist-section \
+       --domain ai --section <name> \
+       --markdown-file /tmp/ai_<name>.md --json-file /tmp/ai_<name>.json
+   ```
+
+   Section-specific guidance:
+
+   - **`frontier_radar`** — 8 labs (`OpenAI`, `Anthropic`, `Google DeepMind`, `Meta`, `xAI`, `Mistral`, `Qwen`, `DeepSeek`). For each, do at most **1 grouped WebSearch** for the day's signals (you may search multiple labs at once). Body anchor: `labs[]`. Verified signals → `signals[]` with `verified: true`; unverified rumours → top-level `unverified_frontier_signals`.
+   - **`paper_layer`** — **Read paper-digest's daily JSON first**: `~/.oh-my-agent/reports/paper-digest/daily/<TODAY>.json` (use the same `<TODAY>` ISO date as your `section-status` call resolved to). Use `top_picks[].{arxiv_id, title, tldr_cn, arxiv_url}` directly to populate `papers_consumed_from_paper_digest[]`. **Do not WebSearch arXiv papers** — that's paper-digest's job. If the file is missing or older than today, set `paper_digest_status` accordingly, leave `papers_consumed_from_paper_digest: []`, and add `paper_digest_unavailable` (or `paper_digest_stale`) to `coverage_gaps`. Add at most 2-3 entries to `technical_signals[]` for technical news that paper-digest legitimately would not cover (e.g., a tooling release, an open-weights drop without a paper).
+   - **`people_pool`** — Load `references/ai_people_seed.yaml` and `ai_people_pool.py context` output. Research tracked people + community signals → `tracked_people_signals[]`. Run the bounded discovery sweep (see "People discovery rules" below) → `new_candidate_people[]`. Body anchor: `people_signal_summary` (string).
+   - **`macro_news`** — 5-layer signals across `energy`, `chips`, `infra`, `model`, `application`, plus `cross_layer_links[]`. **Do not duplicate** what `paper_layer` already covered (the aggregator will dedup, but writing the same paper twice wastes turns). Body anchor: `five_layer_signals` (object with the 5 layer keys).
+
+4. **Final aggregation step** — read the 4 sub-section JSONs back from disk and write the legacy `ai.md` + `ai.json` (the user-facing single-file output preserved for backward compat + weekly synthesis). The legacy AI daily Markdown structure is fixed at 11 H2 sections in [`references/report_schema.md`](references/report_schema.md); thread the 4 sub-section payloads into them as follows:
+
+   | Legacy `ai.md` H2 section | Source sub-section + JSON path |
+   | --- | --- |
+   | `## 摘要` | Synthesise from all 4 sub-section JSONs (1-2 sentences each layer's headline, plus your overall day-frame) |
+   | `## Frontier Labs / Frontier Model Radar` | `frontier_radar.json` — render `frontier_signal_summary` as a lead paragraph, then per-lab `signals[]`. Append `unverified_frontier_signals[]` as a clearly-labelled tail block. |
+   | `## 关键人物与社区信号` | `people_pool.json` `people_signal_summary` + `tracked_people_signals[]` |
+   | `## Energy` / `## Chips` / `## Infra` / `## Model` / `## Application` | `macro_news.json` `five_layer_signals.{energy, chips, infra, model, application}` |
+   | (folded INTO `## Model`) | `paper_layer.json` `papers_consumed_from_paper_digest[]` — render as a sub-list at the **end** of `## Model`, each entry `- [<arxiv_id>](arxiv_url) <title> — <tldr_cn>`. **No new H2 section.** |
+   | (folded INTO `## Application`) | `paper_layer.json` `technical_signals[]` — render as a sub-list at the **end** of `## Application`, each entry `- <summary>` with evidence-url citations. **No new H2 section.** |
+   | `## 层间联动影响` | `macro_news.json` `cross_layer_links[]` |
+   | `## 🎙️ 播客动态` | `podcast_fetch.py` output from step 1 (NOT a sub-section JSON) |
+   | `## 候选池变化与后续关注` | `people_pool.json` `new_candidate_people[]` + `promoted_people[]` + `candidate_queue_summary` |
+   | `## 来源与交叉验证说明` | Synthesise from all 4 sub-sections' `coverage_gaps[]` + `confidence_flags[]` + the bibliography of cited URLs |
+
+   The aggregate `ai.json` should re-flatten the same content into the legacy AI daily JSON shape (`frontier_lab_watch`, `tracked_people`, `new_candidate_people`, etc. per `references/report_schema.md`) — pull from the 4 sub-section JSONs without re-deriving from web sources.
+
+   Persist via the existing `persist` command (no `--section` flag — this is the final aggregate, not a sub-section):
+
+   ```bash
+   ./.venv/bin/python ${OMA_AGENT_HOME}/skills/market-briefing/scripts/report_store.py persist \
+       --mode daily_digest --domain ai \
+       --markdown-file /tmp/ai.md --json-file /tmp/ai.json
+   ```
+
+   The legacy `persist` command **still auto-records the AI people pool** from the aggregate `ai.json` — no separate manual step needed. The 4 sub-section files under `ai_sections/` are NOT consumed by `ai_people_pool.py record`; they exist for checkpoint recovery + downstream composition only.
+
+5. **Output** — see "Final answer format" above.
+
+### Execution strategy (parallel preferred)
+
+The 4 sub-sections in step 3 are largely independent — `paper_layer` depends only on paper-digest's prior JSON; the others touch separate sources (frontier-lab announcements / tracked-people activity / 5-layer macro news). If your runtime exposes a sub-agent / Task / Agent tool (Claude Code's `Task` tool, Gemini's `@agent_name`, or equivalent), prefer fanning out the 4 section drafts as parallel sub-agent calls so each gets its own context window. Each sub-agent should:
+
+- be told its single `section` (one of the 4 names above)
+- own the full per-section workflow end-to-end (research → JSON + Markdown matching the schema → `persist-section`)
+- return only a short success/failure summary + the persisted file paths
+
+The cross-section dedupe (e.g., a paper appearing in both `paper_layer` and `macro_news.model`) happens in the **final aggregation step (step 4)**, which reads the 4 per-section JSONs back from disk — so isolated sub-agent contexts do **not** weaken cross-section coverage.
+
+If sub-agent tooling is not available, fall back to running the 4 section drafts sequentially in the parent context — same outputs, same filesystem layout, just slower. Even sequential, the per-section persist preserves the checkpoint-recovery property: a max_turns or timeout failure mid-run leaves complete sections on disk for the bumped re-run to skip.
+
+Use `references/sync-repo` for explicit curated people-pool maintenance only. Do not rewrite the repo seed file during a normal daily run.
 
 ### People discovery rules
 
