@@ -494,9 +494,10 @@ def test_runtime_cleanup_missing_section_passes():
 # ``None`` — the validator used to skip both, but boot's ``setdefault`` is
 # a no-op for explicit ``None``, so the value reached the runtime where
 # ``int(None)`` crashes and ``bool(None)`` silently flips intent.
-# Each null-is-error test below has a paired absent-is-ok regression for
-# the four scoped code paths (bool helper / int main loop / merge_gate /
-# short_workspace).
+# The null-is-error tests below cover each touched leaf; absent-is-ok
+# regressions exist for every scoped code path (bool helper / int main
+# loop / retention_hours_by_outcome sub-loop / merge_gate / short_workspace)
+# so a future revert to the old skip-both pattern would surface here.
 
 
 def test_runtime_cleanup_enabled_null_is_error():
@@ -545,6 +546,19 @@ def test_runtime_cleanup_retention_hours_by_outcome_success_null_is_error():
         e.path == "runtime.cleanup.retention_hours_by_outcome.success" for e in errs
     ), errs
     assert not result.ok
+
+
+def test_runtime_cleanup_retention_hours_by_outcome_default_absent_is_ok():
+    """Sub-loop's absent path: a sibling key is present but ``default`` is
+    not — should skip silently so boot can fall back."""
+    result = validate_config(_config_with_runtime({
+        "cleanup": {"retention_hours_by_outcome": {"success": 72}}
+    }))
+    errs = [
+        e for e in result.errors
+        if e.path.startswith("runtime.cleanup.retention_hours_by_outcome.")
+    ]
+    assert not errs
 
 
 def test_runtime_merge_gate_enabled_null_is_error():
