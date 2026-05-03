@@ -463,8 +463,15 @@ def _check_short_workspace(config: dict, result: ValidationResult) -> None:
         return  # _check_sections handled the type error
     _check_bool_field(section, "enabled", path="short_workspace", result=result)
     for scalar in ("ttl_hours", "cleanup_interval_minutes"):
-        v = section.get(scalar)
+        if scalar not in section:
+            continue  # absent → boot fills default
+        v = section[scalar]
         if v is None:
+            result.errors.append(ConfigError(
+                f"short_workspace.{scalar}",
+                "must be a non-negative integer, got null",
+                "error",
+            ))
             continue
         if not _is_strict_non_negative_int(v):
             result.errors.append(ConfigError(
@@ -500,9 +507,24 @@ def _check_bool_field(
     ``bool("false")`` returns ``True`` (non-empty string is truthy), so a
     YAML scalar like ``enabled: "false"`` silently inverts the operator's
     intent. Hard-error instead.
+
+    Distinguishes absent key (allow default) from explicit ``null`` (error):
+    ``dict.get(key)`` collapses both to ``None``, so we use ``key in cfg``.
+    Boot's ``setdefault`` does not override an explicit ``None``, so the
+    runtime would then call ``bool(None) == False`` and silently disable
+    the component the operator wrote ``enabled: null`` to enable.
     """
-    v = cfg.get(key)
-    if v is None or isinstance(v, bool):
+    if key not in cfg:
+        return  # absent → boot fills default
+    v = cfg[key]
+    if v is None:
+        result.errors.append(ConfigError(
+            f"{path}.{key}",
+            "must be a boolean (true/false), got null",
+            "error",
+        ))
+        return
+    if isinstance(v, bool):
         return
     result.errors.append(ConfigError(
         f"{path}.{key}",
@@ -544,8 +566,15 @@ def _check_runtime_cleanup(config: dict, result: ValidationResult) -> None:
         _check_bool_field(cleanup, bool_key, path="runtime.cleanup", result=result)
 
     for scalar in ("interval_minutes", "retention_hours"):
-        v = cleanup.get(scalar)
+        if scalar not in cleanup:
+            continue  # absent → boot fills default
+        v = cleanup[scalar]
         if v is None:
+            result.errors.append(ConfigError(
+                f"runtime.cleanup.{scalar}",
+                "must be a non-negative integer, got null",
+                "error",
+            ))
             continue
         if not _is_strict_non_negative_int(v):
             result.errors.append(ConfigError(
@@ -565,8 +594,15 @@ def _check_runtime_cleanup(config: dict, result: ValidationResult) -> None:
         ))
         return
     for key in ("success", "failure", "default"):
-        v = by_outcome.get(key)
+        if key not in by_outcome:
+            continue  # absent → boot fills default
+        v = by_outcome[key]
         if v is None:
+            result.errors.append(ConfigError(
+                f"runtime.cleanup.retention_hours_by_outcome.{key}",
+                "must be a non-negative integer, got null",
+                "error",
+            ))
             continue
         if not _is_strict_non_negative_int(v):
             result.errors.append(ConfigError(

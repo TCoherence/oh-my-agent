@@ -486,3 +486,127 @@ def test_runtime_cleanup_missing_section_passes():
     errs = _runtime_errors(result, severity="error")
     assert not errs
     assert result.ok
+
+
+# ── absent vs explicit-null discrimination ───────────────────────────── #
+#
+# ``dict.get(k)`` collapses "key absent" and "key: null" into the same
+# ``None`` — the validator used to skip both, but boot's ``setdefault`` is
+# a no-op for explicit ``None``, so the value reached the runtime where
+# ``int(None)`` crashes and ``bool(None)`` silently flips intent.
+# The null-is-error tests below cover each touched leaf; absent-is-ok
+# regressions exist for every scoped code path (bool helper / int main
+# loop / retention_hours_by_outcome sub-loop / merge_gate / short_workspace)
+# so a future revert to the old skip-both pattern would surface here.
+
+
+def test_runtime_cleanup_enabled_null_is_error():
+    """``runtime.cleanup.enabled: null`` → ``bool(None) == False`` silently
+    disables cleanup; reject so the misconfig surfaces."""
+    result = validate_config(_config_with_runtime({"cleanup": {"enabled": None}}))
+    errs = _runtime_errors(result, severity="error")
+    assert any(e.path == "runtime.cleanup.enabled" for e in errs), errs
+    assert not result.ok
+
+
+def test_runtime_cleanup_enabled_absent_is_ok():
+    """Absent key is fine — boot's setdefault fills the default."""
+    result = validate_config(_config_with_runtime({"cleanup": {}}))
+    errs = [e for e in result.errors if e.path == "runtime.cleanup.enabled"]
+    assert not errs
+
+
+def test_runtime_cleanup_interval_minutes_null_is_error():
+    """``int(None)`` crashes the runtime; reject in the validator."""
+    result = validate_config(_config_with_runtime({"cleanup": {"interval_minutes": None}}))
+    errs = _runtime_errors(result, severity="error")
+    assert any(e.path == "runtime.cleanup.interval_minutes" for e in errs), errs
+    assert not result.ok
+
+
+def test_runtime_cleanup_retention_hours_null_is_error():
+    result = validate_config(_config_with_runtime({"cleanup": {"retention_hours": None}}))
+    errs = _runtime_errors(result, severity="error")
+    assert any(e.path == "runtime.cleanup.retention_hours" for e in errs), errs
+    assert not result.ok
+
+
+def test_runtime_cleanup_retention_hours_absent_is_ok():
+    result = validate_config(_config_with_runtime({"cleanup": {}}))
+    errs = [e for e in result.errors if e.path == "runtime.cleanup.retention_hours"]
+    assert not errs
+
+
+def test_runtime_cleanup_retention_hours_by_outcome_success_null_is_error():
+    result = validate_config(_config_with_runtime({
+        "cleanup": {"retention_hours_by_outcome": {"success": None}}
+    }))
+    errs = _runtime_errors(result, severity="error")
+    assert any(
+        e.path == "runtime.cleanup.retention_hours_by_outcome.success" for e in errs
+    ), errs
+    assert not result.ok
+
+
+def test_runtime_cleanup_retention_hours_by_outcome_default_absent_is_ok():
+    """Sub-loop's absent path: a sibling key is present but ``default`` is
+    not — should skip silently so boot can fall back."""
+    result = validate_config(_config_with_runtime({
+        "cleanup": {"retention_hours_by_outcome": {"success": 72}}
+    }))
+    errs = [
+        e for e in result.errors
+        if e.path.startswith("runtime.cleanup.retention_hours_by_outcome.")
+    ]
+    assert not errs
+
+
+def test_runtime_merge_gate_enabled_null_is_error():
+    result = validate_config(_config_with_runtime({"merge_gate": {"enabled": None}}))
+    errs = _runtime_errors(result, severity="error")
+    assert any(e.path == "runtime.merge_gate.enabled" for e in errs), errs
+    assert not result.ok
+
+
+def test_runtime_merge_gate_enabled_absent_is_ok():
+    result = validate_config(_config_with_runtime({"merge_gate": {}}))
+    errs = [e for e in result.errors if e.path == "runtime.merge_gate.enabled"]
+    assert not errs
+
+
+def test_short_workspace_enabled_null_is_error():
+    cfg = _base_config()
+    cfg["short_workspace"] = {"enabled": None}
+    result = validate_config(cfg)
+    errs = [e for e in result.errors if e.path == "short_workspace.enabled" and e.severity == "error"]
+    assert errs, result.errors
+    assert not result.ok
+
+
+def test_short_workspace_ttl_hours_null_is_error():
+    cfg = _base_config()
+    cfg["short_workspace"] = {"ttl_hours": None}
+    result = validate_config(cfg)
+    errs = [e for e in result.errors if e.path == "short_workspace.ttl_hours" and e.severity == "error"]
+    assert errs, result.errors
+    assert not result.ok
+
+
+def test_short_workspace_ttl_hours_absent_is_ok():
+    cfg = _base_config()
+    cfg["short_workspace"] = {}
+    result = validate_config(cfg)
+    errs = [e for e in result.errors if e.path == "short_workspace.ttl_hours"]
+    assert not errs
+
+
+def test_short_workspace_cleanup_interval_minutes_null_is_error():
+    cfg = _base_config()
+    cfg["short_workspace"] = {"cleanup_interval_minutes": None}
+    result = validate_config(cfg)
+    errs = [
+        e for e in result.errors
+        if e.path == "short_workspace.cleanup_interval_minutes" and e.severity == "error"
+    ]
+    assert errs, result.errors
+    assert not result.ok
