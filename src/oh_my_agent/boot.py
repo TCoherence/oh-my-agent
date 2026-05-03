@@ -26,6 +26,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from oh_my_agent import paths as _paths
+
 
 @dataclass
 class BootContext:
@@ -429,9 +431,9 @@ def _apply_agent_env_overrides(config: dict) -> None:
 
 
 def _runtime_root(config: dict) -> Path:
-    runtime_cfg = config.get("runtime", {})
-    worktree_root = Path(runtime_cfg.get("worktree_root", "~/.oh-my-agent/runtime/tasks"))
-    return worktree_root.expanduser().resolve().parent
+    """Thin wrapper for backward compatibility — see ``paths.runtime_root``."""
+
+    return _paths.runtime_root(config)
 
 
 def _resolve_project_path(path_value: str | Path, project_root: Path) -> Path:
@@ -760,9 +762,9 @@ async def ignite(ctx: BootContext) -> None:
             maybe_split_legacy_memory_db,
         )
 
-        conversation_db_path = Path(memory_cfg.get("path", "~/.oh-my-agent/runtime/memory.db")).expanduser().resolve()
-        runtime_db_path = Path(config.get("runtime", {}).get("state_path", "~/.oh-my-agent/runtime/runtime.db")).expanduser().resolve()
-        skills_db_path = Path(config.get("skills", {}).get("telemetry_path", "~/.oh-my-agent/runtime/skills.db")).expanduser().resolve()
+        conversation_db_path = _paths.memory_db_path(config)
+        runtime_db_path = _paths.runtime_state_path(config)
+        skills_db_path = _paths.skills_telemetry_path(config)
 
         await maybe_split_legacy_memory_db(
             memory_path=conversation_db_path,
@@ -806,9 +808,7 @@ async def ignite(ctx: BootContext) -> None:
         from oh_my_agent.memory.judge import Judge
         from oh_my_agent.memory.judge_store import JudgeStore
 
-        memory_dir = str(
-            Path(memory_cfg_block.get("memory_dir", "~/.oh-my-agent/memory")).expanduser().resolve()
-        )
+        memory_dir = str(_paths.judge_memory_dir(config))
         _warn_if_legacy_memory_layout(Path(memory_dir), logger)
         judge_store = JudgeStore(
             memory_dir=memory_dir,
