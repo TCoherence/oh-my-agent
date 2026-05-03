@@ -18,6 +18,21 @@ TRACKED_UNIVERSE = ["NVDA", "MSFT", "AAPL", "AMZN", "GOOG", "TSLA", "META", "VOO
 HOLDINGS_WINDOW_DAYS = 7
 REPORTS_ROOT_NAME = "market-briefing"
 
+# Stage 2.2: AI daily sub-section schemas. Used by `persist-section` for
+# write-time validation and by `section-status` for completeness checks.
+# A section is considered "complete" when both .md and .json files exist,
+# the JSON parses, and it has the meta keys + the section-specific body
+# anchor key. See `references/section_schemas.md` for the human-readable
+# contract.
+_SECTION_META_REQUIRED_KEYS = ("version", "section", "domain", "report_date")
+_AI_SECTION_BODY_ANCHORS: dict[str, str] = {
+    "frontier_radar": "labs",
+    "paper_layer": "papers_consumed_from_paper_digest",
+    "people_pool": "people_signal_summary",
+    "macro_news": "five_layer_signals",
+}
+VALID_AI_SECTIONS = frozenset(_AI_SECTION_BODY_ANCHORS.keys())
+
 
 def resolve_report_timezone_label() -> str:
     tz_name = resolve_report_timezone_name()
@@ -420,6 +435,165 @@ def persist_report(
     return md_path, json_path
 
 
+# ---------------------------------------------------------------------------
+# Stage 2.2: AI daily sub-section persistence + status query
+# ---------------------------------------------------------------------------
+
+
+def build_section_paths(
+    *,
+    domain: str,
+    section: str,
+    root: str | Path | None = None,
+    report_date: date | None = None,
+) -> tuple[Path, Path]:
+    """Return ``(md_path, json_path)`` for a sub-section file pair under
+    ``<root>/daily/<date>/<domain>_sections/<section>.{md,json}``.
+
+    Today only ``domain="ai"`` is supported (Stage 2.2 is AI-daily only).
+    Other domains can opt into the same layout in a follow-up; raising
+    explicitly here keeps the contract clear.
+    """
+    if domain != "ai":
+        raise ValueError(
+            f"sub-section storage is only supported for domain='ai' today; got {domain!r}"
+        )
+    if section not in VALID_AI_SECTIONS:
+        raise ValueError(
+            f"unknown AI sub-section: {section!r} (expected one of {sorted(VALID_AI_SECTIONS)})"
+        )
+    store_root = resolve_reports_root(root)
+    day_label = (report_date or current_local_date()).isoformat()
+    sections_dir = store_root / "daily" / day_label / f"{domain}_sections"
+    md_path = sections_dir / f"{section}.md"
+    json_path = sections_dir / f"{section}.json"
+    return md_path, json_path
+
+
+def _validate_section_payload(section: str, payload: dict[str, Any]) -> None:
+    """Raise ``ValueError`` if ``payload`` is missing required meta keys
+    or the section-specific body anchor. Kept lightweight on purpose —
+    per-element field validation belongs in the agent / aggregator, not
+    here. See ``section_schemas.md`` for the rationale."""
+    missing_meta = [k for k in _SECTION_META_REQUIRED_KEYS if k not in payload]
+    if missing_meta:
+        raise ValueError(
+            f"section JSON missing required meta keys: {missing_meta}"
+        )
+    if payload.get("section") != section:
+        raise ValueError(
+            f"section field mismatch: payload says {payload.get('section')!r}, expected {section!r}"
+        )
+    if payload.get("domain") != "ai":
+        raise ValueError(
+            f"section domain must be 'ai'; got {payload.get('domain')!r}"
+        )
+    anchor = _AI_SECTION_BODY_ANCHORS[section]
+    if anchor not in payload:
+        raise ValueError(
+            f"section {section!r} JSON missing body anchor key {anchor!r}"
+        )
+
+
+def persist_section(
+    *,
+    domain: str,
+    section: str,
+    markdown: str,
+    payload: dict[str, Any],
+    root: str | Path | None = None,
+    report_date: date | None = None,
+) -> tuple[Path, Path]:
+    """Write a sub-section file pair to its canonical location, after
+    normalising meta fields and validating the body anchor. Mirrors
+    :func:`persist_report` for sub-section granularity."""
+    resolved_day = report_date or current_local_date()
+    md_path, json_path = build_section_paths(
+        domain=domain,
+        section=section,
+        root=root,
+        report_date=resolved_day,
+    )
+    normalized = dict(payload)
+    normalized["version"] = 1
+    normalized["section"] = section
+    normalized["domain"] = domain
+    normalized["report_date"] = resolved_day.isoformat()
+    normalized["generated_at"] = datetime.now(UTC).isoformat()
+    normalized["report_timezone"] = resolve_report_timezone_label()
+    normalized.setdefault("coverage_gaps", [])
+    normalized.setdefault("confidence_flags", [])
+    _validate_section_payload(section, normalized)
+    atomic_write_text(md_path, markdown)
+    atomic_write_text(json_path, json.dumps(normalized, ensure_ascii=False, indent=2) + "\n")
+    return md_path, json_path
+
+
+def section_status(
+    *,
+    domain: str,
+    root: str | Path | None = None,
+    report_date: date | None = None,
+) -> dict[str, Any]:
+    """Return per-section completion status for the AI daily run.
+
+    Only sections where BOTH ``.md`` and ``.json`` exist AND the JSON
+    parses AND it carries the required meta keys + body anchor are
+    flagged ``complete: True``. Half-written or schema-invalid sections
+    are flagged ``complete: False`` with an explanation in ``reason``.
+
+    Used by the agent on a re-run with bumped budget: skip the
+    complete sections, redo the rest.
+    """
+    resolved_day = report_date or current_local_date()
+    sections: dict[str, Any] = {}
+    for section in sorted(VALID_AI_SECTIONS):
+        md_path, json_path = build_section_paths(
+            domain=domain,
+            section=section,
+            root=root,
+            report_date=resolved_day,
+        )
+        entry: dict[str, Any] = {
+            "complete": False,
+            "md_path": str(md_path),
+            "json_path": str(json_path),
+        }
+        if not md_path.exists():
+            entry["reason"] = "md_missing"
+            sections[section] = entry
+            continue
+        if not json_path.exists():
+            entry["reason"] = "json_missing"
+            sections[section] = entry
+            continue
+        try:
+            payload = json.loads(json_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as exc:
+            entry["reason"] = f"json_parse_failed: {exc}"
+            sections[section] = entry
+            continue
+        if not isinstance(payload, dict):
+            entry["reason"] = "json_not_object"
+            sections[section] = entry
+            continue
+        try:
+            _validate_section_payload(section, payload)
+        except ValueError as exc:
+            entry["reason"] = f"json_schema_invalid: {exc}"
+            sections[section] = entry
+            continue
+        entry["complete"] = True
+        sections[section] = entry
+    return {
+        "domain": domain,
+        "report_date": resolved_day.isoformat(),
+        "sections": sections,
+        "complete_count": sum(1 for s in sections.values() if s["complete"]),
+        "total": len(sections),
+    }
+
+
 def _load_json(path: Path) -> dict[str, Any]:
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
@@ -598,6 +772,27 @@ def _parse_args() -> argparse.Namespace:
     list_cmd.add_argument("--domain")
     list_cmd.add_argument("--root")
     list_cmd.add_argument("--limit", type=int)
+
+    persist_section_cmd = subparsers.add_parser(
+        "persist-section",
+        help="(AI daily Stage 2.2) persist a single sub-section to ai_sections/<name>.{md,json}",
+    )
+    persist_section_cmd.add_argument("--domain", required=True, choices=sorted(DOMAINS))
+    persist_section_cmd.add_argument(
+        "--section", required=True, choices=sorted(VALID_AI_SECTIONS)
+    )
+    persist_section_cmd.add_argument("--report-date")
+    persist_section_cmd.add_argument("--root")
+    persist_section_cmd.add_argument("--markdown-file", required=True)
+    persist_section_cmd.add_argument("--json-file", required=True)
+
+    section_status_cmd = subparsers.add_parser(
+        "section-status",
+        help="(AI daily Stage 2.2) report which sub-sections are complete (for checkpoint recovery on re-run)",
+    )
+    section_status_cmd.add_argument("--domain", required=True, choices=sorted(DOMAINS))
+    section_status_cmd.add_argument("--report-date")
+    section_status_cmd.add_argument("--root")
     return parser.parse_args()
 
 
@@ -678,6 +873,42 @@ def main() -> int:
             limit=args.limit,
         )
         print(json.dumps(items, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.command == "persist-section":
+        report_day = parse_report_date(args.report_date)
+        markdown = Path(args.markdown_file).read_text(encoding="utf-8")
+        payload = json.loads(Path(args.json_file).read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("section JSON must contain an object")
+        md_path, json_path = persist_section(
+            domain=args.domain,
+            section=args.section,
+            markdown=markdown,
+            payload=payload,
+            root=args.root,
+            report_date=report_day,
+        )
+        print(
+            json.dumps(
+                {
+                    "status": "ok",
+                    "section": args.section,
+                    "markdown_path": str(md_path),
+                    "json_path": str(json_path),
+                },
+                ensure_ascii=False,
+            )
+        )
+        return 0
+
+    if args.command == "section-status":
+        status = section_status(
+            domain=args.domain,
+            root=args.root,
+            report_date=parse_report_date(args.report_date),
+        )
+        print(json.dumps(status, ensure_ascii=False, indent=2))
         return 0
 
     raise ValueError(f"unsupported command: {args.command}")

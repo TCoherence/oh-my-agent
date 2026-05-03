@@ -385,3 +385,283 @@ def _make_ai_json_with_candidate(tmp_path: Path) -> Path:
     }
     json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return json_path
+
+
+# ---------------------------------------------------------------------------
+# Stage 2.2: AI daily sub-section persistence + status
+# ---------------------------------------------------------------------------
+
+
+def _ai_section_payload(section: str) -> dict:
+    """Build a minimal valid payload for each of the 4 AI sub-section schemas.
+    Mirrors the body anchors in section_schemas.md — anything richer than
+    these is the agent's responsibility, not section-status's gate."""
+    bodies = {
+        "frontier_radar": {
+            "frontier_signal_summary": "",
+            "labs": [],
+            "unverified_frontier_signals": [],
+        },
+        "paper_layer": {
+            "paper_digest_status": "consumed",
+            "paper_digest_path": "/home/.oh-my-agent/reports/paper-digest/daily/2026-05-04.json",
+            "papers_consumed_from_paper_digest": [],
+            "technical_signals": [],
+        },
+        "people_pool": {
+            "people_signal_summary": "",
+            "tracked_people_signals": [],
+            "new_candidate_people": [],
+            "promoted_people": [],
+            "candidate_queue_summary": "",
+        },
+        "macro_news": {
+            "five_layer_signals": {
+                "energy": [],
+                "chips": [],
+                "infra": [],
+                "model": [],
+                "application": [],
+            },
+            "cross_layer_links": [],
+        },
+    }
+    return bodies[section]
+
+
+def test_build_section_paths_layout(tmp_path):
+    """Sub-sections live at <root>/daily/<date>/ai_sections/<name>.{md,json}.
+    Mirrors deals-scanner's references/<source>.{md,json} layout."""
+    module = _load_module()
+    md_path, json_path = module.build_section_paths(
+        domain="ai",
+        section="frontier_radar",
+        root=tmp_path,
+        report_date=date(2026, 5, 4),
+    )
+    expected_dir = tmp_path / "daily" / "2026-05-04" / "ai_sections"
+    assert md_path == expected_dir / "frontier_radar.md"
+    assert json_path == expected_dir / "frontier_radar.json"
+
+
+def test_build_section_paths_rejects_non_ai_domain(tmp_path):
+    """Stage 2.2 ships AI-only. Non-AI domains should raise loudly so a
+    caller doesn't silently scribble politics/finance sub-sections into
+    a layout we haven't designed yet."""
+    module = _load_module()
+    import pytest as pt
+
+    with pt.raises(ValueError, match="domain='ai'"):
+        module.build_section_paths(
+            domain="finance",
+            section="frontier_radar",
+            root=tmp_path,
+            report_date=date(2026, 5, 4),
+        )
+
+
+def test_build_section_paths_rejects_unknown_section(tmp_path):
+    module = _load_module()
+    import pytest as pt
+
+    with pt.raises(ValueError, match="unknown AI sub-section"):
+        module.build_section_paths(
+            domain="ai",
+            section="not_a_real_section",
+            root=tmp_path,
+            report_date=date(2026, 5, 4),
+        )
+
+
+def test_persist_section_writes_pair_with_normalized_meta(tmp_path):
+    """``persist_section`` writes both the .md and .json file pair, and
+    overwrites/normalises the meta keys (version/section/domain/report_date/
+    generated_at/report_timezone) so the agent can't accidentally write
+    a half-formed header."""
+    module = _load_module()
+    payload = {
+        "section": "frontier_radar",
+        "domain": "ai",
+        "report_date": "wrong",  # will be overwritten
+        **_ai_section_payload("frontier_radar"),
+    }
+
+    md_path, json_path = module.persist_section(
+        domain="ai",
+        section="frontier_radar",
+        markdown="## Frontier Labs\n\nplaceholder body\n",
+        payload=payload,
+        root=tmp_path,
+        report_date=date(2026, 5, 4),
+    )
+
+    assert md_path.read_text(encoding="utf-8").startswith("## Frontier Labs")
+    written = json.loads(json_path.read_text(encoding="utf-8"))
+    assert written["version"] == 1
+    assert written["section"] == "frontier_radar"
+    assert written["domain"] == "ai"
+    assert written["report_date"] == "2026-05-04"
+    assert written["labs"] == []  # body anchor preserved
+    assert "generated_at" in written
+    assert "report_timezone" in written
+
+
+def test_persist_section_validates_body_anchor(tmp_path):
+    """Each AI sub-section has a required body anchor (e.g., `labs` for
+    `frontier_radar`). Missing it should raise — sub-section files
+    without their anchor are unsafe for the aggregator to consume."""
+    module = _load_module()
+    import pytest as pt
+
+    bad_payload = {
+        "section": "frontier_radar",
+        "domain": "ai",
+        "report_date": "2026-05-04",
+        # missing `labs` — the body anchor for frontier_radar
+        "frontier_signal_summary": "",
+    }
+
+    with pt.raises(ValueError, match="body anchor"):
+        module.persist_section(
+            domain="ai",
+            section="frontier_radar",
+            markdown="placeholder",
+            payload=bad_payload,
+            root=tmp_path,
+            report_date=date(2026, 5, 4),
+        )
+
+
+def test_section_status_marks_complete_only_when_both_files_valid(tmp_path):
+    """Checkpoint recovery hinges on this: a section is "complete" only
+    when both files exist AND the JSON parses AND the body anchor is
+    present. Half-written or schema-invalid sections must be flagged
+    incomplete so the bumped re-run redoes them instead of skipping."""
+    module = _load_module()
+    report_date = date(2026, 5, 4)
+
+    # 1. frontier_radar: persist normally → complete
+    module.persist_section(
+        domain="ai",
+        section="frontier_radar",
+        markdown="ok",
+        payload={
+            "section": "frontier_radar",
+            "domain": "ai",
+            "report_date": report_date.isoformat(),
+            **_ai_section_payload("frontier_radar"),
+        },
+        root=tmp_path,
+        report_date=report_date,
+    )
+
+    # 2. paper_layer: only .md exists, no .json → incomplete (json_missing)
+    paper_md, paper_json = module.build_section_paths(
+        domain="ai",
+        section="paper_layer",
+        root=tmp_path,
+        report_date=report_date,
+    )
+    paper_md.parent.mkdir(parents=True, exist_ok=True)
+    paper_md.write_text("only md exists", encoding="utf-8")
+
+    # 3. people_pool: both files exist, but JSON is missing the body anchor
+    pp_md, pp_json = module.build_section_paths(
+        domain="ai",
+        section="people_pool",
+        root=tmp_path,
+        report_date=report_date,
+    )
+    pp_md.parent.mkdir(parents=True, exist_ok=True)
+    pp_md.write_text("md", encoding="utf-8")
+    pp_json.write_text(
+        json.dumps({
+            "version": 1,
+            "section": "people_pool",
+            "domain": "ai",
+            "report_date": report_date.isoformat(),
+            # missing `people_signal_summary` body anchor
+        }),
+        encoding="utf-8",
+    )
+
+    # 4. macro_news: not written at all → incomplete (md_missing)
+
+    status = module.section_status(
+        domain="ai",
+        root=tmp_path,
+        report_date=report_date,
+    )
+
+    assert status["domain"] == "ai"
+    assert status["report_date"] == "2026-05-04"
+    assert status["total"] == 4
+    assert status["complete_count"] == 1
+
+    sections = status["sections"]
+    assert sections["frontier_radar"]["complete"] is True
+    assert sections["paper_layer"]["complete"] is False
+    assert sections["paper_layer"]["reason"] == "json_missing"
+    assert sections["people_pool"]["complete"] is False
+    assert "json_schema_invalid" in sections["people_pool"]["reason"]
+    assert sections["macro_news"]["complete"] is False
+    assert sections["macro_news"]["reason"] == "md_missing"
+
+
+def test_section_status_handles_unparseable_json(tmp_path):
+    """A `.json` that is not parseable (truncated mid-write, etc.) must
+    surface as `json_parse_failed`, not crash the whole section-status
+    call. Otherwise an in-flight kill could brick the re-run path."""
+    module = _load_module()
+    report_date = date(2026, 5, 4)
+
+    md_path, json_path = module.build_section_paths(
+        domain="ai",
+        section="frontier_radar",
+        root=tmp_path,
+        report_date=report_date,
+    )
+    md_path.parent.mkdir(parents=True, exist_ok=True)
+    md_path.write_text("md", encoding="utf-8")
+    json_path.write_text("{not valid json", encoding="utf-8")
+
+    status = module.section_status(
+        domain="ai",
+        root=tmp_path,
+        report_date=report_date,
+    )
+    fr = status["sections"]["frontier_radar"]
+    assert fr["complete"] is False
+    assert fr["reason"].startswith("json_parse_failed")
+
+
+def test_persist_section_then_section_status_round_trip_all_four(tmp_path):
+    """End-to-end smoke: persist all 4 sub-sections with valid payloads,
+    verify section-status reports complete_count == 4."""
+    module = _load_module()
+    report_date = date(2026, 5, 4)
+
+    for section in ("frontier_radar", "paper_layer", "people_pool", "macro_news"):
+        module.persist_section(
+            domain="ai",
+            section=section,
+            markdown=f"# {section}\n",
+            payload={
+                "section": section,
+                "domain": "ai",
+                "report_date": report_date.isoformat(),
+                **_ai_section_payload(section),
+            },
+            root=tmp_path,
+            report_date=report_date,
+        )
+
+    status = module.section_status(
+        domain="ai",
+        root=tmp_path,
+        report_date=report_date,
+    )
+    assert status["complete_count"] == 4
+    assert status["total"] == 4
+    for section_status_entry in status["sections"].values():
+        assert section_status_entry["complete"] is True
