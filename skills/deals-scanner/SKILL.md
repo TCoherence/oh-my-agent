@@ -123,24 +123,49 @@ For weekly digest:
 
 ## Final answer format
 
-**You MUST end your turn with the full Markdown report body in your reply** — the same Markdown content you persisted in step 6. The Discord user receives only your final assistant message; they cannot see file contents. If you skip this they only see progress narration ("scanning Doctor of Credit..." / "fetching Slickdeals...") and have no way to read the deals you found.
+The full Markdown report is on disk; **do NOT re-paste it verbatim in chat**. Re-streaming a long deals report as output tokens wastes wall-clock budget late in the run; the proper systemic fix lives in the runtime backlog under "Long-output final delivery" — until that lands, return a structured chat summary that gives the user enough to act without opening the file.
+
+**Required content in the chat reply:**
+
+1. **简短结论 (2 sentences)**: today's priority action + 1–2 concrete drivers; main limitation / risk / coverage caveat.
+2. **Top picks (3–5 highest-confidence deals)** across all sources in scope. Format each as `- [<merchant>](<deal_url>) — <value> — <quality_score> — <inline citation>`. These are the deals the user actually needs to see in chat.
+3. **Per-source one-line snapshot** (for broad daily bundles): one bullet per source covered, format `- <source>: <main opportunity + current caveat>`. Skip a source only if `coverage_gaps` covers it.
+4. **Coverage / Confidence note**: if any source missed the high-confidence floor, name them and say so. Skip if all sources hit floor.
+5. **Storage paths** at the end (the published `.md` / `.json` pair; for bundles list every per-source path).
 
 Layout:
 
 ```
-<full Markdown report — every section, every deal item, verbatim from the .md you persisted>
+简短结论：<today's priority + driver / caveat — 2 sentences>
+
+**Top picks**
+
+- [<merchant>](<url>) — <value> — Q<quality_score> — <inline citation>
+- ...
+
+**各渠道快照** (broad bundles only)
+
+- credit-cards: <one-line opportunity + caveat>
+- uscardforum: ...
+- rakuten: ...
+- slickdeals: ...
+- dealmoon: ...
+
+**Coverage / Confidence** (skip if all hit floor)
+
+- <source>: missed high-confidence floor — <reason>
 
 📁 Stored at:
 - ~/.oh-my-agent/reports/deals-scanner/<mode>/<date>/<source>.md
 - ~/.oh-my-agent/reports/deals-scanner/<mode>/<date>/<source>.json
+(broad bundle: also list each `references/<source>.{md,json}` path)
 ```
 
-(For broad daily bundles, list every per-source path plus the combined bundle.)
-
 ❌ Don't end the turn with "Done.", "Report saved.", or a short progress summary — those are status notes, not the answer.
-❌ Don't reply with only the storage path — the user cannot open files in Discord.
-❌ Don't truncate, paraphrase, or "summarize for chat" because the report is long — the gateway auto-chunks messages > 2000 chars across multiple Discord posts, so paste the full body anyway.
-✅ The exact Markdown body you wrote to the deal store goes into your reply, verbatim, followed by the storage paths.
+❌ Don't reply with ONLY the storage path — the user can't open files in Discord; they need the summary.
+❌ Don't paste the full Markdown body verbatim — that's wasted output tokens and wall-clock.
+❌ Don't drop the `各渠道快照` block on a broad bundle in favor of "今日整体平稳" — the reader wants the per-source read.
+✅ The summary above gives the reader enough to act on the day's best deals without opening the files.
 
 ### Broad daily bundle workflow
 
@@ -190,7 +215,7 @@ filesystem layout, just slower.
    - include explicit links to `references/<source>.md`
    - keep `各渠道快照` as a supporting layer, not the main content
    - make each source snapshot a compact brief of `main opportunity + current caveat`, not a floor-only label
-5. In the final answer, paste the full **summary.md** body verbatim (the bundle's primary deliverable), then list the per-source paths under it as drill-down references. The same rules in **Final answer format** above apply — substitute `summary.md` for the per-source `.md`.
+5. In the final answer, follow the **Final answer format** rules above (structured chat summary, NOT verbatim full-body paste). For a broad bundle the structured summary draws Top picks from across all 5 sources, and the per-source snapshot block has 5 entries. List every per-source `references/<source>.{md,json}` path plus the day-level `summary.{md,json}` path under `📁 Stored at:` so the user can drill down to any source's full file.
 
 ## Storage layout
 

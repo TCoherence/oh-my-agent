@@ -87,14 +87,46 @@ metadata:
    ```
    存到 `~/.oh-my-agent/reports/youtube-podcast-digest/weekly/<ISO-week>/report.md|report.json`。
 
-7. **最终回复**：直接贴 Markdown 正文 + 存储路径。无需二次总结。
+7. **最终回复**：在 chat 中给出结构化摘要 + 存储路径，**不要**再把整篇 weekly digest verbatim 贴一次。
 
-   **这是必须的**：Discord 用户只能看到你的 final assistant message，看不到 file 内容。如果跳过这一步，用户只能看到前几个步骤的进度叙述（"fetching subscriptions..." / "generating per-episode TL;DR..."），完全看不到你产出的 weekly digest。Gateway 自动 chunk 超过 2000 字的消息为多条 Discord posts，所以 weekly digest 再长也直接 paste 全文。
+   完整 weekly digest 已经落盘；把整篇 Markdown 再以 output token 重生一遍，会在 run 末尾吃掉大量 wall-clock 预算（系统级修复跟踪在 runtime backlog 的 "Long-output final delivery" 条目里）。这一步要回的是结构化摘要 —— 让用户**不打开 file 也能拿到核心结论**。
+
+   **chat reply 必含内容：**
+
+   1. **本周一句话结论（1-2 句）**：本周订阅播客的总体读：哪些主题反复出现、哪条信号最值得展开、整体新集多/少。
+   2. **Top 3 集（精选）**：从 5 个 group 里挑信号最强的 3 集。每行格式 `- [<频道名 — 集名>](<video_url>) — <一句话 TL;DR 浓缩>（<group>）`。这是用户来这次想看的实质内容。
+   3. **5 个 group 速览（一行/group）**：固定顺序 ai / vc / public_markets / china_tech / deep_dive。每行 1 句话：本周这个 group 的主题方向 + 集数。空 group 写"本周暂无新集"。
+   4. **跨集主题观察（1-3 条压缩版）**：从报告 §本周跨集主题观察 里挑最强的 1-3 条直接 paste；其余在文件里。
+   5. **Coverage Notes（如有）**：本周未发布或字幕失败的频道，1 行说明。如果都正常就跳过。
+   6. **存储路径**：weekly report.md + report.json。
 
    格式：
 
    ```
-   <完整的 Markdown weekly digest 正文 — 5 个 group 小节、跨集观察、Coverage Notes，verbatim 复制自 report.md>
+   <本周一句话结论>
+
+   **Top 3 集**
+
+   - [<频道名 — 集名>](<video_url>) — <TL;DR 浓缩>（<group>）
+   - ...
+   - ...
+
+   **5 group 速览**
+
+   - ai: <一句话>
+   - vc: <一句话>
+   - public_markets: <一句话>
+   - china_tech: <一句话>
+   - deep_dive: <一句话>
+
+   **跨集主题观察**
+
+   - <主题 1>
+   - <主题 2>
+
+   **Coverage Notes**（如有）
+
+   - <静默频道 / 字幕失败>
 
    Saved:
    - ~/.oh-my-agent/reports/youtube-podcast-digest/weekly/<ISO-week>/report.md
@@ -102,9 +134,10 @@ metadata:
    ```
 
    ❌ 不要用 "Done."、"Report saved."、"本周报告已写入文件"收尾 —— 那是状态注释，不是 answer。
-   ❌ 不要只回 storage path —— 用户在 Discord 打不开文件。
-   ❌ 不要因为报告长就截断 / 改写 / "二次总结" —— Gateway 会 chunk。
-   ✅ 你 persist 到 weekly store 的那份 `report.md` 正文，原样进 reply。
+   ❌ 不要只回 storage path —— 用户在 Discord 打不开文件，需要看到摘要。
+   ❌ 不要把整篇 weekly digest 正文 verbatim 贴 chat —— 浪费 output token + wall-clock，文件是 canonical artifact。
+   ❌ 不要把"本周一句话结论"写成"本周播客内容丰富"这种空话 —— 摘要要给用户判断"是否要打开 file 读全文"的信息密度。
+   ✅ 摘要本身要让一个不打开文件的读者也能拿到核心结论；文件用于 deep dive。
 
 ## Source rules
 
