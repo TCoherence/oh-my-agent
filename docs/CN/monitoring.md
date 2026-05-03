@@ -1,8 +1,12 @@
 # 监控
 
-生产环境里要盯什么：值得报警的日志模式，以及 `/doctor` 每节怎么读。
+生产环境里要盯什么：值得报警的日志模式，`/doctor` 每节怎么读，以及可选的只读 web 监控面板。
 
-bot 设计是单用户/单机。没有 Prometheus exporter；监控靠 tail `service.log` 和按需跑 `/doctor`。
+bot 设计是单用户/单机。没有 Prometheus exporter；监控有 3 种方式：
+
+1. tail `service.log`。
+2. 按需跑 `/doctor`。
+3. （可选）跑 `oma-dashboard` 进程——一个把 SQLite + 日志 + 内存状态聚合成 HTML 的只读页面，60 秒自动刷新。详见 [§6 监控面板](#6-监控面板)。
 
 ---
 
@@ -182,3 +186,55 @@ du -sh ~/.oh-my-agent/runtime/* ~/.oh-my-agent/memory/*
 | Provider dashboard（Anthropic / OpenAI / Google） | 权威的实际花费 |
 
 怀疑跑飞了：`grep AGENT_RUNNING ~/.oh-my-agent/runtime/logs/service.log | tail -n 50` 看哪些 thread 在背靠背跑。
+
+---
+
+## 6. 监控面板
+
+**状态**：opt-in。需要 `dashboard` 可选依赖（`fastapi` / `uvicorn` / `jinja2`）。
+
+**绑定契约**：仅 loopback。默认绑 `127.0.0.1:8080`，**没有鉴权**。在没有先实现鉴权的情况下把 dashboard 暴露到 `0.0.0.0` 或 LAN 是不安全的。
+
+### 6.1 面板内容
+
+dashboard 是单页 HTML，60 秒自动 meta-refresh，5 个 section：
+
+| Section | 数据源 | 健康标志 |
+|---|---|---|
+| Automation 健康 | `automation_runtime_state` + 7 天 `runtime_tasks` | `success_rate` ≥ ~80%，启用的 automation 没有 `last_error`，`next_run_at` 有值 |
+| Task / runtime 健康 | `runtime_tasks` 当前 + 7 天终态 | `RUNNING` 数 ≤ workers，最近失败列表短且时间老 |
+| Cost / usage | `usage_events` 7 天 + 当日 by source / by skill | 日 trend 平稳或下行，sparkline 没近期突刺 |
+| Memory & skill | `memories.yaml` + 30 天 per-skill `runtime_tasks` | `active` ≫ `superseded`，常用 skill `success_rate` ≥ ~80% |
+| 系统层 | `service.log` + `oh-my-agent.log` 末尾 64 KB；disk usage；bot uptime | `total_error` 低，disk usage 没异常突增，uptime > 几分钟 |
+
+系统层**同时读两份**日志——`service.log`（root logger 出口）和 `oh-my-agent.log`（RuntimeService 副日志）——合并 ERROR / WARNING 计数。用的是 Python `record.levelname` 字符串（`ERROR` / `WARNING` / `INFO`），**不是** `WARN`。
+
+### 6.2 host 直跑（仅 bind mount 部署）
+
+如果你的容器用 bind mount 把 `~/.oh-my-agent/` 暴露给 host（仓库 `compose.yaml` 默认是 named volume，需要自行调整），可以在 host 直接跑 dashboard 不走 Docker：
+
+```bash
+pip install -e '.[dashboard]'      # 装 fastapi/uvicorn/jinja2
+oma-dashboard --config ./config.yaml
+```
+
+然后访问 `http://localhost:8080`。
+
+如果你用仓库默认的 named volume，SQLite 在 host 上不可读——用下面 §6.3 的容器内部署。
+
+### 6.3 容器内部署
+
+下个 release 推荐方案是 `compose.yaml` 增加第二个 service `oh-my-agent-dashboard`：复用同一镜像、挂同一 volume、跑 `oma-dashboard --host 0.0.0.0`，再用 `ports: ["127.0.0.1:8080:8080"]` 把端口仅发布到 host loopback。在那个 PR 落地之前，可以手动跑：
+
+```bash
+docker compose exec oh-my-agent oma-dashboard --host 0.0.0.0 --port 8080 &
+# 如果端口没有 forward，再做一下从 host loopback 的转发
+```
+
+### 6.4 怎么读这个页面
+
+- **首次加载全空**：bot 还没产生数据（runtime.db / 日志都空）。每个 section 显示占位文本而不是 500。
+- **持续显示 "all log files missing"**：检查 `OMA_MOUNT_ROOT`（或你的 runtime root）是否真的指向 dashboard 进程能读的路径。
+- **某 automation 的 `success_rate` 跌了**：跟 `/automation_status` 交叉验证拿完整 `last_error`；面板上 error 是截断的，`/doctor` 完整显示。
+- **uptime 倒退或显示 "no Runtime started line found"**：`service.log` 已被轮转出 7 天保留窗口。下次 bot 重启后恢复。
+

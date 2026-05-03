@@ -31,20 +31,40 @@ Issues = "https://github.com/TCoherence/oh-my-agent/issues"
 [project.optional-dependencies]
 anthropic = ["anthropic>=0.40"]
 openai = ["openai>=1.0"]
-all = ["anthropic>=0.40", "openai>=1.0"]
+dashboard = [
+    "fastapi>=0.110,<1",
+    "uvicorn[standard]>=0.27,<1",
+    "jinja2>=3.1,<4",
+]
+all = [
+    "anthropic>=0.40",
+    "openai>=1.0",
+    "fastapi>=0.110,<1",
+    "uvicorn[standard]>=0.27,<1",
+    "jinja2>=3.1,<4",
+]
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",
     "ruff>=0.13",
     "mypy>=1.13",
     "types-PyYAML",
+    "fastapi>=0.110,<1",
+    "uvicorn[standard]>=0.27,<1",
+    "jinja2>=3.1,<4",
 ]
 
 [project.scripts]
 oh-my-agent = "oh_my_agent.main:main"
+oma-dashboard = "oh_my_agent.dashboard.cli:main"
 
 [tool.setuptools.dynamic]
 version = {attr = "oh_my_agent._version.__version__"}
+
+[tool.setuptools.package-data]
+# Ship Jinja2 templates with the dashboard package so non-editable
+# installs (wheel) can find them via importlib.resources / PackageLoader.
+"oh_my_agent.dashboard" = ["templates/*.html"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
