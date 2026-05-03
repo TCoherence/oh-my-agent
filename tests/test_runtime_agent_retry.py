@@ -155,21 +155,23 @@ async def test_api_5xx_uses_escalating_backoff_until_success():
 
 
 @pytest.mark.asyncio
-async def test_timeout_retries_once_then_gives_up(caplog):
+async def test_timeout_does_not_auto_retry_anymore():
+    """Wall-clock subprocess timeout is no longer in ``_RETRY_BACKOFF_SECONDS`` —
+    auto-retry there usually compounds the same failure (see task
+    ``c267ba34a29e`` 5/1 which 2× timed out at 1500s for zero output).
+    The operator-mediated path is the "Re-run +30 min timeout" button
+    surfaced by ``_surface_rerun_bump_timeout_button`` instead."""
     stub = _retry_stub([
         AgentResponse(text="", error="timed out", error_kind="timeout"),
-        AgentResponse(text="", error="timed out again", error_kind="timeout"),
     ])
 
-    caplog.set_level(logging.WARNING, logger="oh_my_agent.runtime.service")
     response = await _call(stub)
 
-    assert response.error == "timed out again"
+    assert response.error == "timed out"
     assert response.error_kind == "timeout"
-    assert stub._invoke_agent.await_count == 2
-    assert stub._store.add_runtime_event.await_count == 1
-    messages = [rec.getMessage() for rec in caplog.records]
-    assert any("per-kind retry exhausted" in m and "timeout" in m for m in messages)
+    # No auto-retry: invoked exactly once, no retry events recorded.
+    assert stub._invoke_agent.await_count == 1
+    assert stub._store.add_runtime_event.await_count == 0
 
 
 @pytest.mark.asyncio

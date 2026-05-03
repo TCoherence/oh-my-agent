@@ -696,3 +696,50 @@ async def test_modal_submit_rejects_non_positive_budget_without_calling_decide()
     assert submit_response.messages
     err_text, _ = submit_response.messages[0]
     assert "must be positive" in err_text
+
+
+# ---------------------------------------------------------------------------
+# action_meta rendering for failure-recovery buttons.
+# ---------------------------------------------------------------------------
+
+
+def test_build_task_interactive_prompt_renders_rerun_bump_turns_button():
+    """``rerun_bump_turns`` was added in PR #15 chain. Pin its label + style
+    so a stylistic refactor of action_meta doesn't silently change what
+    operators see on a max_turns failure."""
+    channel = DiscordChannel(token="x", channel_id="100")
+
+    prompt = channel._build_task_interactive_prompt(
+        draft_text="task hit max_turns",
+        task_id="task-mt-1",
+        nonce="nonce-mt",
+        actions=["rerun_bump_turns"],
+    )
+
+    assert len(prompt.actions) == 1
+    descriptor = prompt.actions[0]
+    assert descriptor.id == "rerun_bump_turns"
+    assert descriptor.label == "Re-run +30 turns"
+    assert descriptor.style == "primary"
+    assert descriptor.disabled is False
+
+
+def test_build_task_interactive_prompt_renders_rerun_bump_timeout_button():
+    """New in this PR. Wall-clock timeout failure surfaces a parallel
+    button to ``rerun_bump_turns``. Label / style match conventions for
+    primary recovery actions."""
+    channel = DiscordChannel(token="x", channel_id="100")
+
+    prompt = channel._build_task_interactive_prompt(
+        draft_text="task hit subprocess timeout",
+        task_id="task-to-1",
+        nonce="nonce-to",
+        actions=["rerun_bump_timeout"],
+    )
+
+    assert len(prompt.actions) == 1
+    descriptor = prompt.actions[0]
+    assert descriptor.id == "rerun_bump_timeout"
+    assert descriptor.label == "Re-run +30 min timeout"
+    assert descriptor.style == "primary"
+    assert descriptor.disabled is False

@@ -81,6 +81,7 @@ DecisionAction = Literal[
     "discard",
     "request_changes",
     "rerun_bump_turns",
+    "rerun_bump_timeout",
 ]
 DecisionSource = Literal["button", "slash"]
 
