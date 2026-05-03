@@ -156,11 +156,16 @@ def test_warning_severity_string_in_rendered_template(tmp_path: Path) -> None:
     """Regression for the WARN-vs-WARNING trap — page should reference
     WARNING (not WARN) when log fixture contains warning lines."""
 
+    from datetime import datetime, timedelta, timezone
+
+    recent_ts = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat(
+        timespec="milliseconds"
+    )
     config = _seed_minimal_runtime_tree(tmp_path)
     log = tmp_path / "logs" / "service.log"
     log.write_text(
         log.read_text(encoding="utf-8")
-        + "2026-05-03T20:01:00.000Z level=WARNING logger=oh_my_agent.gateway msg=test-warning\n",
+        + f"{recent_ts} level=WARNING logger=oh_my_agent.gateway msg=test-warning\n",
         encoding="utf-8",
     )
     app = create_app(config)

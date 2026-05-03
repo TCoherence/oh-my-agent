@@ -222,13 +222,18 @@ Then open `http://localhost:8080`.
 
 For the named-volume default in this repo's `compose.yaml`, the SQLite files live inside the volume and aren't host-readable — use the in-container deployment described next.
 
-### 6.3 In-container deployment
+### 6.3 In-container deployment (next PR)
 
-In the next release the recommended path is a second `compose.yaml` service (`oh-my-agent-dashboard`) that reuses the same image, mounts the same volume, runs `oma-dashboard --host 0.0.0.0`, and publishes the port loopback-only via `ports: ["127.0.0.1:8080:8080"]`. Until that PR lands, you can run it manually:
+The recommended Docker deployment — a second `compose.yaml` service (`oh-my-agent-dashboard`) that reuses the same image, mounts the same volume, runs `oma-dashboard --host 0.0.0.0`, and publishes the port loopback-only via `ports: ["127.0.0.1:8080:8080"]` — lands in a follow-up PR.
+
+This PR ships the package, the entry point, and the host-side dev workflow only. The stock `Dockerfile` in this PR does **not** preinstall `fastapi` / `uvicorn` / `jinja2`, so `docker compose exec oh-my-agent oma-dashboard` will fail with a missing-dependency error today.
+
+If you can't wait, install the deps inside the container manually:
 
 ```bash
+docker compose exec oh-my-agent pip install fastapi 'uvicorn[standard]' jinja2
 docker compose exec oh-my-agent oma-dashboard --host 0.0.0.0 --port 8080 &
-# Then publish/forward port 8080 from the host's loopback if not already mapped.
+# Then forward port 8080 from the container to host's 127.0.0.1.
 ```
 
 ### 6.4 Reading the page

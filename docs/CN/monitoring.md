@@ -222,13 +222,18 @@ oma-dashboard --config ./config.yaml
 
 如果你用仓库默认的 named volume，SQLite 在 host 上不可读——用下面 §6.3 的容器内部署。
 
-### 6.3 容器内部署
+### 6.3 容器内部署（下个 PR）
 
-下个 release 推荐方案是 `compose.yaml` 增加第二个 service `oh-my-agent-dashboard`：复用同一镜像、挂同一 volume、跑 `oma-dashboard --host 0.0.0.0`，再用 `ports: ["127.0.0.1:8080:8080"]` 把端口仅发布到 host loopback。在那个 PR 落地之前，可以手动跑：
+推荐的 Docker 部署方案——`compose.yaml` 增加第二个 service `oh-my-agent-dashboard`，复用同一镜像、挂同一 volume、跑 `oma-dashboard --host 0.0.0.0`，再用 `ports: ["127.0.0.1:8080:8080"]` 把端口仅发布到 host loopback——会在下一个 PR 里落地。
+
+这个 PR 只 ship 了包、entry point 和 host 端 dev workflow。当前 `Dockerfile` **没有**预装 `fastapi` / `uvicorn` / `jinja2`，所以现在直接跑 `docker compose exec oh-my-agent oma-dashboard` 会因为缺依赖失败。
+
+如果等不及，可以容器内手动装依赖：
 
 ```bash
+docker compose exec oh-my-agent pip install fastapi 'uvicorn[standard]' jinja2
 docker compose exec oh-my-agent oma-dashboard --host 0.0.0.0 --port 8080 &
-# 如果端口没有 forward，再做一下从 host loopback 的转发
+# 再做一下从容器到 host 127.0.0.1 的端口转发
 ```
 
 ### 6.4 怎么读这个页面

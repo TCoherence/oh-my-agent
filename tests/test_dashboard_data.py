@@ -337,6 +337,20 @@ def _write_log(path: Path, lines: list[str]) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _recent_ts(minutes_ago: int) -> str:
+    """Return an ISO timestamp ``minutes_ago`` minutes before now (UTC).
+
+    Log fixtures need to land inside the dashboard's 60-min window for
+    bucket assertions to fire — using static ``2026-05-03T20:00:00``-style
+    timestamps would be excluded by the time filter."""
+
+    from datetime import datetime, timedelta, timezone
+
+    return (datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)).isoformat(
+        timespec="milliseconds"
+    )
+
+
 def test_fetch_log_health_severity_string_is_warning_not_warn(tmp_path: Path) -> None:
     """Codex-flagged trap: Python logging emits ``level=WARNING``, not ``WARN``.
 
@@ -348,10 +362,10 @@ def test_fetch_log_health_severity_string_is_warning_not_warn(tmp_path: Path) ->
     _write_log(
         log,
         [
-            "2026-05-03T20:00:00.000Z level=INFO logger=oh_my_agent.gateway msg=hello",
-            "2026-05-03T20:01:00.000Z level=WARNING logger=oh_my_agent.runtime msg=slow",
-            "2026-05-03T20:02:00.000Z level=ERROR logger=oh_my_agent.runtime msg=boom",
-            "2026-05-03T20:03:00.000Z level=WARNING logger=oh_my_agent.gateway msg=again",
+            f"{_recent_ts(10)} level=INFO logger=oh_my_agent.gateway msg=hello",
+            f"{_recent_ts(9)} level=WARNING logger=oh_my_agent.runtime msg=slow",
+            f"{_recent_ts(8)} level=ERROR logger=oh_my_agent.runtime msg=boom",
+            f"{_recent_ts(7)} level=WARNING logger=oh_my_agent.gateway msg=again",
         ],
     )
     r = data.fetch_log_health([log])
@@ -365,13 +379,13 @@ def test_fetch_log_health_two_file_aggregation(tmp_path: Path) -> None:
     log_b = tmp_path / "oh-my-agent.log"
     _write_log(
         log_a,
-        ["2026-05-03T20:00:00.000Z level=ERROR logger=a msg=err-a"],
+        [f"{_recent_ts(5)} level=ERROR logger=a msg=err-a"],
     )
     _write_log(
         log_b,
         [
-            "2026-05-03T20:00:00.000Z level=WARNING logger=b msg=warn-b",
-            "2026-05-03T20:01:00.000Z level=ERROR logger=b msg=err-b",
+            f"{_recent_ts(4)} level=WARNING logger=b msg=warn-b",
+            f"{_recent_ts(3)} level=ERROR logger=b msg=err-b",
         ],
     )
     r = data.fetch_log_health([log_a, log_b])
@@ -382,7 +396,7 @@ def test_fetch_log_health_two_file_aggregation(tmp_path: Path) -> None:
 
 def test_fetch_log_health_one_file_missing_other_present(tmp_path: Path) -> None:
     log = tmp_path / "oh-my-agent.log"
-    _write_log(log, ["2026-05-03T20:00:00.000Z level=ERROR logger=x msg=err-x"])
+    _write_log(log, [f"{_recent_ts(5)} level=ERROR logger=x msg=err-x"])
     r = data.fetch_log_health([tmp_path / "service.log", log])
     assert r["total_error"] == 1
     assert r["files_missing"] == [str(tmp_path / "service.log")]
@@ -401,18 +415,44 @@ def test_fetch_log_health_skips_traceback_lines(tmp_path: Path) -> None:
     _write_log(
         log,
         [
-            "2026-05-03T20:00:00.000Z level=ERROR logger=x msg=oops",
+            f"{_recent_ts(5)} level=ERROR logger=x msg=oops",
             "Traceback (most recent call last):",
             '  File "/src/foo.py", line 42, in handler',
             "    raise ValueError(...)",
             "ValueError: bad",
-            "2026-05-03T20:01:00.000Z level=INFO logger=x msg=ok",
+            f"{_recent_ts(4)} level=INFO logger=x msg=ok",
         ],
     )
     r = data.fetch_log_health([log])
     assert r["total_error"] == 1
     # The traceback lines didn't contribute false ERRORs
     assert len(r["recent_errors"]) == 1
+
+
+def test_fetch_log_health_excludes_lines_outside_window(tmp_path: Path) -> None:
+    """Codex round-7 review: 'last hour' label must actually mean last 60 min.
+
+    Lines older than ``LOG_BUCKET_WINDOW_MINUTES`` minutes ago must NOT be
+    counted in window-scoped totals/buckets, even if they match the regex.
+    """
+
+    log = tmp_path / "service.log"
+    _write_log(
+        log,
+        [
+            # Old line — 3 hours ago, outside the 60-min window
+            "2025-01-01T00:00:00.000+00:00 level=ERROR logger=old msg=ancient",
+            # Recent line — inside the window
+            f"{_recent_ts(5)} level=ERROR logger=new msg=fresh",
+        ],
+    )
+    r = data.fetch_log_health([log])
+    # Window-scoped total: only the recent line.
+    assert r["total_error"] == 1
+    # The ancient line still contributed to recent_errors (first 5 ERRORs
+    # by encounter order, since file is read top-to-bottom).
+    # That's separate from the bucketed window count.
+    assert any("fresh" in e["msg"] for e in r["recent_errors"])
 
 
 # ---------------------------------------------------------------------------

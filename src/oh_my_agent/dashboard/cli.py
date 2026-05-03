@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Sequence
@@ -29,9 +30,9 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--config",
-        default="config.yaml",
-        help="Path to oh-my-agent config.yaml (default: ./config.yaml). "
-        "Falls back to OMA_CONFIG_PATH env var when present.",
+        default=None,
+        help="Path to oh-my-agent config.yaml. "
+        "Resolution order: --config flag → OMA_CONFIG_PATH env var → ./config.yaml.",
     )
     parser.add_argument(
         "--host",
@@ -60,9 +61,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
 
-    import os
-
-    config_path_str = args.config or os.environ.get("OMA_CONFIG_PATH", "config.yaml")
+    # Resolution order: --config > OMA_CONFIG_PATH > ./config.yaml.
+    # argparse's default kwarg can't express that — keep default=None and
+    # resolve here so the env var actually kicks in.
+    config_path_str = args.config or os.environ.get("OMA_CONFIG_PATH") or "config.yaml"
     config_path = Path(config_path_str).expanduser()
     if not config_path.is_absolute():
         config_path = config_path.resolve()

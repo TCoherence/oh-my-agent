@@ -463,18 +463,33 @@ def fetch_log_health(log_paths: list[Path]) -> dict:
             "files_missing": files_missing,
         }
 
-    sorted_buckets = sorted(bucket_counts.items())[-(LOG_BUCKET_WINDOW_MINUTES // LOG_BUCKET_MINUTES) :]
+    # Filter buckets to the actual last LOG_BUCKET_WINDOW_MINUTES window.
+    # Plain "last N entries" was misleading when the log was old — Codex
+    # review caught this. We compare bucket key (already a quantized ISO
+    # timestamp) against now-minus-window.
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=LOG_BUCKET_WINDOW_MINUTES)
+    in_window: list[tuple[str, dict[str, int]]] = []
+    for key, counts in sorted(bucket_counts.items()):
+        try:
+            bucket_ts = datetime.fromisoformat(key)
+        except ValueError:
+            continue
+        if bucket_ts.tzinfo is None:
+            bucket_ts = bucket_ts.replace(tzinfo=timezone.utc)
+        if bucket_ts >= cutoff:
+            in_window.append((key, counts))
 
     return {
         "files_read": files_read,
         "files_missing": files_missing,
         "parsed_lines": parsed_lines,
         "buckets": [
-            {"bucket": k, "error": v["ERROR"], "warning": v["WARNING"]} for k, v in sorted_buckets
+            {"bucket": k, "error": v["ERROR"], "warning": v["WARNING"]} for k, v in in_window
         ],
         "recent_errors": error_lines,
-        "total_error": sum(v["ERROR"] for v in bucket_counts.values()),
-        "total_warning": sum(v["WARNING"] for v in bucket_counts.values()),
+        # Window-scoped totals — match what's actually shown in the buckets table.
+        "total_error": sum(v["ERROR"] for _, v in in_window),
+        "total_warning": sum(v["WARNING"] for _, v in in_window),
     }
 
 

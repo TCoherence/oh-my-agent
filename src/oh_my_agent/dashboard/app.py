@@ -13,7 +13,6 @@ under WAL, so this stays correct while the bot writes.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any
 
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -182,11 +181,3 @@ def _sparkline_svg(values: list[float], width: int = 120, height: int = 24) -> s
 
 
 __all__ = ["create_app"]
-
-
-def _coerce_top_level_config(maybe_config: Any) -> dict:
-    """Defensive coercion — ensure we have a top-level config dict."""
-
-    if not isinstance(maybe_config, dict):
-        raise TypeError("dashboard expects top-level config dict")
-    return maybe_config
