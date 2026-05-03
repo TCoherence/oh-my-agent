@@ -233,6 +233,7 @@
 
 - [ ] Live observability ring buffer + 状态卡 live excerpt
 - [ ] 交付策略细化（inline summary / attachment / link），包括 Discord 友好的 markdown-heavy 产物展示：表格自动降级为 code block / list、可选 CSV/HTML/图片附件，以及适合 scoreboard 的 embed/card 交付模式
+- [ ] 长产物的最终交付：skill 已经把完整 markdown/json 落盘到 `runtime.reports_dir/...` 之后（例如 `market-briefing` weekly synthesis 的 38KB cross-domain.md），agent 仍然会把整段 markdown 当 assistant 文本回一次给 Discord —— 等于把已落盘内容再用 token 流重新生成一遍，既浪费 output token，又会把数分钟纯输出生成时间塞进 subprocess wall-clock 预算（real case：`bdcf9908d735` 2026-05-03 weekly，persist 在 18:16 成功，最后的 chat reply 还没生成完就被 1500s wall 砍了）。方向：runtime 把已发布路径作为 truth source，agent 只回简短摘要 + path，runtime 自己读盘 chunk 上传/贴文，与 CLAUDE.md 的 "single published artifact path" 语义对齐。和上一条 markdown rendering 风格细化是不同切面：上一条管"怎么把内容渲染好"，这条管"不要让 agent 再生一次已落盘内容"
 - [x] Docker 隔离（host 挂载到 `/home`，repo 挂载到 `/repo`，配置从 repo 读取，启动时 editable install，并预装 CLI 工具）
 - [ ] Discord `/restart` 运维命令：触发 host 侧受控容器重启链路（安全边界先定，具体实现后续细化）
 - [ ] Adaptive Memory 加密存储 + 认证后明文访问
