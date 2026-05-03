@@ -8,7 +8,9 @@ import pytest
 from oh_my_agent.agents.base import AgentResponse
 from oh_my_agent.gateway.services.task_service import TaskService
 from oh_my_agent.runtime.service import (
+    _RERUN_BUMP_TIMEOUT_SECONDS_DEFAULT,
     _RERUN_BUMP_TURNS_DEFAULT,
+    _RERUN_FALLBACK_BASE_TIMEOUT_SECONDS,
     _RERUN_FALLBACK_BASE_TURNS,
     RuntimeService,
 )
@@ -67,6 +69,7 @@ def _rerun_stub(*, parent: RuntimeTask):
             id=kwargs["task_id"],
             status=kwargs["status"],
             agent_max_turns=kwargs.get("agent_max_turns"),
+            agent_timeout_seconds=kwargs.get("agent_timeout_seconds"),
             goal=kwargs["goal"],
             preferred_agent=kwargs.get("preferred_agent"),
             completion_mode=kwargs.get("completion_mode", "reply"),
@@ -88,6 +91,9 @@ def _rerun_stub(*, parent: RuntimeTask):
     stub._signal_status_by_id = AsyncMock(return_value=None)
     stub._rerun_task_with_bumped_turns = MethodType(
         RuntimeService._rerun_task_with_bumped_turns, stub
+    )
+    stub._rerun_task_with_bumped_timeout = MethodType(
+        RuntimeService._rerun_task_with_bumped_timeout, stub
     )
     return stub
 
@@ -189,19 +195,125 @@ async def test_rerun_bump_turns_notifies_and_signals_sibling():
     assert stub._task_sources[sibling_task.id] == "rerun_bump_turns:slash"
 
 
-def test_disable_actions_for_failed_task_exposes_rerun_button():
-    failed = _task(status="FAILED")
-    assert TaskService.disable_actions(failed) == ["rerun_bump_turns"]
+@pytest.mark.asyncio
+async def test_rerun_bump_timeout_uses_fallback_when_parent_has_no_override():
+    """When the parent task has no ``agent_timeout_seconds`` override (None),
+    use ``_RERUN_FALLBACK_BASE_TIMEOUT_SECONDS`` as the base. Mirror of the
+    fallback test for ``_rerun_task_with_bumped_turns``."""
+    parent = _task(agent_timeout_seconds=None)
+    stub = _rerun_stub(parent=parent)
 
+    result = await stub._rerun_task_with_bumped_timeout(
+        parent,
+        actor_id="owner-1",
+        source="button",
+    )
 
-def test_disable_actions_for_non_failed_task_does_not_expose_rerun_button():
-    for status in ("RUNNING", "COMPLETED", "MERGED", "PAUSED", "DISCARDED"):
-        assert "rerun_bump_turns" not in TaskService.disable_actions(_task(status=status))
+    expected = _RERUN_FALLBACK_BASE_TIMEOUT_SECONDS + _RERUN_BUMP_TIMEOUT_SECONDS_DEFAULT
+    create_kwargs = stub._store.create_runtime_task.await_args.kwargs
+    assert create_kwargs["agent_timeout_seconds"] == expected
+    # max_turns must be carried through unchanged (we're bumping timeout only).
+    assert create_kwargs["agent_max_turns"] == parent.agent_max_turns
+    assert create_kwargs["status"] == "PENDING"
+    assert f"timeout_seconds={expected}" in result
 
 
 @pytest.mark.asyncio
-async def test_fail_surfaces_rerun_button_only_on_max_turns():
-    """Smoke test: verify the max_turns branch gates the surface call."""
+async def test_rerun_bump_timeout_bumps_explicit_parent_override():
+    """When parent has ``agent_timeout_seconds=1500`` (typical automation
+    config), the sibling gets 1500 + 1800 = 3300s."""
+    parent = _task(agent_timeout_seconds=1500)
+    stub = _rerun_stub(parent=parent)
+
+    await stub._rerun_task_with_bumped_timeout(
+        parent,
+        actor_id="owner-1",
+        source="button",
+    )
+
+    expected = 1500 + _RERUN_BUMP_TIMEOUT_SECONDS_DEFAULT
+    create_kwargs = stub._store.create_runtime_task.await_args.kwargs
+    assert create_kwargs["agent_timeout_seconds"] == expected
+
+
+@pytest.mark.asyncio
+async def test_rerun_bump_timeout_emits_lineage_events():
+    """Two events: ``task.created`` on sibling (with rerun_bump_timeout
+    source tag), ``task.rerun_sibling_created`` on parent (with timeout
+    fields, not turns)."""
+    parent = _task(agent_timeout_seconds=1500)
+    stub = _rerun_stub(parent=parent)
+
+    await stub._rerun_task_with_bumped_timeout(
+        parent,
+        actor_id="owner-1",
+        source="button",
+    )
+
+    event_calls = stub._store.add_runtime_event.await_args_list
+    assert len(event_calls) == 2
+
+    sibling_created_kwargs = event_calls[0].args
+    assert sibling_created_kwargs[1] == "task.created"
+    assert sibling_created_kwargs[2]["parent_task_id"] == parent.id
+    assert sibling_created_kwargs[2]["source"] == "rerun_bump_timeout:button"
+    assert sibling_created_kwargs[2]["agent_timeout_seconds"] == 3300
+
+    lineage_kwargs = event_calls[1].args
+    assert lineage_kwargs[0] == parent.id
+    assert lineage_kwargs[1] == "task.rerun_sibling_created"
+    assert lineage_kwargs[2]["actor_id"] == "owner-1"
+    assert lineage_kwargs[2]["source"] == "button"
+    assert lineage_kwargs[2]["agent_timeout_seconds"] == 3300
+    assert lineage_kwargs[2]["base_timeout_seconds"] == 1500
+
+
+@pytest.mark.asyncio
+async def test_rerun_bump_timeout_notifies_and_signals_sibling():
+    parent = _task(agent_timeout_seconds=1500)
+    stub = _rerun_stub(parent=parent)
+
+    await stub._rerun_task_with_bumped_timeout(
+        parent,
+        actor_id="owner-1",
+        source="slash",
+    )
+
+    assert stub._notify.await_count == 1
+    notify_args = stub._notify.await_args
+    sibling_task = notify_args.args[0]
+    notify_text = notify_args.args[1]
+    assert sibling_task.id != parent.id
+    assert "timeout_seconds=3300" in notify_text
+    assert parent.id in notify_text
+
+    assert stub._signal_status_by_id.await_count == 1
+    signaled_task, signaled_status = stub._signal_status_by_id.await_args.args
+    assert signaled_task.id == sibling_task.id
+    assert signaled_status == "PENDING"
+    assert stub._task_sources[sibling_task.id] == "rerun_bump_timeout:slash"
+
+
+def test_disable_actions_for_failed_task_exposes_rerun_buttons():
+    failed = _task(status="FAILED")
+    # Both rerun buttons are exposed for FAILED tasks. The runtime decides
+    # which one to actually surface based on ``error_kind`` (max_turns →
+    # rerun_bump_turns, timeout → rerun_bump_timeout) — but the action
+    # whitelist for the FAILED state covers both.
+    assert TaskService.disable_actions(failed) == ["rerun_bump_turns", "rerun_bump_timeout"]
+
+
+def test_disable_actions_for_non_failed_task_does_not_expose_rerun_buttons():
+    for status in ("RUNNING", "COMPLETED", "MERGED", "PAUSED", "DISCARDED"):
+        actions = TaskService.disable_actions(_task(status=status))
+        assert "rerun_bump_turns" not in actions
+        assert "rerun_bump_timeout" not in actions
+
+
+@pytest.mark.asyncio
+async def test_fail_surfaces_rerun_button_only_on_max_turns_or_timeout():
+    """Verify the max_turns / timeout branches gate the surface call,
+    and that each error_kind routes to its own button."""
     from oh_my_agent.runtime.service import RuntimeService as RS
 
     parent = _task(status="RUNNING")
@@ -217,19 +329,36 @@ async def test_fail_surfaces_rerun_button_only_on_max_turns():
         stub._signal_status_by_id = AsyncMock(return_value=None)
         stub._format_agent_failure_text = lambda r, prefix: f"{prefix} {r.error or ''}"
         stub._surface_rerun_bump_turns_button = AsyncMock(return_value=None)
+        stub._surface_rerun_bump_timeout_button = AsyncMock(return_value=None)
         stub._emit_automation_terminal_push = MagicMock(return_value=None)
         stub._fail = MethodType(RS._fail, stub)
         await stub._fail(parent, "boom", response=response)
         return stub
 
-    surfaced = await _make_stub(AgentResponse(text="", error="max_turns", error_kind="max_turns"))
-    assert surfaced._surface_rerun_bump_turns_button.await_count == 1
+    # max_turns → only the turns button fires
+    max_turns_stub = await _make_stub(
+        AgentResponse(text="", error="max_turns", error_kind="max_turns")
+    )
+    assert max_turns_stub._surface_rerun_bump_turns_button.await_count == 1
+    assert max_turns_stub._surface_rerun_bump_timeout_button.await_count == 0
 
-    not_surfaced = await _make_stub(AgentResponse(text="", error="boom", error_kind="cli_error"))
-    assert not_surfaced._surface_rerun_bump_turns_button.await_count == 0
+    # timeout → only the timeout button fires (parallel branch added in this PR)
+    timeout_stub = await _make_stub(
+        AgentResponse(text="", error="timed out", error_kind="timeout")
+    )
+    assert timeout_stub._surface_rerun_bump_turns_button.await_count == 0
+    assert timeout_stub._surface_rerun_bump_timeout_button.await_count == 1
+
+    # Other error_kinds → neither button fires
+    cli_error_stub = await _make_stub(
+        AgentResponse(text="", error="boom", error_kind="cli_error")
+    )
+    assert cli_error_stub._surface_rerun_bump_turns_button.await_count == 0
+    assert cli_error_stub._surface_rerun_bump_timeout_button.await_count == 0
 
     no_response = await _make_stub(None)
     assert no_response._surface_rerun_bump_turns_button.await_count == 0
+    assert no_response._surface_rerun_bump_timeout_button.await_count == 0
 
 
 @pytest.mark.asyncio

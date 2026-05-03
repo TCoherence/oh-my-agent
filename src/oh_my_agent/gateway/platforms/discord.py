@@ -746,6 +746,7 @@ class DiscordChannel(BaseChannel):
             "request_changes": ("Request Changes", "secondary"),
             "replace": ("Replace", "secondary"),
             "rerun_bump_turns": ("Re-run +30 turns", "primary"),
+            "rerun_bump_timeout": ("Re-run +30 min timeout", "primary"),
         }
         descriptors = [
             ActionDescriptor(
