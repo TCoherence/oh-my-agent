@@ -33,16 +33,16 @@ The script forwards everything to the stt CLI and translates its output to the o
 ## Arguments
 
 - `--input PATH` (required) — path to the media file. `~` is expanded.
-- `--format {json,srt,text}` (default `json`) — output format. Skills should usually pick `json` (structured segments). `srt` is for human-facing subtitle files; `text` is plain joined text.
+- `--format {json,srt,text}` (default `json`) — body shape inside the JSON envelope. `json` returns structured segments; `srt` returns a single SRT string; `text` returns plain joined text.
 - `--language CODE` (default `auto`) — ISO 639-1 code (`zh`, `en`, ...) or `auto` to detect.
 - `--engine {faster-whisper,mlx}` (optional) — backend override. Defaults to whatever stt's `set.ini` configures. On Apple Silicon, `mlx` is dramatically faster.
 - `--model NAME` (default `large-v3-turbo`) — Whisper model. `large-v3-turbo` is the recommended default — best speed/quality balance.
-- `--output PATH` (optional) — write the body to a file instead of stdout. Pass `-` for stdout (default).
 
 ## Output
 
-**On success (`--format json`)**, stdout is a JSON object:
+**The wrapper always emits a JSON envelope on stdout** regardless of `--format`. (`--help` is the one exception; argparse handles it directly with plain text + exit 0.)
 
+`--format json` (default):
 ```json
 {
   "status": "ok",
@@ -51,13 +51,32 @@ The script forwards everything to the stt CLI and translates its output to the o
   "language": "zh",
   "duration_seconds": 3970.2,
   "elapsed_seconds": 133.4,
-  "segments": [
-    {"start": 0.0, "end": 24.26, "text": "我们今天很开心..."}
-  ]
+  "segments": [{"start": 0.0, "end": 24.26, "text": "我们今天很开心..."}]
 }
 ```
 
-**On success (`--format srt | text`)**, stdout is the formatted body directly (not wrapped in JSON).
+`--format srt`:
+```json
+{
+  "status": "ok",
+  "engine": "mlx",
+  "model": "large-v3-turbo",
+  "language": "zh",
+  "duration_seconds": 3970.2,
+  "elapsed_seconds": 133.4,
+  "srt": "1\n00:00:00,000 --> 00:00:24,260\n我们今天很开心...\n\n2\n..."
+}
+```
+
+`--format text`:
+```json
+{
+  "status": "ok",
+  "engine": "mlx",
+  ...
+  "text": "我们今天很开心...\nHello,大家好,我是..."
+}
+```
 
 **On failure**, stdout is a JSON error envelope and exit code is non-zero:
 
@@ -70,10 +89,11 @@ The script forwards everything to the stt CLI and translates its output to the o
 - `ffmpeg_failed` (exit 2) — ffmpeg conversion error (e.g. corrupt media)
 - `model_unavailable` (exit 1) — mlx-whisper not installed; HF model not found; download failure
 - `transcribe_failed` (exit 3) — whisper backend raised mid-run
+- `timeout` (exit 3) — stt CLI exceeded the wrapper's 1700s budget; process group terminated to clean up any in-flight ffmpeg child
 - `stt_not_found` (exit 2) — `$STT_HOME` doesn't point to a valid stt install
-- `internal` (exit 4) — programming error / unexpected exception
+- `internal` (exit 4) — programming error / unexpected exception (e.g. stt CLI emitted unparseable stdout)
 
-Switch on `kind` for retry-vs-hard-fail. Network-related `model_unavailable` is retry-able; `invalid_input` is not.
+Switch on `kind` for retry-vs-hard-fail. Network-related `model_unavailable` is retry-able; `invalid_input` is not. `timeout` is borderline — usually means a hung model or huge input.
 
 ## Performance hints
 
@@ -102,4 +122,6 @@ If `$STT_HOME` is not set or points to a non-existent path, the script returns `
 
 - Pass `subprocess.run([...], capture_output=True, text=True)` and parse `stdout` as JSON. No need to read stderr — successes have empty stderr, errors mirror their JSON envelope to stdout.
 - `--format json` returns segments with start/end timestamps in seconds (float). Useful for chaptering, jumping to time codes, or attribution heuristics.
+- `--format srt` and `text` return the formatted body inside the JSON envelope under the `srt` / `text` key — extract with `data["srt"]` and `Path("out.srt").write_text(data["srt"])` for direct file write.
 - For a 2-speaker interview/podcast, the LLM consuming this can usually infer who said what from context — speaker diarization is rarely worth the extra ~10x compute time.
+- The wrapper hard-caps the subprocess at 1700s and uses `start_new_session=True` so a hung whisper inference cannot leave an orphan ffmpeg child past the agent's 1800s timeout.
