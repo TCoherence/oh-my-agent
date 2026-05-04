@@ -471,6 +471,121 @@ async def test_heartbeat_cancelled_on_finalize():
     assert len(ch.edits) == before
 
 
+class _SlowEditChannel(FakeChannel):
+    """Test channel where one edit_message call can be parked on a gate.
+
+    ``arm_slow()`` flags the NEXT edit_message call as slow. That call
+    signals when it parks (``_slow_started``) and waits on
+    ``_slow_release`` before recording. All other calls record immediately,
+    matching Discord accepting edits in arrival order.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._slow_release = asyncio.Event()
+        self._slow_started = asyncio.Event()
+        self._slow_armed = False
+
+    def arm_slow(self) -> None:
+        self._slow_armed = True
+
+    def release_slow(self) -> None:
+        self._slow_release.set()
+
+    async def edit_message(
+        self, thread_id: str, message_id: str, text: str
+    ) -> None:
+        cancelled_after_record = False
+        if self._slow_armed:
+            self._slow_armed = False  # consume the arm flag
+            self._slow_started.set()
+            try:
+                await self._slow_release.wait()
+            except asyncio.CancelledError:
+                # Simulate Discord having already processed the edit before
+                # asyncio-side cancel propagated — the HTTP request may have
+                # been delivered server-side even though our coroutine was
+                # cancelled. Record the edit and re-raise so the caller still
+                # observes the cancellation.
+                cancelled_after_record = True
+        self.edits.append((thread_id, message_id, text))
+        if cancelled_after_record:
+            raise asyncio.CancelledError()
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_inflight_edit_does_not_overwrite_finalize():
+    """Race regression for task [67217ed9]: a heartbeat-driven ``_safe_edit``
+    that is mid-flight when ``finalize()`` runs must NOT clobber the finalize
+    body.
+
+    Scenario:
+      1. Heartbeat fires, takes the lock, computes the live body (claude
+         attribution + ⏱ Ns + tool-trail), releases the lock, awaits
+         ``_safe_edit(live_body)``.
+      2. The Discord edit hangs (slow rate-limit slot / network).
+      3. Codex finishes; manager calls
+         ``relay.finalize(text, attribution_override="-# via **codex**")``.
+      4. Finalize must wait for the in-flight heartbeat edit before issuing
+         its own — otherwise the heartbeat edit lands LAST and the user
+         sees the live streaming format (the [67217ed9] symptom).
+    """
+    ch = _SlowEditChannel()
+    relay = StreamingRelay(
+        channel=ch,
+        thread_id="t",
+        attribution_prefix="-# via **claude**",
+        min_edit_interval=0.0,
+        heartbeat_interval=0.02,
+    )
+    # Seed live state so the heartbeat body is meaningfully different from
+    # the finalize body (matches the [67217ed9] observation: 2 `-# 🔧 Bash`
+    # lines on the live body, single attribution line on finalize).
+    relay._tool_trail.extend(["Bash", "Bash"])
+    relay._tool_count = 2
+    relay._latest_text = "partial assistant text"  # heartbeat will _flush_once
+
+    ch.arm_slow()
+    await relay.start("⏳ *thinking…*")
+
+    # Wait for the heartbeat-driven slow edit to actually be parked inside
+    # edit_message. (relay.start itself records once before the slow gate
+    # arms — that's fine; we want the SECOND edit, the heartbeat one, to be
+    # the slow one.) Re-arm the gate for the heartbeat call.
+    if not ch._slow_armed:
+        ch.arm_slow()
+    try:
+        await asyncio.wait_for(ch._slow_started.wait(), timeout=1.0)
+    except asyncio.TimeoutError:
+        pytest.fail("expected a heartbeat edit to start within 1s")
+
+    # Codex finishes; manager calls finalize while the heartbeat edit is
+    # still parked. With the fix, finalize awaits the heartbeat task before
+    # issuing its own edit, so the heartbeat edit records FIRST and the
+    # finalize edit records LAST.
+    final_text = "All done — codex finished."
+    finalize_task = asyncio.create_task(
+        relay.finalize(final_text, attribution_override="-# via **codex**")
+    )
+    await asyncio.sleep(0.05)
+    ch.release_slow()
+    await asyncio.wait_for(finalize_task, timeout=1.0)
+    await asyncio.sleep(0.05)
+
+    assert ch.edits, "expected at least one edit to have been recorded"
+    last_body = ch.edits[-1][2]
+    assert "via **codex**" in last_body, (
+        f"final edit should carry the finalize attribution, got: {last_body!r}"
+    )
+    assert final_text in last_body, (
+        f"final edit should carry the final response text, got: {last_body!r}"
+    )
+    assert "-# 🔧 Bash" not in last_body, (
+        "final edit should NOT contain the live tool-trail block "
+        f"(heartbeat in-flight edit clobbered finalize): {last_body!r}"
+    )
+
+
 def test_format_elapsed_under_one_minute_uses_seconds():
     assert StreamingRelay._format_elapsed(0) == "0s"
     assert StreamingRelay._format_elapsed(1) == "1s"
