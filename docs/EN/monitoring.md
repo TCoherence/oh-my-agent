@@ -1,8 +1,12 @@
 # Monitoring
 
-What to watch in production: log patterns that warrant alerts, and how to read each section of `/doctor`.
+What to watch in production: log patterns that warrant alerts, how to read each section of `/doctor`, and the optional read-only web dashboard.
 
-The bot is single-user / single-host by design. There is no Prometheus exporter; monitoring is done by tailing `service.log` and running `/doctor` on demand.
+The bot is single-user / single-host by design. There is no Prometheus exporter; monitoring is done by:
+
+1. Tailing `service.log`.
+2. Running `/doctor` on demand.
+3. (Optional) Running the `oma-dashboard` process — a read-only HTML page aggregating SQLite + log + memory state, refreshed every 60s. See [§6 Dashboard](#6-dashboard) below.
 
 ---
 
@@ -182,3 +186,60 @@ Cost is dominated by agent subprocess token usage. The bot does not bill directl
 | Provider dashboard (Anthropic / OpenAI / Google) | Authoritative spend |
 
 If you suspect a runaway: `grep AGENT_RUNNING ~/.oh-my-agent/runtime/logs/service.log | tail -n 50` to see which threads are running back-to-back.
+
+---
+
+## 6. Dashboard
+
+**Status**: opt-in. Requires the `dashboard` extras (`fastapi`, `uvicorn`, `jinja2`).
+
+**Bind contract**: loopback only. The default bind is `127.0.0.1:8080`. There is **no auth**. Exposing the dashboard on `0.0.0.0` or any non-loopback interface without first wiring auth is unsafe and will be flagged by the operator-guide pre-flight checklist.
+
+### 6.1 What it shows
+
+The dashboard is a single HTML page (auto-refreshed every 60s via `<meta refresh>`) with five sections:
+
+| Section | Source | Healthy |
+|---|---|---|
+| Automation health | `automation_runtime_state` + 7-day `runtime_tasks` rollup | `success_rate` ≥ ~80%, no `last_error` for active automations, `next_run_at` populated for enabled jobs |
+| Task / runtime health | `runtime_tasks` current + 7-day terminal | `RUNNING` ≤ workers; recent failures table is short and old |
+| Cost / usage | `usage_events` 7-day daily + today by source / by skill | Daily trend is flat or trending down; sparkline shows no recent spike |
+| Memory & skill | `memories.yaml` + `runtime_tasks` (per-skill 30d) | `active` ≫ `superseded` for active automations; per-skill `success_rate` ≥ ~80% |
+| System | `service.log` + `oh-my-agent.log` last 64 KB; disk usage; bot uptime | `total_error` low, no surprise gaps in disk usage, uptime > a few minutes |
+
+The system layer reads **two** log files — `service.log` (root logger sink) and `oh-my-agent.log` (RuntimeService secondary log) — and aggregates ERROR / WARNING counts across both. It uses Python's `record.levelname` strings (`ERROR` / `WARNING` / `INFO`), **not** `WARN`.
+
+### 6.2 Local run (host-side, bind-mount only)
+
+If your container uses a bind mount that exposes `~/.oh-my-agent/` on the host (the default in this repo's `compose.yaml` is a named volume — adjust if needed), you can run the dashboard directly on the host without going through Docker:
+
+```bash
+pip install -e '.[dashboard]'      # installs fastapi/uvicorn/jinja2
+oma-dashboard --config ./config.yaml
+```
+
+Then open `http://localhost:8080`.
+
+For the named-volume default in this repo's `compose.yaml`, the SQLite files live inside the volume and aren't host-readable — use the in-container deployment described next.
+
+### 6.3 In-container deployment (next PR)
+
+The recommended Docker deployment — a second `compose.yaml` service (`oh-my-agent-dashboard`) that reuses the same image, mounts the same volume, runs `oma-dashboard --host 0.0.0.0`, and publishes the port loopback-only via `ports: ["127.0.0.1:8080:8080"]` — lands in a follow-up PR.
+
+This PR ships the package, the entry point, and the host-side dev workflow only. The stock `Dockerfile` in this PR does **not** preinstall `fastapi` / `uvicorn` / `jinja2`, so `docker compose exec oh-my-agent oma-dashboard` will fail with a missing-dependency error today.
+
+If you can't wait, install the deps inside the container manually:
+
+```bash
+docker compose exec oh-my-agent pip install fastapi 'uvicorn[standard]' jinja2
+docker compose exec oh-my-agent oma-dashboard --host 0.0.0.0 --port 8080 &
+# Then forward port 8080 from the container to host's 127.0.0.1.
+```
+
+### 6.4 Reading the page
+
+- **All-empty page on first load**: the bot has not produced any data yet (no `runtime.db`, no logs). Each section shows a placeholder rather than 500.
+- **Persistent "all log files missing"**: check that the `OMA_MOUNT_ROOT` (or your runtime root) actually maps to a path the dashboard process can read.
+- **`success_rate` drops on one automation**: cross-reference with `/automation_status` for the live `last_error`; the dashboard shows truncated errors for layout, but `/doctor` shows the full text.
+- **Bot uptime jumps backwards or shows "no Runtime started line found"**: the `service.log` was rotated past the 7-day retention window. Display recovers next time the bot restarts.
+
