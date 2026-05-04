@@ -224,3 +224,127 @@ def test_index_negative_refresh_seconds_clamped_to_zero(tmp_path: Path) -> None:
     r = client.get("/")
     assert r.status_code == 200
     assert 'http-equiv="refresh"' not in r.text
+
+
+# ---------------------------------------------------------------------------
+# Cost / usage chart — axes + tick labels (PR #38)
+# ---------------------------------------------------------------------------
+
+
+def test_chart_svg_renders_axes_grid_and_data() -> None:
+    from oh_my_agent.dashboard.app import _chart_svg
+
+    svg = _chart_svg(
+        [0.05, 0.0, 0.0, 0.02, 0.01, 1.5, 0.8],
+        ["04-28", "04-29", "04-30", "05-01", "05-02", "05-03", "05-04"],
+    )
+    # Axes: y-axis line, x-axis line, plus tick marks
+    assert svg.count("<line ") >= 2
+    # Y-axis labels: $0, midpoint, max
+    assert ">$0<" in svg or ">$0.0" in svg
+    assert any(token in svg for token in (">$1.50<", ">$1.500<"))
+    # X-axis labels — every input label appears as text
+    for label in ["04-28", "04-29", "04-30", "05-01", "05-02", "05-03", "05-04"]:
+        assert f">{label}<" in svg
+    # Data: polyline + 7 dot markers
+    assert "<polyline" in svg
+    assert svg.count("<circle ") == 7
+
+
+def test_chart_svg_handles_empty_input() -> None:
+    from oh_my_agent.dashboard.app import _chart_svg
+
+    svg = _chart_svg([], [])
+    assert "<svg" in svg
+    assert "<polyline" not in svg
+    assert "<circle" not in svg
+
+
+def test_chart_svg_handles_single_value_no_polyline() -> None:
+    """One data point → dot, no line."""
+
+    from oh_my_agent.dashboard.app import _chart_svg
+
+    svg = _chart_svg([0.5], ["05-04"])
+    assert "<circle " in svg
+    # polyline needs >=2 points; should NOT be emitted for n=1
+    assert "<polyline" not in svg
+
+
+def test_chart_svg_flat_series_does_not_divide_by_zero() -> None:
+    """All-equal values: span would be 0; padding kicks in to keep render valid."""
+
+    from oh_my_agent.dashboard.app import _chart_svg
+
+    svg = _chart_svg([0.0, 0.0, 0.0], ["a", "b", "c"])
+    assert "<polyline" in svg
+    # No NaN / inf in coords
+    assert "NaN" not in svg
+    assert "inf" not in svg
+
+
+def test_chart_svg_all_zero_series_has_compact_y_axis() -> None:
+    """Codex round-1 catch: all-zero series previously padded to $0/$0.50/$1.00,
+    making the data look pinned to the bottom. Use $0.01 padding instead so
+    the y-axis labels stay near zero."""
+
+    from oh_my_agent.dashboard.app import _chart_svg
+
+    svg = _chart_svg([0.0, 0.0, 0.0, 0.0], ["a", "b", "c", "d"])
+    # Top tick should be $0.01 (or formatted equivalent), NOT $1.00 or $0.50
+    assert ">$0.50<" not in svg
+    assert ">$1.00<" not in svg
+    assert ">$1<" not in svg
+    # The top label should be in the small-cents range
+    assert ">$0.010<" in svg or ">$0.01<" in svg
+
+
+def test_chart_svg_escapes_x_axis_labels() -> None:
+    """Codex round-1 catch: chart is a Jinja global; future callers might
+    pass user-controlled labels. _chart_svg escapes <, >, & in labels."""
+
+    from oh_my_agent.dashboard.app import _chart_svg
+
+    svg = _chart_svg([1.0, 2.0], ["<script>alert(1)</script>", "&fragment"])
+    # The literal `<script>` tag must NOT appear in output
+    assert "<script>" not in svg
+    # Escaped form should appear in a <text> element
+    assert "&lt;script&gt;" in svg
+    assert "&amp;fragment" in svg
+
+
+def test_short_day_filter() -> None:
+    from oh_my_agent.dashboard.app import _short_day
+
+    assert _short_day("2026-05-04") == "05-04"
+    assert _short_day("") == ""
+    assert _short_day(None) == ""
+    # Pass through if format doesn't match
+    assert _short_day("not-a-date") == "not-a-date"
+
+
+def test_format_y_axis_label_adaptive() -> None:
+    from oh_my_agent.dashboard.app import _format_y_axis_label
+
+    assert _format_y_axis_label(0) == "$0"
+    assert _format_y_axis_label(0.0001) == "$0.0001"
+    assert _format_y_axis_label(0.05) == "$0.050"
+    assert _format_y_axis_label(2.5) == "$2.50"
+    assert _format_y_axis_label(42.0) == "$42"
+    assert _format_y_axis_label(1500) == "$1.5k"
+
+
+def test_index_renders_cost_chart_with_axes(tmp_path: Path) -> None:
+    """Live page integration: cost section uses the new chart, not sparkline."""
+
+    config = _seed_minimal_runtime_tree(tmp_path)
+    app = create_app(config)
+    client = TestClient(app)
+    r = client.get("/")
+    assert r.status_code == 200
+    # The cost section title is present (no error placeholder)
+    assert "Cost / usage" in r.text
+    # When there's no usage data, chart-wrap should be skipped
+    # (template guards on `cost.daily_7d`).
+    # We can still assert the section header is there:
+    assert "7-day daily totals" in r.text

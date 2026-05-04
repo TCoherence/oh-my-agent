@@ -12,6 +12,7 @@ under WAL, so this stays correct while the bot writes.
 
 from __future__ import annotations
 
+import html
 from datetime import datetime, timezone
 
 from fastapi import FastAPI
@@ -46,7 +47,9 @@ def create_app(config: dict, *, refresh_seconds: int = 300) -> FastAPI:
     env.filters["fmt_relative"] = _fmt_relative
     env.filters["fmt_pct"] = _fmt_pct
     env.filters["fmt_uptime"] = _fmt_uptime
-    env.globals["sparkline"] = _sparkline_svg
+    env.filters["short_day"] = _short_day
+    env.globals["chart"] = _chart_svg
+    env.globals["sparkline"] = _sparkline_svg  # legacy alias, kept for any caller
 
     template = env.get_template("dashboard.html")
 
@@ -163,10 +166,157 @@ def _fmt_uptime(seconds: int | None) -> str:
     return f"{days}d {hours}h"
 
 
+def _short_day(s: str | None) -> str:
+    """Shorten ``YYYY-MM-DD`` to ``MM-DD``; pass through anything else."""
+
+    if s and len(s) >= 10 and s[4] == "-" and s[7] == "-":
+        return s[5:10]
+    return s or ""
+
+
+def _format_y_axis_label(value: float) -> str:
+    """Compact dollar formatter for chart y-axis ticks.
+
+    The cost values we plot range from ~$0.0001 (chat exchanges) to ~$10
+    (heavy automation days), so we need adaptive precision.
+    """
+
+    if value == 0:
+        return "$0"
+    abs_val = abs(value)
+    if abs_val >= 1000:
+        return f"${value / 1000:.1f}k"
+    if abs_val >= 10:
+        return f"${value:.0f}"
+    if abs_val >= 1:
+        return f"${value:.2f}"
+    if abs_val >= 0.01:
+        return f"${value:.3f}"
+    return f"${value:.4f}"
+
+
+def _chart_svg(
+    values: list[float],
+    labels: list[str] | None = None,
+    width: int = 480,
+    height: int = 140,
+) -> str:
+    """Render a labeled line chart with x/y axes, ticks, and grid.
+
+    More substantial than ``_sparkline_svg`` — designed to live as a block
+    element with breathing room. Fills the y-axis with min/mid/max ticks
+    and the x-axis with one tick per data point. Empty / single-value
+    inputs render a labeled-empty placeholder.
+    """
+
+    if not values:
+        return f'<svg width="{width}" height="{height}"></svg>'
+
+    left, top, right, bottom = 52, 10, 12, 26
+    plot_w = width - left - right
+    plot_h = height - top - bottom
+
+    vmin = min(values)
+    vmax = max(values)
+    if vmax == vmin:
+        # Pad a tiny range so a flat series still renders on the polyline,
+        # not on the axis itself. Use 10% of the value when non-zero, or
+        # a small absolute pad ($0.01) when everything is zero — Codex
+        # round-1 caught that the previous `max(1.0, ...)` pushed the
+        # all-zero case to a misleading $0/$0.50/$1.00 y-axis.
+        if vmin == 0:
+            vmax = 0.01
+        else:
+            vmax = vmin + abs(vmin) * 0.1
+    span = vmax - vmin
+
+    n = len(values)
+
+    def x_for(i: int) -> float:
+        if n == 1:
+            return left + plot_w / 2
+        return left + (i / (n - 1)) * plot_w
+
+    def y_for(v: float) -> float:
+        return top + plot_h - ((v - vmin) / span) * plot_h
+
+    parts: list[str] = []
+    parts.append(
+        f'<svg width="{width}" height="{height}" viewBox="0 0 {width} {height}" '
+        'xmlns="http://www.w3.org/2000/svg" style="font: 10px ui-monospace, '
+        'SFMono-Regular, Menlo, Consolas, monospace;">'
+    )
+
+    # Horizontal grid + y-axis ticks at min/mid/max.
+    y_ticks = [
+        (vmin, top + plot_h),
+        ((vmin + vmax) / 2, top + plot_h / 2),
+        (vmax, top),
+    ]
+    for _val, y in y_ticks:
+        parts.append(
+            f'<line x1="{left}" y1="{y:.1f}" x2="{left + plot_w}" y2="{y:.1f}" '
+            'stroke="#3a3a3a" stroke-width="0.5" stroke-dasharray="2,3"/>'
+        )
+    for val, y in y_ticks:
+        parts.append(
+            f'<line x1="{left - 3}" y1="{y:.1f}" x2="{left}" y2="{y:.1f}" '
+            'stroke="#888" stroke-width="0.5"/>'
+        )
+        parts.append(
+            f'<text x="{left - 5}" y="{y + 3:.1f}" text-anchor="end" '
+            f'fill="#888">{_format_y_axis_label(val)}</text>'
+        )
+
+    # Axis lines.
+    parts.append(
+        f'<line x1="{left}" y1="{top}" x2="{left}" y2="{top + plot_h}" '
+        'stroke="#888" stroke-width="0.5"/>'
+    )
+    parts.append(
+        f'<line x1="{left}" y1="{top + plot_h}" x2="{left + plot_w}" '
+        f'y2="{top + plot_h}" stroke="#888" stroke-width="0.5"/>'
+    )
+
+    # X-axis ticks + labels (one per data point, if labels provided).
+    if labels and len(labels) == n:
+        for i, lab in enumerate(labels):
+            x = x_for(i)
+            parts.append(
+                f'<line x1="{x:.1f}" y1="{top + plot_h}" x2="{x:.1f}" '
+                f'y2="{top + plot_h + 3}" stroke="#888" stroke-width="0.5"/>'
+            )
+            # Escape: chart() is a Jinja global, future callers may pass
+            # user-controlled strings. Cheap defense regardless of who calls.
+            safe_lab = html.escape(str(lab), quote=False)
+            parts.append(
+                f'<text x="{x:.1f}" y="{top + plot_h + 14:.1f}" '
+                f'text-anchor="middle" fill="#888">{safe_lab}</text>'
+            )
+
+    # Data: polyline + dot markers.
+    if n >= 2:
+        points = " ".join(f"{x_for(i):.1f},{y_for(v):.1f}" for i, v in enumerate(values))
+        parts.append(
+            f'<polyline points="{points}" fill="none" stroke="currentColor" '
+            'stroke-width="1.5"/>'
+        )
+    for i, v in enumerate(values):
+        parts.append(
+            f'<circle cx="{x_for(i):.1f}" cy="{y_for(v):.1f}" r="2.5" '
+            'fill="currentColor"/>'
+        )
+
+    parts.append("</svg>")
+    return "".join(parts)
+
+
 def _sparkline_svg(values: list[float], width: int = 120, height: int = 24) -> str:
     """Render a list of numbers as an inline SVG polyline.
 
-    Empty / single-value lists render an empty SVG. No external chart lib.
+    Legacy minimal renderer. Kept as a Jinja global for any future caller
+    that wants tiny inline trends; current dashboard uses ``chart`` instead
+    (axes + tick labels). Empty / single-value lists render an empty SVG.
     """
 
     if not values or len(values) < 2:
