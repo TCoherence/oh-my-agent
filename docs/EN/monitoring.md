@@ -222,19 +222,40 @@ Then open `http://localhost:8080`.
 
 For the named-volume default in this repo's `compose.yaml`, the SQLite files live inside the volume and aren't host-readable — use the in-container deployment described next.
 
-### 6.3 In-container deployment (next PR)
+### 6.3 In-container deployment (recommended for named-volume users)
 
-The recommended Docker deployment — a second `compose.yaml` service (`oh-my-agent-dashboard`) that reuses the same image, mounts the same volume, runs `oma-dashboard --host 0.0.0.0`, and publishes the port loopback-only via `ports: ["127.0.0.1:8080:8080"]` — lands in a follow-up PR.
+`compose.yaml` ships with a second service `oh-my-agent-dashboard` that reuses the same image, mounts the same volume, and binds `0.0.0.0:8080` inside the container. The compose port mapping publishes that on host loopback only:
 
-This PR ships the package, the entry point, and the host-side dev workflow only. The stock `Dockerfile` in this PR does **not** preinstall `fastapi` / `uvicorn` / `jinja2`, so `docker compose exec oh-my-agent oma-dashboard` will fail with a missing-dependency error today.
+```yaml
+ports:
+  - "127.0.0.1:8080:8080"
+```
 
-If you can't wait, install the deps inside the container manually:
+The Dockerfile preinstalls `fastapi` / `uvicorn[standard]` / `jinja2` so no extra `pip install` is needed at start-up.
+
+**First-time setup** (rebuild required because dashboard deps were added to the image):
 
 ```bash
-docker compose exec oh-my-agent pip install fastapi 'uvicorn[standard]' jinja2
-docker compose exec oh-my-agent oma-dashboard --host 0.0.0.0 --port 8080 &
-# Then forward port 8080 from the container to host's 127.0.0.1.
+docker compose build
+docker compose up -d            # starts bot + dashboard
+# Then open http://localhost:8080 in your browser.
 ```
+
+**Bot only** (skip dashboard entirely):
+
+```bash
+docker compose up -d oh-my-agent
+```
+
+**Restart just the dashboard** (e.g. after upgrading source code):
+
+```bash
+docker compose restart oh-my-agent-dashboard
+```
+
+If you've forked `compose.yaml` to switch the runtime mount from the named volume `oma-runtime:/home` to a bind mount (e.g. `~/oh-my-agent-mount:/home`), apply the same change to `oh-my-agent-dashboard`'s `volumes` block. Dashboard and bot must mount the same path.
+
+**Loopback boundary**: the `127.0.0.1:8080:8080` syntax is what makes this safe-by-default — Docker only listens on host loopback, not all interfaces. If you change it to `0.0.0.0:8080:8080` to access the dashboard over the LAN, you **must** add auth in front first; the dashboard itself has none.
 
 ### 6.4 Reading the page
 

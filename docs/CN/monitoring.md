@@ -222,19 +222,40 @@ oma-dashboard --config ./config.yaml
 
 如果你用仓库默认的 named volume，SQLite 在 host 上不可读——用下面 §6.3 的容器内部署。
 
-### 6.3 容器内部署（下个 PR）
+### 6.3 容器内部署（named-volume 用户推荐）
 
-推荐的 Docker 部署方案——`compose.yaml` 增加第二个 service `oh-my-agent-dashboard`，复用同一镜像、挂同一 volume、跑 `oma-dashboard --host 0.0.0.0`，再用 `ports: ["127.0.0.1:8080:8080"]` 把端口仅发布到 host loopback——会在下一个 PR 里落地。
+`compose.yaml` 自带第二个 service `oh-my-agent-dashboard`：复用同一镜像、挂同一 volume、容器内绑 `0.0.0.0:8080`。compose 的端口映射只把它发布到 host loopback：
 
-这个 PR 只 ship 了包、entry point 和 host 端 dev workflow。当前 `Dockerfile` **没有**预装 `fastapi` / `uvicorn` / `jinja2`，所以现在直接跑 `docker compose exec oh-my-agent oma-dashboard` 会因为缺依赖失败。
+```yaml
+ports:
+  - "127.0.0.1:8080:8080"
+```
 
-如果等不及，可以容器内手动装依赖：
+Dockerfile 预装了 `fastapi` / `uvicorn[standard]` / `jinja2`，启动时不需要再跑 pip install。
+
+**首次设置**（dashboard 依赖被加到镜像里了，必须重建）：
 
 ```bash
-docker compose exec oh-my-agent pip install fastapi 'uvicorn[standard]' jinja2
-docker compose exec oh-my-agent oma-dashboard --host 0.0.0.0 --port 8080 &
-# 再做一下从容器到 host 127.0.0.1 的端口转发
+docker compose build
+docker compose up -d            # 同时起 bot + dashboard
+# 然后浏览器打开 http://localhost:8080
 ```
+
+**只起 bot**（跳过 dashboard）：
+
+```bash
+docker compose up -d oh-my-agent
+```
+
+**只重启 dashboard**（比如代码更新后）：
+
+```bash
+docker compose restart oh-my-agent-dashboard
+```
+
+如果你 fork 过 `compose.yaml`，把 `oma-runtime:/home` named volume 换成了 bind mount（比如 `~/oh-my-agent-mount:/home`），那 `oh-my-agent-dashboard` 的 `volumes` 块也要改成同一路径。dashboard 和 bot 必须挂同一个目录。
+
+**Loopback 边界**：`127.0.0.1:8080:8080` 这个写法是默认安全的关键——Docker 只在 host loopback 上监听，不监听所有网卡。如果你改成 `0.0.0.0:8080:8080` 想 LAN 访问，**必须**先在前面挡一层鉴权；dashboard 自己没有任何鉴权。
 
 ### 6.4 怎么读这个页面
 

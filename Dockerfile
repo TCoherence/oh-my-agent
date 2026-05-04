@@ -36,5 +36,14 @@ PY
 RUN python -m pip install -r /tmp/oma-requirements.txt 'setuptools>=75' \
     && rm -f /tmp/oma-requirements.txt
 
+# Preinstall the `dashboard` optional-deps group (fastapi + uvicorn + jinja2)
+# so the `oma-dashboard` entry point works in the same image without a second
+# pip install at container start. Versions kept in lockstep with
+# pyproject.toml's `[project.optional-dependencies] dashboard`.
+RUN python -m pip install \
+    'fastapi>=0.110,<1' \
+    'uvicorn[standard]>=0.27,<1' \
+    'jinja2>=3.1,<4'
+
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/oma-entrypoint"]
 CMD ["oh-my-agent"]
