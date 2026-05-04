@@ -151,19 +151,6 @@ oma_port_is_free() {
   return 0
 }
 
-# Iterate DASHBOARD_PORTS, print the first one that's free on the host.
-# Empty stdout if all are taken.
-oma_dashboard_pick_port() {
-  local port
-  for port in ${DASHBOARD_PORTS}; do
-    if oma_port_is_free "${port}"; then
-      printf '%s\n' "${port}"
-      return 0
-    fi
-  done
-  return 1
-}
-
 # Build the docker-run argv for the dashboard container. Mirrors
 # oma_docker_build_common_run_args but: different container name,
 # OMA_FAIL_FAST_CLI=0 (no CLI binary check needed), and the chosen
