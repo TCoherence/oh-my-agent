@@ -1,0 +1,108 @@
+scenario: bilibili-chat-reply-suspended-resume
+description: |
+  L-level regression: a chat-reply (NOT a task) triggers auth_required;
+  after the auth provider auto-approves, the suspended-resume runs in a
+  given cwd and stores its session id in the agent_sessions DB. A
+  *follow-up* chat reply in the same thread must be able to --resume
+  that session — which only works if the suspended-resume + chat-reply
+  paths agree on cwd. PR #41 makes them agree (both use the per-thread
+  short workspace).
+
+  Why a follow-up message is required to catch the regression: the
+  runtime's suspended-resume already has a stale-session retry that
+  masks the FIRST cwd-mismatch failure (it clears + retries with a
+  fresh session). Without the fix, that fresh session lands in the
+  base-workspace cwd, so the FIRST flow still succeeds with `via
+  claude`. The damage shows up on the NEXT chat reply, when the gateway
+  loads the stored session id from the DB but runs claude in the
+  per-thread short-workspace cwd — a different cwd than the one the
+  session was created in. StubAgent (cwd_keyed_sessions=true) returns
+  the exact `claude exited 1: No conversation found` error real claude
+  produces, registry falls back to codex, and the assertion that the
+  follow-up's `agent_used: claude` fails. With PR #41, both calls share
+  the per-thread short-workspace cwd, so the session resume succeeds
+  and claude stays on the thread.
+
+  Phrasing avoids artifact/long-task heuristic keywords (`summarize` /
+  `分析` / `总结` / `report` / etc.) so the message stays on the
+  chat-reply path and is not promoted to an artifact_task.
+
+seed:
+  auth_provider: approving
+  agents:
+    claude:
+      cwd_keyed_sessions: true
+      responses:
+        - when:
+            content_contains: "[System Resume Context]"
+          text: |
+            # 外卖员生存报告
+            一句话结论：算法、单价、电瓶撑起的中国底层。
+            数据：每单 ~2.5 元，平均跑 60 单/日。
+            TASK_STATE: DONE
+        - when:
+            content_contains: "再讲一下"
+          text: |
+            (claude follow-up) Sure — pickup volume rises after dinner rush.
+            TASK_STATE: DONE
+        - when:
+            default: true
+          text: |
+            <OMA_CONTROL>{"version":1,"type":"challenge","data":{"challenge_type":"auth_required","provider":"bilibili","reason":"login_required"}}</OMA_CONTROL>
+    codex:
+      responses:
+        - when: { default: true }
+          text: |
+            (codex took over because claude session resume failed)
+            TASK_STATE: DONE
+
+steps:
+  - inject_user_message:
+      thread_id: null
+      author_id: "owner-1"
+      content: "你能 open https://www.bilibili.com/video/BV1ekoqBBEDF 这个链接吗"
+      capture:
+        thread_id_as: "@thread1"
+  - await:
+      condition: event_seen
+      type: send
+      payload_contains: "Login confirmed"
+      timeout_seconds: 30
+  - await:
+      condition: event_seen
+      type: send
+      payload_contains: "外卖员生存报告"
+      timeout_seconds: 30
+  # Follow-up message in the SAME thread. With PR #41 the gateway resolves
+  # the same short-workspace cwd, the agent_sessions row matches the cwd
+  # the suspended-resume created the session in, --resume succeeds, and
+  # claude responds. Without PR #41 the session lives under base-workspace
+  # cwd; the chat-reply path runs in short-workspace cwd; --resume misses
+  # the cache; registry falls back to codex; the follow-up assertion below
+  # fails.
+  - inject_user_message:
+      thread_id: "@thread1"
+      author_id: "owner-1"
+      content: "再讲一下细节"
+  - await:
+      condition: event_seen
+      type: send
+      payload_contains: "(claude follow-up)"
+      timeout_seconds: 30
+
+expect:
+  events_in_order:
+    - type: send
+      thread_id: "@thread1"
+      payload_contains: "Login confirmed"
+    - type: send
+      thread_id: "@thread1"
+      payload_contains: "外卖员生存报告"
+    - type: send
+      thread_id: "@thread1"
+      payload_contains: "(claude follow-up)"
+  events_not_present:
+    - type: send
+      payload_contains: "codex took over"
+  metrics:
+    auth_flows_started: 1

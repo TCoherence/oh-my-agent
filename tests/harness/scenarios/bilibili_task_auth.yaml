@@ -1,0 +1,67 @@
+scenario: bilibili-task-auth-flow
+description: |
+  General auth + S-level via task path. No cached cookies → user posts URL
+  → task hits auth_required → stub_approving provider auto-approves → task
+  re-claims and completes. Asserts auth flow happened exactly once and the
+  COMPLETED body shows the actual report (S-level).
+
+  Note: this scenario does NOT cover L-level (the cwd-mismatch suspended-
+  resume bug). Task path's auth-retry stays in the same task workspace
+  before and after auth, so cwd never crosses. See bilibili_chat_reply_resume
+  for the L-level coverage.
+
+seed:
+  auth_provider: approving
+  agents:
+    claude:
+      cwd_keyed_sessions: true
+      responses:
+        - when:
+            step_no_eq: 1
+          text: |
+            <OMA_CONTROL>{"version":1,"type":"challenge","data":{"challenge_type":"auth_required","provider":"bilibili","reason":"login_required"}}</OMA_CONTROL>
+            TASK_STATE: BLOCKED
+            BLOCK_REASON: Bilibili login required to fetch subtitles.
+        - when:
+            step_no_eq: 2
+          text: |
+            # 外卖员生存报告
+            一句话结论：算法、单价、电瓶撑起的中国底层。
+            ## 摘要
+            视频用 28 分钟讲清外卖员真实状态。
+            TASK_STATE: DONE
+    codex:
+      responses:
+        - when: { default: true }
+          error: "codex must not be invoked in this scenario"
+          error_kind: cli_error
+
+steps:
+  - inject_user_message:
+      thread_id: null
+      author_id: "owner-1"
+      content: "https://www.bilibili.com/video/BV1ekoqBBEDF 帮我总结"
+      capture:
+        thread_id_as: "@thread1"
+  - await:
+      condition: task_status_eq
+      task_index: 0
+      status: COMPLETED
+      timeout_seconds: 30
+
+expect:
+  events_in_order:
+    - type: send_attachment
+      payload_contains: "qr"
+    - type: send
+      thread_id: "@thread1"
+      payload_contains: "Login confirmed"
+    - type: send
+      thread_id: "@thread1"
+      payload_contains: "外卖员生存报告"
+  task:
+    index: 0
+    status: COMPLETED
+    output_summary_non_empty: true
+  metrics:
+    auth_flows_started: 1

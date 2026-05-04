@@ -106,7 +106,59 @@ class TaskDecisionSurface(Protocol):
 
 
 class BaseChannel(ABC):
-    """Platform adapter: bridges a chat platform with the GatewayManager."""
+    """Platform adapter: bridges a chat platform with the GatewayManager.
+
+    Surface contract — what GatewayManager + RuntimeService rely on:
+
+    Mandatory (must implement):
+        - ``platform`` / ``channel_id`` properties
+        - ``async start(on_message)`` — block until ``stop()`` is called
+        - ``async create_thread(msg, name)`` — return new platform thread id
+        - ``async send(thread_id, text)`` — return optional message id
+
+    Cross-platform optional (sensible defaults provided):
+        - ``async create_followup_thread(...)`` — anchor thread to existing
+          message; default returns None (platform doesn't support it)
+        - ``async stop()`` — graceful shutdown; default no-op
+        - ``async edit_message(...)`` / ``supports_streaming_edit`` — message
+          editing for streaming; defaults to no-op + False
+        - ``async send_interactive(...)`` / ``async update_interactive(...)``
+          — interactive button messages; default falls through to ``send`` /
+          ``edit_message``
+        - ``async send_dm(user_id, text)`` — best-effort DM; default returns None
+        - ``async upsert_status_message(...)`` — sticky status msg; default
+          falls through to ``send``
+        - ``async send_attachment(...)`` / ``async send_attachments(...)`` —
+          file uploads; default surfaces the filename via text
+        - ``typing(thread_id)`` async context manager — typing indicator; default no-op
+        - ``supports_buttons()`` — False by default
+        - ``async send_task_draft(...)`` — task approval card; default falls
+          through to ``send``
+        - ``parse_decision_event(raw)`` — button-click event parser; default
+          returns None
+        - ``async signal_task_status(thread_id, message_id, emoji)`` —
+          status emoji on a message; default no-op (platforms without
+          reactions degrade silently)
+        - ``async send_hitl_prompt(*, thread_id, prompt)`` — HITL prompt
+          card; default falls through to ``send`` with a text rendition
+
+    Platform extension hooks (set by GatewayManager via ``hasattr`` guards;
+    NOT part of the channel API surface — DiscordChannel implements them as
+    Discord-specific glue, other platforms are free to omit):
+        - ``set_session_context(session, registry, memory_store=None)``
+        - ``set_skill_syncer(syncer, workspace_skills_dirs=None)``
+        - ``set_runtime_service(runtime_service)``
+        - ``set_scheduler(scheduler)``
+        - ``register_dump_channel(channel_id)``
+        - ``async ensure_dm_channel(user_id)``
+
+    Adding a new platform: subclass and implement the mandatory methods
+    plus any cross-platform optional ones whose default behavior loses
+    important UX (typing indicator, attachment upload, etc.). The harness
+    channel at ``tests/harness/scripted_channel.py`` is the executable
+    contract test — every method GatewayManager / RuntimeService call must
+    work against it without Discord-specific shims.
+    """
 
     @property
     @abstractmethod
@@ -270,3 +322,46 @@ class BaseChannel(ABC):
     def parse_decision_event(self, raw: Any) -> Any | None:
         del raw
         return None
+
+    # -- task / HITL surfaces (formerly Discord-only; promoted for harness) -
+
+    async def signal_task_status(
+        self,
+        thread_id: str,
+        message_id: str | None,
+        emoji: str,
+    ) -> None:
+        """Attach a status emoji (e.g. status reaction) to a message.
+
+        Discord uses native message reactions. Platforms without reaction
+        support degrade silently — the status is already conveyed via the
+        text task notifications, so dropping the emoji is lossless.
+        """
+        del thread_id, message_id, emoji
+
+    async def send_hitl_prompt(
+        self,
+        *,
+        thread_id: str,
+        prompt: Any,
+    ) -> str | None:
+        """Render a HITL prompt as an interactive card.
+
+        ``prompt`` is a ``runtime.types.HitlPrompt``. Discord renders this as
+        a button card; platforms without rich card support fall back here to
+        a text rendition (question + numbered choices) so the user still sees
+        what's being asked.
+        """
+        question = getattr(prompt, "question", "") or ""
+        choices = getattr(prompt, "choices", ()) or ()
+        rendered_choices: list[str] = []
+        for idx, choice in enumerate(choices, start=1):
+            label = (
+                choice.get("label", "")
+                if isinstance(choice, dict)
+                else getattr(choice, "label", "") or ""
+            )
+            rendered_choices.append(f"{idx}. {label}")
+        choices_block = "\n".join(rendered_choices) if rendered_choices else "(no choices)"
+        body = f"**Decision needed:** {question}\n\nChoices:\n{choices_block}"
+        return await self.send(thread_id, body)

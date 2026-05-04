@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import fnmatch
 import inspect
 import json
@@ -85,6 +86,32 @@ _STATUS_MESSAGE_PREFIX = "**Task Status**"
 _TERMINAL_MESSAGE_PREFIX = "**Task Update**"
 _TASK_STATE_LINE_RE = re.compile(r"^\s*TASK_STATE:\s*\w+\s*$", re.MULTILINE)
 _BLOCK_REASON_LINE_RE = re.compile(r"^\s*BLOCK_REASON:\s*.+\s*$", re.MULTILINE)
+
+
+def _is_stub_artifact_reply(text: str) -> bool:
+    """True when *text* looks like a short "artifact ready" ack rather than
+    a real report body. Used by ``_artifact_reply_text`` to prefer the file
+    preview when the agent wrote the real report to a workspace file and
+    only sent a one-line confirmation in chat — that's the established
+    automation pattern (skill writes markdown, agent says "report ready").
+    Substantive replies (multi-line content lines, header markers, > 60
+    chars) skip this and render the agent text directly.
+    """
+    cleaned = _TASK_STATE_LINE_RE.sub("", text)
+    cleaned = _BLOCK_REASON_LINE_RE.sub("", cleaned).strip()
+    if not cleaned:
+        return True
+    content_lines = [line for line in cleaned.splitlines() if line.strip()]
+    # Multi-line *content* (after stripping TASK_STATE / BLOCK_REASON
+    # boilerplate) is by definition not a stub ack — even short multi-line
+    # replies usually carry intentional structure.
+    if len(content_lines) > 1:
+        return False
+    # Single-line content under 60 chars is treated as a stub ack. Real
+    # reports in chat almost always span multiple lines (heading + body);
+    # single-line outputs that long usually indicate the agent forgot to
+    # format and there's no upside to surfacing them over a file preview.
+    return len(cleaned) <= 60
 
 _TERMINAL_CLEANUP_STATUSES = {
     TASK_STATUS_APPLIED,  # legacy
@@ -3316,6 +3343,18 @@ class RuntimeService:
                     "Runtime task=%s preparing completion step=%d", task.id, step,
                 )
                 completed_task = await self._store.get_runtime_task(task.id) or task
+                # We compute output_summary above but write it to the DB
+                # AFTER the channel notify (so the COMPLETED watermark only
+                # lands once the message is in flight). Splice the freshly-
+                # computed value into the in-memory task object so the
+                # rendering path sees it; otherwise ``_artifact_reply_text``
+                # reads ``task.output_summary == None`` from the stale DB
+                # row and falls back to the literal "Run completed." string,
+                # silently swallowing the agent's report body.
+                completed_task = dataclasses.replace(
+                    completed_task,
+                    output_summary=output_summary,
+                )
                 delivery = None
                 if completed_task.task_type == TASK_TYPE_ARTIFACT:
                     delivery = await self._deliver_artifacts(
@@ -4571,7 +4610,15 @@ class RuntimeService:
         # token, which silently swallowed report bodies.
         artifact_preview_path: str | None = None
         body_source = (task.output_summary or "").strip()
-        if not body_source:
+        if not body_source or _is_stub_artifact_reply(body_source):
+            # Empty body, or a short "artifact ready"-style ack — prefer the
+            # single-file preview when one exists. This preserves the legacy
+            # automation behavior where the agent wrote markdown to a file
+            # and replied with a one-line ack: the rendered message shows
+            # the file content, not the ack. Substantive agent replies
+            # (multi-line, headers, etc.) skip this branch and render
+            # verbatim — that's the PR #41 S-level fix for chat tasks
+            # that paste the report inline.
             preview = self._artifact_preview_text(task, changed_files)
             if preview is not None:
                 artifact_preview_path, body_source = preview
