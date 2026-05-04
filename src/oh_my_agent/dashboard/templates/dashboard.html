@@ -27,6 +27,9 @@
   .pill.off { background: #ffcdd2; color: #b71c1c; }
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1em; }
   @media (max-width: 720px) { .grid2 { grid-template-columns: 1fr; } }
+  .chart-wrap { margin: 0.6em 0 0.8em; padding: 0.4em 0.2em; }
+  .chart-title { font-size: 11px; color: #555; font-weight: 600; margin-bottom: 0.2em; }
+  .chart-wrap svg { display: block; max-width: 100%; height: auto; color: #167400; }
 </style>
 </head>
 <body>
@@ -118,7 +121,13 @@
 {% if cost.error %}
   <div class="placeholder">{{ cost.error }}</div>
 {% else %}
-<p class="meta">Today total cost: <strong>${{ "%.4f"|format(cost.today_total_cost or 0) }}</strong> · 7d trend: {{ sparkline(cost.daily_7d | map(attribute='cost') | list) | safe }}</p>
+<p class="meta">Today total cost: <strong>${{ "%.4f"|format(cost.today_total_cost or 0) }}</strong></p>
+{% if cost.daily_7d %}
+<div class="chart-wrap">
+  <div class="chart-title">7-day cost trend</div>
+  {{ chart(cost.daily_7d | map(attribute='cost') | list, cost.daily_7d | map(attribute='day') | map('short_day') | list) | safe }}
+</div>
+{% endif %}
 
 <div class="grid2">
 <div>
