@@ -91,6 +91,14 @@ class GatewayManager:
         self._skill_syncer = skill_syncer
         self._workspace_skills_dirs = workspace_skills_dirs  # list[Path] | None
         self._runtime_service = runtime_service
+        # Share the per-thread short-workspace resolver with RuntimeService so
+        # suspended-resume / HITL invocations land in the same cwd as chat
+        # replies. Without this they default to the base agent workspace and
+        # claude --resume misses its session cache (~/.claude/projects/<cwd>/).
+        if self._runtime_service is not None and hasattr(
+            self._runtime_service, "set_workspace_resolver"
+        ):
+            self._runtime_service.set_workspace_resolver(self._resolve_short_workspace)
         self._repo_root = Path(repo_root).expanduser().resolve() if repo_root else Path.cwd()
         self._intent_router = intent_router
         self._router_context_turns = max(1, int(router_context_turns))
@@ -1647,6 +1655,26 @@ class GatewayManager:
                     )
             except Exception as exc:
                 logger.warning("[%s] Memory injection failed: %s", req_id, exc)
+
+        # Surface any cached provider credentials (e.g. Bilibili cookies) so the
+        # agent can reuse them instead of triggering a redundant QR auth flow.
+        runtime = self._runtime_service
+        collector = (
+            getattr(runtime, "collect_provider_credential_hints", None)
+            if runtime is not None
+            else None
+        )
+        if callable(collector):
+            try:
+                credential_hints = await collector(
+                    text=msg.content,
+                    owner_user_id=msg.author_id or msg.author,
+                )
+            except Exception as exc:
+                logger.warning("[%s] credential_hint_lookup_failed err=%s", req_id, exc)
+                credential_hints = []
+            if credential_hints:
+                agent_prompt = agent_prompt + "\n\n" + "\n\n".join(credential_hints)
 
         # Run agent (with fallback, or targeted if preferred_agent is set)
         workspace_override = await self._resolve_short_workspace(session, thread_id)

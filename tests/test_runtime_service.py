@@ -210,6 +210,19 @@ class _FakeAuthService:
     async def clear_credential(self, provider: str, owner_user_id: str) -> None:
         self.cleared.append((provider, owner_user_id))
 
+    async def get_valid_credential(
+        self,
+        provider: str,
+        owner_user_id: str,
+    ) -> CredentialHandle | None:
+        if (
+            self.credential is None
+            or self.credential.provider != provider
+            or self.credential.owner_user_id != owner_user_id
+        ):
+            return None
+        return self.credential
+
     async def emit(self, event_type: str, flow_id: str, message: str | None = None) -> None:
         flow = self._flows[flow_id]
         for listener in self._listeners:
@@ -4595,6 +4608,57 @@ async def test_cleanup_tasks_uses_per_outcome_retention(tmp_path):
     assert rows["success-old"].workspace_path is None
     assert rows["failure-old"].workspace_path is None
     assert cleaned == 2
+
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_collect_provider_credential_hints_bilibili(tmp_path):
+    """A cached bilibili credential should surface a `--cookies-path` hint when
+    the request text mentions a bilibili URL — without this, every new task /
+    chat reply triggers a redundant QR auth flow even though valid cookies are
+    already on disk."""
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    store = SQLiteMemoryStore(tmp_path / "cred-hints.db")
+    await store.init()
+    auth = _FakeAuthService()
+    runtime = RuntimeService(
+        store,
+        config={"enabled": True, "worktree_root": str(tmp_path / "wt")},
+        owner_user_ids={"owner-1"},
+        repo_root=repo,
+        auth_service=auth,
+    )
+
+    hits = await runtime.collect_provider_credential_hints(
+        text="please summarize https://www.bilibili.com/video/BV1ekoqBBEDF",
+        owner_user_id="owner-1",
+    )
+    assert len(hits) == 1
+    assert "/tmp/cookies.txt" in hits[0]
+    assert "--cookies-path" in hits[0]
+
+    # No bilibili URL → no hint, even with a valid cached credential.
+    blank = await runtime.collect_provider_credential_hints(
+        text="just chatting, nothing to extract",
+        owner_user_id="owner-1",
+    )
+    assert blank == []
+
+    # b23.tv short links count too — easy to forget when refactoring the regex.
+    short = await runtime.collect_provider_credential_hints(
+        text="https://b23.tv/abc123",
+        owner_user_id="owner-1",
+    )
+    assert len(short) == 1
+
+    # Different owner → credential lookup misses → no hint.
+    other = await runtime.collect_provider_credential_hints(
+        text="https://www.bilibili.com/video/BV1ekoqBBEDF",
+        owner_user_id="someone-else",
+    )
+    assert other == []
 
     await store.close()
 
