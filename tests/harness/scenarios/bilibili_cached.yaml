@@ -1,0 +1,64 @@
+scenario: bilibili-with-cached-cookies
+description: |
+  M-level + S-level regression: when a valid bilibili credential is already
+  cached for the owner, posting a bilibili URL must NOT trigger a new QR
+  flow, and the task COMPLETED message body must contain the agent's actual
+  report (not an empty "Run completed.").
+
+seed:
+  credentials:
+    - provider: bilibili
+      owner_user_id: "owner-1"
+      cookie_value: "stub-sessdata-from-bilibili_cached-yaml"
+  agents:
+    claude:
+      cwd_keyed_sessions: true
+      responses:
+        - when:
+            content_contains: "bilibili"
+          text: |
+            # 外卖员生存报告
+            一句话结论：算法、单价、电瓶撑起的中国底层。
+            ## 摘要
+            视频用 28 分钟讲清外卖员真实状态。
+            ## 核心内容
+            - 算法压力
+            - 单价下行
+            - 一台电瓶
+            TASK_STATE: DONE
+    codex:
+      responses:
+        - when: { default: true }
+          error: "codex must not be invoked in this scenario"
+          error_kind: cli_error
+
+steps:
+  - inject_user_message:
+      thread_id: null
+      author_id: "owner-1"
+      content: "https://www.bilibili.com/video/BV1ekoqBBEDF 帮我总结"
+      capture:
+        thread_id_as: "@thread1"
+        message_id_as: "@user_msg1"
+  - await:
+      condition: task_status_eq
+      task_index: 0
+      status: COMPLETED
+      timeout_seconds: 30
+
+expect:
+  events_in_order:
+    - type: send
+      thread_id: "@thread1"
+      payload_contains: "外卖员生存报告"
+  events_not_present:
+    - type: send_attachment
+      payload_contains: "qr"
+    - type: send
+      payload_contains: "Auth Login Required"
+  task:
+    index: 0
+    status: COMPLETED
+    output_summary_non_empty: true
+  metrics:
+    auth_flows_started: 0
