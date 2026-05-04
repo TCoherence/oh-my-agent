@@ -25,4 +25,10 @@ fi
 
 oma_docker_print_banner "attached-dev"
 
+# Start the dashboard side-container (detached) BEFORE we exec into the
+# foreground bot. dashboard's a separate `docker run -d`, so Ctrl+C of
+# the bot won't tear it down — clean up both via `docker-stop.sh`. Set
+# OMA_DASHBOARD_ENABLED=0 for fast dev iteration without the dashboard.
+oma_dashboard_start_detached
+
 exec "${CMD[@]}"
