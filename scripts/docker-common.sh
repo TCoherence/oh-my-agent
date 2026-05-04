@@ -172,6 +172,12 @@ oma_dashboard_build_run_args() {
     -v "${MOUNT_PATH}:${WORKSPACE_MOUNT_TARGET}"
     -v "${REPO_MOUNT_PATH}:${REPO_MOUNT_TARGET}"
   )
+  # Forward the auto-refresh interval to the dashboard process if the
+  # operator set it on the host. cli.py reads OMA_DASHBOARD_REFRESH_SECONDS
+  # when --refresh-seconds isn't passed; default is 300 (5 min).
+  if [[ -n "${OMA_DASHBOARD_REFRESH_SECONDS:-}" ]]; then
+    OMA_DASHBOARD_RUN_ARGS+=(-e "OMA_DASHBOARD_REFRESH_SECONDS=${OMA_DASHBOARD_REFRESH_SECONDS}")
+  fi
 }
 
 # Start the dashboard container detached. Honors DASHBOARD_ENABLED gate

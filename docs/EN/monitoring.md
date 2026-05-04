@@ -251,6 +251,12 @@ Override the port candidate list:
 OMA_DASHBOARD_PORTS='9091 9092' bash scripts/docker-start.sh
 ```
 
+Override the page auto-refresh interval (default 300s = 5 min; 0 disables refresh):
+
+```bash
+OMA_DASHBOARD_REFRESH_SECONDS=120 bash scripts/docker-start.sh
+```
+
 `scripts/docker-stop.sh` stops both containers; `scripts/docker-logs.sh dashboard` tails the dashboard's stdout (default tails the bot, unchanged).
 
 #### 6.3.b Compose path

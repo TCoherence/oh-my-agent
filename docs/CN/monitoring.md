@@ -251,6 +251,12 @@ OMA_DASHBOARD_ENABLED=0 bash scripts/docker-start.sh
 OMA_DASHBOARD_PORTS='9091 9092' bash scripts/docker-start.sh
 ```
 
+调整页面自动刷新间隔（默认 300s = 5 分钟；0 关掉自动刷新）：
+
+```bash
+OMA_DASHBOARD_REFRESH_SECONDS=120 bash scripts/docker-start.sh
+```
+
 `scripts/docker-stop.sh` 同时停两个容器；`scripts/docker-logs.sh dashboard` 跟 dashboard 的 stdout（不带参数继续是 bot，行为不变）。
 
 #### 6.3.b Compose 路径
