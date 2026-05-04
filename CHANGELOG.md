@@ -6,6 +6,10 @@ The format is intentionally lightweight and release-oriented rather than exhaust
 
 ## Unreleased
 
+### Fixed
+
+- **Docker entrypoint serializes concurrent editable installs** to avoid bot+dashboard containers trampling each other's `pip install -e /repo`. Both containers share `/home` via the host bind mount, so they share `/home/.local/` (where pip writes editable metadata + console scripts). When a version bump triggered uninstall-before-upgrade, one container's "remove `/home/.local/bin/oh-my-agent`" raced the other's "install `/home/.local/bin/oh-my-agent`", leaving an inconsistent state — real incident: `OSError: [Errno 2] No such file or directory: '/home/.local/bin/oh-my-agent'` on `docker-run.sh` after pulling v0.9.4 → v0.9.5. Fix: `docker/entrypoint.sh` wraps the `pip install -e` call in `flock -x` against `${HOME}/.local/.oma-pip-install.lock`. Lock file lives in the shared bind mount, so siblings sharing `HOME` serialize; unrelated containers using a different HOME mount don't see the lock and proceed independently. `flock` is already present in `python:3.12-slim` (`/usr/bin/flock` from `util-linux`) so no Dockerfile change. The lock is released as soon as `pip install` returns; idempotent `pip install -e` of the same version (the common case after the first container does the upgrade) is fast (~100ms), so the second container's wait is essentially free.
+
 ## v0.9.5 - 2026-05-04
 
 ### Added
