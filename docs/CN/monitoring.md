@@ -247,11 +247,17 @@ docker compose up -d            # 同时起 bot + dashboard
 docker compose up -d oh-my-agent
 ```
 
-**只重启 dashboard**（比如代码更新后）：
+**代码更新后**：
+
+两个 service 都是本地 `Dockerfile` build（不是从 registry pull），所以单纯 `restart` **不会**带上新代码。要用：
 
 ```bash
-docker compose restart oh-my-agent-dashboard
+docker compose up -d --build           # 重建并重启两个 service
+# 或者只重建 dashboard：
+docker compose up -d --build oh-my-agent-dashboard
 ```
+
+`docker compose restart` 适合代码不变只想就地重启（比如清掉某个内存状态）。
 
 如果你 fork 过 `compose.yaml`，把 `oma-runtime:/home` named volume 换成了 bind mount（比如 `~/oh-my-agent-mount:/home`），那 `oh-my-agent-dashboard` 的 `volumes` 块也要改成同一路径。dashboard 和 bot 必须挂同一个目录。
 

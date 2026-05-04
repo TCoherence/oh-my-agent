@@ -247,11 +247,17 @@ docker compose up -d            # starts bot + dashboard
 docker compose up -d oh-my-agent
 ```
 
-**Restart just the dashboard** (e.g. after upgrading source code):
+**After upgrading source code**:
+
+Both services build from the local `Dockerfile` (not pulled from a registry), so a `restart` alone does NOT pick up new code. Use:
 
 ```bash
-docker compose restart oh-my-agent-dashboard
+docker compose up -d --build           # rebuild then restart both services
+# or, dashboard only:
+docker compose up -d --build oh-my-agent-dashboard
 ```
+
+`docker compose restart` is fine for in-place restart without code changes (e.g. to clear an in-memory state).
 
 If you've forked `compose.yaml` to switch the runtime mount from the named volume `oma-runtime:/home` to a bind mount (e.g. `~/oh-my-agent-mount:/home`), apply the same change to `oh-my-agent-dashboard`'s `volumes` block. Dashboard and bot must mount the same path.
 
