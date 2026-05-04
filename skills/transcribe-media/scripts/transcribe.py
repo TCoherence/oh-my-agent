@@ -15,6 +15,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import platform
+import shutil
 import signal
 import subprocess
 import sys
@@ -25,29 +27,157 @@ from typing import Any
 SUBPROCESS_TIMEOUT_SECONDS = 1700  # SKILL.md frontmatter cap is 1800; leave ~100s headroom
 GRACEFUL_TERM_GRACE_SECONDS = 5
 
+STT_REPO_URL = "https://github.com/TCoherence/stt.git"
+INSTALL_TIMEOUT_CLONE = 300       # 5 min — git clone of the stt repo
+INSTALL_TIMEOUT_VENV = 120        # 2 min — python -m venv
+INSTALL_TIMEOUT_PIP_BASE = 600    # 10 min — torch + faster-whisper, slow on cold caches
+INSTALL_TIMEOUT_PIP_MLX = 300     # 5 min — mlx-whisper
+
 
 def _emit(payload: dict, *, exit_code: int = 0) -> None:
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     raise SystemExit(exit_code)
 
 
-def _resolve_stt_home() -> Path:
+def _log(msg: str) -> None:
+    """Progress messages → stderr so stdout stays clean for the JSON envelope."""
+    print(f"[transcribe-media] {msg}", file=sys.stderr, flush=True)
+
+
+def _install_failed(message: str, exit_code: int = 1) -> None:
+    _emit(
+        {"status": "error", "kind": "stt_install_failed", "message": message},
+        exit_code=exit_code,
+    )
+
+
+def _run_install_step(cmd: list[str], *, timeout: int, label: str) -> None:
+    """Run an install subprocess; on failure emit kind=stt_install_failed and exit."""
+    try:
+        rs = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _install_failed(f"{label} timed out after {timeout}s")
+    except FileNotFoundError as e:
+        _install_failed(f"{label} failed: {e}")
+    if rs.returncode != 0:
+        # pip can spew megabytes; keep the tail which usually has the real reason.
+        tail = (rs.stderr or rs.stdout or "").strip()[-1500:]
+        _install_failed(f"{label} exited {rs.returncode}: {tail}")
+
+
+def _install_stt(home: Path) -> None:
+    """Clone stt into `home`, create its venv, install requirements.
+
+    Apple Silicon also gets mlx-whisper + engine=mlx flipped on for the ~30x
+    realtime payoff. mlx install failure falls back to faster-whisper CPU
+    instead of erroring out.
+    """
+    git_bin = shutil.which("git")
+    py3_bin = shutil.which("python3") or sys.executable
+    if not git_bin:
+        _install_failed(
+            "git not on PATH; install git or pre-install stt manually at $STT_HOME",
+            exit_code=2,
+        )
+
+    if home.exists() and not (home / ".git").is_dir():
+        # Don't blow away a directory we don't recognize as our checkout.
+        _install_failed(
+            f"{home} exists but is not a git checkout; remove it or set $STT_HOME elsewhere",
+            exit_code=2,
+        )
+
+    if not home.exists():
+        home.parent.mkdir(parents=True, exist_ok=True)
+        _log(f"cloning {STT_REPO_URL} → {home}")
+        _run_install_step(
+            [git_bin, "clone", "--depth", "1", STT_REPO_URL, str(home)],
+            timeout=INSTALL_TIMEOUT_CLONE,
+            label="git clone",
+        )
+
+    venv_dir = home / "venv"
+    if not (venv_dir / "bin" / "python").is_file():
+        _log(f"creating venv at {venv_dir}")
+        _run_install_step(
+            [py3_bin, "-m", "venv", str(venv_dir)],
+            timeout=INSTALL_TIMEOUT_VENV,
+            label="venv create",
+        )
+
+    pip_bin = venv_dir / "bin" / "pip"
+    _log("installing stt requirements (torch + faster-whisper + ...; first run takes 1–3 min)")
+    _run_install_step(
+        [str(pip_bin), "install", "--upgrade", "pip"],
+        timeout=INSTALL_TIMEOUT_VENV,
+        label="pip self-upgrade",
+    )
+    _run_install_step(
+        [str(pip_bin), "install", "-r", str(home / "requirements.txt")],
+        timeout=INSTALL_TIMEOUT_PIP_BASE,
+        label="pip install -r requirements.txt",
+    )
+
+    if platform.system() == "Darwin" and platform.machine() == "arm64":
+        _log("Apple Silicon detected; installing mlx-whisper for GPU acceleration")
+        try:
+            rs = subprocess.run(
+                [str(pip_bin), "install", "mlx-whisper"],
+                capture_output=True, text=True, timeout=INSTALL_TIMEOUT_PIP_MLX,
+            )
+        except subprocess.TimeoutExpired:
+            rs = None
+        if rs is not None and rs.returncode == 0:
+            ini = home / "set.ini"
+            try:
+                content = ini.read_text(encoding="utf-8")
+                if "engine=faster-whisper" in content:
+                    ini.write_text(
+                        content.replace("engine=faster-whisper", "engine=mlx"),
+                        encoding="utf-8",
+                    )
+                    _log("set engine=mlx in set.ini")
+            except OSError as e:
+                _log(f"could not toggle engine=mlx in set.ini: {e}; staying on faster-whisper")
+        else:
+            _log("mlx-whisper install failed/timed out; falling back to faster-whisper CPU")
+
+    _log("stt setup complete")
+
+
+def _ensure_stt() -> Path:
+    """Return $STT_HOME, auto-installing stt on first call if missing.
+
+    Mirrors oh-my-agent's `_ensure_yt_dlp` pattern (cf. youtube-video-summary).
+    Set STT_AUTO_INSTALL=0 to opt out and require a pre-existing install.
+    """
     raw = os.environ.get("STT_HOME") or "~/repos/stt"
     home = Path(raw).expanduser().resolve()
     cli_py = home / "cli.py"
     venv_python = home / "venv" / "bin" / "python"
-    if not cli_py.is_file() or not venv_python.is_file():
+    if cli_py.is_file() and venv_python.is_file():
+        return home
+
+    if os.environ.get("STT_AUTO_INSTALL") == "0":
         _emit(
             {
                 "status": "error",
                 "kind": "stt_not_found",
                 "message": (
-                    f"stt project not found at {home} (looked for cli.py and venv/bin/python). "
-                    "Set $STT_HOME or clone https://github.com/TCoherence/stt.git into ~/repos/stt "
-                    "and create its venv per the project README."
+                    f"stt project not found at {home} (auto-install disabled via "
+                    f"STT_AUTO_INSTALL=0). Clone {STT_REPO_URL} into $STT_HOME and "
+                    "create its venv."
                 ),
             },
             exit_code=2,
+        )
+
+    _log(f"stt not found at {home}; auto-installing (slow on first call, fast thereafter)")
+    _install_stt(home)
+
+    if not (cli_py.is_file() and venv_python.is_file()):
+        _install_failed(
+            f"setup completed but expected files still missing at {home}",
         )
     return home
 
@@ -170,7 +300,7 @@ def main() -> None:
     parser.add_argument("--model", default="large-v3-turbo", help="Whisper model name.")
     args = parser.parse_args()
 
-    home = _resolve_stt_home()
+    home = _ensure_stt()
 
     # Always invoke stt with --format json so we can re-shape the body locally
     # without ever letting raw SRT/text reach the caller's stdout.
