@@ -14,7 +14,20 @@ if [[ "${OMA_INSTALL_REPO_EDITABLE:-1}" != "0" ]]; then
     exit 1
   fi
   echo "[oma] installing mounted repo as editable package from ${REPO_ROOT}"
-  python -m pip install --disable-pip-version-check --no-deps -e "${REPO_ROOT}"
+  # Serialize concurrent installs across sibling containers (e.g. bot +
+  # dashboard) that share this $HOME via a bind mount. Without the lock,
+  # pip's uninstall-before-upgrade step from one container could remove
+  # /home/.local/bin/oh-my-agent mid-flight while the other container is
+  # mid-install — real incident: "OSError: No such file or directory:
+  # '/home/.local/bin/oh-my-agent'" when starting both via docker-run.sh
+  # right after a version bump. flock on a HOME-relative file means
+  # siblings sharing HOME serialize; unrelated containers don't.
+  mkdir -p "${HOME:-/home}/.local"
+  LOCK_FILE="${HOME:-/home}/.local/.oma-pip-install.lock"
+  (
+    flock -x 9
+    python -m pip install --disable-pip-version-check --no-deps -e "${REPO_ROOT}"
+  ) 9>"${LOCK_FILE}"
 fi
 
 if [[ ! -f "${CONFIG_PATH}" ]]; then
