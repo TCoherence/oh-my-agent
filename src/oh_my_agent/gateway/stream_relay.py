@@ -195,16 +195,7 @@ class StreamingRelay:
         if self._finalized:
             return [self._message_id] if self._message_id else []
         self._finalized = True
-        self._cancel_heartbeat()
-        # Cancel any scheduled trailing edit — we're about to do the real one.
-        pending = self._pending_task
-        self._pending_task = None
-        if pending is not None and not pending.done():
-            pending.cancel()
-            try:
-                await pending
-            except (asyncio.CancelledError, Exception):
-                pass
+        await self._stop_background_tasks()
 
         attribution = attribution_override if attribution_override is not None else self._attribution_prefix
         attribution = self._decorate_attribution_for_finalize(attribution)
@@ -243,15 +234,7 @@ class StreamingRelay:
         if self._finalized or self._message_id is None:
             return
         self._finalized = True
-        self._cancel_heartbeat()
-        pending = self._pending_task
-        self._pending_task = None
-        if pending is not None and not pending.done():
-            pending.cancel()
-            try:
-                await pending
-            except (asyncio.CancelledError, Exception):
-                pass
+        await self._stop_background_tasks()
         body = f"{self._attribution_prefix}\n❌ {message[:1800]}" if self._attribution_prefix else f"❌ {message[:1800]}"
         await self._safe_edit(body)
 
@@ -371,13 +354,34 @@ class StreamingRelay:
         except Exception:
             logger.debug("StreamingRelay heartbeat failed", exc_info=True)
 
-    def _cancel_heartbeat(self) -> None:
-        task = self._heartbeat_task
-        if task is None:
-            return
+    async def _stop_background_tasks(self) -> None:
+        """Cancel and *await* heartbeat + pending trailing flush.
+
+        Cancelling alone is not enough: ``_safe_edit`` runs outside the body
+        lock, so a heartbeat or trailing flush can already be in the middle
+        of ``await self._channel.edit_message(...)`` when ``finalize`` /
+        ``error`` fire. If we don't await the cancelled task, its in-flight
+        edit can land at Discord *after* finalize's edit and overwrite the
+        finalized UI — leaving the message stuck in the live ``-# 🔧 ...``
+        tool-trail format with the placeholder agent name. Awaiting here
+        ensures any racing edit completes (or is fully cancelled) before
+        finalize sends its own ``_safe_edit`` so Discord receives them in
+        intended order.
+        """
+        tasks: list[asyncio.Task] = []
+        if self._heartbeat_task is not None and not self._heartbeat_task.done():
+            self._heartbeat_task.cancel()
+            tasks.append(self._heartbeat_task)
         self._heartbeat_task = None
-        if not task.done():
-            task.cancel()
+        if self._pending_task is not None and not self._pending_task.done():
+            self._pending_task.cancel()
+            tasks.append(self._pending_task)
+        self._pending_task = None
+        for task in tasks:
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
 
     async def _flush_once(self) -> None:
         """Render the current latest_text and push one edit if it changed."""
