@@ -178,6 +178,19 @@ def test_resolve_refresh_seconds_zero_is_kept(monkeypatch) -> None:
     assert _resolve_refresh_seconds(None) == 0
 
 
+def test_resolve_refresh_seconds_cli_zero_overrides_nonzero_env(monkeypatch) -> None:
+    """Codex round-7 catch: explicit --refresh-seconds 0 must beat a non-zero env.
+
+    Distinguishes 'is not None' (correct) from 'truthy' (wrong) check —
+    the latter would let 0 fall through to env.
+    """
+
+    from oh_my_agent.dashboard.cli import _resolve_refresh_seconds
+
+    monkeypatch.setenv("OMA_DASHBOARD_REFRESH_SECONDS", "300")
+    assert _resolve_refresh_seconds(0) == 0
+
+
 def test_resolve_refresh_seconds_negative_clamped_to_zero(monkeypatch) -> None:
     from oh_my_agent.dashboard.cli import _resolve_refresh_seconds
 
