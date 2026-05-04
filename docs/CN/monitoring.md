@@ -224,6 +224,37 @@ oma-dashboard --config ./config.yaml
 
 ### 6.3 容器内部署（named-volume 用户推荐）
 
+两条等价路径任选其一：`scripts/docker-*.sh`（裸 `docker run`）或 `compose.yaml`（Docker Compose）。看你 bot 现在用哪种就用哪种。
+
+#### 6.3.a 脚本路径（裸 `docker run`）
+
+`scripts/docker-start.sh` 同时起 bot 和一个 dashboard side container。dashboard 启动器会按 `OMA_DASHBOARD_PORTS`（默认 `8080 8081 8088 8888 9090`）顺序找第一个空闲端口绑到 host loopback：
+
+```bash
+cd ~/repos/oh-my-agent
+bash scripts/docker-build.sh   # 重建镜像（带上 dashboard 依赖）
+bash scripts/docker-start.sh   # 起 oh-my-agent + oh-my-agent-dashboard
+# stdout 会打印： [oma] dashboard at http://127.0.0.1:8080
+```
+
+实际命中的 host port 跑一次可能变一次（如果 8080 被占）—— 看 stdout，或者 `bash scripts/docker-status.sh`（两个容器的端口绑定都列）。
+
+跳过 dashboard：
+
+```bash
+OMA_DASHBOARD_ENABLED=0 bash scripts/docker-start.sh
+```
+
+改候选端口列表：
+
+```bash
+OMA_DASHBOARD_PORTS='9091 9092' bash scripts/docker-start.sh
+```
+
+`scripts/docker-stop.sh` 同时停两个容器；`scripts/docker-logs.sh dashboard` 跟 dashboard 的 stdout（不带参数继续是 bot，行为不变）。
+
+#### 6.3.b Compose 路径
+
 `compose.yaml` 自带第二个 service `oh-my-agent-dashboard`：复用同一镜像、挂同一 volume、容器内绑 `0.0.0.0:8080`。compose 的端口映射只把它发布到 host loopback：
 
 ```yaml

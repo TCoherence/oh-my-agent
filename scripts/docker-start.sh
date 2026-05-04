@@ -25,3 +25,7 @@ container_id="$("${CMD[@]}")"
 echo "[oma] container id: ${container_id}"
 echo "[oma] use ./scripts/docker-logs.sh to follow container stdout/stderr"
 echo "[oma] app log file: $(oma_docker_app_log_path)"
+
+# Start the dashboard side-container if enabled. Failure here is
+# non-fatal — bot is already up and the dashboard is opt-in.
+oma_dashboard_start_detached
