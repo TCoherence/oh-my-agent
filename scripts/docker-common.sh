@@ -151,19 +151,6 @@ oma_port_is_free() {
   return 0
 }
 
-# Iterate DASHBOARD_PORTS, print the first one that's free on the host.
-# Empty stdout if all are taken.
-oma_dashboard_pick_port() {
-  local port
-  for port in ${DASHBOARD_PORTS}; do
-    if oma_port_is_free "${port}"; then
-      printf '%s\n' "${port}"
-      return 0
-    fi
-  done
-  return 1
-}
-
 # Build the docker-run argv for the dashboard container. Mirrors
 # oma_docker_build_common_run_args but: different container name,
 # OMA_FAIL_FAST_CLI=0 (no CLI binary check needed), and the chosen
@@ -188,9 +175,19 @@ oma_dashboard_build_run_args() {
 }
 
 # Start the dashboard container detached. Honors DASHBOARD_ENABLED gate
-# and tries each port in DASHBOARD_PORTS until one binds. Always returns
-# success — a dashboard failure does NOT block bot startup. Prints a
-# clearly labeled URL line so docker-logs.sh / scrollback can find it.
+# and iterates DASHBOARD_PORTS, attempting `docker run -p <host>:<container>`
+# for each until one binds. Always returns success — a dashboard failure
+# does NOT block bot startup. Prints a clearly labeled URL line so
+# docker-logs.sh / scrollback can find the port that actually won.
+#
+# Why we don't trust oma_port_is_free as the authoritative gate:
+#   `lsof` without sudo on macOS misses root-owned listeners (e.g. the
+#   built-in Apache binds *:8080 as root and a non-sudo lsof returns
+#   empty), so a port that LOOKS free can fail the actual `docker run`
+#   bind. Pre-check is kept as a hint to skip slow `docker run` round-
+#   trips, but the real authority is the docker run exit code — on
+#   failure we clean up the partially-created container and try the
+#   next port.
 oma_dashboard_start_detached() {
   if [[ "${DASHBOARD_ENABLED}" != "1" ]]; then
     echo "[oma] dashboard disabled (OMA_DASHBOARD_ENABLED=${DASHBOARD_ENABLED})"
@@ -198,31 +195,44 @@ oma_dashboard_start_detached() {
   fi
 
   oma_dashboard_remove_existing_container
-
-  local port
-  port="$(oma_dashboard_pick_port)" || true
-  if [[ -z "${port}" ]]; then
-    echo "[oma] dashboard: every candidate port is taken (${DASHBOARD_PORTS}); skipping" >&2
-    echo "[oma] override with OMA_DASHBOARD_PORTS='9091 9092' or set OMA_DASHBOARD_ENABLED=0" >&2
-    return 0
-  fi
-
   oma_dashboard_build_run_args
 
-  if docker run -d --restart unless-stopped \
-      "${OMA_DASHBOARD_RUN_ARGS[@]}" \
-      -p "${DASHBOARD_BIND_HOST}:${port}:${DASHBOARD_CONTAINER_PORT}" \
-      "${IMAGE_TAG}" \
-      oma-dashboard --host 0.0.0.0 --port "${DASHBOARD_CONTAINER_PORT}" \
-      >/dev/null 2>/tmp/oma-dashboard-launch.err; then
-    echo "[oma] dashboard at http://${DASHBOARD_BIND_HOST}:${port}"
-    echo "[oma] dashboard container: ${DASHBOARD_CONTAINER_NAME}"
-    rm -f /tmp/oma-dashboard-launch.err
-  else
-    echo "[oma] dashboard launch failed; bot still starting" >&2
-    if [[ -s /tmp/oma-dashboard-launch.err ]]; then
-      sed 's/^/[oma]   /' /tmp/oma-dashboard-launch.err >&2
-      rm -f /tmp/oma-dashboard-launch.err
+  local launch_err_file="/tmp/oma-dashboard-launch.${$}.err"
+  local port last_err="" tried_count=0
+  for port in ${DASHBOARD_PORTS}; do
+    tried_count=$((tried_count + 1))
+    # Cheap hint pass: if the port is observably busy (and we have a way
+    # to check), skip the docker round-trip for this candidate.
+    if ! oma_port_is_free "${port}"; then
+      echo "[oma] dashboard: port ${port} appears busy on host, trying next"
+      continue
     fi
+    if docker run -d --restart unless-stopped \
+        "${OMA_DASHBOARD_RUN_ARGS[@]}" \
+        -p "${DASHBOARD_BIND_HOST}:${port}:${DASHBOARD_CONTAINER_PORT}" \
+        "${IMAGE_TAG}" \
+        oma-dashboard --host 0.0.0.0 --port "${DASHBOARD_CONTAINER_PORT}" \
+        >/dev/null 2>"${launch_err_file}"; then
+      echo "[oma] dashboard at http://${DASHBOARD_BIND_HOST}:${port}"
+      echo "[oma] dashboard container: ${DASHBOARD_CONTAINER_NAME}"
+      rm -f "${launch_err_file}"
+      return 0
+    fi
+    # docker run failed (port was busy under the hood, or some other
+    # reason). Capture the last error, clean up any stranded container,
+    # and try the next candidate.
+    if [[ -s "${launch_err_file}" ]]; then
+      last_err="$(cat "${launch_err_file}")"
+    fi
+    docker rm -f "${DASHBOARD_CONTAINER_NAME}" >/dev/null 2>&1 || true
+    echo "[oma] dashboard: docker run failed on port ${port}, trying next"
+  done
+
+  echo "[oma] dashboard: every candidate port failed (tried ${tried_count}: ${DASHBOARD_PORTS})" >&2
+  if [[ -n "${last_err}" ]]; then
+    printf '%s\n' "${last_err}" | sed 's/^/[oma]   /' >&2
   fi
+  echo "[oma] override with OMA_DASHBOARD_PORTS='9091 9092' or set OMA_DASHBOARD_ENABLED=0" >&2
+  rm -f "${launch_err_file}"
+  return 0
 }
