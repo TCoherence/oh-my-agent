@@ -1,14 +1,23 @@
 # Oh My Agent — Docker Compose
 #
 # Usage:
-#   docker compose up -d          # start in background
-#   docker compose logs -f        # follow logs
-#   docker compose restart        # restart
-#   docker compose down           # stop and remove
+#   docker compose up -d                          # start bot + dashboard
+#   docker compose up -d oh-my-agent              # start bot only
+#   docker compose logs -f                        # follow logs
+#   docker compose restart                        # restart
+#   docker compose down                           # stop and remove
 #
 # Prerequisites:
 #   1. Copy config.yaml.example → config.yaml and fill in tokens.
 #   2. Set DISCORD_BOT_TOKEN and DISCORD_CHANNEL_ID in .env or shell env.
+#
+# Two services:
+#   - oh-my-agent           — the Discord bot (mandatory).
+#   - oh-my-agent-dashboard — read-only HTML dashboard at
+#                             http://localhost:8080 (loopback only).
+#                             Optional but cheap (same image, ~tens of MB
+#                             extra memory). Skip via the explicit
+#                             `up oh-my-agent` form above.
 #
 # The container mounts the repo for editable install and a persistent
 # volume for runtime state (SQLite DBs, logs, task worktrees).
@@ -52,6 +61,61 @@ services:
       - oma-runtime:/home
 
     # ── Security ─────────────────────────────────────────────────────
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges
+
+  # ─────────────────────────────────────────────────────────────────────
+  # Read-only monitoring dashboard. Same image, separate process.
+  #
+  # The port mapping `127.0.0.1:8080:8080` publishes ONLY on the host's
+  # loopback interface — the dashboard has no auth and is unsafe to
+  # expose to LAN/internet without first wiring auth (see
+  # docs/EN/monitoring.md §6.1).
+  #
+  # Inside the container the dashboard binds 0.0.0.0:8080 (required —
+  # container's 127.0.0.1 ≠ host's 127.0.0.1 under Docker NAT). The host
+  # loopback restriction is enforced by Docker's port-publish syntax.
+  #
+  # If you don't want the dashboard at all:
+  #   docker compose up -d oh-my-agent
+  # ─────────────────────────────────────────────────────────────────────
+  oh-my-agent-dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: oh-my-agent-dashboard
+    restart: unless-stopped
+    depends_on:
+      - oh-my-agent
+
+    environment:
+      - HOME=/home
+      - PATH=/home/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      - OMA_MOUNT_ROOT=/home
+      - OMA_WORKDIR=/home
+      - OMA_REPO_ROOT=/repo
+      - OMA_CONFIG_PATH=/repo/config.yaml
+      # The dashboard does not invoke any external CLI tools — disable
+      # the entrypoint's fail-fast CLI binary check so the container
+      # starts even if claude/codex/gemini binaries weren't preinstalled
+      # in this image (or were removed later).
+      - OMA_FAIL_FAST_CLI=0
+      - TZ=${TZ:-UTC}
+
+    volumes:
+      # Same mounts as the bot — the dashboard reads the same SQLite,
+      # logs, and memories.yaml. If you switch the bot to a bind mount
+      # (e.g. `~/oh-my-agent-mount:/home`), apply the same change here.
+      - .:/repo
+      - oma-runtime:/home
+
+    # Bind to 0.0.0.0:8080 inside the container; publish only on host loopback.
+    ports:
+      - "127.0.0.1:8080:8080"
+    command: ["oma-dashboard", "--host", "0.0.0.0", "--port", "8080"]
+
     cap_drop:
       - ALL
     security_opt:
