@@ -104,7 +104,7 @@ Switch on `kind` for retry-vs-hard-fail. Network-related `model_unavailable` is 
 
 ## Configuration
 
-`$STT_HOME` (default `~/repos/stt`) tells the skill where to find — or where to install — the stt project. The skill auto-installs on first call if both `$STT_HOME/cli.py` and `$STT_HOME/venv/bin/python` are missing.
+`$STT_HOME` (default `~/repos/stt`) tells the skill where to find — or where to install — the stt project. The skill auto-installs on first call if either `$STT_HOME/cli.py` or `$STT_HOME/venv/bin/python` is missing.
 
 **First-call install steps** (logs to stderr, never stdout):
 1. `git clone --depth 1 https://github.com/TCoherence/stt.git $STT_HOME`

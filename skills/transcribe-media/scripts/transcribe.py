@@ -27,11 +27,13 @@ from typing import Any
 SUBPROCESS_TIMEOUT_SECONDS = 1700  # SKILL.md frontmatter cap is 1800; leave ~100s headroom
 GRACEFUL_TERM_GRACE_SECONDS = 5
 
+# TODO: switch to upstream jianchang512/stt once the CLI lands there.
 STT_REPO_URL = "https://github.com/TCoherence/stt.git"
 INSTALL_TIMEOUT_CLONE = 300       # 5 min — git clone of the stt repo
 INSTALL_TIMEOUT_VENV = 120        # 2 min — python -m venv
 INSTALL_TIMEOUT_PIP_BASE = 600    # 10 min — torch + faster-whisper, slow on cold caches
 INSTALL_TIMEOUT_PIP_MLX = 300     # 5 min — mlx-whisper
+INSTALL_STDERR_TAIL_BYTES = 4000  # last N bytes of failing tool's stderr in error envelope
 
 
 def _emit(payload: dict, *, exit_code: int = 0) -> None:
@@ -52,17 +54,79 @@ def _install_failed(message: str, exit_code: int = 1) -> None:
 
 
 def _run_install_step(cmd: list[str], *, timeout: int, label: str) -> None:
-    """Run an install subprocess; on failure emit kind=stt_install_failed and exit."""
+    """Run an install subprocess in its own process group; kill the group on timeout.
+
+    Mirrors the transcribe-step pattern in `_run_stt` so a SIGTERM hitting the
+    wrapper mid-install doesn't leak pip / git children.
+    """
     try:
-        rs = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        _install_failed(f"{label} timed out after {timeout}s")
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
     except FileNotFoundError as e:
         _install_failed(f"{label} failed: {e}")
-    if rs.returncode != 0:
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_group(proc.pid, signal.SIGTERM)
+        try:
+            proc.communicate(timeout=GRACEFUL_TERM_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            _kill_group(proc.pid, signal.SIGKILL)
+            proc.communicate()
+        _install_failed(f"{label} timed out after {timeout}s; process group terminated")
+    if proc.returncode != 0:
         # pip can spew megabytes; keep the tail which usually has the real reason.
-        tail = (rs.stderr or rs.stdout or "").strip()[-1500:]
-        _install_failed(f"{label} exited {rs.returncode}: {tail}")
+        tail = (stderr or stdout or "").strip()[-INSTALL_STDERR_TAIL_BYTES:]
+        cmd_summary = " ".join(cmd[:3]) + (" ..." if len(cmd) > 3 else "")
+        _install_failed(
+            f"{label} exited {proc.returncode} (cmd: {cmd_summary}): {tail}",
+        )
+
+
+def _toggle_engine_to_mlx(ini_path: Path) -> None:
+    """Flip the active `engine=` line in set.ini from faster-whisper → mlx.
+
+    Line-aware so a commented `; engine=faster-whisper` is left alone; only an
+    UNcommented active line is changed. Logs whether or not a substitution was made.
+    """
+    try:
+        content = ini_path.read_text(encoding="utf-8")
+    except OSError as e:
+        _log(f"could not read {ini_path}: {e}; staying on faster-whisper")
+        return
+
+    out_lines: list[str] = []
+    modified = False
+    for line in content.splitlines(keepends=True):
+        stripped = line.lstrip()
+        if (
+            not modified
+            and not stripped.startswith((";", "#"))
+            and stripped.startswith("engine")
+            and "=" in stripped
+        ):
+            key, _, value = stripped.partition("=")
+            if key.strip() == "engine" and value.strip().lower() == "faster-whisper":
+                indent = line[: len(line) - len(stripped)]
+                trailing_nl = "\n" if line.endswith("\n") else ""
+                out_lines.append(f"{indent}engine=mlx{trailing_nl}")
+                modified = True
+                continue
+        out_lines.append(line)
+
+    if modified:
+        try:
+            ini_path.write_text("".join(out_lines), encoding="utf-8")
+            _log("flipped engine=faster-whisper → engine=mlx in set.ini")
+        except OSError as e:
+            _log(f"could not write {ini_path}: {e}; staying on faster-whisper")
+    else:
+        _log("no active `engine=faster-whisper` line in set.ini; engine setting left as-is")
 
 
 def _install_stt(home: Path) -> None:
@@ -80,12 +144,16 @@ def _install_stt(home: Path) -> None:
             exit_code=2,
         )
 
-    if home.exists() and not (home / ".git").is_dir():
-        # Don't blow away a directory we don't recognize as our checkout.
-        _install_failed(
-            f"{home} exists but is not a git checkout; remove it or set $STT_HOME elsewhere",
-            exit_code=2,
-        )
+    if home.exists():
+        # Require BOTH a .git/ and a set.ini — the latter is stt-specific so we
+        # don't accidentally run pip inside an unrelated git checkout sitting at
+        # $STT_HOME.
+        if not (home / ".git").is_dir() or not (home / "set.ini").is_file():
+            _install_failed(
+                f"{home} exists but is not a stt checkout (missing .git/ or set.ini); "
+                "remove it or set $STT_HOME elsewhere",
+                exit_code=2,
+            )
 
     if not home.exists():
         home.parent.mkdir(parents=True, exist_ok=True)
@@ -128,17 +196,7 @@ def _install_stt(home: Path) -> None:
         except subprocess.TimeoutExpired:
             rs = None
         if rs is not None and rs.returncode == 0:
-            ini = home / "set.ini"
-            try:
-                content = ini.read_text(encoding="utf-8")
-                if "engine=faster-whisper" in content:
-                    ini.write_text(
-                        content.replace("engine=faster-whisper", "engine=mlx"),
-                        encoding="utf-8",
-                    )
-                    _log("set engine=mlx in set.ini")
-            except OSError as e:
-                _log(f"could not toggle engine=mlx in set.ini: {e}; staying on faster-whisper")
+            _toggle_engine_to_mlx(home / "set.ini")
         else:
             _log("mlx-whisper install failed/timed out; falling back to faster-whisper CPU")
 
