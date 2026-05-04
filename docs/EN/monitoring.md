@@ -224,6 +224,37 @@ For the named-volume default in this repo's `compose.yaml`, the SQLite files liv
 
 ### 6.3 In-container deployment (recommended for named-volume users)
 
+There are two equivalent paths: `scripts/docker-*.sh` (raw `docker run`) or `compose.yaml` (Docker Compose). Pick whichever your existing bot setup uses.
+
+#### 6.3.a Scripts path (raw `docker run`)
+
+`scripts/docker-start.sh` starts both the bot and a side dashboard container. The dashboard launcher tries `OMA_DASHBOARD_PORTS` (default `8080 8081 8088 8888 9090`) and binds the first free port on host loopback only:
+
+```bash
+cd ~/repos/oh-my-agent
+bash scripts/docker-build.sh   # rebuild image with dashboard deps
+bash scripts/docker-start.sh   # starts oh-my-agent + oh-my-agent-dashboard
+# stdout prints:  [oma] dashboard at http://127.0.0.1:8080
+```
+
+The exact host port can change run-to-run if 8080 is busy — read it off stdout, or run `bash scripts/docker-status.sh` (shows port bindings for both containers).
+
+Skip the dashboard entirely:
+
+```bash
+OMA_DASHBOARD_ENABLED=0 bash scripts/docker-start.sh
+```
+
+Override the port candidate list:
+
+```bash
+OMA_DASHBOARD_PORTS='9091 9092' bash scripts/docker-start.sh
+```
+
+`scripts/docker-stop.sh` stops both containers; `scripts/docker-logs.sh dashboard` tails the dashboard's stdout (default tails the bot, unchanged).
+
+#### 6.3.b Compose path
+
 `compose.yaml` ships with a second service `oh-my-agent-dashboard` that reuses the same image, mounts the same volume, and binds `0.0.0.0:8080` inside the container. The compose port mapping publishes that on host loopback only:
 
 ```yaml

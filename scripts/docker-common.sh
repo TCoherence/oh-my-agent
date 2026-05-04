@@ -43,6 +43,16 @@ oma_docker_init() {
   CONFIG_PATH_IN_CONTAINER="${OMA_CONFIG_PATH:-${REPO_MOUNT_TARGET}/config.yaml}"
   OMA_CONTAINER_PATH="${WORKSPACE_MOUNT_TARGET}/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
   OMA_REPORT_TIMEZONE_VALUE="${OMA_REPORT_TIMEZONE:-$(oma_detect_timezone)}"
+
+  # Dashboard side container — read-only monitoring page; lives in the same
+  # image, runs the `oma-dashboard` entry point, port-published to host
+  # loopback only. Default-on because it's cheap (~30MB extra RAM); set
+  # OMA_DASHBOARD_ENABLED=0 to skip.
+  DASHBOARD_CONTAINER_NAME="${OMA_DASHBOARD_CONTAINER_NAME:-${CONTAINER_NAME}-dashboard}"
+  DASHBOARD_ENABLED="${OMA_DASHBOARD_ENABLED:-1}"
+  DASHBOARD_PORTS="${OMA_DASHBOARD_PORTS:-8080 8081 8088 8888 9090}"
+  DASHBOARD_BIND_HOST="${OMA_DASHBOARD_BIND_HOST:-127.0.0.1}"
+  DASHBOARD_CONTAINER_PORT="${OMA_DASHBOARD_CONTAINER_PORT:-8080}"
 }
 
 oma_docker_ensure_ready() {
@@ -106,4 +116,113 @@ oma_docker_print_banner() {
 
 oma_docker_app_log_path() {
   printf '%s/.oh-my-agent/runtime/logs/oh-my-agent.log\n' "${MOUNT_PATH}"
+}
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Dashboard helpers (parallel to the bot helpers above)
+# ─────────────────────────────────────────────────────────────────────
+
+oma_dashboard_container_exists() {
+  docker ps -a --format '{{.Names}}' | grep -Fxq "${DASHBOARD_CONTAINER_NAME}"
+}
+
+oma_dashboard_remove_existing_container() {
+  if oma_dashboard_container_exists; then
+    echo "[oma] removing existing dashboard container ${DASHBOARD_CONTAINER_NAME}"
+    docker rm -f "${DASHBOARD_CONTAINER_NAME}" >/dev/null
+  fi
+}
+
+# Print port to stdout if free; return non-zero if taken.
+# Tries `lsof` first (most accurate on macOS); falls back to `nc -z`. If
+# neither tool is available, optimistically returns success and lets the
+# subsequent `docker run` fail-detect the bind.
+oma_port_is_free() {
+  local port="$1"
+  if command -v lsof >/dev/null 2>&1; then
+    ! lsof -nP -iTCP:"${port}" -sTCP:LISTEN >/dev/null 2>&1
+    return
+  fi
+  if command -v nc >/dev/null 2>&1; then
+    ! nc -z 127.0.0.1 "${port}" >/dev/null 2>&1
+    return
+  fi
+  return 0
+}
+
+# Iterate DASHBOARD_PORTS, print the first one that's free on the host.
+# Empty stdout if all are taken.
+oma_dashboard_pick_port() {
+  local port
+  for port in ${DASHBOARD_PORTS}; do
+    if oma_port_is_free "${port}"; then
+      printf '%s\n' "${port}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Build the docker-run argv for the dashboard container. Mirrors
+# oma_docker_build_common_run_args but: different container name,
+# OMA_FAIL_FAST_CLI=0 (no CLI binary check needed), and the chosen
+# host_port:container_port mapping appended by the caller.
+oma_dashboard_build_run_args() {
+  OMA_DASHBOARD_RUN_ARGS=(
+    --name "${DASHBOARD_CONTAINER_NAME}"
+    --user "$(id -u):$(id -g)"
+    --cap-drop ALL
+    --security-opt no-new-privileges
+    -e HOME="${WORKSPACE_MOUNT_TARGET}"
+    -e PATH="${OMA_CONTAINER_PATH}"
+    -e OMA_MOUNT_ROOT="${WORKSPACE_MOUNT_TARGET}"
+    -e OMA_WORKDIR="${WORKDIR_IN_CONTAINER}"
+    -e OMA_REPO_ROOT="${REPO_MOUNT_TARGET}"
+    -e OMA_CONFIG_PATH="${CONFIG_PATH_IN_CONTAINER}"
+    -e OMA_FAIL_FAST_CLI=0
+    -e TZ="${OMA_REPORT_TIMEZONE_VALUE}"
+    -v "${MOUNT_PATH}:${WORKSPACE_MOUNT_TARGET}"
+    -v "${REPO_MOUNT_PATH}:${REPO_MOUNT_TARGET}"
+  )
+}
+
+# Start the dashboard container detached. Honors DASHBOARD_ENABLED gate
+# and tries each port in DASHBOARD_PORTS until one binds. Always returns
+# success — a dashboard failure does NOT block bot startup. Prints a
+# clearly labeled URL line so docker-logs.sh / scrollback can find it.
+oma_dashboard_start_detached() {
+  if [[ "${DASHBOARD_ENABLED}" != "1" ]]; then
+    echo "[oma] dashboard disabled (OMA_DASHBOARD_ENABLED=${DASHBOARD_ENABLED})"
+    return 0
+  fi
+
+  oma_dashboard_remove_existing_container
+
+  local port
+  port="$(oma_dashboard_pick_port)" || true
+  if [[ -z "${port}" ]]; then
+    echo "[oma] dashboard: every candidate port is taken (${DASHBOARD_PORTS}); skipping" >&2
+    echo "[oma] override with OMA_DASHBOARD_PORTS='9091 9092' or set OMA_DASHBOARD_ENABLED=0" >&2
+    return 0
+  fi
+
+  oma_dashboard_build_run_args
+
+  if docker run -d --restart unless-stopped \
+      "${OMA_DASHBOARD_RUN_ARGS[@]}" \
+      -p "${DASHBOARD_BIND_HOST}:${port}:${DASHBOARD_CONTAINER_PORT}" \
+      "${IMAGE_TAG}" \
+      oma-dashboard --host 0.0.0.0 --port "${DASHBOARD_CONTAINER_PORT}" \
+      >/dev/null 2>/tmp/oma-dashboard-launch.err; then
+    echo "[oma] dashboard at http://${DASHBOARD_BIND_HOST}:${port}"
+    echo "[oma] dashboard container: ${DASHBOARD_CONTAINER_NAME}"
+    rm -f /tmp/oma-dashboard-launch.err
+  else
+    echo "[oma] dashboard launch failed; bot still starting" >&2
+    if [[ -s /tmp/oma-dashboard-launch.err ]]; then
+      sed 's/^/[oma]   /' /tmp/oma-dashboard-launch.err >&2
+      rm -f /tmp/oma-dashboard-launch.err
+    fi
+  fi
 }
