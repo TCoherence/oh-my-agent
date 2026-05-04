@@ -2,7 +2,9 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="refresh" content="60">
+{% if refresh_seconds and refresh_seconds > 0 %}
+<meta http-equiv="refresh" content="{{ refresh_seconds }}">
+{% endif %}
 <title>oh-my-agent dashboard</title>
 <style>
   body { font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; max-width: 1100px; margin: 1em auto; padding: 0 1em; color: #1a1a1a; background: #fafafa; }
@@ -30,7 +32,7 @@
 <body>
 
 <h1>oh-my-agent dashboard</h1>
-<p class="meta">Snapshot at <code>{{ now_utc }}</code> · auto-refresh every 60s · loopback-only · read-only</p>
+<p class="meta">Snapshot at <code>{{ now_utc }}</code> · {% if refresh_seconds and refresh_seconds > 0 %}auto-refresh every {{ refresh_seconds }}s{% else %}auto-refresh disabled{% endif %} · loopback-only · read-only</p>
 
 <!-- ─────────────────────────────────────────────────────────────────────── -->
 <h2>1. Automation health</h2>

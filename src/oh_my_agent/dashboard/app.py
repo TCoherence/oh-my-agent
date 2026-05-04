@@ -23,12 +23,19 @@ from oh_my_agent import paths
 from . import data as dashboard_data
 
 
-def create_app(config: dict) -> FastAPI:
+def create_app(config: dict, *, refresh_seconds: int = 300) -> FastAPI:
     """Build a FastAPI app bound to the given top-level oh-my-agent config.
+
+    Args:
+        config: top-level oh-my-agent config dict.
+        refresh_seconds: page auto-refresh interval (default 300 = 5 min).
+            Set to 0 to omit the meta-refresh tag entirely.
 
     The app keeps a reference to the config dict and resolves all paths fresh
     on each request (cheap — just dict lookups + string ops). No caching.
     """
+
+    refresh_seconds = max(0, int(refresh_seconds))
 
     app = FastAPI(title="oh-my-agent dashboard", docs_url=None, redoc_url=None)
     env = Environment(
@@ -50,6 +57,7 @@ def create_app(config: dict) -> FastAPI:
     @app.get("/")
     def index() -> HTMLResponse:
         ctx = _build_context(config)
+        ctx["refresh_seconds"] = refresh_seconds
         return HTMLResponse(template.render(**ctx))
 
     return app

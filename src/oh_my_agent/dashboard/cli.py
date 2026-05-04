@@ -52,7 +52,29 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=("debug", "info", "warning", "error"),
         help="uvicorn log level (default: info).",
     )
+    parser.add_argument(
+        "--refresh-seconds",
+        type=int,
+        default=None,
+        help="Page auto-refresh interval in seconds. Resolution order: "
+        "--refresh-seconds → OMA_DASHBOARD_REFRESH_SECONDS env var → 300 (5 min). "
+        "Pass 0 to disable auto-refresh entirely.",
+    )
     return parser
+
+
+def _resolve_refresh_seconds(arg_value: int | None) -> int:
+    """Resolve refresh interval: CLI flag > env var > 300 default."""
+
+    if arg_value is not None:
+        return max(0, arg_value)
+    env_value = os.environ.get("OMA_DASHBOARD_REFRESH_SECONDS")
+    if env_value:
+        try:
+            return max(0, int(env_value))
+        except ValueError:
+            pass
+    return 300
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -94,10 +116,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     from .app import create_app
 
-    app = create_app(config)
+    refresh_seconds = _resolve_refresh_seconds(args.refresh_seconds)
+    app = create_app(config, refresh_seconds=refresh_seconds)
+    refresh_label = f"every {refresh_seconds}s" if refresh_seconds > 0 else "disabled"
     print(
         f"oma-dashboard: serving on http://{args.host}:{args.port} "
-        f"(config={config_path}, log_level={args.log_level})"
+        f"(config={config_path}, log_level={args.log_level}, auto-refresh={refresh_label})"
     )
     uvicorn.run(app, host=args.host, port=args.port, log_level=args.log_level)
     return 0

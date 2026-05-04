@@ -174,3 +174,53 @@ def test_warning_severity_string_in_rendered_template(tmp_path: Path) -> None:
     assert r.status_code == 200
     # The total WARNING count appears as 1
     assert "WARNING" in r.text
+
+
+# ---------------------------------------------------------------------------
+# Auto-refresh interval (configurable per PR #37)
+# ---------------------------------------------------------------------------
+
+
+def test_index_default_refresh_seconds_is_300(tmp_path: Path) -> None:
+    """Default auto-refresh interval is 5 minutes (300s)."""
+
+    config = _seed_minimal_runtime_tree(tmp_path)
+    app = create_app(config)  # default refresh_seconds=300
+    client = TestClient(app)
+    r = client.get("/")
+    assert r.status_code == 200
+    assert 'http-equiv="refresh" content="300"' in r.text
+    assert "auto-refresh every 300s" in r.text
+
+
+def test_index_respects_custom_refresh_seconds(tmp_path: Path) -> None:
+    config = _seed_minimal_runtime_tree(tmp_path)
+    app = create_app(config, refresh_seconds=42)
+    client = TestClient(app)
+    r = client.get("/")
+    assert r.status_code == 200
+    assert 'http-equiv="refresh" content="42"' in r.text
+    assert "auto-refresh every 42s" in r.text
+
+
+def test_index_omits_meta_refresh_when_zero(tmp_path: Path) -> None:
+    """refresh_seconds=0 → no meta-refresh tag, header says disabled."""
+
+    config = _seed_minimal_runtime_tree(tmp_path)
+    app = create_app(config, refresh_seconds=0)
+    client = TestClient(app)
+    r = client.get("/")
+    assert r.status_code == 200
+    assert 'http-equiv="refresh"' not in r.text
+    assert "auto-refresh disabled" in r.text
+
+
+def test_index_negative_refresh_seconds_clamped_to_zero(tmp_path: Path) -> None:
+    """Defensive: negative value behaves like 0 (disabled)."""
+
+    config = _seed_minimal_runtime_tree(tmp_path)
+    app = create_app(config, refresh_seconds=-5)
+    client = TestClient(app)
+    r = client.get("/")
+    assert r.status_code == 200
+    assert 'http-equiv="refresh"' not in r.text
