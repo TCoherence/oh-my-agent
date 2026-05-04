@@ -21,12 +21,16 @@ pytest -k "test_fallback"         # single test by name
 
 # Lint & type-check (CI runs these before pytest; push-blockers)
 ruff check src tests              # lint + import sort
-mypy src                          # static type-check (68 files, 0 errors)
+mypy src                          # static type-check
+
+# Scripted E2E harness — run a single scenario offline (no network, no API keys)
+python scripts/run_harness.py tests/harness/scenarios/bilibili_cached.yaml
+pytest tests/harness/test_scenarios.py -v  # all scenarios via pytest
 ```
 
 ## Architecture
 
-The system has seven major subsystems.
+The system has nine major subsystems plus a config layer.
 
 **Gateway layer** (`src/oh_my_agent/gateway/`)
 
@@ -126,6 +130,21 @@ See [`docs/EN/task-model.md`](docs/EN/task-model.md) ([中文](docs/CN/task-mode
 - `BarkPushProvider` POSTs JSON to `{server}/{device_key}` via stdlib `urllib.request` in `asyncio.to_thread` (matches `gateway/router.py` / `auth/providers/bilibili.py` patterns; no new dependency). Bark `level` (`passive`/`active`/`timeSensitive`/`critical`) is configured per event under `notifications.levels.<kind>`.
 - Boot constructs the dispatcher once (`_build_push_dispatcher` in `boot.py`) and shares the same instance with `DiscordChannel` (mention peek) and `RuntimeService` (terminal pushes; forwarded to `NotificationManager` via constructor). Single `aclose()` at shutdown.
 - Config under top-level `notifications`: `enabled` (default false), `provider` (`bark` | `noop`), `bark.device_key_env` (env var name — secret never lives in YAML), `events` (per-kind allow-list), `levels` (per-kind Bark level). Validator (`_check_notifications` in `config_validator.py`) errors on unknown providers / missing `device_key_env` / invalid level enum, warns when the named env var is unset.
+
+**Test harness layer** (`tests/harness/`)
+
+Scripted/offline E2E harness for cross-subsystem regressions. Drives the **real** GatewayManager + RuntimeService stack with a `HarnessChannel(BaseChannel)`, `StubAgent`, and `StubBilibiliAuthProvider` — no network, no API keys, no daemons. Designed cross-platform-first: `HarnessChannel` deliberately does NOT import `DiscordChannel`, so the same yaml scenarios will run unmodified against future Slack/Feishu channels (post-v1.0).
+
+- `scripted_channel.py` — `HarnessChannel` records every outgoing channel call as a typed `ChannelEvent`; `start()` blocks on an internal stop event so GatewayManager's `gather` doesn't tear the stack down; `inject_user_message()` is the driver-only API for pumping user input; `wait_ready()` lets the driver block until the gateway has installed the handler. Streaming-edit collapse: same `(thread_id, message_id)` edits are folded into a final-text view while raw events keep the per-edit history.
+- `stubs.py` — `StubAgent` mimics real CLI agents with cwd-keyed sessions (returns the exact `claude exited 1: No conversation found` error real claude produces when `--resume` from a different cwd; this is what catches the L-level cwd-mismatch regression). `StubBilibiliAuthProvider` short-circuits the network call to `api.bilibili.com` for offline determinism; supports `valid` / `approving` / `failing` / `expiring` modes.
+- `runner.py` — yaml loader + `bootstrap_harness_env(spec)` (wires its own component graph following `runtime_env` fixture pattern; does NOT reuse `boot.ignite()` because that owns signal handlers + daemon supervisors that test code doesn't want) + step dispatcher + assertion engine. Teardown does `gateway.stop()` then `runtime.stop()` (mirrors `boot.py:540-545` since `GatewayManager.stop()` doesn't include runtime workers).
+- `scenarios/*.yaml` — declarative scenarios with `seed.credentials` / `seed.auth_provider` / `seed.agents.<name>.responses` (predicate-based response selection: `content_contains` / `content_regex` / `step_no_eq` / `default`), `steps:` (`inject_user_message` / `await condition: task_status_eq|event_seen|auth_flow_event`) with `capture: { thread_id_as: "@thread1" }` aliases for chaining, and `expect:` (`events_in_order` ordered subset / `events_not_present` / `task` / `metrics.auth_flows_started`).
+- `test_scenarios.py` — pytest entry that discovers + runs every yaml in stub mode + a guard test that confirms the L-level scenario fails when `runtime.set_workspace_resolver(None)` (proves scenarios actually exercise the bug, not rubber-stamp).
+- `scripts/run_harness.py` — CLI entrypoint for one-off runs. Real-mode (`OMA_HARNESS_ALLOW_REAL=1`) currently raises `NotImplementedError`; v2 will plumb real CLI subprocess + real bilibili API for nightly spot-checks.
+
+**Adding a new scenario**: drop `tests/harness/scenarios/<name>.yaml`. `seed.agents.<name>.responses[].when` selects per-prompt; `seed.credentials` for cached-cookie scenarios (uses `validation: stub_valid` by default — never network); `seed.auth_provider: approving` for fresh-login flows. `pytest tests/harness/test_scenarios.py` auto-discovers it.
+
+**Adding a method to BaseChannel**: if it's cross-platform (Slack/Feishu/Discord all need it), promote to `BaseChannel` ABC with a sensible default. If it's Discord-only platform glue (`set_session_context` etc.), keep it on `DiscordChannel` and let GatewayManager call it via `hasattr` guard. The "BaseChannel surface contract" docstring section at the top of the ABC has the full taxonomy.
 
 **Sandbox isolation** (`main.py` + `BaseCLIAgent`)
 
