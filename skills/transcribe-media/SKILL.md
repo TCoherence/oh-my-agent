@@ -1,6 +1,6 @@
 ---
 name: transcribe-media
-description: Transcribe an audio or video file to text, SRT subtitles, or structured JSON using a local Whisper model via the stt CLI. Use when the user gives you a path to a media file (mp3, mp4, m4a, wav, mov, mkv, ...) and asks for a transcript, captions, what-was-said, or anything that needs the spoken content. Also use as a fallback when other skills (e.g. youtube-video-summary, bilibili-video-summary) couldn't get subtitles. Runs offline; on Apple Silicon it uses mlx-whisper for ~30x realtime, otherwise faster-whisper on CPU. Requires the stt project installed at $STT_HOME (default ~/repos/stt).
+description: Transcribe an audio or video file to text, SRT subtitles, or structured JSON using a local Whisper model via the stt CLI. Use when the user gives you a path to a media file (mp3, mp4, m4a, wav, mov, mkv, ...) and asks for a transcript, captions, what-was-said, or anything that needs the spoken content. Also use as a fallback when other skills (e.g. youtube-video-summary, bilibili-video-summary) couldn't get subtitles. Runs offline; on Apple Silicon it uses mlx-whisper for ~30x realtime, otherwise faster-whisper on CPU. Auto-installs the stt project at $STT_HOME (default ~/repos/stt) on first call if missing — subsequent calls are fast.
 timeout_seconds: 1800
 ---
 
@@ -90,7 +90,8 @@ The script forwards everything to the stt CLI and translates its output to the o
 - `model_unavailable` (exit 1) — mlx-whisper not installed; HF model not found; download failure
 - `transcribe_failed` (exit 3) — whisper backend raised mid-run
 - `timeout` (exit 3) — stt CLI exceeded the wrapper's 1700s budget; process group terminated to clean up any in-flight ffmpeg child
-- `stt_not_found` (exit 2) — `$STT_HOME` doesn't point to a valid stt install
+- `stt_not_found` (exit 2) — `$STT_HOME` doesn't point to a valid stt install AND `STT_AUTO_INSTALL=0` (auto-install was opted out)
+- `stt_install_failed` (exit 1 or 2) — auto-install attempted but a step (clone / venv / pip) failed; message has the relevant tail of the failing tool's stderr
 - `internal` (exit 4) — programming error / unexpected exception (e.g. stt CLI emitted unparseable stdout)
 
 Switch on `kind` for retry-vs-hard-fail. Network-related `model_unavailable` is retry-able; `invalid_input` is not. `timeout` is borderline — usually means a hung model or huge input.
@@ -103,25 +104,37 @@ Switch on `kind` for retry-vs-hard-fail. Network-related `model_unavailable` is 
 
 ## Configuration
 
-The skill expects the stt project at `$STT_HOME` (default `~/repos/stt`). Setup:
+`$STT_HOME` (default `~/repos/stt`) tells the skill where to find — or where to install — the stt project. The skill auto-installs on first call if either `$STT_HOME/cli.py` or `$STT_HOME/venv/bin/python` is missing.
+
+**First-call install steps** (logs to stderr, never stdout):
+1. `git clone --depth 1 https://github.com/TCoherence/stt.git $STT_HOME`
+2. `python3 -m venv $STT_HOME/venv`
+3. `pip install -r requirements.txt` (torch + faster-whisper, ~1–3 min on cold pip cache)
+4. On Apple Silicon (`Darwin/arm64`): `pip install mlx-whisper` + flip `engine=faster-whisper` → `engine=mlx` in `set.ini` for the ~30x realtime payoff. mlx install failure is non-fatal — falls back to faster-whisper CPU.
+
+After install completes, the skill runs the requested transcription in the same call. So a fresh first call takes ~2–4 min total (install + first model download + transcribe); subsequent calls are fast.
+
+**Opt out**: set `STT_AUTO_INSTALL=0` to disable auto-install. The skill then returns `kind: stt_not_found` with a setup hint instead.
+
+**Pre-existing partial install**: the skill is idempotent — if `$STT_HOME` exists with a `.git/` but missing venv, only the venv + pip steps run. If `$STT_HOME` exists without `.git/` (a directory not recognized as our checkout), the skill errors with `kind: stt_install_failed` rather than risking destruction of user data.
+
+**Manual setup (if you prefer)**:
 
 ```bash
 git clone https://github.com/TCoherence/stt.git ~/repos/stt
 cd ~/repos/stt
 python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
-
-# Apple Silicon users — enable mlx backend for ~30x realtime
+# Apple Silicon — enable mlx backend
 pip install mlx-whisper
-sed -i '' 's/^engine=.*/engine=mlx/' set.ini   # or edit set.ini manually
+sed -i '' 's/^engine=.*/engine=mlx/' set.ini
 ```
-
-If `$STT_HOME` is not set or points to a non-existent path, the script returns `kind: stt_not_found` with a setup hint.
 
 ## Notes for skill authors
 
-- Pass `subprocess.run([...], capture_output=True, text=True)` and parse `stdout` as JSON. No need to read stderr — successes have empty stderr, errors mirror their JSON envelope to stdout.
+- Pass `subprocess.run([...], capture_output=True, text=True)` and parse `stdout` as JSON. No need to read stderr — successes have empty stderr (or just install progress lines on the very first call), errors mirror their JSON envelope to stdout.
+- The first call after a fresh deploy may take a few minutes (auto-install). Don't add tight per-call timeouts client-side; the skill respects `timeout_seconds: 1800` from frontmatter and hard-caps the inner subprocess at 1700s.
 - `--format json` returns segments with start/end timestamps in seconds (float). Useful for chaptering, jumping to time codes, or attribution heuristics.
 - `--format srt` and `text` return the formatted body inside the JSON envelope under the `srt` / `text` key — extract with `data["srt"]` and `Path("out.srt").write_text(data["srt"])` for direct file write.
 - For a 2-speaker interview/podcast, the LLM consuming this can usually infer who said what from context — speaker diarization is rarely worth the extra ~10x compute time.
-- The wrapper hard-caps the subprocess at 1700s and uses `start_new_session=True` so a hung whisper inference cannot leave an orphan ffmpeg child past the agent's 1800s timeout.
+- The wrapper uses `start_new_session=True` so a hung whisper inference cannot leave an orphan ffmpeg child past the agent's 1800s timeout.
