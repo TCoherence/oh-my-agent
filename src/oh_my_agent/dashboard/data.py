@@ -421,6 +421,13 @@ def fetch_log_health(log_paths: list[Path]) -> dict:
     would silently miss ``WARNING`` lines (Codex review insight).
     """
 
+    # Window cutoff is computed once up front. Filtering happens at the
+    # log-line timestamp level, NOT at the bucket-start-time level — Codex
+    # round 2 caught that quantizing first then comparing bucket-start to
+    # cutoff would silently drop lines whose timestamp falls within the
+    # window but whose bucket starts before it (5-minute quantization
+    # spans the cutoff for up to LOG_BUCKET_MINUTES - 1 minutes).
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=LOG_BUCKET_WINDOW_MINUTES)
     bucket_counts: dict[str, dict[str, int]] = defaultdict(lambda: {"ERROR": 0, "WARNING": 0})
     error_lines: list[dict[str, Any]] = []
     parsed_lines = 0
@@ -445,6 +452,19 @@ def fetch_log_health(log_paths: list[Path]) -> dict:
             level = m.group("level")
             if level not in ("ERROR", "WARNING"):
                 continue
+
+            # Parse the line's actual timestamp; reject if unparseable or
+            # outside the window. Window-scoped totals + buckets +
+            # recent_errors all derive from this filter.
+            try:
+                line_ts = datetime.fromisoformat(m.group("ts").replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if line_ts.tzinfo is None:
+                line_ts = line_ts.replace(tzinfo=timezone.utc)
+            if line_ts < cutoff:
+                continue
+
             bucket_key = _bucket_key(m.group("ts"))
             if bucket_key:
                 bucket_counts[bucket_key][level] += 1
@@ -463,33 +483,18 @@ def fetch_log_health(log_paths: list[Path]) -> dict:
             "files_missing": files_missing,
         }
 
-    # Filter buckets to the actual last LOG_BUCKET_WINDOW_MINUTES window.
-    # Plain "last N entries" was misleading when the log was old — Codex
-    # review caught this. We compare bucket key (already a quantized ISO
-    # timestamp) against now-minus-window.
-    cutoff = datetime.now(timezone.utc) - timedelta(minutes=LOG_BUCKET_WINDOW_MINUTES)
-    in_window: list[tuple[str, dict[str, int]]] = []
-    for key, counts in sorted(bucket_counts.items()):
-        try:
-            bucket_ts = datetime.fromisoformat(key)
-        except ValueError:
-            continue
-        if bucket_ts.tzinfo is None:
-            bucket_ts = bucket_ts.replace(tzinfo=timezone.utc)
-        if bucket_ts >= cutoff:
-            in_window.append((key, counts))
+    sorted_buckets = sorted(bucket_counts.items())
 
     return {
         "files_read": files_read,
         "files_missing": files_missing,
         "parsed_lines": parsed_lines,
         "buckets": [
-            {"bucket": k, "error": v["ERROR"], "warning": v["WARNING"]} for k, v in in_window
+            {"bucket": k, "error": v["ERROR"], "warning": v["WARNING"]} for k, v in sorted_buckets
         ],
         "recent_errors": error_lines,
-        # Window-scoped totals — match what's actually shown in the buckets table.
-        "total_error": sum(v["ERROR"] for _, v in in_window),
-        "total_warning": sum(v["WARNING"] for _, v in in_window),
+        "total_error": sum(v["ERROR"] for _, v in sorted_buckets),
+        "total_warning": sum(v["WARNING"] for _, v in sorted_buckets),
     }
 
 

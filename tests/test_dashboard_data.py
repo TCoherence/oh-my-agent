@@ -430,10 +430,11 @@ def test_fetch_log_health_skips_traceback_lines(tmp_path: Path) -> None:
 
 
 def test_fetch_log_health_excludes_lines_outside_window(tmp_path: Path) -> None:
-    """Codex round-7 review: 'last hour' label must actually mean last 60 min.
+    """Codex review: 'last hour' label must actually mean last 60 min.
 
     Lines older than ``LOG_BUCKET_WINDOW_MINUTES`` minutes ago must NOT be
-    counted in window-scoped totals/buckets, even if they match the regex.
+    counted in window-scoped totals/buckets/recent_errors. Filtering
+    happens at line-timestamp level, not bucket-start level.
     """
 
     log = tmp_path / "service.log"
@@ -449,10 +450,38 @@ def test_fetch_log_health_excludes_lines_outside_window(tmp_path: Path) -> None:
     r = data.fetch_log_health([log])
     # Window-scoped total: only the recent line.
     assert r["total_error"] == 1
-    # The ancient line still contributed to recent_errors (first 5 ERRORs
-    # by encounter order, since file is read top-to-bottom).
-    # That's separate from the bucketed window count.
+    # recent_errors is also window-scoped — ancient line excluded.
     assert any("fresh" in e["msg"] for e in r["recent_errors"])
+    assert not any("ancient" in e["msg"] for e in r["recent_errors"])
+
+
+def test_fetch_log_health_includes_lines_near_cutoff_boundary(tmp_path: Path) -> None:
+    """Codex round-2 catch: filter at line-timestamp, not bucket-start.
+
+    A line at minute 59 inside the window has a bucket-start at minute 55,
+    which can fall *before* the cutoff at minute 60. If we filtered on
+    bucket-start, the line would be silently dropped. This pins the
+    line-level filter so a late-window line is always counted.
+
+    Concrete: cutoff is now-60m. Line is now-58m. Bucket key (5-min
+    quantize) lands at now-60m or earlier. Line MUST still be counted.
+    """
+
+    log = tmp_path / "service.log"
+    _write_log(
+        log,
+        [
+            # 58 min ago — inside the 60-min window. The bucket key for this
+            # line will quantize down to the 55- or 60-min bucket, depending
+            # on current clock minute, which is sometimes BEFORE cutoff.
+            f"{_recent_ts(58)} level=ERROR logger=near msg=near-boundary",
+        ],
+    )
+    r = data.fetch_log_health([log])
+    assert r["total_error"] == 1, (
+        f"line at 58min ago must be counted; got buckets={r['buckets']}, "
+        f"total_error={r['total_error']}"
+    )
 
 
 # ---------------------------------------------------------------------------
