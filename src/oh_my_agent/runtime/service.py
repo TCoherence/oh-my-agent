@@ -9,6 +9,7 @@ import re
 import shutil
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -316,6 +317,13 @@ class RuntimeService:
         self._workers: list[asyncio.Task] = []
         self._janitor_task: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
+        # Optional callback that resolves the per-thread short-workspace path
+        # used by chat replies. When set, ``_invoke_thread_agent`` (suspended
+        # resume + HITL) uses the same cwd so claude --resume hits the same
+        # ``~/.claude/projects/<cwd-hash>/`` cache the chat path wrote to.
+        self._workspace_resolver: (
+            Callable[[ChannelSession, str], Awaitable[Path | None]] | None
+        ) = None
 
     @staticmethod
     def _extract_skill_frontmatter(skill_md: Path) -> dict[str, Any]:
@@ -695,6 +703,12 @@ class RuntimeService:
         key = self._key(session.platform, session.channel_id)
         self._sessions[key] = session
         self._registries[key] = registry
+
+    def set_workspace_resolver(
+        self,
+        resolver: Callable[[ChannelSession, str], Awaitable[Path | None]] | None,
+    ) -> None:
+        self._workspace_resolver = resolver
 
     def register_session_alias(
         self,
@@ -1279,6 +1293,71 @@ class RuntimeService:
         await self._notify(task, f"Task `{task.id}` resumed and queued.")
         await self._signal_status_by_id(task, TASK_STATUS_PENDING)
         return f"Task `{task.id}` resumed and queued."
+
+    # Map provider name → URL detection regex. Used by
+    # ``collect_provider_credential_hints`` to match request text against
+    # known providers and surface already-cached credentials so the agent
+    # doesn't trigger a fresh QR flow when one isn't needed.
+    _PROVIDER_URL_PATTERNS: dict[str, re.Pattern[str]] = {
+        "bilibili": re.compile(
+            r"https?://(?:www\.)?(?:bilibili\.com/video/|b23\.tv/)\S+",
+            re.IGNORECASE,
+        ),
+    }
+
+    async def collect_provider_credential_hints(
+        self,
+        *,
+        text: str,
+        owner_user_id: str | None,
+    ) -> list[str]:
+        """Return prompt-ready hint lines for any providers detectable in
+        *text* that already have a valid stored credential. Empty list when
+        auth is disabled, no providers match, or no valid credential exists
+        for the owner. Surfaced into task / chat-reply prompts so the agent
+        can pass ``--cookies-path`` directly instead of triggering a redundant
+        QR flow."""
+        if not text or not owner_user_id:
+            return []
+        if not self._auth_service or not self._auth_service.enabled:
+            return []
+        seen: set[str] = set()
+        hints: list[str] = []
+        for provider, pattern in self._PROVIDER_URL_PATTERNS.items():
+            if provider in seen:
+                continue
+            if not pattern.search(text):
+                continue
+            seen.add(provider)
+            try:
+                credential = await self._auth_service.get_valid_credential(
+                    provider, owner_user_id
+                )
+            except Exception:
+                logger.debug(
+                    "credential lookup failed provider=%s owner=%s",
+                    provider,
+                    owner_user_id,
+                    exc_info=True,
+                )
+                continue
+            if credential is None or not credential.storage_path:
+                continue
+            path = credential.storage_path
+            if provider == "bilibili":
+                hints.append(
+                    "[Cached credential]\n"
+                    f"- A valid Bilibili login is already cached at `{path}`.\n"
+                    f"- Pass `--cookies-path '{path}'` to the bilibili extractor "
+                    "and do NOT emit an `auth_required` control frame unless "
+                    "this credential is itself rejected by Bilibili."
+                )
+            else:
+                hints.append(
+                    f"- A valid `{provider}` credential is cached at `{path}`. "
+                    "Reuse it instead of asking the user to log in again."
+                )
+        return hints
 
     async def start_auth_login(
         self,
@@ -2810,6 +2889,13 @@ class RuntimeService:
                     last_hitl_answer=last_hitl_answer,
                 )
 
+            credential_hints = await self.collect_provider_credential_hints(
+                text=f"{task.goal}\n{current.original_request or ''}",
+                owner_user_id=task.created_by,
+            )
+            if credential_hints:
+                prompt = prompt + "\n\n" + "\n\n".join(credential_hints)
+
             t_agent = time.perf_counter()
             agent_name, response = await self._run_agent(
                 registry=registry,
@@ -3106,15 +3192,31 @@ class RuntimeService:
                 finding_lines = self._format_evaluation_findings(evaluation_findings)
                 if finding_lines:
                     summary += "\nReview findings:\n" + "\n".join(finding_lines)
-                output_summary = (
-                    strip_control_frame_text(response.text).strip()
-                    if task.automation_name
-                    else self._build_output_summary(
+                output_summary: str | None
+                if task.automation_name:
+                    output_summary = strip_control_frame_text(response.text).strip()
+                elif task.completion_mode == TASK_COMPLETION_REPLY:
+                    # Chat-thread artifact tasks (user shared a URL → bilibili
+                    # summary, paper digest, etc.): use the agent's actual
+                    # response text as the body so the report renders verbatim
+                    # in the COMPLETED message. Without this, the body source
+                    # is the legacy ``Artifacts (N): ...`` summary which is
+                    # ``None`` whenever the run produced no workspace files —
+                    # leaving the user with a bare ``Run completed.`` line.
+                    text_body = strip_control_frame_text(response.text).strip()
+                    text_body = _TASK_STATE_LINE_RE.sub("", text_body)
+                    text_body = _BLOCK_REASON_LINE_RE.sub("", text_body).strip()
+                    output_summary = text_body or self._build_output_summary(
                         task=task,
                         changed_files=changed_files,
                         test_summary=test_summary,
                     )
-                )
+                else:
+                    output_summary = self._build_output_summary(
+                        task=task,
+                        changed_files=changed_files,
+                        test_summary=test_summary,
+                    )
                 artifact_manifest = changed_files if task.completion_mode != TASK_COMPLETION_MERGE else None
                 if self._uses_merge_flow(task) and self._merge_gate_enabled:
                     # Merge flow: WAITING_MERGE is non-terminal and is
@@ -5384,13 +5486,25 @@ class RuntimeService:
         max_turns_override: int | None = None,
     ) -> AgentResponse:
         history = await session.get_history(thread_id)
+        workspace_override: Path | None = None
+        if self._workspace_resolver is not None:
+            try:
+                workspace_override = await self._workspace_resolver(session, thread_id)
+            except Exception:
+                logger.warning(
+                    "workspace_resolver failed thread=%s — falling back to default cwd",
+                    thread_id,
+                    exc_info=True,
+                )
+                workspace_override = None
         logger.info(
-            "THREAD_AGENT_START purpose=%s thread=%s force_agent=%s skill_timeout_override=%r history_turns=%d",
+            "THREAD_AGENT_START purpose=%s thread=%s force_agent=%s skill_timeout_override=%r history_turns=%d workspace=%s",
             purpose,
             thread_id,
             force_agent,
             timeout_override_seconds,
             len(history),
+            workspace_override,
         )
         run_task = asyncio.create_task(
             registry.run(
@@ -5398,6 +5512,7 @@ class RuntimeService:
                 history,
                 thread_id=thread_id,
                 force_agent=force_agent,
+                workspace_override=workspace_override,
                 log_path=log_path,
                 run_label=f"{purpose} thread={thread_id}",
                 timeout_override_seconds=timeout_override_seconds,
