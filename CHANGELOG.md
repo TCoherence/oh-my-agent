@@ -6,6 +6,8 @@ The format is intentionally lightweight and release-oriented rather than exhaust
 
 ## Unreleased
 
+## v0.9.5 - 2026-05-04
+
 ### Added
 
 - **Cost section uses a labeled chart with x/y axes instead of an inline sparkline**. Field feedback: the original 120×24 inline sparkline (PR #32) carried no axes / tick labels — operators couldn't tell which day a spike landed on or what the absolute spending was. This PR replaces the inline sparkline with a 480×140 block-element chart: y-axis ticks at min / mid / max with adaptive dollar formatting (`$0` / `$0.0001` / `$0.050` / `$2.50` / `$42` / `$1.5k`), x-axis ticks per data point with shortened `MM-DD` date labels, three dashed horizontal grid lines, dot markers at each data point, and a polyline connecting them. Implemented as a new `_chart_svg(values, labels)` Jinja global named `chart`; the legacy `_sparkline_svg` and its `sparkline` global are retained unused (back-compat). New `short_day` Jinja filter trims `YYYY-MM-DD` to `MM-DD`; `_format_y_axis_label` adapts precision based on magnitude. Chart wrapper has its own CSS block (`.chart-wrap` / `.chart-title`) so the chart breathes on its own line below the cost summary, with `currentColor` inheriting from `.chart-wrap svg { color: #167400; }` for the line color. Empty / single-value / flat-series inputs all render without crashing (no NaN coords). Covered by 7 new tests in `test_dashboard_app.py`: axes + ticks + labels + polyline + dot count, empty input, single-value (no polyline), flat-series (no div-by-zero), `short_day` formatter, `_format_y_axis_label` precision matrix, and the live-page render check that the cost section title still resolves.
