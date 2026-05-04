@@ -12,6 +12,7 @@ under WAL, so this stays correct while the bot writes.
 
 from __future__ import annotations
 
+import html
 from datetime import datetime, timezone
 
 from fastapi import FastAPI
@@ -218,10 +219,15 @@ def _chart_svg(
     vmin = min(values)
     vmax = max(values)
     if vmax == vmin:
-        # Pad a tiny range so a flat series still renders on the line, not on
-        # the axis itself. 1 is fine since cost values rarely sit at exactly
-        # the same number across days.
-        vmax = vmin + max(1.0, abs(vmin) * 0.1)
+        # Pad a tiny range so a flat series still renders on the polyline,
+        # not on the axis itself. Use 10% of the value when non-zero, or
+        # a small absolute pad ($0.01) when everything is zero — Codex
+        # round-1 caught that the previous `max(1.0, ...)` pushed the
+        # all-zero case to a misleading $0/$0.50/$1.00 y-axis.
+        if vmin == 0:
+            vmax = 0.01
+        else:
+            vmax = vmin + abs(vmin) * 0.1
     span = vmax - vmin
 
     n = len(values)
@@ -280,10 +286,12 @@ def _chart_svg(
                 f'<line x1="{x:.1f}" y1="{top + plot_h}" x2="{x:.1f}" '
                 f'y2="{top + plot_h + 3}" stroke="#888" stroke-width="0.5"/>'
             )
-            # Escape minimal — labels are server-controlled (date strings).
+            # Escape: chart() is a Jinja global, future callers may pass
+            # user-controlled strings. Cheap defense regardless of who calls.
+            safe_lab = html.escape(str(lab), quote=False)
             parts.append(
                 f'<text x="{x:.1f}" y="{top + plot_h + 14:.1f}" '
-                f'text-anchor="middle" fill="#888">{lab}</text>'
+                f'text-anchor="middle" fill="#888">{safe_lab}</text>'
             )
 
     # Data: polyline + dot markers.

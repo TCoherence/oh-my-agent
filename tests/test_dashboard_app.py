@@ -283,6 +283,36 @@ def test_chart_svg_flat_series_does_not_divide_by_zero() -> None:
     assert "inf" not in svg
 
 
+def test_chart_svg_all_zero_series_has_compact_y_axis() -> None:
+    """Codex round-1 catch: all-zero series previously padded to $0/$0.50/$1.00,
+    making the data look pinned to the bottom. Use $0.01 padding instead so
+    the y-axis labels stay near zero."""
+
+    from oh_my_agent.dashboard.app import _chart_svg
+
+    svg = _chart_svg([0.0, 0.0, 0.0, 0.0], ["a", "b", "c", "d"])
+    # Top tick should be $0.01 (or formatted equivalent), NOT $1.00 or $0.50
+    assert ">$0.50<" not in svg
+    assert ">$1.00<" not in svg
+    assert ">$1<" not in svg
+    # The top label should be in the small-cents range
+    assert ">$0.010<" in svg or ">$0.01<" in svg
+
+
+def test_chart_svg_escapes_x_axis_labels() -> None:
+    """Codex round-1 catch: chart is a Jinja global; future callers might
+    pass user-controlled labels. _chart_svg escapes <, >, & in labels."""
+
+    from oh_my_agent.dashboard.app import _chart_svg
+
+    svg = _chart_svg([1.0, 2.0], ["<script>alert(1)</script>", "&fragment"])
+    # The literal `<script>` tag must NOT appear in output
+    assert "<script>" not in svg
+    # Escaped form should appear in a <text> element
+    assert "&lt;script&gt;" in svg
+    assert "&amp;fragment" in svg
+
+
 def test_short_day_filter() -> None:
     from oh_my_agent.dashboard.app import _short_day
 
