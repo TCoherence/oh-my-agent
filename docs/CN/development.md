@@ -13,52 +13,65 @@ Oh My Agent 是一个多平台 bot，执行层直接使用 CLI Agent，而不是
 
 ## 当前 Runtime 基线
 
-已实现：
-- 可选 LLM 意图路由（`reply_once`、`invoke_existing_skill`、`propose_artifact_task`、`propose_repo_task`、`create_skill`、`repair_skill`）
-- 短对话临时 workspace + TTL 清理，状态持久化到 SQLite
-- 多类型 runtime orchestration：
-  - `artifact` 任务可直接完成，不进入 merge
-  - `repo_change` 与 `skill_change` 继续走 merge gate
-- 一等 `WAITING_USER_INPUT` 状态，以及 direct chat / runtime task 的单选式 `ask_user`
-- active `ask_user` prompt 的 owner 通知、SQLite 持久化和重启后重新注册
-- Runtime 可观测性基线：
-  - `/task_logs`
-  - SQLite 中采样式 progress snapshot
-  - 进程日志中的完整 heartbeat
-  - Discord 中单条可更新的状态消息
-  - Discord `/doctor`
-  - `runtime/logs/threads/` 下按 thread 聚合的统一日志
-  - `runtime/logs/agents/` 下内部 live agent spool 日志
-- Codex skill 接入已切到官方 repo/workspace `.agents/skills/`；生成的 workspace `AGENTS.md` 只保留 repo 规则和元信息
-- 真正的子进程中断（heartbeat 循环检查 PAUSED/STOPPED，取消运行中 agent/test）
-- 消息驱动的 runtime 控制（通过 `_parse_control_intent` 从普通 thread 消息触发 stop/pause/resume）
-- PAUSED 状态：非终态，workspace 保留，可带指令 resume
-- 结构化任务完成摘要（目标、变更文件、测试统计、耗时）
-- Runtime 指标（`total_agent_s`、`total_test_s`、`total_elapsed_s`）
-- Adaptive Memory：对话中自动提取记忆、注入 agent prompt、`/memories` 和 `/forget` 命令
-- Skill 评估已实现：结果追踪、用户反馈、健康统计、自动降级、重叠防重、source-grounded review
-- 基于 router 的 `repair_skill` 技能修复意图已实现
+已发布：`v0.9.5`（2026-05-04）。分支处于 v1.0 契约冻结阶段：九个主要子系统加一层 config（详见 [`architecture.md`](architecture.md)）。Memory 在 v0.9.0 重写为事件驱动 Judge 模型（迁移说明见 CHANGELOG）；平台抽象在 v0.8 完成 service 层抽离；Slack stub 在 v0.9.1 移除（1.0 唯一支持平台是 Discord）。后续 v0.9.x 加固了 streaming、push notifications、中央 scheduler due-loop、dump channels、dashboard、weekly reflection、cost chart，以及 PR #41 / #44 借助新 harness 暴露并修掉的 cwd 一致性 / cached-credential / 完成体内容三个 runtime 修复。
 
-仍缺少：
-- 直接展示到 Discord 状态卡里的内存级 live excerpt
-- 超出本地 attachment/path 兜底之外的远端 delivery backend
-- 超越 cron 的事件驱动触发器
-- 超出结构化单选 checkpoint 的更丰富 HITL 家族
-- guest session 隔离
-- 语义检索（v0.8+）
+已实现（v0.9.5 实际表面）：
+- **Gateway**：Discord 适配器、slash 命令、消息路由、`@agent` 指定、图片附件、自动化完成消息的 dump-channel 路由、mention-peek push 通知。
+- **Agents**：CLI 子进程封装（`claude` / `gemini` / `codex`）+ fallback 注册表；三个 agent 都支持跨重启的 session 持久化恢复；session 存储按 cwd 区分键，匹配真实 CLI 语义。
+- **Memory**：SQLite history + 事件驱动 Judge agent 写单层 `memories.yaml` + agent 合成的 `MEMORY.md`；触发器 = 空闲 15 min / `/memorize` / 关键词；daily diary reflection（v0.9.5 起默认开启）+ weekly reflection（默认 Tuesday 03:00 local）。
+- **Runtime**：持久化状态机（DRAFT / RUNNING / VALIDATING / WAITING_MERGE / WAITING_USER_INPUT / COMPLETED / FAILED / TIMEOUT / PAUSED / STOPPED / BLOCKED）；per-task worktree；真正的子进程中断；消息驱动控制（自然语言里说 `stop` / `pause` / `resume`）；带答案绑定 + 重启重新注册的 HITL `ask_user` checkpoint；task + chat-reply prompt 中自动注入 cached-credential 提示（PR #41）；`runtime.reports_dir/` 下单一发布产物路径，无平铺重复；COMPLETED post-notify watermark（任何看到 `status=COMPLETED` 的 poller 保证 channel message 已落地）。
+- **Skills**：`skills/` 与各 CLI 原生目录的双向同步；agent 驱动的创建 + 校验 + merge gate；outcome 追踪、reaction 反馈、滚动失败率自动 disable、overlap guard、source-grounded review。
+- **Router**：可选 OpenAI 兼容 LLM 意图分类（5 个 canonical 意图：`chat_reply` / `invoke_skill` / `oneoff_artifact` / `propose_repo_change` / `update_skill`）+ 置信度阈值 + heuristic 回退。
+- **Automation**：cron / interval scheduler，central due-loop（v0.9.4）；per-automation `auto_approve`；reply-to-automation-post 自动升格为 follow-up thread；持久化 runtime state（`/automation_status` 跨重启可见）。
+- **Auth**：每 provider QR flow（已落 bilibili）；通过 `get_valid_credential` + 自动注入 `--cookies-path` 提示复用 cached credential（PR #41）。
+- **Push notifications**：跨平台外推送层（首发 Bark；ntfy / wecom / feishu 待加）；按事件类型白名单 + per-kind Bark level；绝不阻塞主事件循环。
+- **Sandbox 隔离**：workspace cwd + env 白名单 + CLI 原生 sandbox（Codex `--full-auto`、Gemini `--yolo`、Claude `--dangerously-skip-permissions` + `--allowedTools`）。
+- **Test harness**（PR #44）：`tests/harness/` 下脚本化离线 E2E 驱动器，覆盖完整 GatewayManager + RuntimeService 栈，仅依赖 `BaseChannel` 契约；3 个 yaml 回归场景 + smoke-regression guard test；cross-platform-ready（不引用 Discord），未来加 Slack / Feishu 时可复用同一批场景。
+- **Operator surfaces**：Discord `/doctor`、`/automation_status`、`/usage_today`、`/usage_thread`、`/task_logs`、`/skill_stats`、持久化 automation runtime state、可选只读的 `oma-dashboard` HTTP 服务（按部署约定 loopback-only）。
+
+仍缺少（post-1.0 / 1.x — 详见 [`todo.md`](todo.md) 和 [`v1.0-plan.md`](v1.0-plan.md)）：
+- Slack / Feishu / Lark / WeChat 平台适配
+- 语义记忆检索（BM25 + 向量混合，MMR re-rank）
+- Hybrid autonomy（从历史里发现重复 pattern → 自动起草 skill）
+- 超越 cron 的事件驱动触发器（webhook、文件监听、外部通知）
+- 比单选 checkpoint 更丰富的 HITL 家族
+- Guest session / tenant 隔离
+- 远端对象存储 delivery 后端（R2/S3 风格）
+- Real-mode harness CI 集成（今天通过 `OMA_HARNESS_ALLOW_REAL=1` gate，仍 raise `NotImplementedError`）
 
 ## 下一阶段产品方向
 
-- 当前分支已发布为 `v0.7.3`。
-- v0.7.3 在 v0.7.2 基线之上补齐了 HITL、delivery、operator observability 的闭环。
-- 下一个目标是 deferred items 与 `v0.8+`，不是继续拆 v0.7.3 phase。
-- v0.5 已完成 runtime-first 基线（全部完成）。
-- v0.6 已交付 skill-first autonomy + adaptive memory。
-- v0.7 已交付日期驱动记忆、多类型 runtime、skill 评估，以及当前这轮 auth/HITL/runtime 基础设施。
-- v0.8+ 增加语义记忆检索（向量搜索）和 hybrid autonomy。
-- 源代码自我更迭不是默认自主性路径，而是高风险、强审批的特殊能力。
+- 当前分支：`v0.9.5` 已发布；目标 `v1.0` 稳定版。
+- `v0.8` 完成平台抽象 + 可靠性加固 + 部署加固（service 抽离、graceful shutdown、log 卫生、error contract、docker compose、restart/recovery 测试、operator 文档）。
+- `v0.9.0` 把 memory 重写为事件驱动 Judge 模型 — BREAKING；老的 daily/curated 双层 + 手动 promote 命令移除（迁移脚本在 `scripts/`）。
+- `v0.9.1`–`v0.9.3` 完成剩余 service 抽离、restart/recovery 加固、experimental surface 清理、Slack stub 移除。
+- `v0.9.4` 上 streaming anchor edits、push notifications、watchdog、单一发布产物路径、dump channels、central scheduler due-loop、CI 三段 gate。
+- `v0.9.5` 上 weekly reflection、daily reflection 默认开启、dashboard + Docker 部署、带坐标轴的 cost chart、可配置 refresh、AI daily section checkpointing、Docker entrypoint flock 串行化。同期落了 PR #41 的 cwd 统一 / cached credential / 完成体修复 + PR #44 的 scripted E2E harness。
+- `v1.0` 是稳定契约冻结 — Discord-only、单用户、自部署；验收标准在 [`v1.0-plan.md`](v1.0-plan.md)。
+- post-1.0 扩展（Slack / Feishu / WeChat、语义检索、hybrid autonomy）不在 1.0 关键路径上；cross-platform `BaseChannel` 契约 + harness 是后续扩展不需要 re-tooling 的基础。
+- 源代码自我更迭仍是高风险、强审批的特殊能力 — 不是默认自主性路径。
 
 ## 历史阶段
+
+### v0.9.5（2026-05-04）
+
+- Cwd 统一 + cached bilibili 凭证复用 + 非空完成体（PR #41）；`tests/harness/` 下脚本化离线 E2E harness 含 3 个回归 scenario + cwd-keyed `StubAgent`（PR #44）；`BaseChannel` ABC 把 `signal_task_status` 和 `send_hitl_prompt` 提到 ABC 默认走文本回退
+- Weekly memory reflection（在 daily 之上的多尺度"梦境"通道）；daily reflection 默认开启；dashboard Docker 部署 + scripts/ 启动脚本路径；带 x/y 坐标轴的 cost chart 替换 inline sparkline；可配置 dashboard refresh 间隔；AI daily Stage 2.2（section 级别 checkpoint 存储 + paper-digest JSON 直读）；Docker entrypoint `flock` 串行化并发 editable install
+
+### v0.9.4
+
+- Streaming anchor edits；push notifications layer（首发 Bark）；scheduler liveness watchdog；`runtime.reports_dir/` 下单一发布产物路径；automation 完成消息的 dump-channel 路由（一个 bot token 多个只发 channel）；CI 三段 gate（lint → typecheck → tests）；中央 scheduler due-loop；canonical 5-intent router 契约；可选只读 `oma-dashboard` HTTP 服务
+
+### v0.9.0–v0.9.3
+
+- v0.9.0：Memory 子系统重写为事件驱动 Judge 模型 — BREAKING。老的双层 date-based memory + post-turn extractor 移除；单层 `memories.yaml` + agent 合成 `MEMORY.md`；空闲 / `/memorize` / 关键词触发；附迁移脚本
+- v0.9.1：Slack stub 移除；剩余 service-layer 抽离；chat / skill / runtime / HITL / auth / automations 的 restart/recovery 测试；老 state layout 升级路径校验
+- v0.9.2：Watchdog（首发）；operator 文档收紧
+- v0.9.3：artifact archive；automation follow-up thread
+
+### v0.8
+
+- 1.0 hardening — 全四阶段完成：平台抽象（service 抽离、`BaseChannel` 契约 review）、可靠性加固（graceful shutdown、startup config 校验、升级/迁移契约、markdown-aware chunking、rate-limit、log 卫生、user-visible error contract）、部署加固（first-class `compose.yaml`、operator 重启/升级 SOP、health-check）、文档（EN + CN 平价）
 
 ### v0.7.2 基线 + 后续演进
 

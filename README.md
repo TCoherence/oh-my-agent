@@ -37,7 +37,7 @@ User (Discord)
    Response → Markdown-aware chunk → thread.send()
 ```
 
-Seven subsystems: **Gateway** (platform adapters, slash commands, message routing), **Agents** (CLI subprocess wrappers with fallback), **Memory** (SQLite history + event-driven Judge writing `memories.yaml`), **Skills** (bidirectional sync, evaluation, creation), **Runtime** (autonomous task orchestration), **Router** (LLM intent classification), **Automation** (cron/interval scheduler).
+Nine subsystems: **Gateway** (platform adapters, slash commands, message routing), **Agents** (CLI subprocess wrappers with fallback), **Memory** (SQLite history + event-driven Judge writing `memories.yaml`), **Skills** (bidirectional sync, evaluation, creation), **Runtime** (autonomous task orchestration), **Router** (LLM intent classification), **Automation** (cron/interval scheduler), **Auth** (per-provider QR flows + cached credential reuse), **Push notifications** (off-platform delivery via Bark/etc.). A scripted offline E2E harness under `tests/harness/` exercises the full stack via `BaseChannel`-only contracts so cross-platform regressions are caught without a human in the loop.
 
 → Full architecture walkthrough: [EN](docs/EN/architecture.md) · [中文](docs/CN/architecture.md)
 

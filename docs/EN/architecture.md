@@ -165,6 +165,7 @@ Responsibilities:
 - Persist auth artifacts under `~/.oh-my-agent/runtime/auth/`.
 - Emit control envelopes (`OMA_CONTROL`) so chat-path or runtime-path agent calls can request login without crashing the whole flow.
 - Resume the blocked or waiting work after login completes.
+- **Surface cached credentials proactively** (PR #41): `RuntimeService.collect_provider_credential_hints(text, owner_user_id)` matches request text against `_PROVIDER_URL_PATTERNS` (currently `bilibili.com/video/`, `b23.tv/`) and emits a `[Cached credential]` block carrying the on-disk cookies path + a `--cookies-path '<path>'` instruction. `_run_task` and the chat-reply path call it before invoking the agent, so an existing valid credential is reused instead of triggering a redundant QR auth flow on every new task / chat reply.
 
 ### 7. Automations / Scheduler
 
@@ -183,6 +184,39 @@ Responsibilities:
 - Enable or disable individual automations by editing the YAML source file.
 
 The scheduler is intentionally file-driven now. `config.yaml` only keeps global automation settings, not inline job definitions.
+
+### 8. Test harness (E2E)
+
+Primary code:
+
+- `tests/harness/scripted_channel.py` — `HarnessChannel(BaseChannel)` impl
+- `tests/harness/stubs.py` — `StubAgent`, `StubBilibiliAuthProvider`
+- `tests/harness/runner.py` — yaml loader + bootstrap + step dispatcher + assertions
+- `tests/harness/scenarios/*.yaml` — declarative regression scenarios
+- `scripts/run_harness.py` — single-scenario CLI entrypoint
+
+Responsibilities:
+
+- Drive the **real** GatewayManager + RuntimeService stack offline (no network, no API keys, no Discord) so cross-subsystem regressions are catchable in tests instead of via manual user-in-Discord verification.
+- Validate the `BaseChannel` contract itself by deliberately not importing `DiscordChannel`. Anything GatewayManager / RuntimeService call on `BaseChannel` must work via the ABC alone, so future Slack / Feishu adapters reuse the same yaml scenarios.
+- `StubAgent` mimics real CLI agents with cwd-keyed sessions — when `run()` is called with a different `workspace_override` than where a session was created, it returns the EXACT error string real claude produces (`"<name> exited 1: No conversation found with session ID: …"`) so `AgentRegistry` falls through to the next agent. This is what catches the L-level cwd-mismatch regression PR #41 fixed.
+- `StubBilibiliAuthProvider` short-circuits the network call to `api.bilibili.com` (validation always returns `valid=True` in stub mode) so CI is offline-deterministic. Three modes: `valid` (cached cookies), `approving` (auto-approves on poll for fresh-login flows), `failing` (poll returns expired/failed for error branches).
+- `HarnessChannel.start()` blocks on an internal stop event so GatewayManager's `gather` doesn't tear down the stack; `inject_user_message()` is the driver-only API for pumping user input; supports `@alias` capture for chaining steps.
+- The bundled scenarios cover the PR #41 regressions: `bilibili_cached.yaml` (M-level + S-level), `bilibili_task_auth.yaml` (general auth + S-level via task path), `bilibili_chat_reply_resume.yaml` (L-level via chat-reply suspended-resume + a follow-up message that exposes the cwd-mismatch bug after the runtime's stale-session retry masks the first attempt).
+
+Real-mode (`OMA_HARNESS_ALLOW_REAL=1` + `--mode real`) is wired but currently raises `NotImplementedError` — the v2 plan plumbs it through real CLI subprocess + real bilibili API for nightly spot-checks. PR-time CI stays on stub mode for speed and determinism.
+
+### 9. Push notifications (off-platform)
+
+Primary code:
+
+- `src/oh_my_agent/push_notifications/`
+
+Responsibilities:
+
+- Fire off-platform pushes (Bark first, future ntfy / wecom / feishu) so OS focus / DND modes can't bury time-critical events. Distinct from the internal `runtime.notifications.NotificationManager` (which pings owners inside Discord).
+- `PushDispatcher.schedule()` is fire-and-forget via `asyncio.create_task` with provider HTTP timeouts (5 s default) that never block the main event loop.
+- Allow-listed event kinds: `mention_owner`, `task_draft`, `task_waiting_merge`, `ask_user`, `automation_complete`, `automation_failed`. Per-kind Bark levels (`passive` / `active` / `timeSensitive` / `critical`) configurable under `notifications.levels`.
 
 ## Request Paths
 

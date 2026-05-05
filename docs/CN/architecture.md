@@ -165,6 +165,7 @@ Gateway 是协调层。它本身不直接执行 agent，也不负责长生命周
 - 把 auth 产物保存在 `~/.oh-my-agent/runtime/auth/` 下。
 - 通过 `OMA_CONTROL` 控制帧让 chat-path 或 runtime-path 的 agent 调用能请求登录，而不是直接把整个流程打崩。
 - 在登录完成后恢复阻塞中的工作。
+- **主动暴露 cached 凭证**（PR #41）：`RuntimeService.collect_provider_credential_hints(text, owner_user_id)` 用 `_PROVIDER_URL_PATTERNS`（目前是 `bilibili.com/video/`、`b23.tv/`）匹配请求文本，命中后查 `auth_service.get_valid_credential()`，输出 `[Cached credential]` 段落，里面带磁盘上 cookies 路径和 `--cookies-path '<path>'` 提示。`_run_task` 和 chat-reply 路径在调 agent 之前都先调一次，这样有现成可用凭证时，新 task 或 chat reply 就不会触发多余的 QR 流程。
 
 ### 7. Automations / Scheduler
 
@@ -183,6 +184,39 @@ Gateway 是协调层。它本身不直接执行 agent，也不负责长生命周
 - 通过修改 YAML 源文件来启用或禁用单条 automation。
 
 现在 scheduler 是刻意的文件驱动设计。`config.yaml` 只保留 automation 的全局设置，不再内嵌 jobs。
+
+### 8. Test harness（端到端）
+
+主要代码：
+
+- `tests/harness/scripted_channel.py` — `HarnessChannel(BaseChannel)` 实现
+- `tests/harness/stubs.py` — `StubAgent`、`StubBilibiliAuthProvider`
+- `tests/harness/runner.py` — yaml 加载 + bootstrap + step 分发 + 断言
+- `tests/harness/scenarios/*.yaml` — 声明式回归 scenario
+- `scripts/run_harness.py` — 单 scenario CLI 入口
+
+职责：
+
+- 离线驱动**真实的** GatewayManager + RuntimeService 全栈（无网络、无 API key、无 Discord），让跨子系统回归在测试里就能抓到，不用每次都让用户在 Discord 里手动复现。
+- 通过刻意不引用 `DiscordChannel` 来校验 `BaseChannel` 抽象本身。GatewayManager / RuntimeService 在 `BaseChannel` 上调用的所有方法，必须仅靠 ABC 就能工作 — 这样未来 Slack / Feishu 适配器可以复用同一份 yaml scenario。
+- `StubAgent` 模拟真 CLI agent，且**按 cwd 区分 session**：当 `run()` 被传入与 session 创建时不同的 `workspace_override`，它会返回真 claude 完全相同的错误字符串（`"<name> exited 1: No conversation found with session ID: …"`），让 `AgentRegistry` 自然回退到下一个 agent。这就是 PR #41 修的 L 级 cwd 不一致回归的检测原理。
+- `StubBilibiliAuthProvider` 短路对 `api.bilibili.com` 的网络调用（stub 模式下 validation 永远返回 `valid=True`），让 CI 离线确定。三种模式：`valid`（有缓存 cookie）、`approving`（poll 即批准，覆盖全新登录路径）、`failing`（poll 返回过期/失败，覆盖错误分支）。
+- `HarnessChannel.start()` 阻塞在内部 stop event，不让 GatewayManager 的 `gather` 误以为 channel 已退出而拆栈；`inject_user_message()` 是 driver-only API 用于注入用户输入；支持 `@alias` capture 链接 step。
+- 内置场景覆盖 PR #41 的几条回归：`bilibili_cached.yaml`（M 级 + S 级）、`bilibili_task_auth.yaml`（task 路径上的通用 auth + S 级）、`bilibili_chat_reply_resume.yaml`（chat-reply suspended-resume 上的 L 级 + 一条 follow-up message 用来在 runtime 的 stale-session 重试掩盖第一次失败之后暴露 cwd 不一致 bug）。
+
+Real mode（`OMA_HARNESS_ALLOW_REAL=1` + `--mode real`）已接通参数解析，目前 raise `NotImplementedError`。v2 计划把它打通到真 CLI 子进程 + 真 bilibili API，跑夜间 spot check。PR-time CI 仍走 stub 模式保证速度和确定性。
+
+### 9. Push notifications（跨平台外推送）
+
+主要代码：
+
+- `src/oh_my_agent/push_notifications/`
+
+职责：
+
+- 触发跨平台外的推送（首发 Bark，未来 ntfy / wecom / feishu），让 OS 的专注模式 / DND 屏蔽不掉时效消息。和内部的 `runtime.notifications.NotificationManager`（Discord 内部 ping owner）是两套机制。
+- `PushDispatcher.schedule()` 是同步入口，fire-and-forget 通过 `asyncio.create_task` 投递；provider HTTP 超时（默认 5s）永不阻塞主事件循环。
+- 事件白名单：`mention_owner`、`task_draft`、`task_waiting_merge`、`ask_user`、`automation_complete`、`automation_failed`。每事件类型可配 Bark `level`（`passive` / `active` / `timeSensitive` / `critical`）放在 `notifications.levels` 下。
 
 ## 关键执行路径
 
