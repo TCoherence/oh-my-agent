@@ -1,33 +1,23 @@
 # Todo / 路线图
 
-## 当前快照（2026-04-16）
+## 当前快照（2026-05-04）
 
-- `/search` 已实现。
-- SkillSync reverse sync 已实现。
-- CLI-first 基础设施已经到位。
-- `v0.7.3` 已发布（phase 1–3 完成）。
-- `v0.8.0` 已发布（全部四个 phase 完成）。详见 CHANGELOG。
-- `v0.8.1` 已发布：记忆质量优化、skill contract 加固、播客集成、automation YAML 修复。详见 CHANGELOG。
-- v0.5 runtime-first 已完成（包括 runtime hardening pass）。
-- 可选 LLM router 已实现。
-- Runtime 可观测性基线已实现。
-- Runtime live agent logging 已实现。
-- 多类型 runtime 已实现（`artifact`、`repo_change`、`skill_change`）。
-- `WAITING_USER_INPUT` 和通用单选式 `ask_user` HITL 已实现。
-- `repair_skill` router 意图已实现。
-- Adaptive Memory 已实现（自动提取、注入、`/memories`、`/forget`）。
-- 记忆子系统已在 v0.9.0 重写为事件驱动 Judge（单层 `memories.yaml` + agent 合成的 `MEMORY.md`）；旧的 daily-tier / curated-tier 双层制度已移除。
-- 图片附件支持已实现（Discord 下载、per-agent 处理、临时文件生命周期管理）。
-- Codex repo/workspace skill 发现已切到官方 `.agents/skills/`；生成的 workspace `AGENTS.md` 只保留 rules/metadata。
-- Service-layer 提取完成（task、ask、doctor、automation、HITL 服务）。
-- Markdown-aware chunker、结构化日志、graceful shutdown、错误展示契约、速率限制、并发隔离测试均已实现。
-- 首个正式 `compose.yaml` 和运营指南（EN + CN）已发布。
-- 记忆系统质量优化已完成（提取窗口修复、两段式去重、快慢晋升路径、scope-aware 分桶检索）。
-- `seattle-metro-housing-watch` 和 `market-briefing` skill contract 已更新；`market-briefing` AI 和财经日报均已支持播客预取。
-- Automation YAML 文件已补全 `skill_name` 字段，确保 timeout 正确继承 skill metadata；prompt 改为引用 SKILL.md workflow，不再硬编码输出路径。
-- 按 automation 配置 `auto_approve` 标志（默认关闭）；DRAFT 卡片和 DM 通知展示人类可读的风险原因；新增 `/automation_run` 手动触发命令。
-- `market-briefing` AI people-pool 发现规则已写入 SKILL.md；`report_store.py persist` 自动记录 people pool 条目。
-- 当前下一个目标：`v0.9`（1.0 RC / Contract Freeze）。详见 `v1.0-plan.md`。
+- `v0.9.5` 已发布。1.0 契约冻结基本到位；剩下的工作是加固和 `v1.0-plan.md` 里的验收清单。**当前下一个目标：`v1.0` 稳定版。**
+- `v0.7.3`（phase 1–3 完成）→ `v0.8.0`（全部四个 hardening phase 完成）→ `v0.8.1`（记忆质量优化、skill contract 加固、播客集成、automation YAML 修复）→ `v0.9.0`（BREAKING：memory 重写为 Judge）→ `v0.9.1`–`v0.9.3`（Slack stub 移除、restart/recovery、experimental surface 清理）→ `v0.9.4`（streaming、push notifications、watchdog、中央 scheduler due-loop、dump channels、dashboard）→ `v0.9.5`（weekly reflection、daily reflection 默认开启、dashboard Docker 部署、带坐标轴 cost chart、可配置 refresh、AI daily Stage 2.2、Docker entrypoint flock 串行化、cwd 统一 + cached credential 复用 + 非空完成体（PR #41）、scripted offline E2E harness（PR #44））。每个版本的细节看 CHANGELOG。
+- v0.5 runtime-first 完成；v0.6 skill-first + adaptive memory 完成（memory 在 v0.9.0 被 Judge 取代）；v0.7 date-based memory + 多类型 runtime + skill 评估 + auth/HITL/operator 一波完成。
+- 可选 LLM router 已实现（canonical 5 个意图：`chat_reply` / `invoke_skill` / `oneoff_artifact` / `propose_repo_change` / `update_skill`）。
+- Runtime 可观测性基线已实现；`WAITING_USER_INPUT` + 单选 `ask_user` HITL 已实现；`repair_skill` 已并入 `update_skill`（router 通过 skill 注册查找决定 create vs repair）。
+- 图片附件支持已实现（Discord 下载、per-agent 处理、临时文件生命周期）。
+- Codex repo/workspace skill 发现走官方 `.agents/skills/`；workspace 提示文件（`AGENTS.md` / `CLAUDE.md` / `GEMINI.md`）由 `WORKSPACE_AGENTS.md` 生成。
+- Service-layer 抽离完成（task、ask、doctor、automation、HITL 服务）。
+- Markdown-aware chunker、结构化日志、graceful shutdown、错误展示契约、速率限制、并发隔离测试、log 卫生、restart/recovery 测试、升级路径校验全部到位。
+- First-class `compose.yaml` + Docker 脚本（`scripts/docker-*.sh`）+ 运营指南（EN + CN）+ 只读监控 dashboard（`oma-dashboard`）已发布。
+- Memory 系统：事件驱动 Judge 模型，两段式 dedup、动作驱动判定（`add` / `strengthen` / `supersede` / `no_op`）、scope-aware 分桶检索、daily diary reflection（v0.9.5 起默认开启）+ weekly reflection（默认 Tuesday 03:00 local）。
+- `seattle-metro-housing-watch` 和 `market-briefing` skill 契约多次迭代；`market-briefing` 含播客预取 + AI daily 4 个 sub-section checkpointing（Stage 2.2）直读 paper-digest JSON。
+- Automation YAML 已补全 `skill_name`；per-automation `auto_approve`（默认关）；DRAFT 卡片展示人类可读风险原因；`/automation_run` 手动触发；automation runtime state 跨重启持久化；reply-to-automation-post 自动升格为 follow-up thread。
+- Push notifications 层：首发 Bark；事件白名单（`mention_owner` / `task_draft` / `task_waiting_merge` / `ask_user` / `automation_complete` / `automation_failed`）；跨平台外推送，OS focus / DND 屏蔽不掉时效消息。
+- Auth：每 provider QR flow（已落 bilibili）；通过 `get_valid_credential` + 自动注入 `--cookies-path` 提示复用 cached credential（PR #41）— 已有有效凭证时新 task / chat reply 不再触发多余的 QR 流程。
+- **Test harness（PR #44）**：`tests/harness/` 下脚本化离线 E2E 驱动器，含 `HarnessChannel(BaseChannel)` + `StubAgent`（cwd-keyed sessions，模拟真 claude `--resume`）+ `StubBilibiliAuthProvider`（无网络）。3 个 yaml 回归 scenario + smoke-regression guard test。CLI：`python scripts/run_harness.py <yaml>`；pytest：`pytest tests/harness/test_scenarios.py`。Cross-platform-ready（不引用 Discord）。
 
 ## v0.5 Runtime 加固（已完成）
 
@@ -261,4 +251,9 @@
 - [ ] **跨 skill 输出依赖图**（`plans/market-briefing-daily-ai-0900-fail-patt-mutable-nest` 的 Stage 4）：跨 skill 输出引用 —— 例如 PR #24 之后 `market-briefing` 的 `paper_layer` sub-section 读 `~/.oh-my-agent/reports/paper-digest/daily/<DATE>.json` —— 当前依赖隐式 cron 时序（paper-digest 8:30 → market-briefing-ai 9:00）。当更多 skill 这样组合（Stage 2.2 引入了一条，Stage 3 拆分会扩大），需要显式依赖图 DSL：skill frontmatter `depends_on: [paper-digest]`，scheduler 读图排序 cron / 上游完成前 hold 下游 / 上游失败时给下游明确信号，避免下游静默读到过期或缺失的 JSON 而产出降级报告。今天的兜底是各 skill 自己的 `paper_digest_status: missing | stale` 字段加 `coverage_gaps`，属于 per-skill 约定，不是系统级保证。
 - [ ] **调研为何 Claude `Task` tool 在聚合 skill 上不触发**（同一 plan 的 Stage 4）：3 个近期成功的 deals-scanner run（`d0c8cfae2b0c` / `07f32bac12e5` / `59860d9c2d34`）的 JSONL `system / subtype: init` 事件 `tools` 列表里都有 `Task`，但后续 `tool_use name=Task` **0 次** —— agent 全部走了 11-22 次串行 `Bash` 调用。`skills/deals-scanner/SKILL.md:149` 和新的 `skills/market-briefing/SKILL.md` AI workflow（PR #24）都文档化了 "parallel preferred" 提示指向 `Task`，但 prod 里都未触发。需要调研 prompt-shape / model-preference / allowed_tools 交互。结论要么是让提示真正生效（衡量 parallel wall-clock 收益），要么承认 sequential 才是实际行为，从 SKILL.md 里删掉这些没兑现的提示，降低读者困惑。
 - [ ] **每任务预算分配器 + sub-agent 成本核算**（同一 plan 的 Stage 4）：仅在上面的 `Task` tool 调研有结论且并行 sub-agent fan-out 真的触发后才有意义。当 parent task 派生 N 个 sub-agent 时，runtime 今天对每个 sub-agent 的预算消耗和成本没有可视性 —— 都被掩盖在 parent transcript 内部。需要补：按 section / 按 sub-agent 的预算分配器（从 parent 配额扣减），成本核算（把 sub-agent 的 `usage` 事件汇总到 parent 总数，通过 `/usage_thread` / `/doctor` 暴露）。在并行 fan-out 实证生效前不开工。
+- [ ] **Harness v2 — slash command 覆盖**（PR #44 后续）。今天 `HarnessChannel.inject_user_message` 只能模拟普通聊天。加 `inject_slash_command(name, args)` 让场景能驱动 `/task_stop` / `/auth_clear bilibili` / `/automation_run` 等。第一个具体场景：owner 在任务跑到一半 `/task_stop` → 断言 task 进入 STOPPED + workspace 清理 + 之后 channel 没有新写入。需要在不引入 `discord.app_commands` 依赖的前提下模拟 Discord slash 路由（slash handler 是 GatewayManager 通过 setter hook 装上去的，harness 可以直接 call 同一组 handler stub）。
+- [ ] **Harness v2 — real-mode CI 集成**（PR #44 后续）。`--mode real` 已经接通参数解析但 raise `NotImplementedError`。落地内容：`OMA_HARNESS_ALLOW_REAL=1` 时构造真 `ClaudeAgent` / `CodexAgent` + 真 `BilibiliAuthProvider`。挂到一个夜间 CI job 跑 `bilibili_cached.yaml`，覆盖 yt-dlp / bilibili API 漂移（subtitle 字段改名之类的真实接口变化）。PR-time CI 仍然用 stub mode 保速度 + 确定性。
+- [ ] **Harness v2 — Slack/Feishu HarnessChannel 模式**（PR #44 后续；只在那些后端开始做的时候才相关）。Slack 适配开始的时候，加一个 `SlackShapedHarnessChannel` 模拟 Slack BlockKit 按钮、`ts`-based message id、`chat.update` 编辑语义。同一份 yaml 场景（`bilibili_chat_reply_resume.yaml` 等）应该不改就能跑 — cross-platform 合约可执行化的承诺兑现。
+- [ ] **Boot 重构 — 从 `boot.ignite()` 抽出纯 builder 阶段**（PR #44 后续）。今天 harness 自己照 `runtime_env` fixture 重新 wire 一份组件图（重复了 `boot.py` 大概 50 行 wiring 代码），不复用 `boot.ignite()` 是因为 `ignite` 还要装信号 handler、push dispatcher 守护、scheduler supervisor 等等 — 在测试里都是噪声。重构思路：拆成 `build_runtime_graph(config) → ComponentGraph`（纯）+ `run_forever(graph)`（信号 handler + 守护 + shutdown）。harness 只调 builder；prod 调全套。后续加新组件不用两边都改。
+- [ ] **清理 — 删除残留的 `getattr(channel, ...)` 防御调用**（PR #44 后续）。GatewayManager + RuntimeService 还有几处 `hasattr` 守卫调用（`set_session_context` / `set_skill_syncer` / `set_runtime_service` / `set_scheduler` / `register_dump_channel` / `ensure_dm_channel`）。等 Slack/Feishu 上线、确认这些 method 在 ABC 里都有 default 后，把守卫删掉直接调。纯 cleanup，不影响行为。和 boot 重构一起排队。
 - [ ] **macOS Docker bind-mount + SQLite WAL：writer 还活着时外部 reader 看到 stale 数据**（修正 PR #28 合并的"post-completion hang"条目 —— 那条诊断是错的，根因就是这个）。症状：从 macOS host 查 `~/.oh-my-agent/runtime/runtime.db`（甚至 `docker exec` 进同一个容器跑 `sqlite3.connect()` 新连接）会返回**滞后几分钟到几小时**的已 commit 数据，看不到 runtime 进程已经执行并 `await db.commit()` 完成的 INSERT / UPDATE / event。2026-05-03 用 task `4c59b02a6806` 反复重现：docker log 里 21:32:19 UTC 写了 `Runtime task=4c59b02a6806 COMPLETED step=1`，Discord 同时收到了结构化摘要消息，但**外部 SELECT（host + `docker exec`）30+ 分钟一直显示 `status=RUNNING` 和 0 个 `task.completed` 事件**，而 runtime 早已继续在跑下一个 finance daily task。SIGINT graceful shutdown（PR #16 的 `cooperative shutdown + WAL checkpoint on close`）触发后 host 立刻看到**积压 30+ 分钟的所有写入一次性出现**：`09d739572674` finance task 也是 21:58:46 COMPLETED，加上 4c59b02a6806 缺失的 status flip / `task.completed` / `automation_posts` 行。shutdown 那行 `WAL checkpoint complete log_pages=0 checkpointed=0` 表明 WAL close 之前就已是空 —— 写入根本不在 WAL 里，是被困在 aiosqlite mmap dirty pages 和外部 reader 能看到的底层文件 inode 之间（macOS Docker Desktop 的 bind-mount IO 走 VirtioFS / gRPC FUSE 代理，SQLite 的 mmap dirty pages 在 writer 进程关闭前不会 msync 回底层文件）。**运营上这不是 runtime bug** —— automation 正常完成、Discord 正常发送、文件正常落盘；纯粹是 macOS 用户的**可观测性 / 诊断工具陷阱**。修复切面：(a) 在运营文档（EN + CN docs/operating-the-bot.md）里显著标注，避免再花半天诊断幻觉 hang；(b) 给 runtime 加周期性强制 `PRAGMA wal_checkpoint(FULL)`（比如 janitor 每 ~30s 做一次），让外部 reader 几秒内能看到写入进度，而不是要等 writer close —— 用极小 perf 损失换可见性；(c) 可选：提供 `make doctor` / `oh-my-agent doctor` host 端 helper 自动 `docker stop && sqlite3 ... && docker start`，在运维想要 ground-truth 时执行（理解 requeue 副作用）；(d) 考虑在 macOS 上对 runtime DB 关掉 SQLite mmap（`PRAGMA mmap_size=0`），牺牲一点 perf 换跨进程可见性一致。**(b) 是最可能的首选修复**，等测一下 perf 影响。**Linux 部署不受影响** —— 无 FUSE 层，mmap dirty pages 通过 page cache 对其他进程可见。
