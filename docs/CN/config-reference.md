@@ -84,6 +84,29 @@ Skill 加载、telemetry、auto-disable。
 
 ---
 
+## `logging`
+
+控制台 + 文件 handler 配置。无显式块也能跑（用默认值）。
+
+| Key | 类型 | 默认 | 说明 |
+|---|---|---|---|
+| `level` | string | `INFO` | root logger 级别（`DEBUG`/`INFO`/`WARNING`/`ERROR`）。非法值回落到 `INFO`。 |
+| `format` | string | `auto` | 输出样式。`auto` = 控制台多行 pretty + 文件单行 `key=value`（logfmt）。`keyvalue` = 处处单行（老行为）。`pretty` = 处处多行。非法值回落到 `auto`。 |
+| `service_retention_days` | int | `7` | 启动时删除超过该天数的轮转 `service.log.*` 文件。 |
+
+> per-thread agent log 保留期由 [`runtime.cleanup.retention_hours`](#runtimecleanup) 控制，不在此处。
+
+**关于 `format`。** 默认 `auto` 把人友好的多行输出写到 stderr（`docker logs` / 终端会话能看到正常 traceback），同时 `~/.oh-my-agent/runtime/logs/service.log` 仍保持单行 `key=value`，老的 log shipper（Promtail / Loki / fluent-bit 等）按行解析的设定无感知。如果你的部署是把 **stderr** 投喂给只懂 logfmt 的解析器，把 `format` 设为 `keyvalue` 即可恢复 v0.9.5 及之前的全单行行为。
+
+```yaml
+logging:
+  level: INFO
+  format: auto              # auto | keyvalue | pretty
+  service_retention_days: 7
+```
+
+---
+
 ## `access`
 
 owner 访问门。
@@ -200,7 +223,6 @@ Cron / interval 周期任务。
 | `progress_persist_seconds` | int | `60` | 沉默这么久后持久化进度 checkpoint。 |
 | `log_event_limit` | int | `12` | `/task_logs` 默认返回的事件数。 |
 | `log_tail_chars` | int | `1200` | 每个事件 tail 字符数。 |
-| `service_retention_days` | int | `7`（代码中默认） | `service.log` 轮转保留期。需要时在顶层覆盖。 |
 | `shutdown_timeout_seconds` | int | `30`（代码中默认） | SIGTERM 后排空预算。 |
 
 ### `runtime.cleanup`

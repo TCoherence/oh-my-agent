@@ -1,10 +1,17 @@
 import asyncio
+import logging
 from types import SimpleNamespace
 
 import pytest
 
 from oh_my_agent.gateway.base import OutgoingAttachment
-from oh_my_agent.gateway.platforms.discord import DiscordChannel
+from oh_my_agent.gateway.platforms import discord as discord_platform
+from oh_my_agent.gateway.platforms.discord import (
+    DiscordChannel,
+    _acquire_reconnect_annotator,
+    _DiscordReconnectAnnotator,
+    _release_reconnect_annotator,
+)
 from oh_my_agent.runtime.types import HitlPrompt
 
 
@@ -743,3 +750,236 @@ def test_build_task_interactive_prompt_renders_rerun_bump_timeout_button():
     assert descriptor.label == "Re-run +30 min timeout"
     assert descriptor.style == "primary"
     assert descriptor.disabled is False
+
+
+def _make_backoff_record(
+    msg_template: str,
+    *args,
+    exc: BaseException | None = None,
+) -> logging.LogRecord:
+    record = logging.LogRecord(
+        name="discord.client",
+        level=logging.ERROR,
+        pathname=__file__,
+        lineno=1,
+        msg=msg_template,
+        args=args,
+        exc_info=(type(exc), exc, exc.__traceback__) if exc else None,
+    )
+    return record
+
+
+def test_reconnect_annotator_emits_friendly_warning(caplog):
+    """The annotator should emit a WARNING with minutes and ETA when discord.client
+    logs ``Attempting a reconnect in X.XXs``, so operators don't have to dig the
+    timing out of a multi-page traceback."""
+    annotator = _DiscordReconnectAnnotator()
+    record = _make_backoff_record("Attempting a reconnect in %.2fs", 832.73)
+
+    with caplog.at_level(logging.WARNING, logger="oh_my_agent.gateway.platforms.discord"):
+        keep = annotator.filter(record)
+
+    # Always pass the original record through — full traceback stays available.
+    assert keep is True
+
+    matching = [
+        r for r in caplog.records
+        if r.name == "oh_my_agent.gateway.platforms.discord"
+        and r.levelno == logging.WARNING
+        and "reconnect scheduled" in r.getMessage()
+    ]
+    assert len(matching) == 1
+    text = matching[0].getMessage()
+    assert "backoff=832.7s" in text
+    assert "13.9m" in text
+    assert "eta=" in text
+
+
+def test_reconnect_annotator_includes_cause_when_exception_present(caplog):
+    annotator = _DiscordReconnectAnnotator()
+    try:
+        raise ConnectionError("Cannot connect to host gateway-us-east1-b.discord.gg:443")
+    except ConnectionError as exc:
+        record = _make_backoff_record(
+            "Attempting a reconnect in %.2fs", 60.0, exc=exc
+        )
+
+    with caplog.at_level(logging.WARNING, logger="oh_my_agent.gateway.platforms.discord"):
+        annotator.filter(record)
+
+    matching = [
+        r for r in caplog.records
+        if r.name == "oh_my_agent.gateway.platforms.discord"
+        and "reconnect scheduled" in r.getMessage()
+    ]
+    assert len(matching) == 1
+    text = matching[0].getMessage()
+    assert "cause=ConnectionError" in text
+    assert "gateway-us-east1-b.discord.gg" in text
+
+
+def test_reconnect_annotator_ignores_unrelated_messages(caplog):
+    annotator = _DiscordReconnectAnnotator()
+    record = _make_backoff_record("Some other discord.client log %s", "noise")
+
+    with caplog.at_level(logging.WARNING, logger="oh_my_agent.gateway.platforms.discord"):
+        keep = annotator.filter(record)
+
+    assert keep is True
+    assert not [
+        r for r in caplog.records
+        if r.name == "oh_my_agent.gateway.platforms.discord"
+        and "reconnect scheduled" in r.getMessage()
+    ]
+
+
+def test_reconnect_annotator_handles_malformed_seconds(caplog):
+    """Defensive: never blow up the log path if upstream emits non-float seconds.
+
+    Use ``1.2.3s`` so the regex ``[\\d.]+`` matches and the parse path is
+    actually exercised — ``float("1.2.3")`` raises ``ValueError`` and the
+    annotator must short-circuit cleanly. (A ``NaNs`` payload would never
+    reach the float() call because it doesn't match the regex.)"""
+    annotator = _DiscordReconnectAnnotator()
+    record = logging.LogRecord(
+        name="discord.client",
+        level=logging.ERROR,
+        pathname=__file__,
+        lineno=1,
+        msg="Attempting a reconnect in 1.2.3s",
+        args=(),
+        exc_info=None,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="oh_my_agent.gateway.platforms.discord"):
+        keep = annotator.filter(record)
+
+    assert keep is True
+    # Malformed → no WARNING emitted, but original record passes through.
+    assert not [
+        r for r in caplog.records
+        if r.name == "oh_my_agent.gateway.platforms.discord"
+        and "reconnect scheduled" in r.getMessage()
+    ]
+
+
+def _reset_annotator_state() -> None:
+    """Clear any leftover annotator install from prior tests/instances."""
+    discord_platform._RECONNECT_ANNOTATOR_REFCOUNT = 0
+    if discord_platform._RECONNECT_ANNOTATOR_INSTANCE is not None:
+        logging.getLogger("discord.client").removeFilter(
+            discord_platform._RECONNECT_ANNOTATOR_INSTANCE
+        )
+        discord_platform._RECONNECT_ANNOTATOR_INSTANCE = None
+
+
+def test_reconnect_annotator_install_is_refcounted():
+    """Two ``DiscordChannel`` instances must each acquire a refcount; the filter
+    only detaches when the last one releases.
+
+    Regression for the prior "first-installer-wins" guard, which let a partial
+    stop strip the annotation off a channel that was still running."""
+    _reset_annotator_state()
+    try:
+        # First acquire: filter is installed.
+        _acquire_reconnect_annotator()
+        first_instance = discord_platform._RECONNECT_ANNOTATOR_INSTANCE
+        assert first_instance is not None
+        assert first_instance in logging.getLogger("discord.client").filters
+        assert discord_platform._RECONNECT_ANNOTATOR_REFCOUNT == 1
+
+        # Second acquire: same singleton, refcount bumps.
+        _acquire_reconnect_annotator()
+        assert discord_platform._RECONNECT_ANNOTATOR_INSTANCE is first_instance
+        assert discord_platform._RECONNECT_ANNOTATOR_REFCOUNT == 2
+
+        # First release: filter still attached (refcount > 0).
+        _release_reconnect_annotator()
+        assert discord_platform._RECONNECT_ANNOTATOR_INSTANCE is first_instance
+        assert first_instance in logging.getLogger("discord.client").filters
+
+        # Second release: filter is detached and singleton cleared.
+        _release_reconnect_annotator()
+        assert discord_platform._RECONNECT_ANNOTATOR_INSTANCE is None
+        assert first_instance not in logging.getLogger("discord.client").filters
+        assert discord_platform._RECONNECT_ANNOTATOR_REFCOUNT == 0
+    finally:
+        _reset_annotator_state()
+
+
+def test_reconnect_annotator_release_clamps_at_zero(caplog):
+    """Defensive: spurious release when refcount is already zero is clamped,
+    leaves the logger filter list untouched, and emits a WARNING so a real
+    double-release in production is observable instead of silently swallowed."""
+    _reset_annotator_state()
+    try:
+        client_logger = logging.getLogger("discord.client")
+        before_filters = list(client_logger.filters)
+
+        with caplog.at_level(
+            logging.WARNING,
+            logger="oh_my_agent.gateway.platforms.discord",
+        ):
+            _release_reconnect_annotator()  # underflow attempt
+
+        assert discord_platform._RECONNECT_ANNOTATOR_REFCOUNT == 0
+        assert discord_platform._RECONNECT_ANNOTATOR_INSTANCE is None
+        # No annotator was ever attached, so the filter list is unchanged.
+        assert list(client_logger.filters) == before_filters
+        # And the WARNING surfaced so an operator can see the over-release.
+        warnings = [
+            r for r in caplog.records
+            if r.levelno == logging.WARNING
+            and "over-released" in r.getMessage()
+        ]
+        assert len(warnings) == 1
+    finally:
+        _reset_annotator_state()
+
+
+@pytest.mark.asyncio
+async def test_discord_channel_lifecycle_acquires_and_releases_annotator(caplog):
+    """``DiscordChannel.stop()`` must release its refcount and detach the
+    filter when no other channel is holding it.
+
+    Idempotency contract: calling ``stop()`` twice is safe — the second
+    call must NOT emit the over-release WARNING, because
+    ``_holds_reconnect_annotator`` flips to False on the first stop and
+    guards the second from re-entering the release path.
+    """
+    _reset_annotator_state()
+    try:
+        channel = DiscordChannel(token="x", channel_id="100")
+        # Simulate ``start()``'s annotator-acquire half (skipping the
+        # discord-client connect, which would block on real network IO).
+        assert _acquire_reconnect_annotator()
+        channel._holds_reconnect_annotator = True
+
+        installed = discord_platform._RECONNECT_ANNOTATOR_INSTANCE
+        assert installed is not None
+        assert installed in logging.getLogger("discord.client").filters
+
+        with caplog.at_level(
+            logging.WARNING,
+            logger="oh_my_agent.gateway.platforms.discord",
+        ):
+            await channel.stop()
+            # First stop: filter detaches, refcount drops to 0.
+            assert discord_platform._RECONNECT_ANNOTATOR_INSTANCE is None
+            assert installed not in logging.getLogger("discord.client").filters
+            assert channel._holds_reconnect_annotator is False
+
+            # Second stop: must be a clean no-op.
+            await channel.stop()
+            assert discord_platform._RECONNECT_ANNOTATOR_REFCOUNT == 0
+            assert discord_platform._RECONNECT_ANNOTATOR_INSTANCE is None
+            assert channel._holds_reconnect_annotator is False
+
+        # No over-release WARNING from either stop call.
+        assert not [
+            r for r in caplog.records
+            if r.levelno == logging.WARNING
+            and "over-released" in r.getMessage()
+        ]
+    finally:
+        _reset_annotator_state()

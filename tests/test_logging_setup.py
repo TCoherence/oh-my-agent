@@ -6,7 +6,12 @@ import logging
 import logging.handlers
 from datetime import datetime, timedelta, timezone
 
-from oh_my_agent.logging_setup import KeyValueFormatter, _cleanup_old_logs, setup_logging
+from oh_my_agent.logging_setup import (
+    KeyValueFormatter,
+    PrettyFormatter,
+    _cleanup_old_logs,
+    setup_logging,
+)
 
 
 class TestKeyValueFormatter:
@@ -81,6 +86,73 @@ class TestKeyValueFormatter:
         assert "msg=count=42 name=alice" in line
 
 
+class TestPrettyFormatter:
+    def test_header_format(self):
+        """Header is ``timestamp [LEVEL] logger.name: message`` on a single line."""
+        formatter = PrettyFormatter()
+        record = logging.LogRecord(
+            name="oh_my_agent.gateway.manager",
+            level=logging.INFO,
+            pathname="",
+            lineno=0,
+            msg="agent running",
+            args=(),
+            exc_info=None,
+        )
+        line = formatter.format(record)
+        assert line.endswith("[INFO] oh_my_agent.gateway.manager: agent running")
+        assert line[10] == "T"
+        assert "Z " in line
+        # Single-line for non-exception records
+        assert "\n" not in line
+
+    def test_traceback_renders_multiline_indented(self):
+        """Tracebacks expand below the header line, indented two spaces — so
+        operators reading by eye see proper Python-style frames instead of
+        a single-line ``\\n``-escaped blob."""
+        formatter = PrettyFormatter()
+        try:
+            raise ValueError("boom")
+        except ValueError:
+            import sys
+            exc_info = sys.exc_info()
+
+        record = logging.LogRecord(
+            name="test",
+            level=logging.ERROR,
+            pathname="",
+            lineno=0,
+            msg="failed",
+            args=(),
+            exc_info=exc_info,
+        )
+        out = formatter.format(record)
+        lines = out.split("\n")
+        assert lines[0].endswith("[ERROR] test: failed")
+        # All traceback lines indented by two spaces
+        for line in lines[1:]:
+            assert line.startswith("  ")
+        # Verify the actual exception text is preserved verbatim
+        assert any("ValueError: boom" in line for line in lines)
+        assert any("Traceback" in line for line in lines)
+
+    def test_no_logfmt_escaping(self):
+        """Pretty mode keeps real ``\\n`` characters — no logfmt-style escaping."""
+        formatter = PrettyFormatter()
+        record = logging.LogRecord(
+            name="test",
+            level=logging.WARNING,
+            pathname="",
+            lineno=0,
+            msg="line1\nline2",
+            args=(),
+            exc_info=None,
+        )
+        line = formatter.format(record)
+        assert "line1\nline2" in line
+        assert "\\n" not in line
+
+
 class TestSetupLogging:
     def test_defaults_when_no_config(self, tmp_path):
         setup_logging(None, runtime_root=tmp_path)
@@ -131,10 +203,52 @@ class TestSetupLogging:
         assert root.level == logging.INFO
         assert len(root.handlers) == 2
 
-    def test_formatter_is_key_value(self, tmp_path):
+    def test_default_format_is_auto_console_pretty_file_keyvalue(self, tmp_path):
+        """Default ``auto``: humans on stderr get pretty, log shippers on disk get logfmt."""
         setup_logging(None, runtime_root=tmp_path)
+        root = logging.getLogger()
+        console_handlers = [
+            h for h in root.handlers
+            if isinstance(h, logging.StreamHandler)
+            and not isinstance(h, logging.handlers.TimedRotatingFileHandler)
+        ]
+        file_handlers = [
+            h for h in root.handlers
+            if isinstance(h, logging.handlers.TimedRotatingFileHandler)
+        ]
+        assert console_handlers and isinstance(
+            console_handlers[0].formatter, PrettyFormatter
+        )
+        assert file_handlers and isinstance(
+            file_handlers[0].formatter, KeyValueFormatter
+        )
+
+    def test_keyvalue_format_uses_keyvalue_everywhere(self, tmp_path):
+        setup_logging({"logging": {"format": "keyvalue"}}, runtime_root=tmp_path)
         for handler in logging.getLogger().handlers:
             assert isinstance(handler.formatter, KeyValueFormatter)
+
+    def test_pretty_format_uses_pretty_everywhere(self, tmp_path):
+        setup_logging({"logging": {"format": "pretty"}}, runtime_root=tmp_path)
+        for handler in logging.getLogger().handlers:
+            assert isinstance(handler.formatter, PrettyFormatter)
+
+    def test_invalid_format_falls_back_to_auto(self, tmp_path):
+        setup_logging({"logging": {"format": "BANANA"}}, runtime_root=tmp_path)
+        root = logging.getLogger()
+        console_handlers = [
+            h for h in root.handlers
+            if isinstance(h, logging.StreamHandler)
+            and not isinstance(h, logging.handlers.TimedRotatingFileHandler)
+        ]
+        file_handlers = [
+            h for h in root.handlers
+            if isinstance(h, logging.handlers.TimedRotatingFileHandler)
+        ]
+        # Auto fallback must wire BOTH handlers, not just console — otherwise
+        # the log shipper reading service.log would silently change format too.
+        assert isinstance(console_handlers[0].formatter, PrettyFormatter)
+        assert isinstance(file_handlers[0].formatter, KeyValueFormatter)
 
     def test_thread_log_retention_accessible(self):
         """thread_log_retention_days is a config value the janitor reads directly."""

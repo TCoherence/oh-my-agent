@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+import re
 import tempfile
+import threading
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -53,6 +55,108 @@ THREAD_ARCHIVE_MINUTES: Literal[60, 1440, 4320, 10080] = 60
 STATUS_MESSAGE_PREFIX = "**Task Status**"
 _MAX_IMAGE_BYTES = 10 * 1024 * 1024  # 10 MB
 _ATTACHMENT_DIR = Path(tempfile.gettempdir()) / "oh-my-agent" / "attachments"
+
+# discord.py emits its reconnect-backoff message via ``log.exception(...)`` at
+# ERROR level, so the actual delay (`Attempting a reconnect in 832.73s`) gets
+# buried under a multi-page traceback. Operators reading the log can't tell at
+# a glance how long the bot will be down or when to expect it back, and assume
+# the process is wedged. ``_DiscordReconnectAnnotator`` watches for that
+# specific message and emits a parallel WARNING with human-friendly minutes,
+# an absolute ETA, and a one-line cause summary. The original record passes
+# through unchanged so the full traceback remains for deeper debugging.
+_DISCORD_BACKOFF_RE = re.compile(r"Attempting a reconnect in ([\d.]+)s")
+
+
+class _DiscordReconnectAnnotator(logging.Filter):
+    """Add a friendlier WARNING line next to discord.py's reconnect-backoff ERROR."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._target_logger = logging.getLogger(__name__)
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            msg = record.getMessage()
+        except Exception:
+            return True
+        match = _DISCORD_BACKOFF_RE.search(msg)
+        if not match:
+            return True
+        try:
+            secs = float(match.group(1))
+        except (TypeError, ValueError):
+            return True
+
+        eta = datetime.now(timezone.utc) + timedelta(seconds=secs)
+        cause = ""
+        if record.exc_info:
+            try:
+                exc = record.exc_info[1]
+                if exc is not None:
+                    cause_text = str(exc).strip().splitlines()[0] if str(exc).strip() else ""
+                    cause = f" cause={type(exc).__name__}: {cause_text[:120]}"
+            except Exception:
+                pass
+
+        self._target_logger.warning(
+            "[discord] Gateway reconnect scheduled — backoff=%.1fs (~%.1fm), eta=%s%s",
+            secs,
+            secs / 60.0,
+            eta.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            cause,
+        )
+        return True
+
+
+# The reconnect annotator is shared across every ``DiscordChannel`` instance
+# in the same process — there's exactly one ``discord.client`` logger to
+# decorate. Naively having each channel install its own filter would emit
+# duplicate WARNINGs on a single record; the previous "first installer wins"
+# guard fixed that but introduced a new bug — if channel A installs and
+# stops while channel B is still running, channel B loses its annotation.
+# A module-level refcount keeps install/uninstall symmetric: the first
+# acquire installs, the last release removes, intermediate calls are cheap.
+_RECONNECT_ANNOTATOR_LOCK = threading.Lock()
+_RECONNECT_ANNOTATOR_INSTANCE: _DiscordReconnectAnnotator | None = None
+_RECONNECT_ANNOTATOR_REFCOUNT = 0
+
+
+def _acquire_reconnect_annotator() -> bool:
+    """Install the annotator if not already installed; bump refcount.
+
+    Returns ``True`` if the caller successfully acquired a reference and
+    must call :func:`_release_reconnect_annotator` when done; ``False``
+    only on internal failure (currently never).
+    """
+    global _RECONNECT_ANNOTATOR_INSTANCE, _RECONNECT_ANNOTATOR_REFCOUNT
+    with _RECONNECT_ANNOTATOR_LOCK:
+        if _RECONNECT_ANNOTATOR_INSTANCE is None:
+            _RECONNECT_ANNOTATOR_INSTANCE = _DiscordReconnectAnnotator()
+            logging.getLogger("discord.client").addFilter(_RECONNECT_ANNOTATOR_INSTANCE)
+        _RECONNECT_ANNOTATOR_REFCOUNT += 1
+    return True
+
+
+def _release_reconnect_annotator() -> None:
+    """Drop a refcount; remove the filter when no holders remain.
+
+    A release with refcount already at zero is clamped (never goes
+    negative) but logged at WARNING so a genuine double-release in
+    production is observable rather than silently swallowed.
+    """
+    global _RECONNECT_ANNOTATOR_INSTANCE, _RECONNECT_ANNOTATOR_REFCOUNT
+    with _RECONNECT_ANNOTATOR_LOCK:
+        if _RECONNECT_ANNOTATOR_REFCOUNT <= 0:
+            logger.warning(
+                "Discord reconnect annotator over-released; refcount already at 0 "
+                "(possible double stop() or bug in install/uninstall pairing)"
+            )
+            _RECONNECT_ANNOTATOR_REFCOUNT = 0
+            return
+        _RECONNECT_ANNOTATOR_REFCOUNT -= 1
+        if _RECONNECT_ANNOTATOR_REFCOUNT == 0 and _RECONNECT_ANNOTATOR_INSTANCE is not None:
+            logging.getLogger("discord.client").removeFilter(_RECONNECT_ANNOTATOR_INSTANCE)
+            _RECONNECT_ANNOTATOR_INSTANCE = None
 
 
 class _InteractiveView(discord.ui.View):
@@ -357,6 +461,13 @@ class DiscordChannel(BaseChannel):
         # messages posted there so follow-up threads can be spawned on them.
         self._dump_channel_ids: set[str] = set()
         self._client: discord.Client | None = None
+        # Tracks whether this instance currently holds a refcount on the
+        # process-wide reconnect-backoff annotator. ``True`` between
+        # ``start()`` (which calls ``_acquire_reconnect_annotator``) and
+        # ``stop()`` (which releases it). Multiple ``DiscordChannel``
+        # instances in the same process each hold their own refcount; the
+        # filter only comes off the logger when the last one releases.
+        self._holds_reconnect_annotator: bool = False
         # Injected by GatewayManager after construction
         self._session = None  # ChannelSession
         self._registry = None  # AgentRegistry
@@ -1065,6 +1176,13 @@ class DiscordChannel(BaseChannel):
         client = discord.Client(intents=intents)
         tree = app_commands.CommandTree(client)
         self._client = client
+
+        # Annotate discord.py's reconnect-backoff ERROR with a human-friendly
+        # WARNING (minutes + absolute ETA + cause). Refcounted so multi-channel
+        # processes only attach the filter once and never lose it while any
+        # channel still wants the annotation.
+        if _acquire_reconnect_annotator():
+            self._holds_reconnect_annotator = True
 
         target_id = int(self._channel_id)
 
@@ -2178,6 +2296,9 @@ class DiscordChannel(BaseChannel):
         return [str(msg.id)]
 
     async def stop(self) -> None:
+        if self._holds_reconnect_annotator:
+            _release_reconnect_annotator()
+            self._holds_reconnect_annotator = False
         if self._client and not self._client.is_closed():
             await self._client.close()
 

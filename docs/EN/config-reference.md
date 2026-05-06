@@ -84,6 +84,29 @@ Skill loading + telemetry + auto-disable.
 
 ---
 
+## `logging`
+
+Console + file handler config. Defaults work without an explicit block.
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `level` | string | `INFO` | Root logger level (`DEBUG`/`INFO`/`WARNING`/`ERROR`). Invalid values fall back to `INFO`. |
+| `format` | string | `auto` | Output style. `auto` = console multi-line "pretty" + file single-line `key=value` (logfmt). `keyvalue` = single-line everywhere (legacy). `pretty` = multi-line everywhere. Invalid values fall back to `auto`. |
+| `service_retention_days` | int | `7` | Rotated `service.log` files older than this are deleted on startup. |
+
+> Per-thread agent log retention lives under [`runtime.cleanup.retention_hours`](#runtimecleanup), not here.
+
+**About `format`.** The default `auto` writes human-readable multi-line output to stderr (so `docker logs` and terminal sessions show readable tracebacks) while keeping `~/.oh-my-agent/runtime/logs/service.log` in single-line `key=value` so existing log shippers (Promtail, Loki, fluent-bit) keep parsing one record per line. If your deployment ships **stderr** to a logfmt-only parser, set `format: keyvalue` to restore the v0.9.5-and-earlier behavior on both handlers.
+
+```yaml
+logging:
+  level: INFO
+  format: auto              # auto | keyvalue | pretty
+  service_retention_days: 7
+```
+
+---
+
 ## `access`
 
 Owner gate.
@@ -200,7 +223,6 @@ Autonomous task orchestration.
 | `progress_persist_seconds` | int | `60` | Persist a progress checkpoint after this much silence. |
 | `log_event_limit` | int | `12` | `/task_logs` returns this many events by default. |
 | `log_tail_chars` | int | `1200` | Per-event tail size. |
-| `service_retention_days` | int | `7` (in code) | `service.log` rotation retention. Override at top level if needed. |
 | `shutdown_timeout_seconds` | int | `30` (in code) | Drain budget on SIGTERM. |
 
 ### `runtime.cleanup`
