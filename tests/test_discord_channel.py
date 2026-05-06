@@ -907,21 +907,46 @@ def test_reconnect_annotator_install_is_refcounted():
         _reset_annotator_state()
 
 
-def test_reconnect_annotator_release_clamps_at_zero():
-    """Defensive: spurious release when refcount is already zero is a no-op."""
+def test_reconnect_annotator_release_clamps_at_zero(caplog):
+    """Defensive: spurious release when refcount is already zero is clamped,
+    leaves the logger filter list untouched, and emits a WARNING so a real
+    double-release in production is observable instead of silently swallowed."""
     _reset_annotator_state()
     try:
-        _release_reconnect_annotator()  # underflow attempt
+        client_logger = logging.getLogger("discord.client")
+        before_filters = list(client_logger.filters)
+
+        with caplog.at_level(
+            logging.WARNING,
+            logger="oh_my_agent.gateway.platforms.discord",
+        ):
+            _release_reconnect_annotator()  # underflow attempt
+
         assert discord_platform._RECONNECT_ANNOTATOR_REFCOUNT == 0
         assert discord_platform._RECONNECT_ANNOTATOR_INSTANCE is None
+        # No annotator was ever attached, so the filter list is unchanged.
+        assert list(client_logger.filters) == before_filters
+        # And the WARNING surfaced so an operator can see the over-release.
+        warnings = [
+            r for r in caplog.records
+            if r.levelno == logging.WARNING
+            and "over-released" in r.getMessage()
+        ]
+        assert len(warnings) == 1
     finally:
         _reset_annotator_state()
 
 
 @pytest.mark.asyncio
-async def test_discord_channel_lifecycle_acquires_and_releases_annotator():
+async def test_discord_channel_lifecycle_acquires_and_releases_annotator(caplog):
     """``DiscordChannel.stop()`` must release its refcount and detach the
-    filter when no other channel is holding it."""
+    filter when no other channel is holding it.
+
+    Idempotency contract: calling ``stop()`` twice is safe — the second
+    call must NOT emit the over-release WARNING, because
+    ``_holds_reconnect_annotator`` flips to False on the first stop and
+    guards the second from re-entering the release path.
+    """
     _reset_annotator_state()
     try:
         channel = DiscordChannel(token="x", channel_id="100")
@@ -934,10 +959,27 @@ async def test_discord_channel_lifecycle_acquires_and_releases_annotator():
         assert installed is not None
         assert installed in logging.getLogger("discord.client").filters
 
-        await channel.stop()
+        with caplog.at_level(
+            logging.WARNING,
+            logger="oh_my_agent.gateway.platforms.discord",
+        ):
+            await channel.stop()
+            # First stop: filter detaches, refcount drops to 0.
+            assert discord_platform._RECONNECT_ANNOTATOR_INSTANCE is None
+            assert installed not in logging.getLogger("discord.client").filters
+            assert channel._holds_reconnect_annotator is False
 
-        assert discord_platform._RECONNECT_ANNOTATOR_INSTANCE is None
-        assert installed not in logging.getLogger("discord.client").filters
-        assert channel._holds_reconnect_annotator is False
+            # Second stop: must be a clean no-op.
+            await channel.stop()
+            assert discord_platform._RECONNECT_ANNOTATOR_REFCOUNT == 0
+            assert discord_platform._RECONNECT_ANNOTATOR_INSTANCE is None
+            assert channel._holds_reconnect_annotator is False
+
+        # No over-release WARNING from either stop call.
+        assert not [
+            r for r in caplog.records
+            if r.levelno == logging.WARNING
+            and "over-released" in r.getMessage()
+        ]
     finally:
         _reset_annotator_state()

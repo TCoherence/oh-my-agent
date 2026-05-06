@@ -93,7 +93,8 @@ Console + file handler config. Defaults work without an explicit block.
 | `level` | string | `INFO` | Root logger level (`DEBUG`/`INFO`/`WARNING`/`ERROR`). Invalid values fall back to `INFO`. |
 | `format` | string | `auto` | Output style. `auto` = console multi-line "pretty" + file single-line `key=value` (logfmt). `keyvalue` = single-line everywhere (legacy). `pretty` = multi-line everywhere. Invalid values fall back to `auto`. |
 | `service_retention_days` | int | `7` | Rotated `service.log` files older than this are deleted on startup. |
-| `thread_log_retention_days` | int | (unset) | Read directly by the runtime janitor for per-thread agent logs; not consumed by `setup_logging` itself. |
+
+> Per-thread agent log retention lives under [`runtime.cleanup.retention_hours`](#runtimecleanup), not here.
 
 **About `format`.** The default `auto` writes human-readable multi-line output to stderr (so `docker logs` and terminal sessions show readable tracebacks) while keeping `~/.oh-my-agent/runtime/logs/service.log` in single-line `key=value` so existing log shippers (Promtail, Loki, fluent-bit) keep parsing one record per line. If your deployment ships **stderr** to a logfmt-only parser, set `format: keyvalue` to restore the v0.9.5-and-earlier behavior on both handlers.
 

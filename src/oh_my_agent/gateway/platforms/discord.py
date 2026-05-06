@@ -138,10 +138,22 @@ def _acquire_reconnect_annotator() -> bool:
 
 
 def _release_reconnect_annotator() -> None:
-    """Drop a refcount; remove the filter when no holders remain."""
+    """Drop a refcount; remove the filter when no holders remain.
+
+    A release with refcount already at zero is clamped (never goes
+    negative) but logged at WARNING so a genuine double-release in
+    production is observable rather than silently swallowed.
+    """
     global _RECONNECT_ANNOTATOR_INSTANCE, _RECONNECT_ANNOTATOR_REFCOUNT
     with _RECONNECT_ANNOTATOR_LOCK:
-        _RECONNECT_ANNOTATOR_REFCOUNT = max(0, _RECONNECT_ANNOTATOR_REFCOUNT - 1)
+        if _RECONNECT_ANNOTATOR_REFCOUNT <= 0:
+            logger.warning(
+                "Discord reconnect annotator over-released; refcount already at 0 "
+                "(possible double stop() or bug in install/uninstall pairing)"
+            )
+            _RECONNECT_ANNOTATOR_REFCOUNT = 0
+            return
+        _RECONNECT_ANNOTATOR_REFCOUNT -= 1
         if _RECONNECT_ANNOTATOR_REFCOUNT == 0 and _RECONNECT_ANNOTATOR_INSTANCE is not None:
             logging.getLogger("discord.client").removeFilter(_RECONNECT_ANNOTATOR_INSTANCE)
             _RECONNECT_ANNOTATOR_INSTANCE = None

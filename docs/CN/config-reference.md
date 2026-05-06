@@ -93,7 +93,8 @@ Skill 加载、telemetry、auto-disable。
 | `level` | string | `INFO` | root logger 级别（`DEBUG`/`INFO`/`WARNING`/`ERROR`）。非法值回落到 `INFO`。 |
 | `format` | string | `auto` | 输出样式。`auto` = 控制台多行 pretty + 文件单行 `key=value`（logfmt）。`keyvalue` = 处处单行（老行为）。`pretty` = 处处多行。非法值回落到 `auto`。 |
 | `service_retention_days` | int | `7` | 启动时删除超过该天数的轮转 `service.log.*` 文件。 |
-| `thread_log_retention_days` | int | （未设） | 由 runtime janitor 直接读取（per-thread agent 日志保留），`setup_logging` 本身不消费。 |
+
+> per-thread agent log 保留期由 [`runtime.cleanup.retention_hours`](#runtimecleanup) 控制，不在此处。
 
 **关于 `format`。** 默认 `auto` 把人友好的多行输出写到 stderr（`docker logs` / 终端会话能看到正常 traceback），同时 `~/.oh-my-agent/runtime/logs/service.log` 仍保持单行 `key=value`，老的 log shipper（Promtail / Loki / fluent-bit 等）按行解析的设定无感知。如果你的部署是把 **stderr** 投喂给只懂 logfmt 的解析器，把 `format` 设为 `keyvalue` 即可恢复 v0.9.5 及之前的全单行行为。
 
