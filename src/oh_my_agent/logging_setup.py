@@ -1,8 +1,21 @@
 """Structured logging setup for oh-my-agent.
 
-Provides ``KeyValueFormatter`` (structured ``key=value`` log lines) and
-``setup_logging()`` to configure the root logger from the application
-config.
+Two formatters live here:
+
+* ``KeyValueFormatter`` — single-line ``key=value`` (logfmt-ish) output.
+  Optimized for log shippers (Promtail, Loki, fluent-bit) that ingest
+  one record per line. Newlines inside ``msg`` and exception tracebacks
+  are escaped to ``\\n`` to preserve the one-record-per-line invariant.
+
+* ``PrettyFormatter`` — multi-line, human-friendly output. Tracebacks
+  print on subsequent lines indented by two spaces, the way ordinary
+  Python apps render them. Optimized for someone reading the log by
+  eye (``docker logs``, terminal stderr, log dashboards).
+
+``setup_logging()`` wires them up. Default mode is ``auto``: the
+console handler uses ``PrettyFormatter`` (humans), the file handler
+uses ``KeyValueFormatter`` (machines). Override via the
+``logging.format`` config key.
 """
 
 from __future__ import annotations
@@ -17,6 +30,14 @@ from typing import Any
 
 _DEFAULT_LEVEL = "INFO"
 _DEFAULT_RETENTION_DAYS = 7
+_DEFAULT_FORMAT = "auto"
+_VALID_FORMATS = {"auto", "keyvalue", "pretty"}
+
+
+def _format_timestamp(record: logging.LogRecord) -> str:
+    return datetime.fromtimestamp(record.created, tz=timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%S.%f"
+    )[:-3] + "Z"  # truncate microseconds → milliseconds
 
 
 class KeyValueFormatter(logging.Formatter):
@@ -28,9 +49,7 @@ class KeyValueFormatter(logging.Formatter):
     """
 
     def format(self, record: logging.LogRecord) -> str:
-        ts = datetime.fromtimestamp(record.created, tz=timezone.utc).strftime(
-            "%Y-%m-%dT%H:%M:%S.%f"
-        )[:-3] + "Z"  # truncate microseconds → milliseconds
+        ts = _format_timestamp(record)
 
         msg = record.getMessage()
         # Keep each log record on a single line
@@ -49,6 +68,33 @@ class KeyValueFormatter(logging.Formatter):
         if record.exc_text:
             line += " exc=" + record.exc_text.replace("\n", "\\n")
         return line
+
+
+class PrettyFormatter(logging.Formatter):
+    """Multi-line, human-friendly output.
+
+    Output format::
+
+        2026-04-10T10:20:11.123Z [INFO] oh_my_agent.gateway.manager: agent running
+
+    Exception tracebacks render below the header line, indented by two
+    spaces so they stay visually grouped with the originating record.
+    Real newlines are preserved (no logfmt-style escaping), so
+    operators reading the log by eye can scan the traceback normally.
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        ts = _format_timestamp(record)
+        header = f"{ts} [{record.levelname}] {record.name}: {record.getMessage()}"
+
+        if record.exc_info and not record.exc_text:
+            record.exc_text = self.formatException(record.exc_info)
+        if record.exc_text:
+            indented = "\n".join(
+                f"  {line}" for line in record.exc_text.splitlines()
+            )
+            return f"{header}\n{indented}"
+        return header
 
 
 def setup_logging(
@@ -82,16 +128,34 @@ def setup_logging(
     except (TypeError, ValueError):
         retention_days = _DEFAULT_RETENTION_DAYS
 
+    # ── format mode ─────────────────────────────────────────────────
+    # ``auto`` (default): console=pretty, file=keyvalue. Humans tailing
+    # ``docker logs`` / terminal see readable multi-line tracebacks; log
+    # shippers reading ``service.log`` keep machine-parseable logfmt.
+    # ``keyvalue``: both handlers emit single-line key=value (legacy).
+    # ``pretty``: both handlers emit multi-line human format.
+    fmt_mode = str(logging_cfg.get("format", _DEFAULT_FORMAT)).lower()
+    if fmt_mode not in _VALID_FORMATS:
+        fmt_mode = _DEFAULT_FORMAT
+
+    if fmt_mode == "keyvalue":
+        console_formatter: logging.Formatter = KeyValueFormatter()
+        file_formatter: logging.Formatter = KeyValueFormatter()
+    elif fmt_mode == "pretty":
+        console_formatter = PrettyFormatter()
+        file_formatter = PrettyFormatter()
+    else:  # auto
+        console_formatter = PrettyFormatter()
+        file_formatter = KeyValueFormatter()
+
     # ── root logger ─────────────────────────────────────────────────
     root = logging.getLogger()
     root.setLevel(level)
     root.handlers.clear()
 
-    formatter = KeyValueFormatter()
-
     # Console handler — always present
     console = logging.StreamHandler(sys.stderr)
-    console.setFormatter(formatter)
+    console.setFormatter(console_formatter)
     root.addHandler(console)
 
     # Rotating file handler — one file per day
@@ -105,7 +169,7 @@ def setup_logging(
         backupCount=retention_days,
         encoding="utf-8",
     )
-    file_handler.setFormatter(formatter)
+    file_handler.setFormatter(file_formatter)
     root.addHandler(file_handler)
 
     # Startup cleanup: delete rotated log files older than retention period.

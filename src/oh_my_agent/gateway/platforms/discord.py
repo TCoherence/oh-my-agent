@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import tempfile
 import uuid
 from collections.abc import AsyncIterator
@@ -53,6 +54,57 @@ THREAD_ARCHIVE_MINUTES: Literal[60, 1440, 4320, 10080] = 60
 STATUS_MESSAGE_PREFIX = "**Task Status**"
 _MAX_IMAGE_BYTES = 10 * 1024 * 1024  # 10 MB
 _ATTACHMENT_DIR = Path(tempfile.gettempdir()) / "oh-my-agent" / "attachments"
+
+# discord.py emits its reconnect-backoff message via ``log.exception(...)`` at
+# ERROR level, so the actual delay (`Attempting a reconnect in 832.73s`) gets
+# buried under a multi-page traceback. Operators reading the log can't tell at
+# a glance how long the bot will be down or when to expect it back, and assume
+# the process is wedged. ``_DiscordReconnectAnnotator`` watches for that
+# specific message and emits a parallel WARNING with human-friendly minutes,
+# an absolute ETA, and a one-line cause summary. The original record passes
+# through unchanged so the full traceback remains for deeper debugging.
+_DISCORD_BACKOFF_RE = re.compile(r"Attempting a reconnect in ([\d.]+)s")
+
+
+class _DiscordReconnectAnnotator(logging.Filter):
+    """Add a friendlier WARNING line next to discord.py's reconnect-backoff ERROR."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._target_logger = logging.getLogger(__name__)
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            msg = record.getMessage()
+        except Exception:
+            return True
+        match = _DISCORD_BACKOFF_RE.search(msg)
+        if not match:
+            return True
+        try:
+            secs = float(match.group(1))
+        except (TypeError, ValueError):
+            return True
+
+        eta = datetime.now(timezone.utc) + timedelta(seconds=secs)
+        cause = ""
+        if record.exc_info:
+            try:
+                exc = record.exc_info[1]
+                if exc is not None:
+                    cause_text = str(exc).strip().splitlines()[0] if str(exc).strip() else ""
+                    cause = f" cause={type(exc).__name__}: {cause_text[:120]}"
+            except Exception:
+                pass
+
+        self._target_logger.warning(
+            "[discord] Gateway reconnect scheduled — backoff=%.1fs (~%.1fm), eta=%s%s",
+            secs,
+            secs / 60.0,
+            eta.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            cause,
+        )
+        return True
 
 
 class _InteractiveView(discord.ui.View):
@@ -357,6 +409,11 @@ class DiscordChannel(BaseChannel):
         # messages posted there so follow-up threads can be spawned on them.
         self._dump_channel_ids: set[str] = set()
         self._client: discord.Client | None = None
+        # Set when ``start()`` installs the reconnect-backoff annotator on the
+        # ``discord.client`` logger; cleared on ``stop()``. ``None`` either
+        # before start or when another instance already owns the filter on
+        # this logger (idempotent install).
+        self._discord_log_filter: logging.Filter | None = None
         # Injected by GatewayManager after construction
         self._session = None  # ChannelSession
         self._registry = None  # AgentRegistry
@@ -1065,6 +1122,20 @@ class DiscordChannel(BaseChannel):
         client = discord.Client(intents=intents)
         tree = app_commands.CommandTree(client)
         self._client = client
+
+        # Annotate discord.py's reconnect-backoff ERROR with a human-friendly
+        # WARNING (minutes + absolute ETA + cause). Idempotent: if another
+        # ``DiscordChannel`` already attached an annotator to the shared
+        # ``discord.client`` logger, defer to it so we don't emit duplicate
+        # warnings on the same record.
+        discord_client_logger = logging.getLogger("discord.client")
+        already_attached = any(
+            isinstance(f, _DiscordReconnectAnnotator)
+            for f in discord_client_logger.filters
+        )
+        if not already_attached:
+            self._discord_log_filter = _DiscordReconnectAnnotator()
+            discord_client_logger.addFilter(self._discord_log_filter)
 
         target_id = int(self._channel_id)
 
@@ -2178,6 +2249,9 @@ class DiscordChannel(BaseChannel):
         return [str(msg.id)]
 
     async def stop(self) -> None:
+        if self._discord_log_filter is not None:
+            logging.getLogger("discord.client").removeFilter(self._discord_log_filter)
+            self._discord_log_filter = None
         if self._client and not self._client.is_closed():
             await self._client.close()
 

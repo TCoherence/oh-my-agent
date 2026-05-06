@@ -1,10 +1,14 @@
 import asyncio
+import logging
 from types import SimpleNamespace
 
 import pytest
 
 from oh_my_agent.gateway.base import OutgoingAttachment
-from oh_my_agent.gateway.platforms.discord import DiscordChannel
+from oh_my_agent.gateway.platforms.discord import (
+    DiscordChannel,
+    _DiscordReconnectAnnotator,
+)
 from oh_my_agent.runtime.types import HitlPrompt
 
 
@@ -743,3 +747,109 @@ def test_build_task_interactive_prompt_renders_rerun_bump_timeout_button():
     assert descriptor.label == "Re-run +30 min timeout"
     assert descriptor.style == "primary"
     assert descriptor.disabled is False
+
+
+def _make_backoff_record(
+    msg_template: str,
+    *args,
+    exc: BaseException | None = None,
+) -> logging.LogRecord:
+    record = logging.LogRecord(
+        name="discord.client",
+        level=logging.ERROR,
+        pathname=__file__,
+        lineno=1,
+        msg=msg_template,
+        args=args,
+        exc_info=(type(exc), exc, exc.__traceback__) if exc else None,
+    )
+    return record
+
+
+def test_reconnect_annotator_emits_friendly_warning(caplog):
+    """The annotator should emit a WARNING with minutes and ETA when discord.client
+    logs ``Attempting a reconnect in X.XXs``, so operators don't have to dig the
+    timing out of a multi-page traceback."""
+    annotator = _DiscordReconnectAnnotator()
+    record = _make_backoff_record("Attempting a reconnect in %.2fs", 832.73)
+
+    with caplog.at_level(logging.WARNING, logger="oh_my_agent.gateway.platforms.discord"):
+        keep = annotator.filter(record)
+
+    # Always pass the original record through — full traceback stays available.
+    assert keep is True
+
+    matching = [
+        r for r in caplog.records
+        if r.name == "oh_my_agent.gateway.platforms.discord"
+        and r.levelno == logging.WARNING
+        and "reconnect scheduled" in r.getMessage()
+    ]
+    assert len(matching) == 1
+    text = matching[0].getMessage()
+    assert "backoff=832.7s" in text
+    assert "13.9m" in text
+    assert "eta=" in text
+
+
+def test_reconnect_annotator_includes_cause_when_exception_present(caplog):
+    annotator = _DiscordReconnectAnnotator()
+    try:
+        raise ConnectionError("Cannot connect to host gateway-us-east1-b.discord.gg:443")
+    except ConnectionError as exc:
+        record = _make_backoff_record(
+            "Attempting a reconnect in %.2fs", 60.0, exc=exc
+        )
+
+    with caplog.at_level(logging.WARNING, logger="oh_my_agent.gateway.platforms.discord"):
+        annotator.filter(record)
+
+    matching = [
+        r for r in caplog.records
+        if r.name == "oh_my_agent.gateway.platforms.discord"
+        and "reconnect scheduled" in r.getMessage()
+    ]
+    assert len(matching) == 1
+    text = matching[0].getMessage()
+    assert "cause=ConnectionError" in text
+    assert "gateway-us-east1-b.discord.gg" in text
+
+
+def test_reconnect_annotator_ignores_unrelated_messages(caplog):
+    annotator = _DiscordReconnectAnnotator()
+    record = _make_backoff_record("Some other discord.client log %s", "noise")
+
+    with caplog.at_level(logging.WARNING, logger="oh_my_agent.gateway.platforms.discord"):
+        keep = annotator.filter(record)
+
+    assert keep is True
+    assert not [
+        r for r in caplog.records
+        if r.name == "oh_my_agent.gateway.platforms.discord"
+        and "reconnect scheduled" in r.getMessage()
+    ]
+
+
+def test_reconnect_annotator_handles_malformed_seconds(caplog):
+    """Defensive: never blow up the log path even if format changes upstream."""
+    annotator = _DiscordReconnectAnnotator()
+    record = logging.LogRecord(
+        name="discord.client",
+        level=logging.ERROR,
+        pathname=__file__,
+        lineno=1,
+        msg="Attempting a reconnect in NaNs",
+        args=(),
+        exc_info=None,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="oh_my_agent.gateway.platforms.discord"):
+        keep = annotator.filter(record)
+
+    assert keep is True
+    # Malformed → no WARNING emitted, but original record passes through.
+    assert not [
+        r for r in caplog.records
+        if r.name == "oh_my_agent.gateway.platforms.discord"
+        and "reconnect scheduled" in r.getMessage()
+    ]
