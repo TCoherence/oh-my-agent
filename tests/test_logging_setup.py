@@ -241,7 +241,14 @@ class TestSetupLogging:
             if isinstance(h, logging.StreamHandler)
             and not isinstance(h, logging.handlers.TimedRotatingFileHandler)
         ]
+        file_handlers = [
+            h for h in root.handlers
+            if isinstance(h, logging.handlers.TimedRotatingFileHandler)
+        ]
+        # Auto fallback must wire BOTH handlers, not just console — otherwise
+        # the log shipper reading service.log would silently change format too.
         assert isinstance(console_handlers[0].formatter, PrettyFormatter)
+        assert isinstance(file_handlers[0].formatter, KeyValueFormatter)
 
     def test_thread_log_retention_accessible(self):
         """thread_log_retention_days is a config value the janitor reads directly."""

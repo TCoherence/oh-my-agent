@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import re
 import tempfile
+import threading
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -105,6 +106,45 @@ class _DiscordReconnectAnnotator(logging.Filter):
             cause,
         )
         return True
+
+
+# The reconnect annotator is shared across every ``DiscordChannel`` instance
+# in the same process — there's exactly one ``discord.client`` logger to
+# decorate. Naively having each channel install its own filter would emit
+# duplicate WARNINGs on a single record; the previous "first installer wins"
+# guard fixed that but introduced a new bug — if channel A installs and
+# stops while channel B is still running, channel B loses its annotation.
+# A module-level refcount keeps install/uninstall symmetric: the first
+# acquire installs, the last release removes, intermediate calls are cheap.
+_RECONNECT_ANNOTATOR_LOCK = threading.Lock()
+_RECONNECT_ANNOTATOR_INSTANCE: _DiscordReconnectAnnotator | None = None
+_RECONNECT_ANNOTATOR_REFCOUNT = 0
+
+
+def _acquire_reconnect_annotator() -> bool:
+    """Install the annotator if not already installed; bump refcount.
+
+    Returns ``True`` if the caller successfully acquired a reference and
+    must call :func:`_release_reconnect_annotator` when done; ``False``
+    only on internal failure (currently never).
+    """
+    global _RECONNECT_ANNOTATOR_INSTANCE, _RECONNECT_ANNOTATOR_REFCOUNT
+    with _RECONNECT_ANNOTATOR_LOCK:
+        if _RECONNECT_ANNOTATOR_INSTANCE is None:
+            _RECONNECT_ANNOTATOR_INSTANCE = _DiscordReconnectAnnotator()
+            logging.getLogger("discord.client").addFilter(_RECONNECT_ANNOTATOR_INSTANCE)
+        _RECONNECT_ANNOTATOR_REFCOUNT += 1
+    return True
+
+
+def _release_reconnect_annotator() -> None:
+    """Drop a refcount; remove the filter when no holders remain."""
+    global _RECONNECT_ANNOTATOR_INSTANCE, _RECONNECT_ANNOTATOR_REFCOUNT
+    with _RECONNECT_ANNOTATOR_LOCK:
+        _RECONNECT_ANNOTATOR_REFCOUNT = max(0, _RECONNECT_ANNOTATOR_REFCOUNT - 1)
+        if _RECONNECT_ANNOTATOR_REFCOUNT == 0 and _RECONNECT_ANNOTATOR_INSTANCE is not None:
+            logging.getLogger("discord.client").removeFilter(_RECONNECT_ANNOTATOR_INSTANCE)
+            _RECONNECT_ANNOTATOR_INSTANCE = None
 
 
 class _InteractiveView(discord.ui.View):
@@ -409,11 +449,13 @@ class DiscordChannel(BaseChannel):
         # messages posted there so follow-up threads can be spawned on them.
         self._dump_channel_ids: set[str] = set()
         self._client: discord.Client | None = None
-        # Set when ``start()`` installs the reconnect-backoff annotator on the
-        # ``discord.client`` logger; cleared on ``stop()``. ``None`` either
-        # before start or when another instance already owns the filter on
-        # this logger (idempotent install).
-        self._discord_log_filter: logging.Filter | None = None
+        # Tracks whether this instance currently holds a refcount on the
+        # process-wide reconnect-backoff annotator. ``True`` between
+        # ``start()`` (which calls ``_acquire_reconnect_annotator``) and
+        # ``stop()`` (which releases it). Multiple ``DiscordChannel``
+        # instances in the same process each hold their own refcount; the
+        # filter only comes off the logger when the last one releases.
+        self._holds_reconnect_annotator: bool = False
         # Injected by GatewayManager after construction
         self._session = None  # ChannelSession
         self._registry = None  # AgentRegistry
@@ -1124,18 +1166,11 @@ class DiscordChannel(BaseChannel):
         self._client = client
 
         # Annotate discord.py's reconnect-backoff ERROR with a human-friendly
-        # WARNING (minutes + absolute ETA + cause). Idempotent: if another
-        # ``DiscordChannel`` already attached an annotator to the shared
-        # ``discord.client`` logger, defer to it so we don't emit duplicate
-        # warnings on the same record.
-        discord_client_logger = logging.getLogger("discord.client")
-        already_attached = any(
-            isinstance(f, _DiscordReconnectAnnotator)
-            for f in discord_client_logger.filters
-        )
-        if not already_attached:
-            self._discord_log_filter = _DiscordReconnectAnnotator()
-            discord_client_logger.addFilter(self._discord_log_filter)
+        # WARNING (minutes + absolute ETA + cause). Refcounted so multi-channel
+        # processes only attach the filter once and never lose it while any
+        # channel still wants the annotation.
+        if _acquire_reconnect_annotator():
+            self._holds_reconnect_annotator = True
 
         target_id = int(self._channel_id)
 
@@ -2249,9 +2284,9 @@ class DiscordChannel(BaseChannel):
         return [str(msg.id)]
 
     async def stop(self) -> None:
-        if self._discord_log_filter is not None:
-            logging.getLogger("discord.client").removeFilter(self._discord_log_filter)
-            self._discord_log_filter = None
+        if self._holds_reconnect_annotator:
+            _release_reconnect_annotator()
+            self._holds_reconnect_annotator = False
         if self._client and not self._client.is_closed():
             await self._client.close()
 

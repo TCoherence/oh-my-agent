@@ -5,9 +5,12 @@ from types import SimpleNamespace
 import pytest
 
 from oh_my_agent.gateway.base import OutgoingAttachment
+from oh_my_agent.gateway.platforms import discord as discord_platform
 from oh_my_agent.gateway.platforms.discord import (
     DiscordChannel,
+    _acquire_reconnect_annotator,
     _DiscordReconnectAnnotator,
+    _release_reconnect_annotator,
 )
 from oh_my_agent.runtime.types import HitlPrompt
 
@@ -831,14 +834,19 @@ def test_reconnect_annotator_ignores_unrelated_messages(caplog):
 
 
 def test_reconnect_annotator_handles_malformed_seconds(caplog):
-    """Defensive: never blow up the log path even if format changes upstream."""
+    """Defensive: never blow up the log path if upstream emits non-float seconds.
+
+    Use ``1.2.3s`` so the regex ``[\\d.]+`` matches and the parse path is
+    actually exercised — ``float("1.2.3")`` raises ``ValueError`` and the
+    annotator must short-circuit cleanly. (A ``NaNs`` payload would never
+    reach the float() call because it doesn't match the regex.)"""
     annotator = _DiscordReconnectAnnotator()
     record = logging.LogRecord(
         name="discord.client",
         level=logging.ERROR,
         pathname=__file__,
         lineno=1,
-        msg="Attempting a reconnect in NaNs",
+        msg="Attempting a reconnect in 1.2.3s",
         args=(),
         exc_info=None,
     )
@@ -853,3 +861,83 @@ def test_reconnect_annotator_handles_malformed_seconds(caplog):
         if r.name == "oh_my_agent.gateway.platforms.discord"
         and "reconnect scheduled" in r.getMessage()
     ]
+
+
+def _reset_annotator_state() -> None:
+    """Clear any leftover annotator install from prior tests/instances."""
+    discord_platform._RECONNECT_ANNOTATOR_REFCOUNT = 0
+    if discord_platform._RECONNECT_ANNOTATOR_INSTANCE is not None:
+        logging.getLogger("discord.client").removeFilter(
+            discord_platform._RECONNECT_ANNOTATOR_INSTANCE
+        )
+        discord_platform._RECONNECT_ANNOTATOR_INSTANCE = None
+
+
+def test_reconnect_annotator_install_is_refcounted():
+    """Two ``DiscordChannel`` instances must each acquire a refcount; the filter
+    only detaches when the last one releases.
+
+    Regression for the prior "first-installer-wins" guard, which let a partial
+    stop strip the annotation off a channel that was still running."""
+    _reset_annotator_state()
+    try:
+        # First acquire: filter is installed.
+        _acquire_reconnect_annotator()
+        first_instance = discord_platform._RECONNECT_ANNOTATOR_INSTANCE
+        assert first_instance is not None
+        assert first_instance in logging.getLogger("discord.client").filters
+        assert discord_platform._RECONNECT_ANNOTATOR_REFCOUNT == 1
+
+        # Second acquire: same singleton, refcount bumps.
+        _acquire_reconnect_annotator()
+        assert discord_platform._RECONNECT_ANNOTATOR_INSTANCE is first_instance
+        assert discord_platform._RECONNECT_ANNOTATOR_REFCOUNT == 2
+
+        # First release: filter still attached (refcount > 0).
+        _release_reconnect_annotator()
+        assert discord_platform._RECONNECT_ANNOTATOR_INSTANCE is first_instance
+        assert first_instance in logging.getLogger("discord.client").filters
+
+        # Second release: filter is detached and singleton cleared.
+        _release_reconnect_annotator()
+        assert discord_platform._RECONNECT_ANNOTATOR_INSTANCE is None
+        assert first_instance not in logging.getLogger("discord.client").filters
+        assert discord_platform._RECONNECT_ANNOTATOR_REFCOUNT == 0
+    finally:
+        _reset_annotator_state()
+
+
+def test_reconnect_annotator_release_clamps_at_zero():
+    """Defensive: spurious release when refcount is already zero is a no-op."""
+    _reset_annotator_state()
+    try:
+        _release_reconnect_annotator()  # underflow attempt
+        assert discord_platform._RECONNECT_ANNOTATOR_REFCOUNT == 0
+        assert discord_platform._RECONNECT_ANNOTATOR_INSTANCE is None
+    finally:
+        _reset_annotator_state()
+
+
+@pytest.mark.asyncio
+async def test_discord_channel_lifecycle_acquires_and_releases_annotator():
+    """``DiscordChannel.stop()`` must release its refcount and detach the
+    filter when no other channel is holding it."""
+    _reset_annotator_state()
+    try:
+        channel = DiscordChannel(token="x", channel_id="100")
+        # Simulate ``start()``'s annotator-acquire half (skipping the
+        # discord-client connect, which would block on real network IO).
+        assert _acquire_reconnect_annotator()
+        channel._holds_reconnect_annotator = True
+
+        installed = discord_platform._RECONNECT_ANNOTATOR_INSTANCE
+        assert installed is not None
+        assert installed in logging.getLogger("discord.client").filters
+
+        await channel.stop()
+
+        assert discord_platform._RECONNECT_ANNOTATOR_INSTANCE is None
+        assert installed not in logging.getLogger("discord.client").filters
+        assert channel._holds_reconnect_annotator is False
+    finally:
+        _reset_annotator_state()
