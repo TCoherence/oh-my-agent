@@ -348,3 +348,86 @@ def test_index_renders_cost_chart_with_axes(tmp_path: Path) -> None:
     # (template guards on `cost.daily_7d`).
     # We can still assert the section header is there:
     assert "7-day daily totals" in r.text
+
+
+# ---------------------------------------------------------------------------
+# Optional bearer-token auth (PR #40, defense-in-depth for non-loopback exposure)
+# ---------------------------------------------------------------------------
+
+
+def test_auth_disabled_by_default(tmp_path: Path) -> None:
+    """No auth_token → no auth required (back-compat for loopback users)."""
+
+    config = _seed_minimal_runtime_tree(tmp_path)
+    app = create_app(config)  # default auth_token=None
+    client = TestClient(app)
+    assert client.get("/").status_code == 200
+    assert client.get("/healthz").status_code == 200
+
+
+def test_auth_required_blocks_unauthed_request(tmp_path: Path) -> None:
+    config = _seed_minimal_runtime_tree(tmp_path)
+    app = create_app(config, auth_token="s3cret")
+    client = TestClient(app)
+    r = client.get("/")
+    assert r.status_code == 401
+    assert "auth required" in r.text.lower()
+    # WWW-Authenticate header for browser/CLI hint
+    assert "Bearer" in r.headers.get("WWW-Authenticate", "")
+
+
+def test_auth_accepts_correct_bearer_header(tmp_path: Path) -> None:
+    config = _seed_minimal_runtime_tree(tmp_path)
+    app = create_app(config, auth_token="s3cret")
+    client = TestClient(app)
+    r = client.get("/", headers={"Authorization": "Bearer s3cret"})
+    assert r.status_code == 200
+    assert "oh-my-agent dashboard" in r.text
+
+
+def test_auth_accepts_correct_query_param(tmp_path: Path) -> None:
+    """Useful for browsers — operator can paste a one-off URL with ?token=..."""
+
+    config = _seed_minimal_runtime_tree(tmp_path)
+    app = create_app(config, auth_token="s3cret")
+    client = TestClient(app)
+    r = client.get("/?token=s3cret")
+    assert r.status_code == 200
+
+
+def test_auth_rejects_wrong_token(tmp_path: Path) -> None:
+    config = _seed_minimal_runtime_tree(tmp_path)
+    app = create_app(config, auth_token="s3cret")
+    client = TestClient(app)
+    assert client.get("/", headers={"Authorization": "Bearer wrong"}).status_code == 401
+    assert client.get("/?token=wrong").status_code == 401
+
+
+def test_auth_healthz_always_unauthenticated(tmp_path: Path) -> None:
+    """Liveness probes can hit /healthz without the token."""
+
+    config = _seed_minimal_runtime_tree(tmp_path)
+    app = create_app(config, auth_token="s3cret")
+    client = TestClient(app)
+    r = client.get("/healthz")
+    assert r.status_code == 200
+    assert r.json() == {"status": "ok"}
+
+
+def test_auth_empty_string_token_treated_as_disabled(tmp_path: Path) -> None:
+    """Defense: env var resolving to '' must NOT enable auth (would block all)."""
+
+    config = _seed_minimal_runtime_tree(tmp_path)
+    app = create_app(config, auth_token="")
+    client = TestClient(app)
+    assert client.get("/").status_code == 200
+
+
+def test_auth_bearer_header_case_insensitive(tmp_path: Path) -> None:
+    """RFC 7235: Bearer scheme is case-insensitive. Some clients send 'bearer'."""
+
+    config = _seed_minimal_runtime_tree(tmp_path)
+    app = create_app(config, auth_token="s3cret")
+    client = TestClient(app)
+    assert client.get("/", headers={"Authorization": "bearer s3cret"}).status_code == 200
+    assert client.get("/", headers={"Authorization": "BEARER s3cret"}).status_code == 200

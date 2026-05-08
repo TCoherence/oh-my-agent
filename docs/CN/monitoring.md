@@ -298,7 +298,7 @@ docker compose up -d --build oh-my-agent-dashboard
 
 如果你 fork 过 `compose.yaml`，把 `oma-runtime:/home` named volume 换成了 bind mount（比如 `~/oh-my-agent-mount:/home`），那 `oh-my-agent-dashboard` 的 `volumes` 块也要改成同一路径。dashboard 和 bot 必须挂同一个目录。
 
-**Loopback 边界**：`127.0.0.1:8080:8080` 这个写法是默认安全的关键——Docker 只在 host loopback 上监听，不监听所有网卡。如果你改成 `0.0.0.0:8080:8080` 想 LAN 访问，**必须**先在前面挡一层鉴权；dashboard 自己没有任何鉴权。
+**Loopback 边界**：`127.0.0.1:8080:8080` 这个写法是默认安全的关键——Docker 只在 host loopback 上监听，不监听所有网卡。如果你改成 `0.0.0.0:8080:8080` 想 LAN 访问，**必须**先在前面挡一层鉴权；dashboard 自己除非设了 `OMA_DASHBOARD_AUTH_TOKEN` 否则没有鉴权（见 §6.5）。
 
 ### 6.4 怎么读这个页面
 
@@ -306,4 +306,88 @@ docker compose up -d --build oh-my-agent-dashboard
 - **持续显示 "all log files missing"**：检查 `OMA_MOUNT_ROOT`（或你的 runtime root）是否真的指向 dashboard 进程能读的路径。
 - **某 automation 的 `success_rate` 跌了**：跟 `/automation_status` 交叉验证拿完整 `last_error`；面板上 error 是截断的，`/doctor` 完整显示。
 - **uptime 倒退或显示 "no Runtime started line found"**：`service.log` 已被轮转出 7 天保留窗口。下次 bot 重启后恢复。
+
+### 6.5 暴露到 loopback 之外（公网、LAN 等）
+
+Dashboard 显示 cost 数据、memory entries（你的私人笔记！）、automation 状态、最近的 failure traceback。任何让它能从 host loopback 之外访问的部署，**两层都要有**：
+
+1. dashboard 进程前面要有**鉴权层**
+2. 跨不可信网络要有 **TLS**
+
+#### 6.5.1 内置 token 鉴权（defense-in-depth）
+
+Dashboard 支持可选 bearer token。设了之后每个非 `/healthz` 请求必须带 `Authorization: Bearer <token>` 头或 `?token=<value>` query 参数。`/healthz` 始终免鉴权（liveness 探针用）。
+
+设 token：
+
+```bash
+# 通过 env（docker-common.sh 会转发到容器内）
+OMA_DASHBOARD_AUTH_TOKEN='<32 字节随机十六进制或更长>' bash scripts/docker-start.sh
+# 生成：openssl rand -hex 32
+```
+
+```bash
+# 或者 oma-dashboard 直接调时传
+oma-dashboard --auth-token "$(openssl rand -hex 32)"
+```
+
+浏览器访问一次 `http://<host>:<port>/?token=<token>` 之后，大多数浏览器会在该页面后续导航中保留这个 token。脚本/监控访问用 `Authorization: Bearer ...` 头。
+
+**单纯 token 鉴权不足以安全暴露到公网**——bearer token 是明文传的。要配合下面的方案。
+
+#### 6.5.2 推荐部署方案
+
+按"我会怎么选"的顺序：
+
+##### 方案 A — Tailscale（或任何 WireGuard 网格）—— 最简单，零公网暴露
+
+只想从你自己的设备（笔记本、手机、平板）看：根本不暴露公网。Docker 主机装 Tailscale，dashboard 保持默认 `127.0.0.1:8081`，从主机的 Tailscale hostname 访问：
+
+```
+http://<machine-name>.<tailnet>.ts.net:8081
+```
+
+不用公网 IP、不用 DNS、不用管 TLS（Tailscale 自己加密传输）、严格说也不需要 token（Tailscale ACL 控制哪些设备能到主机）。个人免费 100 设备。
+
+腰带+背带：还是设 `OMA_DASHBOARD_AUTH_TOKEN`，万一 Tailscale ACL 有疏漏。
+
+##### 方案 B — Cloudflare Tunnel + Cloudflare Access —— 真正公网分享首选
+
+需要从任何网络的浏览器访问（酒店 wifi 上的笔记本、给协作者发只读链接），又不想给家里路由器开 inbound 端口：
+
+```bash
+# 1. 跑 cloudflared 作为 sidecar 容器，主动连出到 Cloudflare 边缘
+# 2. 在 dash.cloudflare.com 配 Tunnel，把你的 subdomain 指到
+#    http://oh-my-agent-dashboard:8080（dashboard 容器内地址）
+# 3. 加 Cloudflare Access Application（免费层覆盖 50 用户），
+#    选你的 IdP（Google / GitHub / 邮箱 OTP）
+# 4. dashboard 容器内 bind 0.0.0.0（Cloudflare Tunnel 走 Docker 网络
+#    访问，不走 host loopback）
+```
+
+腰带+背带：还是设 `OMA_DASHBOARD_AUTH_TOKEN`，万一 Cloudflare Access 策略配错。
+
+##### 方案 C — 反向代理 + HTTP Basic Auth + TLS —— 老派 DIY
+
+如果你已经有 nginx / Caddy / Traefik 在前面挡着，还有域名指向你的 IP：
+
+```caddy
+# Caddy 例子 —— 自动 Let's Encrypt + HTTP Basic Auth
+oma-dashboard.example.com {
+    basic_auth {
+        admin <用 `caddy hash-password` 生成的 bcrypt 哈希>
+    }
+    reverse_proxy 127.0.0.1:8081
+}
+```
+
+Dashboard 还是 `127.0.0.1:8081`（loopback）。Caddy/nginx 终止 TLS + Basic Auth，反代进来。
+
+腰带+背带：还是设 `OMA_DASHBOARD_AUTH_TOKEN`——万一反代配置出问题（typo / 证书过期 / 不小心写成 `proxy_pass http://0.0.0.0:8081`），dashboard 自己的鉴权还在挡。
+
+#### 6.5.3 不要做的事
+
+- 不要在 `compose.yaml` 把 `127.0.0.1:8080:8080` 改成 `0.0.0.0:8080:8080`（脚本里对应 `--host` flag）**而不**同时设 `OMA_DASHBOARD_AUTH_TOKEN`。Dashboard 没有内置 rate limit，没有审计日志，对你 bot 的状态有完整读权限。
+- 不要在 dashboard 没鉴权的情况下，挂一个公网可解析的 DNS A 记录指向主机。即便搜索引擎还没索引，机会主义扫描器几小时内就会发现。
+- 不要单凭 `OMA_DASHBOARD_AUTH_TOKEN` 跨明文 HTTP。要配 TLS（方案 B 自带；方案 C 要 Let's Encrypt 之类的）。
 

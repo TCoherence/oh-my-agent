@@ -178,6 +178,12 @@ oma_dashboard_build_run_args() {
   if [[ -n "${OMA_DASHBOARD_REFRESH_SECONDS:-}" ]]; then
     OMA_DASHBOARD_RUN_ARGS+=(-e "OMA_DASHBOARD_REFRESH_SECONDS=${OMA_DASHBOARD_REFRESH_SECONDS}")
   fi
+  # Forward the optional auth token. When set, dashboard requires Bearer
+  # header or ?token= query param on every non-/healthz request. Strongly
+  # recommended whenever the dashboard is reachable beyond loopback.
+  if [[ -n "${OMA_DASHBOARD_AUTH_TOKEN:-}" ]]; then
+    OMA_DASHBOARD_RUN_ARGS+=(-e "OMA_DASHBOARD_AUTH_TOKEN=${OMA_DASHBOARD_AUTH_TOKEN}")
+  fi
 }
 
 # Start the dashboard container detached. Honors DASHBOARD_ENABLED gate

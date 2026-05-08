@@ -12,11 +12,12 @@ under WAL, so this stays correct while the bot writes.
 
 from __future__ import annotations
 
+import hmac
 import html
 from datetime import datetime, timezone
 
-from fastapi import FastAPI
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from jinja2 import Environment, PackageLoader, select_autoescape
 
 from oh_my_agent import paths
@@ -24,19 +25,31 @@ from oh_my_agent import paths
 from . import data as dashboard_data
 
 
-def create_app(config: dict, *, refresh_seconds: int = 300) -> FastAPI:
+def create_app(
+    config: dict,
+    *,
+    refresh_seconds: int = 300,
+    auth_token: str | None = None,
+) -> FastAPI:
     """Build a FastAPI app bound to the given top-level oh-my-agent config.
 
     Args:
         config: top-level oh-my-agent config dict.
         refresh_seconds: page auto-refresh interval (default 300 = 5 min).
             Set to 0 to omit the meta-refresh tag entirely.
+        auth_token: when set, every non-`/healthz` request must present this
+            token via either an ``Authorization: Bearer <token>`` header or
+            a ``?token=<value>`` query parameter. ``None`` (default) means
+            no auth — only safe for loopback-only deployments.
 
     The app keeps a reference to the config dict and resolves all paths fresh
     on each request (cheap — just dict lookups + string ops). No caching.
     """
 
     refresh_seconds = max(0, int(refresh_seconds))
+    # Empty string token treated as "no auth" — defensive against env vars
+    # that resolve to literal empty strings.
+    auth_token = auth_token or None
 
     app = FastAPI(title="oh-my-agent dashboard", docs_url=None, redoc_url=None)
     env = Environment(
@@ -53,6 +66,23 @@ def create_app(config: dict, *, refresh_seconds: int = 300) -> FastAPI:
 
     template = env.get_template("dashboard.html")
 
+    if auth_token is not None:
+
+        @app.middleware("http")
+        async def require_auth_token(request: Request, call_next):
+            # /healthz always public so liveness probes (Docker / k8s /
+            # uptime monitors) don't need to know the token.
+            if request.url.path == "/healthz":
+                return await call_next(request)
+            if _check_auth_token(request, auth_token):
+                return await call_next(request)
+            return Response(
+                content='{"error":"auth required"}',
+                status_code=401,
+                media_type="application/json",
+                headers={"WWW-Authenticate": 'Bearer realm="oma-dashboard"'},
+            )
+
     @app.get("/healthz")
     def healthz() -> JSONResponse:
         return JSONResponse({"status": "ok"})
@@ -64,6 +94,24 @@ def create_app(config: dict, *, refresh_seconds: int = 300) -> FastAPI:
         return HTMLResponse(template.render(**ctx))
 
     return app
+
+
+def _check_auth_token(request: Request, expected: str) -> bool:
+    """Constant-time check of either ``Authorization: Bearer …`` or ``?token=…``.
+
+    Uses ``hmac.compare_digest`` to avoid timing-side-channel leaks on the
+    token comparison.
+    """
+
+    header = request.headers.get("authorization", "")
+    if header.lower().startswith("bearer "):
+        presented = header.split(" ", 1)[1].strip()
+        if presented and hmac.compare_digest(presented, expected):
+            return True
+    query_token = request.query_params.get("token")
+    if query_token and hmac.compare_digest(query_token, expected):
+        return True
+    return False
 
 
 def _build_context(config: dict) -> dict:
