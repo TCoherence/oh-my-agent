@@ -198,3 +198,70 @@ def test_resolve_refresh_seconds_negative_clamped_to_zero(monkeypatch) -> None:
     assert _resolve_refresh_seconds(-1) == 0
     monkeypatch.setenv("OMA_DASHBOARD_REFRESH_SECONDS", "-5")
     assert _resolve_refresh_seconds(None) == 0
+
+
+# ---------------------------------------------------------------------------
+# _resolve_auth_token — CLI flag > env var > None default
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_auth_token_default_is_none(monkeypatch) -> None:
+    from oh_my_agent.dashboard.cli import _resolve_auth_token
+
+    monkeypatch.delenv("OMA_DASHBOARD_AUTH_TOKEN", raising=False)
+    assert _resolve_auth_token(None) is None
+
+
+def test_resolve_auth_token_cli_flag_wins(monkeypatch) -> None:
+    from oh_my_agent.dashboard.cli import _resolve_auth_token
+
+    monkeypatch.setenv("OMA_DASHBOARD_AUTH_TOKEN", "from-env")
+    assert _resolve_auth_token("from-flag") == "from-flag"
+
+
+def test_resolve_auth_token_env_used_when_no_flag(monkeypatch) -> None:
+    from oh_my_agent.dashboard.cli import _resolve_auth_token
+
+    monkeypatch.setenv("OMA_DASHBOARD_AUTH_TOKEN", "from-env")
+    assert _resolve_auth_token(None) == "from-env"
+
+
+def test_resolve_auth_token_empty_string_is_none(monkeypatch) -> None:
+    """Defense: empty CLI value or env value treated as 'no auth'.
+
+    Letting "" enable auth would block every request silently — operator
+    misconfiguration that's hard to debug.
+    """
+
+    from oh_my_agent.dashboard.cli import _resolve_auth_token
+
+    monkeypatch.delenv("OMA_DASHBOARD_AUTH_TOKEN", raising=False)
+    assert _resolve_auth_token("") is None
+    monkeypatch.setenv("OMA_DASHBOARD_AUTH_TOKEN", "")
+    assert _resolve_auth_token(None) is None
+
+
+def test_resolve_auth_token_whitespace_only_is_none(monkeypatch) -> None:
+    """Codex round-1 catch: whitespace-only token would otherwise pass
+    truthy checks and silently lock everyone out with a low-entropy
+    secret. Must collapse to None like empty string."""
+
+    from oh_my_agent.dashboard.cli import _resolve_auth_token
+
+    monkeypatch.delenv("OMA_DASHBOARD_AUTH_TOKEN", raising=False)
+    assert _resolve_auth_token("   ") is None
+    assert _resolve_auth_token("\t\n") is None
+    monkeypatch.setenv("OMA_DASHBOARD_AUTH_TOKEN", "  ")
+    assert _resolve_auth_token(None) is None
+
+
+def test_resolve_auth_token_strips_surrounding_whitespace(monkeypatch) -> None:
+    """`--auth-token '  realtoken  '` should yield `realtoken` —
+    matches what the request side sees after splitting on the bearer prefix."""
+
+    from oh_my_agent.dashboard.cli import _resolve_auth_token
+
+    monkeypatch.delenv("OMA_DASHBOARD_AUTH_TOKEN", raising=False)
+    assert _resolve_auth_token("  realtoken  ") == "realtoken"
+    monkeypatch.setenv("OMA_DASHBOARD_AUTH_TOKEN", "  envtoken  ")
+    assert _resolve_auth_token(None) == "envtoken"

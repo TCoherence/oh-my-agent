@@ -298,7 +298,7 @@ docker compose up -d --build oh-my-agent-dashboard
 
 If you've forked `compose.yaml` to switch the runtime mount from the named volume `oma-runtime:/home` to a bind mount (e.g. `~/oh-my-agent-mount:/home`), apply the same change to `oh-my-agent-dashboard`'s `volumes` block. Dashboard and bot must mount the same path.
 
-**Loopback boundary**: the `127.0.0.1:8080:8080` syntax is what makes this safe-by-default — Docker only listens on host loopback, not all interfaces. If you change it to `0.0.0.0:8080:8080` to access the dashboard over the LAN, you **must** add auth in front first; the dashboard itself has none.
+**Loopback boundary**: the `127.0.0.1:8080:8080` syntax is what makes this safe-by-default — Docker only listens on host loopback, not all interfaces. If you change it to `0.0.0.0:8080:8080` to access the dashboard over the LAN, you **must** add auth in front first; the dashboard itself has none unless `OMA_DASHBOARD_AUTH_TOKEN` is set (see §6.5).
 
 ### 6.4 Reading the page
 
@@ -306,4 +306,88 @@ If you've forked `compose.yaml` to switch the runtime mount from the named volum
 - **Persistent "all log files missing"**: check that the `OMA_MOUNT_ROOT` (or your runtime root) actually maps to a path the dashboard process can read.
 - **`success_rate` drops on one automation**: cross-reference with `/automation_status` for the live `last_error`; the dashboard shows truncated errors for layout, but `/doctor` shows the full text.
 - **Bot uptime jumps backwards or shows "no Runtime started line found"**: the `service.log` was rotated past the 7-day retention window. Display recovers next time the bot restarts.
+
+### 6.5 Exposing beyond loopback (public internet, LAN, etc.)
+
+The dashboard exposes cost data, memory entries (your private notes!), automation state, and recent failure tracebacks. Any deployment that makes it reachable beyond the host's loopback interface needs **two** layers:
+
+1. **An authentication layer** in front of the dashboard process.
+2. **TLS** if traffic crosses untrusted networks.
+
+#### 6.5.1 Built-in token auth (defense-in-depth)
+
+The dashboard accepts an optional bearer token. When set, every non-`/healthz` request must present either an `Authorization: Bearer <token>` header or a `?token=<value>` query parameter. `/healthz` stays unauthenticated for liveness probes.
+
+Set the token via either:
+
+```bash
+# Via env var (forwarded by docker-common.sh into the container)
+OMA_DASHBOARD_AUTH_TOKEN='<random-32-hex-or-longer>' bash scripts/docker-start.sh
+# Generate one with: openssl rand -hex 32
+```
+
+```bash
+# Or pass --auth-token directly when invoking oma-dashboard manually
+oma-dashboard --auth-token "$(openssl rand -hex 32)"
+```
+
+**Prefer the `Authorization: Bearer <token>` header for programmatic access** (scripts, monitors, browser extensions). The `?token=<value>` query-param form works as a one-off browser convenience but **the token will appear in HTTP access logs, web server logs, browser history, and the `Referer` header on any link the page follows**. Use it once to establish a session and avoid bookmarking the URL with the token in it.
+
+**Token auth alone is NOT enough** to safely expose to the public internet — bearer tokens travel in plaintext. Combine with one of the patterns below (Tailscale and Cloudflare Tunnel handle transport encryption for you; the reverse-proxy pattern requires you to terminate TLS).
+
+#### 6.5.2 Recommended deployment patterns
+
+Pick the first one that fits your needs.
+
+##### Pattern A — Tailscale (or any WireGuard mesh) — easiest, no public exposure
+
+If you only need to reach the dashboard from your own devices (laptop, phone, tablet), don't expose it publicly at all. Install Tailscale on the Docker host, keep the dashboard on `127.0.0.1:8081` as default, and access via the host's Tailscale-assigned hostname:
+
+```
+http://<machine-name>.<tailnet>.ts.net:8081
+```
+
+No public IP needed, no DNS, no TLS to manage (Tailscale handles transport encryption), no token strictly required (Tailscale ACLs gate which devices can reach the host). Free for personal use up to 100 devices.
+
+Belt-and-suspenders: still set `OMA_DASHBOARD_AUTH_TOKEN` in case Tailscale ACLs ever leak.
+
+##### Pattern B — Cloudflare Tunnel + Cloudflare Access — best for true public sharing
+
+If you need browser access from arbitrary networks (laptop on hotel wifi, sharing a read-only view with a collaborator), Cloudflare Tunnel + Access is the simplest path that doesn't require opening any inbound port on your home router.
+
+```bash
+# 1. Run cloudflared as another sidecar container that connects out to Cloudflare's edge.
+# 2. Configure a Tunnel on dash.cloudflare.com pointing your subdomain at
+#    http://oh-my-agent-dashboard:8080 (the dashboard's container-side address).
+# 3. Add a Cloudflare Access Application (free tier covers 50 users) with
+#    your preferred identity provider (Google / GitHub / email OTP).
+# 4. Bind dashboard to 0.0.0.0 inside its container (Cloudflare Tunnel
+#    reaches it via the Docker network, not host loopback).
+```
+
+Belt-and-suspenders: still set `OMA_DASHBOARD_AUTH_TOKEN` so a misconfigured Cloudflare Access policy doesn't expose the dashboard.
+
+##### Pattern C — Reverse proxy + HTTP basic auth + TLS — DIY classical setup
+
+If you already run nginx / Caddy / Traefik in front of your services and have a domain pointed at your IP:
+
+```caddy
+# Caddy example — automatic Let's Encrypt + HTTP basic auth.
+oma-dashboard.example.com {
+    basic_auth {
+        admin <bcrypt-hash-from `caddy hash-password`>
+    }
+    reverse_proxy 127.0.0.1:8081
+}
+```
+
+The dashboard stays on `127.0.0.1:8081` (loopback). Caddy / nginx / etc. terminates TLS + does basic auth, then proxies in.
+
+Belt-and-suspenders: still set `OMA_DASHBOARD_AUTH_TOKEN` — if the reverse proxy config ever degrades (typo, expired cert, accidental `proxy_pass http://0.0.0.0:8081`), the dashboard's own auth still gates access.
+
+#### 6.5.3 What NOT to do
+
+- Don't change `127.0.0.1:8080:8080` to `0.0.0.0:8080:8080` in `compose.yaml` (or the equivalent `--host` flag in scripts) **without** also setting `OMA_DASHBOARD_AUTH_TOKEN`. The dashboard has no built-in rate limiting, no audit log, and full read access to your bot's state.
+- Don't run the dashboard with auth disabled and a publicly-resolvable DNS A record pointing at the host. Even before search engines index the page, opportunistic scanners will find it within hours.
+- Don't trust `OMA_DASHBOARD_AUTH_TOKEN` alone over plaintext HTTP. Pair with TLS (Pattern B handles this; Pattern C requires Let's Encrypt or similar).
 

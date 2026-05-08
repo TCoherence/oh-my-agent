@@ -348,3 +348,131 @@ def test_index_renders_cost_chart_with_axes(tmp_path: Path) -> None:
     # (template guards on `cost.daily_7d`).
     # We can still assert the section header is there:
     assert "7-day daily totals" in r.text
+
+
+# ---------------------------------------------------------------------------
+# Optional bearer-token auth (PR #40, defense-in-depth for non-loopback exposure)
+# ---------------------------------------------------------------------------
+
+
+def test_auth_disabled_by_default(tmp_path: Path) -> None:
+    """No auth_token → no auth required (back-compat for loopback users)."""
+
+    config = _seed_minimal_runtime_tree(tmp_path)
+    app = create_app(config)  # default auth_token=None
+    client = TestClient(app)
+    assert client.get("/").status_code == 200
+    assert client.get("/healthz").status_code == 200
+
+
+def test_auth_required_blocks_unauthed_request(tmp_path: Path) -> None:
+    config = _seed_minimal_runtime_tree(tmp_path)
+    app = create_app(config, auth_token="s3cret")
+    client = TestClient(app)
+    r = client.get("/")
+    assert r.status_code == 401
+    assert "auth required" in r.text.lower()
+    # WWW-Authenticate header for browser/CLI hint
+    assert "Bearer" in r.headers.get("WWW-Authenticate", "")
+
+
+def test_auth_accepts_correct_bearer_header(tmp_path: Path) -> None:
+    config = _seed_minimal_runtime_tree(tmp_path)
+    app = create_app(config, auth_token="s3cret")
+    client = TestClient(app)
+    r = client.get("/", headers={"Authorization": "Bearer s3cret"})
+    assert r.status_code == 200
+    assert "oh-my-agent dashboard" in r.text
+
+
+def test_auth_accepts_correct_query_param(tmp_path: Path) -> None:
+    """Useful for browsers — operator can paste a one-off URL with ?token=..."""
+
+    config = _seed_minimal_runtime_tree(tmp_path)
+    app = create_app(config, auth_token="s3cret")
+    client = TestClient(app)
+    r = client.get("/?token=s3cret")
+    assert r.status_code == 200
+
+
+def test_auth_rejects_wrong_token(tmp_path: Path) -> None:
+    config = _seed_minimal_runtime_tree(tmp_path)
+    app = create_app(config, auth_token="s3cret")
+    client = TestClient(app)
+    assert client.get("/", headers={"Authorization": "Bearer wrong"}).status_code == 401
+    assert client.get("/?token=wrong").status_code == 401
+
+
+def test_auth_healthz_always_unauthenticated(tmp_path: Path) -> None:
+    """Liveness probes can hit /healthz without the token."""
+
+    config = _seed_minimal_runtime_tree(tmp_path)
+    app = create_app(config, auth_token="s3cret")
+    client = TestClient(app)
+    r = client.get("/healthz")
+    assert r.status_code == 200
+    assert r.json() == {"status": "ok"}
+
+
+def test_auth_empty_string_token_treated_as_disabled(tmp_path: Path) -> None:
+    """Defense: env var resolving to '' must NOT enable auth (would block all)."""
+
+    config = _seed_minimal_runtime_tree(tmp_path)
+    app = create_app(config, auth_token="")
+    client = TestClient(app)
+    assert client.get("/").status_code == 200
+
+
+def test_auth_bearer_header_case_insensitive(tmp_path: Path) -> None:
+    """RFC 7235: Bearer scheme is case-insensitive. Some clients send 'bearer'."""
+
+    config = _seed_minimal_runtime_tree(tmp_path)
+    app = create_app(config, auth_token="s3cret")
+    client = TestClient(app)
+    assert client.get("/", headers={"Authorization": "bearer s3cret"}).status_code == 200
+    assert client.get("/", headers={"Authorization": "BEARER s3cret"}).status_code == 200
+
+
+def test_auth_whitespace_only_token_treated_as_disabled(tmp_path: Path) -> None:
+    """Codex round-1 catch: whitespace-only token (e.g. '  ') should NOT
+    pass the truthy check and lock everyone out with a low-entropy secret.
+    """
+
+    config = _seed_minimal_runtime_tree(tmp_path)
+    app = create_app(config, auth_token="   ")
+    client = TestClient(app)
+    assert client.get("/").status_code == 200
+
+
+def test_auth_non_ascii_query_token_rejects_without_500(tmp_path: Path) -> None:
+    """Codex round-1 catch: hmac.compare_digest raises TypeError on non-ASCII;
+    middleware must catch + reject as 401, not surface as 500."""
+
+    config = _seed_minimal_runtime_tree(tmp_path)
+    app = create_app(config, auth_token="s3cret")
+    client = TestClient(app)
+    # Non-ASCII characters in the token query — would TypeError on raw
+    # compare_digest. Must reject, not crash.
+    r = client.get("/?token=é")
+    assert r.status_code == 401
+    r = client.get("/?token=日本語")
+    assert r.status_code == 401
+
+
+def test_safe_token_eq_handles_non_ascii_input() -> None:
+    """Unit test for the `_safe_token_eq` wrapper directly.
+
+    The Bearer header path can't actually deliver non-ASCII via httpx
+    (clients reject at HTTP layer), but query strings can — and a
+    future caller could pass arbitrary strings to this helper. Wrapper
+    must return False, not raise TypeError, on non-ASCII input.
+    """
+
+    from oh_my_agent.dashboard.app import _safe_token_eq
+
+    assert _safe_token_eq("é", "ascii") is False
+    assert _safe_token_eq("ascii", "é") is False
+    assert _safe_token_eq("日本語", "日本語") is False  # both non-ASCII
+    # Same-string ASCII still works
+    assert _safe_token_eq("s3cret", "s3cret") is True
+    assert _safe_token_eq("s3cret", "wrong") is False

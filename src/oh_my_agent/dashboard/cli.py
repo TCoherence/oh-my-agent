@@ -60,6 +60,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "--refresh-seconds → OMA_DASHBOARD_REFRESH_SECONDS env var → 300 (5 min). "
         "Pass 0 to disable auto-refresh entirely.",
     )
+    parser.add_argument(
+        "--auth-token",
+        default=None,
+        help="If set, every request to the dashboard must present this token "
+        "(Bearer header `Authorization: Bearer <token>` or query param `?token=<...>`). "
+        "/healthz stays unauthenticated for liveness probes. Resolution order: "
+        "--auth-token → OMA_DASHBOARD_AUTH_TOKEN env var → no auth (loopback default). "
+        "Strongly recommended whenever the dashboard is reachable beyond loopback.",
+    )
     return parser
 
 
@@ -75,6 +84,24 @@ def _resolve_refresh_seconds(arg_value: int | None) -> int:
         except ValueError:
             pass
     return 300
+
+
+def _resolve_auth_token(arg_value: str | None) -> str | None:
+    """Resolve auth token: CLI flag > env var > None (no auth).
+
+    Empty / whitespace-only strings count as 'no auth' — defensive against
+    misconfigs that would otherwise pass the truthy check and lock everyone
+    out with a low-entropy token (Codex round-1 catch).
+    """
+
+    if arg_value is not None:
+        stripped = arg_value.strip()
+        if stripped:
+            return stripped
+    env_value = os.environ.get("OMA_DASHBOARD_AUTH_TOKEN", "").strip()
+    if env_value:
+        return env_value
+    return None
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -117,12 +144,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     from .app import create_app
 
     refresh_seconds = _resolve_refresh_seconds(args.refresh_seconds)
-    app = create_app(config, refresh_seconds=refresh_seconds)
+    auth_token = _resolve_auth_token(args.auth_token)
+    app = create_app(config, refresh_seconds=refresh_seconds, auth_token=auth_token)
     refresh_label = f"every {refresh_seconds}s" if refresh_seconds > 0 else "disabled"
+    auth_label = "required (token)" if auth_token else "DISABLED (loopback only)"
     print(
         f"oma-dashboard: serving on http://{args.host}:{args.port} "
-        f"(config={config_path}, log_level={args.log_level}, auto-refresh={refresh_label})"
+        f"(config={config_path}, log_level={args.log_level}, auto-refresh={refresh_label}, auth={auth_label})"
     )
+    if not auth_token and args.host not in ("127.0.0.1", "localhost", "::1"):
+        # Best-effort warning: binding to non-loopback without auth is unsafe.
+        # We don't refuse — the operator may have already wired auth in front
+        # (reverse proxy, Cloudflare Access, Tailscale ACL) — just shout once.
+        print(
+            f"oma-dashboard: WARNING — binding to {args.host} without --auth-token. "
+            "Dashboard exposes cost data, memory entries, automation state. "
+            "See docs/EN/monitoring.md §6.5 before exposing beyond loopback.",
+            file=sys.stderr,
+        )
     uvicorn.run(app, host=args.host, port=args.port, log_level=args.log_level)
     return 0
 
