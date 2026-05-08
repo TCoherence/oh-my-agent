@@ -290,7 +290,7 @@ def _check_router(config: dict, result: ValidationResult) -> None:
             _err(f"router.{key}", f"must be a bool, got {type(router[key]).__name__}")
 
     # Positive integers
-    for key in ("timeout_seconds", "context_turns"):
+    for key in ("timeout_seconds", "context_turns", "max_tokens"):
         if key in router:
             val = router[key]
             if isinstance(val, bool) or not isinstance(val, int) or val <= 0:

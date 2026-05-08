@@ -118,11 +118,12 @@ router:
   model: deepseek-chat            # or deepseek-reasoner — stronger reasoning, ~3x latency
   timeout_seconds: 15             # bump to >=25 if model is a reasoner
   max_retries: 1
+  max_tokens: 4096                # router output ceiling (NOT a fixed bill — the model stops naturally and you only pay per generated token). Reasoning-tuned models (deepseek-v4-flash, deepseek-reasoner) share this with chain-of-thought + pretty-printed JSON, so the legacy 400 was too tight and content got truncated mid-JSON. 4096 leaves slack for reasoner outliers; timeout_seconds bounds worst-case latency.
   confidence_threshold: 0.55      # below this → heuristic fallback
   autonomy_threshold: 0.90        # create_skill/repair_skill auto-run only above this; in [conf_thr, auto_thr) it goes to DRAFT awaiting /task_approve
   context_turns: 10
   require_user_confirm: true      # enforce borderline-band user confirmation (no longer a dead config)
-  extra_body: {}                  # pass-through to provider, e.g. {reasoning: {effort: medium}}; must not override messages/model/max_tokens/temperature
+  extra_body: {}                  # pass-through to provider, e.g. {reasoning: {effort: medium}}; must not override messages/model/max_tokens/temperature. response_format defaults to {"type":"json_object"} (DeepSeek + OpenAI accept it); set {response_format: {type: text}} here only if your endpoint rejects JSON mode.
 
 automations:
   enabled: true
