@@ -431,3 +431,48 @@ def test_auth_bearer_header_case_insensitive(tmp_path: Path) -> None:
     client = TestClient(app)
     assert client.get("/", headers={"Authorization": "bearer s3cret"}).status_code == 200
     assert client.get("/", headers={"Authorization": "BEARER s3cret"}).status_code == 200
+
+
+def test_auth_whitespace_only_token_treated_as_disabled(tmp_path: Path) -> None:
+    """Codex round-1 catch: whitespace-only token (e.g. '  ') should NOT
+    pass the truthy check and lock everyone out with a low-entropy secret.
+    """
+
+    config = _seed_minimal_runtime_tree(tmp_path)
+    app = create_app(config, auth_token="   ")
+    client = TestClient(app)
+    assert client.get("/").status_code == 200
+
+
+def test_auth_non_ascii_query_token_rejects_without_500(tmp_path: Path) -> None:
+    """Codex round-1 catch: hmac.compare_digest raises TypeError on non-ASCII;
+    middleware must catch + reject as 401, not surface as 500."""
+
+    config = _seed_minimal_runtime_tree(tmp_path)
+    app = create_app(config, auth_token="s3cret")
+    client = TestClient(app)
+    # Non-ASCII characters in the token query — would TypeError on raw
+    # compare_digest. Must reject, not crash.
+    r = client.get("/?token=é")
+    assert r.status_code == 401
+    r = client.get("/?token=日本語")
+    assert r.status_code == 401
+
+
+def test_safe_token_eq_handles_non_ascii_input() -> None:
+    """Unit test for the `_safe_token_eq` wrapper directly.
+
+    The Bearer header path can't actually deliver non-ASCII via httpx
+    (clients reject at HTTP layer), but query strings can — and a
+    future caller could pass arbitrary strings to this helper. Wrapper
+    must return False, not raise TypeError, on non-ASCII input.
+    """
+
+    from oh_my_agent.dashboard.app import _safe_token_eq
+
+    assert _safe_token_eq("é", "ascii") is False
+    assert _safe_token_eq("ascii", "é") is False
+    assert _safe_token_eq("日本語", "日本語") is False  # both non-ASCII
+    # Same-string ASCII still works
+    assert _safe_token_eq("s3cret", "s3cret") is True
+    assert _safe_token_eq("s3cret", "wrong") is False

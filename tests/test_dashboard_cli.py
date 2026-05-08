@@ -239,3 +239,29 @@ def test_resolve_auth_token_empty_string_is_none(monkeypatch) -> None:
     assert _resolve_auth_token("") is None
     monkeypatch.setenv("OMA_DASHBOARD_AUTH_TOKEN", "")
     assert _resolve_auth_token(None) is None
+
+
+def test_resolve_auth_token_whitespace_only_is_none(monkeypatch) -> None:
+    """Codex round-1 catch: whitespace-only token would otherwise pass
+    truthy checks and silently lock everyone out with a low-entropy
+    secret. Must collapse to None like empty string."""
+
+    from oh_my_agent.dashboard.cli import _resolve_auth_token
+
+    monkeypatch.delenv("OMA_DASHBOARD_AUTH_TOKEN", raising=False)
+    assert _resolve_auth_token("   ") is None
+    assert _resolve_auth_token("\t\n") is None
+    monkeypatch.setenv("OMA_DASHBOARD_AUTH_TOKEN", "  ")
+    assert _resolve_auth_token(None) is None
+
+
+def test_resolve_auth_token_strips_surrounding_whitespace(monkeypatch) -> None:
+    """`--auth-token '  realtoken  '` should yield `realtoken` —
+    matches what the request side sees after splitting on the bearer prefix."""
+
+    from oh_my_agent.dashboard.cli import _resolve_auth_token
+
+    monkeypatch.delenv("OMA_DASHBOARD_AUTH_TOKEN", raising=False)
+    assert _resolve_auth_token("  realtoken  ") == "realtoken"
+    monkeypatch.setenv("OMA_DASHBOARD_AUTH_TOKEN", "  envtoken  ")
+    assert _resolve_auth_token(None) == "envtoken"

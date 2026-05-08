@@ -331,9 +331,9 @@ OMA_DASHBOARD_AUTH_TOKEN='<random-32-hex-or-longer>' bash scripts/docker-start.s
 oma-dashboard --auth-token "$(openssl rand -hex 32)"
 ```
 
-Use the token from a browser by visiting `http://<host>:<port>/?token=<token>` once — most browsers will keep the token on subsequent navigations within the page. For programmatic access (scripts, monitors), use the `Authorization: Bearer ...` header.
+**Prefer the `Authorization: Bearer <token>` header for programmatic access** (scripts, monitors, browser extensions). The `?token=<value>` query-param form works as a one-off browser convenience but **the token will appear in HTTP access logs, web server logs, browser history, and the `Referer` header on any link the page follows**. Use it once to establish a session and avoid bookmarking the URL with the token in it.
 
-**Token auth alone is NOT enough** to safely expose to the public internet — bearer tokens travel in plaintext. Combine with one of the patterns below.
+**Token auth alone is NOT enough** to safely expose to the public internet — bearer tokens travel in plaintext. Combine with one of the patterns below (Tailscale and Cloudflare Tunnel handle transport encryption for you; the reverse-proxy pattern requires you to terminate TLS).
 
 #### 6.5.2 Recommended deployment patterns
 

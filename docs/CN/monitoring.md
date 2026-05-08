@@ -331,9 +331,9 @@ OMA_DASHBOARD_AUTH_TOKEN='<32 字节随机十六进制或更长>' bash scripts/d
 oma-dashboard --auth-token "$(openssl rand -hex 32)"
 ```
 
-浏览器访问一次 `http://<host>:<port>/?token=<token>` 之后，大多数浏览器会在该页面后续导航中保留这个 token。脚本/监控访问用 `Authorization: Bearer ...` 头。
+**程序访问优先用 `Authorization: Bearer <token>` 头**（脚本、监控、浏览器插件）。`?token=<value>` query 参数形式可以做一次性的浏览器便利，但**这个 token 会出现在 HTTP access log、Web 服务器日志、浏览器历史，以及该页面跟出去的任何链接的 `Referer` 头里**。只用一次建立 session，不要把带 token 的 URL 加书签。
 
-**单纯 token 鉴权不足以安全暴露到公网**——bearer token 是明文传的。要配合下面的方案。
+**单纯 token 鉴权不足以安全暴露到公网**——bearer token 是明文传的。要配合下面的方案（Tailscale 和 Cloudflare Tunnel 自带传输加密；反代方案需要自己终止 TLS）。
 
 #### 6.5.2 推荐部署方案
 

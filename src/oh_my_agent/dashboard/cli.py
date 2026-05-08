@@ -89,13 +89,16 @@ def _resolve_refresh_seconds(arg_value: int | None) -> int:
 def _resolve_auth_token(arg_value: str | None) -> str | None:
     """Resolve auth token: CLI flag > env var > None (no auth).
 
-    Empty strings count as 'no auth' to avoid accidentally accepting a literal
-    empty token from a misconfigured env var.
+    Empty / whitespace-only strings count as 'no auth' — defensive against
+    misconfigs that would otherwise pass the truthy check and lock everyone
+    out with a low-entropy token (Codex round-1 catch).
     """
 
-    if arg_value:
-        return arg_value
-    env_value = os.environ.get("OMA_DASHBOARD_AUTH_TOKEN")
+    if arg_value is not None:
+        stripped = arg_value.strip()
+        if stripped:
+            return stripped
+    env_value = os.environ.get("OMA_DASHBOARD_AUTH_TOKEN", "").strip()
     if env_value:
         return env_value
     return None

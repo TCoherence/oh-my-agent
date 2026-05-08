@@ -47,9 +47,13 @@ def create_app(
     """
 
     refresh_seconds = max(0, int(refresh_seconds))
-    # Empty string token treated as "no auth" — defensive against env vars
-    # that resolve to literal empty strings.
-    auth_token = auth_token or None
+    # Normalize: strip surrounding whitespace + collapse falsy values
+    # (None / "" / "   ") to None = "no auth". Defensive against env
+    # vars or CLI flags that resolve to whitespace-only strings — those
+    # would otherwise pass the truthy check and lock everyone out with
+    # an unintended low-entropy token (Codex round-1 catch).
+    if auth_token is not None:
+        auth_token = auth_token.strip() or None
 
     app = FastAPI(title="oh-my-agent dashboard", docs_url=None, redoc_url=None)
     env = Environment(
@@ -100,18 +104,30 @@ def _check_auth_token(request: Request, expected: str) -> bool:
     """Constant-time check of either ``Authorization: Bearer …`` or ``?token=…``.
 
     Uses ``hmac.compare_digest`` to avoid timing-side-channel leaks on the
-    token comparison.
+    token comparison. Wraps the comparison in try/except — ``compare_digest``
+    raises ``TypeError`` when either operand contains non-ASCII characters,
+    which would otherwise surface as a 500 to the caller (Codex round-1 catch:
+    a request like ``?token=é`` should reject as 401, not crash).
     """
 
     header = request.headers.get("authorization", "")
     if header.lower().startswith("bearer "):
         presented = header.split(" ", 1)[1].strip()
-        if presented and hmac.compare_digest(presented, expected):
+        if presented and _safe_token_eq(presented, expected):
             return True
     query_token = request.query_params.get("token")
-    if query_token and hmac.compare_digest(query_token, expected):
+    if query_token and _safe_token_eq(query_token, expected):
         return True
     return False
+
+
+def _safe_token_eq(presented: str, expected: str) -> bool:
+    """``hmac.compare_digest`` wrapper that fails closed on non-ASCII input."""
+
+    try:
+        return hmac.compare_digest(presented, expected)
+    except TypeError:
+        return False
 
 
 def _build_context(config: dict) -> dict:
