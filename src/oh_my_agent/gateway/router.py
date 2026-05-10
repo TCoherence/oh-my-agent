@@ -93,6 +93,7 @@ class OpenAICompatibleRouter:
         timeout_seconds: int = 15,
         confidence_threshold: float = 0.55,
         max_retries: int = 1,
+        max_tokens: int = 4096,
         extra_body: dict[str, Any] | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
@@ -101,6 +102,15 @@ class OpenAICompatibleRouter:
         self._timeout_seconds = int(timeout_seconds)
         self._confidence_threshold = float(confidence_threshold)
         self._max_retries = max(0, int(max_retries))
+        # Reasoning-tuned models (e.g. DeepSeek V4 flash, deepseek-reasoner)
+        # share their token budget with chain-of-thought, and pretty-printed
+        # JSON with multiple risk_hints adds up fast. 400 was the legacy
+        # default and was found to truncate content mid-JSON. max_tokens is
+        # only a ceiling — the model bills per generated token and stops
+        # naturally — so 4096 costs the same as 1024 in the common case
+        # while leaving slack for reasoner outliers. timeout_seconds (15s
+        # default) bounds worst-case latency.
+        self._max_tokens = max(1, int(max_tokens))
         raw_extra = dict(extra_body) if isinstance(extra_body, dict) else {}
         self._extra_body: dict[str, Any] = {}
         for key, value in raw_extra.items():
@@ -166,13 +176,19 @@ class OpenAICompatibleRouter:
         core_payload: dict[str, Any] = {
             "model": self._model,
             "temperature": 0,
-            "max_tokens": 400,
+            "max_tokens": self._max_tokens,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": (f"{context}\n\nCurrent user message:\n{message[:1500]}" if context else message[:1500])},
             ],
         }
         payload: dict[str, Any] = {**self._extra_body, **core_payload}
+        # Default JSON mode unless the user has explicitly set their own
+        # response_format via extra_body (e.g. a custom schema, or disabling
+        # for endpoints that reject the field). DeepSeek's OpenAI-compatible
+        # API accepts {"type":"json_object"}; the system prompt already
+        # mentions JSON, which is the only requirement for that mode.
+        payload.setdefault("response_format", {"type": "json_object"})
         attempts = self._max_retries + 1
         data: dict[str, Any] | None = None
         last_exc: Exception | None = None
@@ -210,10 +226,12 @@ class OpenAICompatibleRouter:
         parsed = self._parse_json(text)
         if not parsed:
             logger.warning(
-                "Router returned non-JSON content model=%s sample=%r",
+                "Router returned non-JSON content model=%s len=%d sample=%r",
                 self._model,
-                text[:200],
+                len(text),
+                text[:500],
             )
+            logger.debug("Router non-JSON full text model=%s text=%r", self._model, text)
             return None
 
         decision = normalize_intent(str(parsed.get("decision", "")))
@@ -273,20 +291,131 @@ class OpenAICompatibleRouter:
 
     @staticmethod
     def _parse_json(text: str) -> dict[str, Any] | None:
+        """Parse the router's JSON output, with three layers of recovery.
+
+        Layer 1: direct ``json.loads`` after stripping markdown code fences
+        (`````json … ````` is a common output style for
+        instruction-tuned models even when JSON mode is on).
+
+        Layer 2: substring between the first ``{`` and the last ``}`` —
+        catches prose-wrapped JSON (``"Here you go: {...}"``).
+
+        Layer 3: best-effort recovery for JSON that was truncated mid-output
+        because the model hit ``max_tokens`` mid-emission. We walk the text
+        tracking string and bracket state, then auto-close any open string
+        plus pending brackets in reverse order. Without this, reasoning
+        models like DeepSeek V4 flash that emit pretty-printed JSON
+        occasionally got their output dropped entirely on the unlucky run.
+        """
         text = text.strip()
         if not text:
             return None
+
+        # Strip markdown code fences (```json ... ``` / ``` ... ```).
+        if text.startswith("```"):
+            first_newline = text.find("\n")
+            if first_newline > 0:
+                text = text[first_newline + 1 :]
+            if text.endswith("```"):
+                text = text[:-3]
+            text = text.strip()
+
+        # Layer 1: direct parse.
         try:
-            return json.loads(text)
+            result = json.loads(text)
+            return result if isinstance(result, dict) else None
         except json.JSONDecodeError:
-            start = text.find("{")
-            end = text.rfind("}")
-            if start == -1 or end == -1 or end <= start:
-                return None
+            pass
+
+        # Layer 2: prose-wrapped — pluck the longest {...} candidate.
+        start = text.find("{")
+        if start == -1:
+            return None
+        end = text.rfind("}")
+        if end > start:
             try:
-                return json.loads(text[start : end + 1])
+                result = json.loads(text[start : end + 1])
+                if isinstance(result, dict):
+                    return result
             except json.JSONDecodeError:
-                return None
+                pass
+
+        # Layer 3: truncation recovery.
+        return OpenAICompatibleRouter._recover_truncated_json(text[start:])
+
+    @staticmethod
+    def _recover_truncated_json(text: str) -> dict[str, Any] | None:
+        """Best-effort parse of JSON cut off by max_tokens.
+
+        Scans ``text`` once tracking string/escape state and a bracket
+        stack. On EOF we (a) close any half-open string, (b) drop a dangling
+        comma or bare key prefix, then (c) close the bracket stack in reverse
+        order. If that still doesn't parse we fall back to truncating at the
+        last comma seen at top-level depth and closing the object — that
+        recovers the leading complete key/value pairs even if a later one
+        got chopped mid-value.
+        """
+        if not text or text[0] != "{":
+            return None
+
+        in_string = False
+        escape = False
+        stack: list[str] = []
+        # Index just before the comma that ended the most recent fully
+        # complete top-level key/value pair (so [:idx] + "}" is valid JSON).
+        last_complete_pair_end = -1
+
+        for i, ch in enumerate(text):
+            if escape:
+                escape = False
+                continue
+            if in_string:
+                if ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    in_string = False
+                continue
+            if ch == '"':
+                in_string = True
+                continue
+            if ch in "{[":
+                stack.append("}" if ch == "{" else "]")
+            elif ch in "}]":
+                if stack and stack[-1] == ch:
+                    stack.pop()
+            elif ch == "," and len(stack) == 1 and stack[0] == "}":
+                last_complete_pair_end = i
+
+        # Strategy A: close what's open.
+        # 1) close a half-open string with a quote
+        # 2) trim trailing whitespace + a dangling comma (``{"a":1,`` → ``{"a":1``)
+        # 3) close pending brackets in reverse stack order
+        # Cases this leaves invalid (e.g. ``{"a":1,"b`` produces ``{"a":1,"b"}``
+        # — a key with no value) fall through to Strategy B.
+        candidate = text
+        if in_string:
+            candidate += '"'
+        candidate = candidate.rstrip().rstrip(",").rstrip()
+        candidate += "".join(reversed(stack))
+        try:
+            result = json.loads(candidate)
+            if isinstance(result, dict):
+                return result
+        except json.JSONDecodeError:
+            pass
+
+        # Strategy B: keep only the prefix up to the last complete
+        # top-level pair, then close the object.
+        if last_complete_pair_end > 0:
+            prefix = text[:last_complete_pair_end] + "}"
+            try:
+                result = json.loads(prefix)
+                if isinstance(result, dict):
+                    return result
+            except json.JSONDecodeError:
+                pass
+
+        return None
 
     @staticmethod
     def _to_float(value: Any) -> float:

@@ -281,7 +281,8 @@ async def test_router_extra_body_cannot_override_reserved_keys(monkeypatch):
     await router.route("hi")
     payload = captured["payload"]
     assert payload["model"] == "safe-model"
-    assert payload["max_tokens"] == 400
+    # Default max_tokens (4096) wins — extra_body cannot inflate it to 999999.
+    assert payload["max_tokens"] == 4096
     assert payload["temperature"] == 0
     # Our user message must survive, not the injected hijack.
     user_msg = payload["messages"][-1]
@@ -329,3 +330,186 @@ async def test_router_parses_repair_skill_decision(monkeypatch):
     assert out.skill_name == "top-5-daily-news"
     assert out.task_type == "skill_change"
     assert out.completion_mode == "merge"
+
+
+# ── DeepSeek V4 / reasoning-model adaptation regression tests ─────────── #
+#
+# These exercise the parsing layers added when DeepSeek V4 flash output
+# started occasionally getting truncated mid-JSON (reasoning tokens eat
+# the budget; pretty-printed output with multi-element ``risk_hints``
+# crosses the old 400-token ceiling). Without recovery, the router would
+# log ``Router returned non-JSON content`` and fall back to heuristics.
+
+
+@pytest.mark.asyncio
+async def test_router_recovers_truncated_json_pretty_printed(monkeypatch):
+    """Real DeepSeek V4 flash failure mode: output cut off after a partial
+    string value. Recovery should still surface the leading complete pairs."""
+    router = OpenAICompatibleRouter(
+        base_url="https://api.example.com/v1",
+        api_key="k",
+        model="deepseek-v4-flash",
+    )
+
+    truncated = (
+        '{\n'
+        '  "decision": "chat_reply",\n'
+        '  "confidence": 0.95,\n'
+        '  "goal": "",\n'
+        '  "risk_hints": ["lo'  # cut off mid-string, no closing quote/bracket/brace
+    )
+
+    def _fake_post(_payload):
+        return {"choices": [{"message": {"content": truncated}}]}
+
+    monkeypatch.setattr(router, "_post_json", _fake_post)
+    out = await router.route("飞书文档怎么接入比较方便？")
+    assert out is not None, "truncated JSON must still produce a decision"
+    # decision/confidence are what actually drive routing — those must
+    # round-trip exactly even from truncated input.
+    assert out.decision == "chat_reply"
+    assert out.confidence == 0.95
+    # ``risk_hints`` got cut mid-string. Strategy A closes the dangling
+    # string and the open brackets, so we get the truncated literal back
+    # ("lo") rather than dropping the whole list. That's strictly better
+    # than the pre-fix behavior of dropping the entire response.
+    assert out.risk_hints == ["lo"]
+
+
+@pytest.mark.asyncio
+async def test_router_recovers_truncated_json_after_complete_pair(monkeypatch):
+    """When the model dies right after a comma, the safe-prefix strategy
+    picks up the complete pairs to the left."""
+    router = OpenAICompatibleRouter(
+        base_url="https://api.example.com/v1",
+        api_key="k",
+        model="deepseek-v4-flash",
+    )
+
+    truncated = (
+        '{"decision":"oneoff_artifact","confidence":0.8,'
+        '"goal":"daily news brief","task_type":"artifact",'
+        '"completion_mode":"reply","risk_hints":["mu'  # killed mid risk_hints
+    )
+
+    def _fake_post(_payload):
+        return {"choices": [{"message": {"content": truncated}}]}
+
+    monkeypatch.setattr(router, "_post_json", _fake_post)
+    out = await router.route("生成一份今日新闻速读")
+    assert out is not None
+    assert out.decision == "oneoff_artifact"
+    assert out.task_type == "artifact"
+    assert out.completion_mode == "reply"
+    assert out.goal == "daily news brief"
+
+
+@pytest.mark.asyncio
+async def test_router_strips_markdown_code_fences(monkeypatch):
+    """Some models still wrap JSON in ```json … ``` even with json mode on."""
+    router = OpenAICompatibleRouter(
+        base_url="https://api.example.com/v1",
+        api_key="k",
+        model="m",
+    )
+
+    fenced = (
+        "```json\n"
+        '{"decision":"chat_reply","confidence":0.9,"goal":"","risk_hints":[]}\n'
+        "```"
+    )
+
+    def _fake_post(_payload):
+        return {"choices": [{"message": {"content": fenced}}]}
+
+    monkeypatch.setattr(router, "_post_json", _fake_post)
+    out = await router.route("hi")
+    assert out is not None
+    assert out.decision == "chat_reply"
+
+
+@pytest.mark.asyncio
+async def test_router_defaults_to_json_response_format(monkeypatch):
+    """JSON mode is on by default — DeepSeek and OpenAI-compatible APIs
+    accept ``response_format: {"type":"json_object"}`` and emit far less
+    prose wrapping when it is set."""
+    router = OpenAICompatibleRouter(
+        base_url="https://api.example.com/v1",
+        api_key="k",
+        model="m",
+    )
+    captured: dict = {}
+
+    def _spy_post(payload):
+        captured["payload"] = payload
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": '{"decision":"chat_reply","confidence":0.9,"goal":"","risk_hints":[]}'
+                    }
+                }
+            ]
+        }
+
+    monkeypatch.setattr(router, "_post_json", _spy_post)
+    await router.route("hi")
+    assert captured["payload"].get("response_format") == {"type": "json_object"}
+
+
+@pytest.mark.asyncio
+async def test_router_extra_body_can_override_response_format(monkeypatch):
+    """Operators on endpoints that reject ``json_object`` (or want a custom
+    schema) must be able to override via ``extra_body`` — ``response_format``
+    is intentionally NOT in the reserved-key list."""
+    router = OpenAICompatibleRouter(
+        base_url="https://api.example.com/v1",
+        api_key="k",
+        model="m",
+        extra_body={"response_format": {"type": "text"}},
+    )
+    captured: dict = {}
+
+    def _spy_post(payload):
+        captured["payload"] = payload
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": '{"decision":"chat_reply","confidence":0.9,"goal":"","risk_hints":[]}'
+                    }
+                }
+            ]
+        }
+
+    monkeypatch.setattr(router, "_post_json", _spy_post)
+    await router.route("hi")
+    assert captured["payload"].get("response_format") == {"type": "text"}
+
+
+@pytest.mark.asyncio
+async def test_router_max_tokens_constructor_param_propagates(monkeypatch):
+    """Operators can dial up the budget for very chatty reasoning models."""
+    router = OpenAICompatibleRouter(
+        base_url="https://api.example.com/v1",
+        api_key="k",
+        model="m",
+        max_tokens=4096,
+    )
+    captured: dict = {}
+
+    def _spy_post(payload):
+        captured["payload"] = payload
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": '{"decision":"chat_reply","confidence":0.9,"goal":"","risk_hints":[]}'
+                    }
+                }
+            ]
+        }
+
+    monkeypatch.setattr(router, "_post_json", _spy_post)
+    await router.route("hi")
+    assert captured["payload"]["max_tokens"] == 4096

@@ -942,6 +942,7 @@ async def ignite(ctx: BootContext) -> None:
                     timeout_seconds=int(router_cfg.get("timeout_seconds", 15)),
                     confidence_threshold=float(router_cfg.get("confidence_threshold", 0.55)),
                     max_retries=int(router_cfg.get("max_retries", 1)),
+                    max_tokens=int(router_cfg.get("max_tokens", 4096)),
                     extra_body=extra_body_cfg,
                 )
                 logger.info(
