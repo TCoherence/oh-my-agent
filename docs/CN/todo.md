@@ -221,6 +221,7 @@
 
 ## Backlog（无版本承诺）
 
+- [ ] **真正把 dashboard 暴露到 loopback 之外（pre-1.0）**。PR #48 已经 ship 了 in-app token 鉴权（`OMA_DASHBOARD_AUTH_TOKEN` → `Authorization: Bearer ...` + `?token=...`）和 `monitoring.md §6.5` 的三种部署方案 walkthrough（Tailscale / Cloudflare Tunnel + Access / 反向代理 + Basic Auth + TLS）。但实际部署形态还是 loopback-only：`compose.yaml` publish `127.0.0.1:8080:8080`，`scripts/docker-common.sh` 默认 `DASHBOARD_BIND_HOST=127.0.0.1`。要走 §6.5 任一方案，operator 还得手动 fork 这两个文件（或设 `OMA_DASHBOARD_BIND_HOST=0.0.0.0`）。pre-1.0 接力：挑一个 canonical 方案（单 host 单 user 默认走 Tailscale；公开分享走 Cloudflare Tunnel + Access 做 documented alt），把对应 `compose.yaml` overlay 或 sidecar（`cloudflared` 容器、Tailscale serve config 之类）ship 出来，把 operator 侧从"读 §6.5 自己挑"降到"跟着 3 行命令走"。Token 鉴权 + 文档已经盖住安全边界，缺的是 turnkey 部署。
 - [ ] Live observability ring buffer + 状态卡 live excerpt
 - [ ] 交付策略细化（inline summary / attachment / link），包括 Discord 友好的 markdown-heavy 产物展示：表格自动降级为 code block / list、可选 CSV/HTML/图片附件，以及适合 scoreboard 的 embed/card 交付模式
 - [ ] 长产物的最终交付：skill 已经把完整 markdown/json 落盘到 `runtime.reports_dir/...` 之后（例如 `market-briefing` weekly synthesis 的 38KB cross-domain.md），agent 仍然会把整段 markdown 当 assistant 文本回一次给 Discord —— 等于把已落盘内容再用 token 流重新生成一遍，既浪费 output token，又会把数分钟纯输出生成时间塞进 subprocess wall-clock 预算（real case：`bdcf9908d735` 2026-05-03 weekly，persist 在 18:16 成功，最后的 chat reply 还没生成完就被 1500s wall 砍了）。方向：runtime 把已发布路径作为 truth source，agent 只回简短摘要 + path，runtime 自己读盘 chunk 上传/贴文，与 CLAUDE.md 的 "single published artifact path" 语义对齐。和上一条 markdown rendering 风格细化是不同切面：上一条管"怎么把内容渲染好"，这条管"不要让 agent 再生一次已落盘内容"
