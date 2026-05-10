@@ -8,6 +8,7 @@ merge, missing files, and traceback-line graceful skip.
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -277,28 +278,35 @@ def test_fetch_memory_summary_missing(tmp_path: Path) -> None:
 
 
 def test_fetch_memory_summary_active_vs_superseded(tmp_path: Path) -> None:
+    # Use relative timestamps so the ``new_7d`` window assertion never
+    # time-bombs. m-1 and m-3 must fall inside the last 7 days; m-2 stays
+    # well outside.
+    now = datetime.now(timezone.utc)
+    recent_a = (now - timedelta(days=1)).isoformat()
+    recent_b = (now - timedelta(days=5)).isoformat()
+    old = (now - timedelta(days=400)).isoformat()
     yaml_path = tmp_path / "memories.yaml"
     yaml_path.write_text(
-        """
+        f"""
 entries:
   - id: m-1
     summary: Active preference
     status: active
     category: preference
     scope: global_user
-    created_at: "2026-05-03T00:00:00+00:00"
+    created_at: "{recent_a}"
   - id: m-2
     summary: Superseded fact
     status: superseded
     category: fact
     scope: workspace
-    created_at: "2025-01-01T00:00:00+00:00"
+    created_at: "{old}"
   - id: m-3
     summary: Active workflow
     status: active
     category: workflow
     scope: skill
-    created_at: "2026-04-29T00:00:00+00:00"
+    created_at: "{recent_b}"
 """,
         encoding="utf-8",
     )
@@ -310,8 +318,8 @@ entries:
     assert r["by_category"]["fact"] == 1
     assert r["by_category"]["workflow"] == 1
     assert r["by_scope"]["global_user"] == 1
-    # m-1 and m-3 created within last 7 days
-    assert r["new_7d"] >= 1
+    # m-1 and m-3 are within the last 7 days; m-2 is 400 days out.
+    assert r["new_7d"] == 2
 
 
 # ---------------------------------------------------------------------------
