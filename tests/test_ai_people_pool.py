@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 def _load_module():
-    path = Path("skills/market-briefing/scripts/ai_people_pool.py")
+    path = Path("skills/market-briefing-ai/scripts/ai_people_pool.py")
     spec = importlib.util.spec_from_file_location("market_briefing_ai_people_pool", path)
     assert spec is not None
     assert spec.loader is not None

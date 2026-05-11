@@ -21,7 +21,7 @@
 
 ## 禁止的源
 
-- 外部网络搜索（跨站综述、新闻报道）：**不允许**。本 skill 只依赖 YouTube 本身的字幕/描述。若某集确实值得深挖周边报道，走 `youtube-video-summary` 或 `market-briefing` skill，不要在本报告里混入。
+- 外部网络搜索（跨站综述、新闻报道）：**不允许**。本 skill 只依赖 YouTube 本身的字幕/描述。若某集确实值得深挖周边报道，走 `youtube-video-summary` 或 `market-briefing-ai` / `market-briefing-finance`，不要在本报告里混入。
 - 频道主页 tab 文案、评论区：**不允许**。仅 per-video 的字幕与 description。
 - 其他 podcast 平台（Spotify、Apple Podcasts）的 shownotes：**不允许**，源头不可控。
 

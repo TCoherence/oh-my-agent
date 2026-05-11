@@ -4,7 +4,7 @@
 
 ## 读写边界
 
-- 外部消费方（如 `market-briefing` AI daily）**只读**。
+- 外部消费方（如 `market-briefing-ai`）**只读**。
 - 写入只由 `paper-digest` 自己的 `scripts/report_store.py persist` 完成。
 - 任何消费方都不得修改 `~/.oh-my-agent/reports/paper-digest/**` 下的文件。
 
@@ -40,9 +40,9 @@ top_picks        [PaperContract]
 
 消费方可假设这四个字段存在；其他字段可能有但不保证。
 
-## 典型消费范例（market-briefing AI daily）
+## 典型消费范例（market-briefing-ai）
 
-在 AI daily prompt 里可以加一段：
+在 market-briefing-ai 的 prompt 里可以加一段：
 
 ```
 在撰写「Frontier Labs / Frontier Model Radar」之后，读取
@@ -67,5 +67,5 @@ top_picks        [PaperContract]
 ## 不被承诺的
 
 - `category_hits`、`extended_reading`、`new_authors`、`tracked_labs_seen` 当前内部使用，未来可能重构。外部消费方不应依赖。
-- `sections[]` 内部字段（`slug`/`heading`/`summary`/`bullets`）对齐 market-briefing 家族的 schema，但不是跨家族稳定契约。
+- `sections[]` 内部字段（`slug`/`heading`/`summary`/`bullets`）对齐 market-briefing-* 系列家族的 schema，但不是跨家族稳定契约。
 - `ranking_score` / `ranking_reasons` 是调试信号，可能随 watchlist 或排序算法变化。

@@ -119,9 +119,9 @@ name: daily-ai-briefing
 enabled: true
 platform: discord
 channel_id: "${DISCORD_CHANNEL_ID}"
-prompt: "Run the market-briefing skill for today's AI digest."
+prompt: "Run the market-briefing-ai skill for today's AI digest."
 agent: claude
-skill_name: market-briefing
+skill_name: market-briefing-ai
 cron: "0 9 * * *"
 auto_approve: true
 ```
@@ -146,7 +146,7 @@ DRAFT → RUNNING → VALIDATING → WAITING_MERGE → MERGED / COMPLETED
 
 | Skill | Description |
 |-------|-------------|
-| `market-briefing` | Chinese-first politics / finance / AI market briefings with persisted reports |
+| `market-briefing-*` | Chinese-first politics / finance / AI daily + cross-domain weekly briefings (`-ai` / `-finance` / `-politics` / `-weekly`) with persisted reports |
 | `paper-digest` | Daily arXiv + HuggingFace + Semantic Scholar paper radar (Chinese) |
 | `youtube-video-summary` | Single-link YouTube video summary via transcript-first extraction |
 | `youtube-podcast-digest` | Weekly digest of subscribed YouTube podcast channels (VC / AI / markets) |

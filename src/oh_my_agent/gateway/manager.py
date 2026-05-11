@@ -1290,7 +1290,7 @@ class GatewayManager:
                 # SKILL.md ``metadata.timeout_seconds`` / ``max_turns``
                 # used to apply only on the inline AgentRegistry.run path.
                 # Forward them so a long-running skill like
-                # ``market-briefing`` (1200s) still gets its budget when
+                # ``market-briefing-ai`` (1500s) still gets its budget when
                 # the runtime hosts the call.
                 agent_timeout_seconds=self._skill_timeout_seconds_by_name(explicit_skill),
                 agent_max_turns=self._skill_max_turns_by_name(explicit_skill),

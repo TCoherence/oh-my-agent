@@ -121,7 +121,7 @@ A prompt sitting in `resolving` for more than a minute usually means the agent c
 - Loaded automations: `4`
 - Active jobs: `4`
 - Recent failures: `1`
-  - market_briefing: HTTP 502 from upstream feed
+  - market_briefing_ai: HTTP 502 from upstream feed
 ```
 
 | Field | Meaning |

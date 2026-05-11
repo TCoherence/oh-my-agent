@@ -262,13 +262,13 @@ def _task(automation_name: str | None) -> MagicMock:
 @pytest.mark.asyncio
 async def test_terminal_push_fires_for_automation_complete():
     helper, spy = _make_runtime_helper_owner()
-    helper(_task("market-briefing"), kind="automation_complete", body="done!")
+    helper(_task("market-briefing-ai"), kind="automation_complete", body="done!")
     await asyncio.sleep(0.01)
 
     assert len(spy.events) == 1
     ev = spy.events[0]
     assert ev.kind == "automation_complete"
-    assert "market-briefing" in ev.title
+    assert "market-briefing-ai" in ev.title
     assert ev.body == "done!"
     assert ev.group == "automation"
 

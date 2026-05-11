@@ -24,7 +24,7 @@ cron: "0 9 * * *"                 # standard 5-field cron (minute hour day month
 agent: claude                     # claude | gemini | codex (default: fallback order)
 
 # Skill binding — enables timeout inheritance from SKILL.md metadata
-skill_name: market-briefing       # must match a skills/<name>/SKILL.md
+skill_name: market-briefing-ai    # must match a skills/<name>/SKILL.md
 
 # Delivery
 delivery: channel                 # "channel" (default) or "dm"

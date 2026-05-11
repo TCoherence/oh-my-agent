@@ -1,78 +1,49 @@
 ---
-name: market-briefing
-description: Produce Chinese-first politics, finance, and AI market briefings with persisted Markdown and JSON outputs under ~/.oh-my-agent/reports/market-briefing/. Use this skill for bounded historical bootstrap dossiers, domain daily digests, and cross-domain weekly synthesis that should reuse prior stored reports rather than relying on Discord history.
+name: market-briefing-ai
+description: Produce Chinese-first AI market briefings (frontier labs / paper layer / people pool / 5-layer macro) with persisted Markdown and JSON outputs under ~/.oh-my-agent/reports/market-briefing/. The daily run produces 4 sub-section files plus a final aggregate; sub-sections persist immediately so a timeout mid-run preserves whatever landed. Reads paper-digest's daily JSON directly instead of re-searching arXiv. Use for daily AI digests and bounded historical AI bootstrap dossiers.
 metadata:
   timeout_seconds: 1500
   max_turns: 60
 ---
 
-# Market Briefing
+# Market Briefing — AI
 
-Use this skill for recurring politics, finance, and AI briefings. This is one core skill with three explicit modes:
-
-- `bootstrap_backfill`
-- `daily_digest`
-- `weekly_synthesis`
-
-The skill is report-centric. It writes durable report files under `~/.oh-my-agent/reports/market-briefing/` so later weekly synthesis can build on stored report history instead of only relying on Discord chat history.
+Use this skill for the recurring AI daily briefing and bounded historical AI bootstrap dossiers. This skill is report-centric: it writes durable report files under `~/.oh-my-agent/reports/market-briefing/` so later weekly synthesis (handled by `market-briefing-weekly`) can build on stored report history instead of relying on Discord chat history.
 
 ## When to use
 
-- User wants a politics / finance / AI daily report.
-- User wants a weekly synthesis across those domains.
-- User wants a bounded historical backfill to seed future reporting.
-- User wants automation-ready prompts or templates for recurring market briefings.
+- User wants an AI daily report (frontier labs / papers / people / 5-layer / cross-layer).
+- User wants a bounded historical backfill to seed future AI reporting.
+- User wants automation-ready prompts or templates for recurring AI market briefings.
 
-## Mode/domain/date discipline
+If the user asks for finance, politics, or cross-domain weekly, prefer the sibling skills (`market-briefing-finance` / `market-briefing-politics` / `market-briefing-weekly`).
 
-- Always make `mode`, `domain`, and `report date` explicit in the working plan.
-- Do not silently default to `daily_digest + ai` just because the user asked for a generic report.
-- If the user intent clearly matches one domain, lock that domain explicitly.
-- If the user intent spans multiple domains, prefer:
-  - multiple domain daily reports, or
-  - one `weekly_synthesis` cross-domain report
+## Mode/date discipline
+
+- Always make `mode` and `report date` explicit in the working plan (`domain` is fixed to `ai` for this skill).
 - If no report date is specified, default to the current local date of the runtime environment (derived from `OMA_REPORT_TIMEZONE` or `TZ` when set) and state it explicitly in the title and JSON metadata.
 - Do not invent a future date unless the user explicitly requests a future-dated planning memo.
 
-## Mode and domain model
+## Modes
 
-### Modes
-
-- `bootstrap_backfill`
-  - Build one bounded historical dossier for a domain.
-  - Do **not** generate fake historical daily files.
 - `daily_digest`
-  - Generate one daily report for a single domain.
-- `weekly_synthesis`
-  - Generate one cross-domain weekly report using recent stored daily reports plus bootstrap context.
-
-### Domains
-
-- `politics`
-- `finance`
-- `ai`
-- `cross-domain` is used only for `weekly_synthesis`
-
-### Default backfill windows
-
-- `politics`: 30 days
-- `finance`: 30 days
-- `ai`: 14 days
+  - Generate one daily AI report.
+- `bootstrap_backfill`
+  - Build one bounded historical AI dossier. Default backfill window: **14 days**. Do **not** generate fake historical daily files.
 
 ## Required workflow
 
-1. Pick the explicit mode and domain.
-2. **(AI / finance daily) Prefetch podcasts** — run the podcast fetch script to get latest episodes from subscribed channels:
+1. Pick the explicit mode (`daily_digest` is the common case).
+2. **Prefetch podcasts** — run the podcast fetch script to get latest episodes from subscribed AI channels:
    ```bash
-   ./.venv/bin/python ${OMA_AGENT_HOME}/skills/market-briefing/scripts/podcast_fetch.py --domain ai
-   ./.venv/bin/python ${OMA_AGENT_HOME}/skills/market-briefing/scripts/podcast_fetch.py --domain finance
+   ./.venv/bin/python ${OMA_AGENT_HOME}/skills/market-briefing-ai/scripts/podcast_fetch.py --domain ai
    ```
-   Use `--domain ai` for AI daily, `--domain finance` for finance daily. The script outputs a JSON array of episodes updated within the last 48 hours. Use this output directly for the `🎙️ 播客动态` section — do not run a separate web search for podcasts.
+   The script outputs a JSON array of episodes updated within the last 48 hours. Use this output directly for the `🎙️ 播客动态` section — do not run a separate web search for podcasts.
    If the script returns an empty array or fails, write "今日订阅播客暂无更新" in the podcast section and move on.
-3. Load prior stored context with the helper script.
+3. Load prior stored context with the helper script (see workflow below for the specific invocation).
 4. Generate a starter Markdown + JSON scaffold.
-5. Do external research for the requested mode/domain.
-6. Fill the Markdown + JSON with the researched content (include prefetched podcast data for AI / finance daily).
+5. Do external research for the requested mode.
+6. Fill the Markdown + JSON with the researched content (include prefetched podcast data).
 7. Persist both files into the canonical report store.
 8. Output the report — see **Final answer format** below. (This is mandatory; the user only sees your final assistant message.)
 
@@ -82,8 +53,8 @@ The full Markdown report is on disk; **do NOT re-paste it verbatim in chat**. Re
 
 **Required content in the chat reply:**
 
-1. **Headline conclusion (1–3 sentences)**: today's main read for this domain — the call/judgment, plus the single most important driver and its main caveat.
-2. **Per-section highlights (one short bullet per section in the canonical order for the domain)**: 1–2 sentences each. For AI daily: frontier_radar / paper_layer / people_pool / 5-layer / cross-layer. For finance daily: 中国宏观 / 美国宏观 / 美国波动 / 中港市场 / 持仓动态 / 播客. For politics daily: 中国中央政策 / 美国联邦政策 / 中美地缘 / 影响判断. For weekly synthesis: cross-domain trend summary + the 3–5 strongest cross-references between domains.
+1. **Headline conclusion (1–3 sentences)**: today's main AI read — the call/judgment, plus the single most important driver and its main caveat.
+2. **Per-section highlights (one short bullet per section in the canonical AI order)**: 1–2 sentences each — frontier_radar / paper_layer / people_pool / 5-layer / cross-layer.
 3. **Top picks / signals (3–5 highest-impact items)**: paste the actual entries with their inline citations from the body — these are what the reader needs to see in chat without opening the file.
 4. **Coverage notes**: any non-empty `coverage_gaps` / `confidence_flags` / source-mix caveats from the JSON, in 1–2 sentences. Skip if empty.
 5. **Storage paths** at the end (the published `.md` / `.json` pair).
@@ -93,11 +64,13 @@ Layout:
 ```
 <headline conclusion>
 
-**[<domain>] 各 section 速览**
+**[AI] 各 section 速览**
 
-- frontier_radar / 中国宏观 / 中国中央政策 / 跨域趋势: <1–2 sentences>
-- paper_layer / 美国宏观 / 美国联邦政策 / 跨域链接: <1–2 sentences>
-- ... (continue per the domain's section order)
+- frontier_radar: <1–2 sentences>
+- paper_layer: <1–2 sentences>
+- people_pool: <1–2 sentences>
+- 5-layer: <1–2 sentences>
+- cross-layer: <1–2 sentences>
 
 **Top picks**
 
@@ -111,8 +84,8 @@ Layout:
 - <flag 1>
 
 📁 Stored at:
-- ~/.oh-my-agent/reports/market-briefing/daily/<date>/<domain>.md
-- ~/.oh-my-agent/reports/market-briefing/daily/<date>/<domain>.json
+- ~/.oh-my-agent/reports/market-briefing/daily/<date>/ai.md
+- ~/.oh-my-agent/reports/market-briefing/daily/<date>/ai.json
 ```
 
 ❌ Don't end the turn with "Done.", "Report saved.", or a short progress summary — those are status notes, not the answer.
@@ -125,9 +98,9 @@ Layout:
 
 Canonical storage paths:
 
-- `~/.oh-my-agent/reports/market-briefing/bootstrap/<domain>/<date>.md|json`
-- `~/.oh-my-agent/reports/market-briefing/daily/<date>/<domain>.md|json`
-- `~/.oh-my-agent/reports/market-briefing/weekly/<iso-week>/cross-domain.md|json`
+- `~/.oh-my-agent/reports/market-briefing/bootstrap/ai/<date>.md|json`
+- `~/.oh-my-agent/reports/market-briefing/daily/<date>/ai.md|json`
+- `~/.oh-my-agent/reports/market-briefing/daily/<date>/ai_sections/<section>.md|json` (4 sub-sections)
 
 Use the helper script for path generation and persistence. Do not hand-roll paths unless you are patching the helper itself.
 
@@ -137,90 +110,26 @@ Read the relevant references before drafting:
 
 - `references/report_schema.md`
 - `references/source_policy.md`
-- `references/finance_watchlist.md`
 - `references/ai_frontier_watchlist.md`
 - `references/ai_people_seed.yaml`
+- `references/section_schemas.md`
 - `references/podcast_feeds.yaml`
 - `references/automation_templates.md`
 - `references/prompt_recipes.md`
 
 ### Daily report structure
 
-- `politics`
-  - 中国中央政策 / 决策信号
-  - 美国联邦政策 / 决策信号
-  - 中美 / 地缘政治动态
-  - 影响判断与后续观察点
-- `finance`
-  - 中国宏观与政策
-  - 美国宏观与政策
-  - 美国市场波动与风险偏好
-  - 中国 / 香港市场脉搏
-  - 中国房地产政策与融资信号
-  - 重点持仓财报 / 管理层表态 / CEO 公开发言
-  - 市场与指数基金视角
-  - 🎙️ 播客动态（from prefetch, 48h freshness window）
-  - 后续观察点
-  - 默认持仓池：
-    - `NVDA`
-    - `MSFT`
-    - `AAPL`
-    - `AMZN`
-    - `GOOG`
-    - `TSLA`
-    - `META`
-    - `VOO`
-    - `SPY`
-    - `S&P 500`
-  - 持仓池默认滚动窗口：`7 天`
-- `ai`
-  - Frontier Labs / Frontier Model Radar
-  - 关键人物与社区信号
-  - 固定五层：
-    - `energy`
-    - `chips`
-    - `infra`
-    - `model`
-    - `application`
-  - 层间联动影响
-  - 🎙️ 播客动态（from prefetch, 48h freshness window）
-  - 候选池变化与后续关注
-
-### Politics vs finance boundary
-
-- `finance`
-  - 关注政策对市场、融资、住房、信用、风险偏好的影响
-- `politics`
-  - 关注政策文本本身、立法/行政背景、地缘/安全/供应链政治含义
-- 同一政策如果两边都提：
-  - finance 写市场影响
-  - politics 写政策与地缘背景
-  - 不允许两边写成重复摘要
-
-### Weekly synthesis structure
-
-Use:
-
-- recent 7 daily reports
-- latest bootstrap dossier for each domain
-- a bounded number of previous weekly reports
-
-The weekly report should stay cross-domain and focus on structure, trend, and continuity rather than repeating raw headlines.
-
-Finance weekly must explicitly absorb:
-
-- US market volatility
-- China / Hong Kong market pulse
-- China property policy changes
-- tracked holdings and broad-market implications
-
-AI weekly must explicitly absorb:
-
-- frontier-lab watch
-- people/community signals
-- five-layer developments
-
-Weekly JSON remains structurally light and should not copy all daily-only JSON fields into the weekly sidecar.
+- Frontier Labs / Frontier Model Radar
+- 关键人物与社区信号
+- 固定五层：
+  - `energy`
+  - `chips`
+  - `infra`
+  - `model`
+  - `application`
+- 层间联动影响
+- 🎙️ 播客动态（from prefetch, 48h freshness window）
+- 候选池变化与后续关注
 
 ## Source policy
 
@@ -258,7 +167,7 @@ In every command below, omit `--report-date` so the script uses today's local da
 0. **(Re-run path) Check for already-complete sub-sections.** Before drafting anything, run:
 
    ```bash
-   ./.venv/bin/python ${OMA_AGENT_HOME}/skills/market-briefing/scripts/report_store.py section-status \
+   ./.venv/bin/python ${OMA_AGENT_HOME}/skills/market-briefing-ai/scripts/report_store.py section-status \
        --domain ai
    ```
 
@@ -267,7 +176,7 @@ In every command below, omit `--report-date` so the script uses today's local da
 1. **Prefetch podcasts** (always run, fast):
 
    ```bash
-   ./.venv/bin/python ${OMA_AGENT_HOME}/skills/market-briefing/scripts/podcast_fetch.py --domain ai
+   ./.venv/bin/python ${OMA_AGENT_HOME}/skills/market-briefing-ai/scripts/podcast_fetch.py --domain ai
    ```
 
    Save the output for the `🎙️ 播客动态` section in the final aggregate. If the script returns an empty array or fails, plan to write `今日订阅播客暂无更新` in the aggregate and move on. Podcasts are not a sub-section — they live only in the final aggregate.
@@ -275,8 +184,8 @@ In every command below, omit `--report-date` so the script uses today's local da
 2. **Load historical context + people pool**:
 
    ```bash
-   ./.venv/bin/python ${OMA_AGENT_HOME}/skills/market-briefing/scripts/report_store.py context --mode daily_digest --domain ai
-   ./.venv/bin/python ${OMA_AGENT_HOME}/skills/market-briefing/scripts/ai_people_pool.py context
+   ./.venv/bin/python ${OMA_AGENT_HOME}/skills/market-briefing-ai/scripts/report_store.py context --mode daily_digest --domain ai
+   ./.venv/bin/python ${OMA_AGENT_HOME}/skills/market-briefing-ai/scripts/ai_people_pool.py context
    ```
 
 3. **Draft + persist each sub-section, immediately**. The 4 sub-sections are largely independent; do NOT batch their persists. Each one is `write Markdown` → `write JSON matching schema` → `persist-section` → move to next.
@@ -287,7 +196,7 @@ In every command below, omit `--report-date` so the script uses today's local da
    # 1. Write the section's draft to /tmp scratch files
    #    (use the schema in references/section_schemas.md)
    # 2. Persist immediately:
-   ./.venv/bin/python ${OMA_AGENT_HOME}/skills/market-briefing/scripts/report_store.py persist-section \
+   ./.venv/bin/python ${OMA_AGENT_HOME}/skills/market-briefing-ai/scripts/report_store.py persist-section \
        --domain ai --section <name> \
        --markdown-file /tmp/ai_<name>.md --json-file /tmp/ai_<name>.json
    ```
@@ -319,7 +228,7 @@ In every command below, omit `--report-date` so the script uses today's local da
    Persist via the existing `persist` command (no `--section` flag — this is the final aggregate, not a sub-section):
 
    ```bash
-   ./.venv/bin/python ${OMA_AGENT_HOME}/skills/market-briefing/scripts/report_store.py persist \
+   ./.venv/bin/python ${OMA_AGENT_HOME}/skills/market-briefing-ai/scripts/report_store.py persist \
        --mode daily_digest --domain ai \
        --markdown-file /tmp/ai.md --json-file /tmp/ai.json
    ```
@@ -386,10 +295,10 @@ Optional but valuable: `x_handle`, `role`, `search_terms`, `cross_checked`, `pro
 
 ## Podcast section rules
 
-The `🎙️ 播客动态` section appears in AI and finance daily reports.
+The `🎙️ 播客动态` section is part of the AI daily report.
 
 - Data comes exclusively from `podcast_fetch.py` output — do not web-search for additional podcasts.
 - Each item: bold linked `[频道名 — 集名](episode_url)`，followed by 1–2 sentence Chinese summary distilled from the shownotes.
 - If prefetch returned zero episodes, write `今日订阅播客暂无更新` and move on.
 - Do not fabricate episode content. Only summarize what the shownotes contain.
-- Subscribed channels are configured in `references/podcast_feeds.yaml`, grouped by domain (`ai`, `finance`). AI daily pulls the `ai` group; finance daily pulls the `finance` group. To add/remove channels, edit the YAML — no code changes needed.
+- Subscribed channels are configured in `references/podcast_feeds.yaml` (this skill only carries the `ai` group). To add/remove channels, edit the YAML — no code changes needed.

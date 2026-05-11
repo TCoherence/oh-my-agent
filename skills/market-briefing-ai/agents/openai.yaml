@@ -1,0 +1,4 @@
+interface:
+  display_name: "Market Briefing — AI"
+  short_description: "Persisted Chinese AI daily briefings (frontier labs / paper layer / people pool / 5-layer)"
+  default_prompt: "Use the market-briefing-ai skill to produce a Chinese AI daily report with an explicit mode and report date. Start with a Frontier Labs / Frontier Model Radar section, read the tracked people/community pool, use X.com as an early-signal layer with cross-checking, and record new candidates/promotions. Read paper-digest's daily JSON directly for paper signals instead of re-searching arXiv. Persist Markdown and JSON outputs under ~/.oh-my-agent/reports/market-briefing/ and return a structured Chinese chat summary per the SKILL.md final-answer format."

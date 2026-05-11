@@ -454,11 +454,11 @@ workspace/.agents/skills/<name>/
 - 自动 `full_sync()`、`SkillValidator` 校验、Discord 通知
 - Validator 检查：frontmatter 必填字段（name + description）、脚本语法、可执行权限
 
-#### 4.5.3 内置 Skills（11 个）
+#### 4.5.3 内置 Skills（14 个）
 
 | Skill | 用途 |
 |---|---|
-| `market-briefing` | 中文优先的政治/财经/AI 市场简报，含播客整合（`xiaoyuzhoufm.com` + YouTube）|
+| `market-briefing-*` | 中文优先的政治 / 财经 / AI 市场简报，4 个原子 skill（`-ai` / `-finance` / `-politics` / `-weekly`）共享 `reports/market-briefing/` 输出目录；AI 与 finance daily 自带播客整合（`xiaoyuzhoufm.com`）|
 | `paper-digest` | 每日 arXiv + HuggingFace + Semantic Scholar 论文雷达（中文）|
 | `youtube-video-summary` | 单链 YouTube 视频摘要 |
 | `youtube-podcast-digest` | 每周订阅频道的 podcast digest |
@@ -533,9 +533,9 @@ enabled: true
 platform: discord
 channel_id: "${DISCORD_CHANNEL_ID}"
 target_channel: oma_dump        # 可选，把完成消息路由到 dump channel
-prompt: "Run the market-briefing skill for today's AI digest."
+prompt: "Run the market-briefing-ai skill for today's AI digest."
 agent: claude
-skill_name: market-briefing      # 用于继承 SKILL.md 的 timeout_seconds / max_turns
+skill_name: market-briefing-ai   # 用于继承 SKILL.md 的 timeout_seconds / max_turns
 cron: "0 9 * * *"
 auto_approve: true               # 跳过 risk eval；DRAFT → 直接 PENDING
 timeout_seconds: 1500            # 显式 override
@@ -842,7 +842,7 @@ skills:          # 启用 + path
 2. **Self-hosted**：没有 hosted SaaS 的设想；secrets 全在用户 host
 3. **Discord-only for 1.0**：Slack stub 已删；新平台 adapter 在 post-1.0 才做
 4. **CLI 三件套之一可用**：Claude / Gemini / Codex 至少装一个；config_validator 启动时检查
-5. **Network 假设**：CLI 子进程能连模型 API；某些 skill (`market-briefing`, `paper-digest`) 还需要外部 API；Bilibili skill 需要 cookie 持久化
+5. **Network 假设**：CLI 子进程能连模型 API；某些 skill (`market-briefing-*`, `paper-digest`) 还需要外部 API；Bilibili skill 需要 cookie 持久化
 6. **Resume CLI session 偶尔不识别新 skill**：明确文档化的当前 limitation
 7. **Missed-job policy = skip**：固定，没有 catch-up；操作员用 `/automation_run` 手动补
 8. **`reports_dir/` 不自动清理**：用户自己定期 `find ... -mtime +90 -delete`

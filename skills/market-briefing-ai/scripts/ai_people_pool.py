@@ -322,7 +322,7 @@ def sync_repo_seed(
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Manage the market-briefing AI people pool")
+    parser = argparse.ArgumentParser(description="Manage the market-briefing-ai people pool")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     context_cmd = subparsers.add_parser("context", help="load the current AI people pool context")

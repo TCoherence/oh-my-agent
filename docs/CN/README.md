@@ -118,9 +118,9 @@ name: daily-ai-briefing
 enabled: true
 platform: discord
 channel_id: "${DISCORD_CHANNEL_ID}"
-prompt: "执行 market-briefing skill，生成今日 AI 简报。"
+prompt: "执行 market-briefing-ai skill，生成今日 AI 简报。"
 agent: claude
-skill_name: market-briefing
+skill_name: market-briefing-ai
 cron: "0 9 * * *"
 auto_approve: true
 ```
@@ -145,7 +145,7 @@ DRAFT → RUNNING → VALIDATING → WAITING_MERGE → MERGED / COMPLETED
 
 | Skill | 说明 |
 |-------|------|
-| `market-briefing` | 政治 / 财经 / AI 日报与周报，含持久化报告存储 |
+| `market-briefing-*` | 政治 / 财经 / AI 日报与跨域周报（`-ai` / `-finance` / `-politics` / `-weekly`），含持久化报告存储 |
 | `seattle-metro-housing-watch` | 西雅图都会区房市快照与深度分析 |
 | `scheduler` | 创建和校验 automation YAML 文件 |
 
