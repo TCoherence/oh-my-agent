@@ -13,21 +13,65 @@ if [[ "${OMA_INSTALL_REPO_EDITABLE:-1}" != "0" ]]; then
     echo "[oma] pyproject.toml not found at ${REPO_ROOT}; cannot install mounted repo editable." >&2
     exit 1
   fi
-  echo "[oma] installing mounted repo as editable package from ${REPO_ROOT}"
-  # Serialize concurrent installs across sibling containers (e.g. bot +
-  # dashboard) that share this $HOME via a bind mount. Without the lock,
-  # pip's uninstall-before-upgrade step from one container could remove
-  # /home/.local/bin/oh-my-agent mid-flight while the other container is
-  # mid-install — real incident: "OSError: No such file or directory:
-  # '/home/.local/bin/oh-my-agent'" when starting both via docker-run.sh
-  # right after a version bump. flock on a HOME-relative file means
-  # siblings sharing HOME serialize; unrelated containers don't.
-  mkdir -p "${HOME:-/home}/.local"
-  LOCK_FILE="${HOME:-/home}/.local/.oma-pip-install.lock"
-  (
-    flock -x 9
-    python -m pip install --disable-pip-version-check --no-deps -e "${REPO_ROOT}"
-  ) 9>"${LOCK_FILE}"
+
+  # Fast path: skip the pip install when an editable install for this
+  # ${REPO_ROOT} is already present AND its entry-point script is on
+  # disk. Editable installs work via a .pth file that adds /repo/src to
+  # sys.path at interpreter start — once placed, source edits under
+  # /repo reflect immediately on the next process boot. So re-running
+  # `pip install -e` on every container start does nothing useful and
+  # pays for itself in two ways:
+  #
+  #   (a) pip's uninstall-before-upgrade step has to re-stat every file
+  #       listed in the RECORD manifest. On macOS Docker bind mounts
+  #       (VirtioFS / gRPC FUSE) stat sometimes returns stale "deleted"
+  #       inodes mid-flight, breaking the uninstall with
+  #       ``[Errno 2] No such file or directory:
+  #       '/home/.local/bin/oh-my-agent'`` even when the file is present
+  #       on the host. The fast path sidesteps that race entirely.
+  #   (b) Container boot drops the pip-install latency (~5-10s on
+  #       cold start with deps cached).
+  #
+  # When pyproject.toml changes (new entry point, new dep, bumped
+  # version) the .pth file remains valid for *imports* but new bin
+  # scripts / new deps need a fresh install. Set OMA_FORCE_REINSTALL=1
+  # to bypass the fast path then. We also auto-bypass if the .pth file
+  # exists but the ``oh-my-agent`` console script is missing — that's
+  # exactly the half-broken state where (a) above just deleted the bin
+  # but pip never finished reinstalling it.
+  needs_install=1
+  if [[ "${OMA_FORCE_REINSTALL:-0}" != "1" ]] && \
+     [[ -x "${HOME:-/home}/.local/bin/oh-my-agent" ]]; then
+    shopt -s nullglob
+    pth_matches=("${HOME:-/home}/.local/lib/python"*/site-packages/__editable__.oh_my_agent-*.pth)
+    shopt -u nullglob
+    for pth in "${pth_matches[@]}"; do
+      if grep -q "${REPO_ROOT}" "${pth}" 2>/dev/null; then
+        needs_install=0
+        echo "[oma] editable install present (${pth} -> ${REPO_ROOT}); skipping pip install"
+        echo "[oma]   override with OMA_FORCE_REINSTALL=1 after pyproject.toml changes"
+        break
+      fi
+    done
+  fi
+
+  if [[ "${needs_install}" == "1" ]]; then
+    echo "[oma] installing mounted repo as editable package from ${REPO_ROOT}"
+    # Serialize concurrent installs across sibling containers (e.g. bot +
+    # dashboard) that share this $HOME via a bind mount. Without the lock,
+    # pip's uninstall-before-upgrade step from one container could remove
+    # /home/.local/bin/oh-my-agent mid-flight while the other container is
+    # mid-install — real incident: "OSError: No such file or directory:
+    # '/home/.local/bin/oh-my-agent'" when starting both via docker-run.sh
+    # right after a version bump. flock on a HOME-relative file means
+    # siblings sharing HOME serialize; unrelated containers don't.
+    mkdir -p "${HOME:-/home}/.local"
+    LOCK_FILE="${HOME:-/home}/.local/.oma-pip-install.lock"
+    (
+      flock -x 9
+      python -m pip install --disable-pip-version-check --no-deps -e "${REPO_ROOT}"
+    ) 9>"${LOCK_FILE}"
+  fi
 fi
 
 if [[ ! -f "${CONFIG_PATH}" ]]; then
