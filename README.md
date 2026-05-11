@@ -119,9 +119,9 @@ name: daily-ai-briefing
 enabled: true
 platform: discord
 channel_id: "${DISCORD_CHANNEL_ID}"
-prompt: "Run the market-briefing skill for today's AI digest."
+prompt: "Run the market-briefing-ai skill for today's AI digest."
 agent: claude
-skill_name: market-briefing
+skill_name: market-briefing-ai
 cron: "0 9 * * *"
 auto_approve: true
 ```
@@ -146,7 +146,10 @@ DRAFT → RUNNING → VALIDATING → WAITING_MERGE → MERGED / COMPLETED
 
 | Skill | Description |
 |-------|-------------|
-| `market-briefing` | Chinese-first politics / finance / AI market briefings with persisted reports |
+| `market-briefing-ai` | Chinese AI daily briefing (frontier labs / paper layer / people pool / 5-layer / cross-layer); reads paper-digest's daily JSON; 4-section checkpoint persists. Persisted reports under `~/.oh-my-agent/reports/market-briefing/`. |
+| `market-briefing-finance` | Chinese finance daily briefing (China macro / US macro / volatility / China-HK / property / tracked holdings) with podcast prefetch. Persisted reports under `~/.oh-my-agent/reports/market-briefing/`. |
+| `market-briefing-politics` | Chinese politics daily briefing (China central / US federal / China-US geopolitics). Persisted reports under `~/.oh-my-agent/reports/market-briefing/`. |
+| `market-briefing-weekly` | Chinese cross-domain weekly synthesis reading the past 7 days of stored daily reports. Persisted reports under `~/.oh-my-agent/reports/market-briefing/weekly/`. |
 | `paper-digest` | Daily arXiv + HuggingFace + Semantic Scholar paper radar (Chinese) |
 | `youtube-video-summary` | Single-link YouTube video summary via transcript-first extraction |
 | `youtube-podcast-digest` | Weekly digest of subscribed YouTube podcast channels (VC / AI / markets) |

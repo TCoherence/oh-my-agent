@@ -9,7 +9,7 @@ Outputs a JSON array to stdout. Each entry contains:
 Only episodes published within the last 48 hours are included.
 
 Usage:
-  ./.venv/bin/python skills/market-briefing/scripts/podcast_fetch.py [--domain ai|finance|all]
+  ./.venv/bin/python skills/market-briefing-finance/scripts/podcast_fetch.py [--domain finance|all]
 """
 from __future__ import annotations
 

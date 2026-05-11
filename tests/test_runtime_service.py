@@ -3384,11 +3384,11 @@ async def test_thread_hitl_resume_logs_progress_and_honors_skill_timeout_overrid
     repo = tmp_path / "repo"
     _init_git_repo(repo)
     skills_path = tmp_path / "skills"
-    skill_dir = skills_path / "market-briefing"
+    skill_dir = skills_path / "market-briefing-ai"
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text(
         """---
-name: market-briefing
+name: market-briefing-ai
 metadata:
   timeout_seconds: 900
   max_turns: 80
@@ -3450,7 +3450,7 @@ metadata:
         resume_context={
             "agent_prompt": "继续完成分析",
             "original_user_content": "帮我继续这个分析",
-            "skill_name": "market-briefing",
+            "skill_name": "market-briefing-ai",
         },
     )
     prompt = await store.get_active_hitl_prompt_for_thread(

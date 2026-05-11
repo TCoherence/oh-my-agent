@@ -55,12 +55,12 @@ async def test_apply_actions_add_strengthen_supersede_no_op(store_dir: Path):
         },
         {"op": "no_op", "reason": "nothing else"},
     ]
-    stats = await store.apply_actions(actions, thread_id="t1", skill_name="market-briefing")
+    stats = await store.apply_actions(actions, thread_id="t1", skill_name="market-briefing-ai")
     assert stats == {"add": 1, "strengthen": 0, "supersede": 0, "no_op": 1, "rejected": 0}
     active = store.get_active()
     assert len(active) == 1
     target = active[0]
-    assert "market-briefing" in target.source_skills
+    assert "market-briefing-ai" in target.source_skills
 
     strengthen = [{"op": "strengthen", "id": target.id, "evidence": "shorter please", "confidence_bump": 0.1}]
     stats2 = await store.apply_actions(strengthen, thread_id="t2")
@@ -185,12 +185,12 @@ async def test_get_relevant_scope_filtering(store_dir: Path):
         {"op": "add", "summary": "global preference", "category": "preference", "scope": "global_user", "confidence": 0.8, "evidence": ""},
         {"op": "add", "summary": "skill rule", "category": "workflow", "scope": "skill", "confidence": 0.85, "evidence": ""},
         {"op": "add", "summary": "workspace knowledge", "category": "project_knowledge", "scope": "workspace", "confidence": 0.75, "evidence": ""},
-    ], skill_name="market-briefing", source_workspace="/repo")
+    ], skill_name="market-briefing-ai", source_workspace="/repo")
     # Skill match boosts the skill-scoped entry to top
-    relevant = store.get_relevant(skill_name="market-briefing", workspace="/repo", limit=10)
+    relevant = store.get_relevant(skill_name="market-briefing-ai", workspace="/repo", limit=10)
     assert relevant[0].scope in {"skill", "global_user"}
     # Without workspace match, the workspace entry is filtered out
-    only_skill = store.get_relevant(skill_name="market-briefing", workspace="/other", limit=10)
+    only_skill = store.get_relevant(skill_name="market-briefing-ai", workspace="/other", limit=10)
     summaries = [m.summary for m in only_skill]
     assert "workspace knowledge" not in summaries
 

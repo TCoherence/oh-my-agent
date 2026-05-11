@@ -67,7 +67,7 @@ confidence_flags       [str]
 source_mix_note        str
 verification_note      str
 sources                [SourceRef]
-sections               [SectionSkeleton]       # 与 market-briefing 同构
+sections               [SectionSkeleton]       # 与 market-briefing-* 系列同构
 ```
 
 ### `PaperEntry` schema
@@ -133,7 +133,7 @@ note                str                        # e.g. "primary" / "curated" / "m
 
 ## 签名稳定性承诺
 
-- `top_picks[]` 里的 `{arxiv_id, title, tldr_cn, arxiv_url}` 是**对外稳定契约 v1**，供 `market-briefing` AI daily 等消费方读取。
+- `top_picks[]` 里的 `{arxiv_id, title, tldr_cn, arxiv_url}` 是**对外稳定契约 v1**，供 `market-briefing-ai` 等消费方读取。
 - 新增字段必须 additive，不改已有字段语义；要破坏性变更必须 bump `version`。
 - `domain` 永远是字面量 `"paper-digest"`，不跟随 skill 改名。
 

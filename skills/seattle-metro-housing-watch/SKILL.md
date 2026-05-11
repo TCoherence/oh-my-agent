@@ -187,7 +187,7 @@ For an area deep dive:
 
 ## Final answer format
 
-Unlike paste-the-full-body skills (e.g. `market-briefing`), this skill is designed for a **structured chat summary** — the full Markdown weekly often runs > 5k chars with listing tables that don't render well inline in Discord, so we keep the substance in chat and the full grid in the file. But "summary" does NOT mean progress notes — it means the substance the user came for.
+Unlike paste-the-full-body skills (e.g. `market-briefing-weekly`), this skill is designed for a **structured chat summary** — the full Markdown weekly often runs > 5k chars with listing tables that don't render well inline in Discord, so we keep the substance in chat and the full grid in the file. But "summary" does NOT mean progress notes — it means the substance the user came for.
 
 **Required content in the chat reply:**
 

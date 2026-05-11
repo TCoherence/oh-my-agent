@@ -1,6 +1,6 @@
 ---
 name: youtube-podcast-digest
-description: Produce a Chinese-first weekly digest of subscribed YouTube podcast channels (VC / AI / public markets / Chinese tech / deep-dive company studies). Fetches the last 7 days of new episodes, generates a 200–300-char Chinese TL;DR per episode from full captions (via yt-dlp), persists per-episode files plus an aggregated weekly report under ~/.oh-my-agent/reports/youtube-podcast-digest/weekly/<ISO-week>/. Use when the user asks for a YouTube podcast weekly, a roll-up of new VC/AI podcast episodes, or a subscribed-channel digest. Unlike youtube-video-summary (single-link ad-hoc) and market-briefing (Xiaoyuzhou Chinese feeds), this skill is the YouTube subscription pool.
+description: Produce a Chinese-first weekly digest of subscribed YouTube podcast channels (VC / AI / public markets / Chinese tech / deep-dive company studies). Fetches the last 7 days of new episodes, generates a 200–300-char Chinese TL;DR per episode from full captions (via yt-dlp), persists per-episode files plus an aggregated weekly report under ~/.oh-my-agent/reports/youtube-podcast-digest/weekly/<ISO-week>/. Use when the user asks for a YouTube podcast weekly, a roll-up of new VC/AI podcast episodes, or a subscribed-channel digest. Unlike youtube-video-summary (single-link ad-hoc) and market-briefing-ai / market-briefing-finance (Xiaoyuzhou Chinese feeds), this skill is the YouTube subscription pool.
 metadata:
   timeout_seconds: 1800
   max_turns: 90
@@ -18,7 +18,7 @@ metadata:
 
 不适用的场景：
 - **单个 YouTube 链接的临时总结** → 用 `youtube-video-summary` skill
-- **中文小宇宙 podcast 的每日简报** → 用 `market-briefing` skill（finance/ai daily 自带播客段）
+- **中文小宇宙 podcast 的每日简报** → 用 `market-briefing-ai` 或 `market-briefing-finance`（各自的 daily 自带播客段）
 - **B 站视频** → 用 `bilibili-video-summary` skill
 
 ## 订阅池

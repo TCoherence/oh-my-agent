@@ -194,7 +194,7 @@ def _new_hitl_kwargs(prompt_id: str, *, prompt_message_id: str | None = "9990001
         selected_choice_label=None,
         selected_choice_description=None,
         control_envelope_json=json.dumps({"resume_token": "tok-abc"}),
-        resume_context_json={"skill_name": "market-briefing"},
+        resume_context_json={"skill_name": "market-briefing-ai"},
         session_id_snapshot="sess-hitl-1",
         prompt_message_id=prompt_message_id,
         created_by="owner-1",
@@ -221,7 +221,7 @@ async def test_restart_hitl_db_round_trip(tmp_path: Path) -> None:
         assert rehydrated is not None
         assert rehydrated.status == "waiting"
         assert rehydrated.prompt_message_id == "999000111"
-        assert rehydrated.resume_context == {"skill_name": "market-briefing"}
+        assert rehydrated.resume_context == {"skill_name": "market-briefing-ai"}
         assert rehydrated.control_envelope_json == json.dumps({"resume_token": "tok-abc"})
         assert {c["id"] for c in rehydrated.choices} == {"ai", "fin"}
 

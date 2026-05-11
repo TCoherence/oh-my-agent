@@ -1307,7 +1307,7 @@ async def test_explicit_skill_invocation_forwards_skill_timeout_to_task(tmp_path
     only to the inline ``AgentRegistry.run`` path; with PR2.1's task-
     routing the manager forwards them as ``agent_timeout_seconds`` /
     ``agent_max_turns`` to ``create_artifact_task`` so a long-running
-    skill like ``market-briefing`` (1200s) keeps its budget."""
+    skill like ``market-briefing-ai`` (1500s) keeps its budget."""
     channel = MagicMock()
     channel.platform = "discord"
     channel.channel_id = "100"
@@ -1334,10 +1334,10 @@ async def test_explicit_skill_invocation_forwards_skill_timeout_to_task(tmp_path
     router.route = AsyncMock()
 
     skills_root = tmp_path / "skills"
-    skill_dir = skills_root / "market-briefing"
+    skill_dir = skills_root / "market-briefing-ai"
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text(
-        "---\nname: market-briefing\ndescription: long report\nmetadata:\n  timeout_seconds: 900\n  max_turns: 80\n---\n",
+        "---\nname: market-briefing-ai\ndescription: long report\nmetadata:\n  timeout_seconds: 900\n  max_turns: 80\n---\n",
         encoding="utf-8",
     )
     syncer = MagicMock()
@@ -1351,7 +1351,7 @@ async def test_explicit_skill_invocation_forwards_skill_timeout_to_task(tmp_path
         skill_syncer=syncer,
     )
 
-    msg = _make_msg(thread_id="thread-1", content="/market-briefing")
+    msg = _make_msg(thread_id="thread-1", content="/market-briefing-ai")
     await gm.handle_message(session, registry, msg)
 
     runtime.create_artifact_task.assert_awaited_once()

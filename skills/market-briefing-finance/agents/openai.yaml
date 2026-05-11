@@ -1,0 +1,4 @@
+interface:
+  display_name: "Market Briefing — Finance"
+  short_description: "Persisted Chinese finance daily briefings (China macro / US macro / volatility / China-HK / property / holdings)"
+  default_prompt: "Use the market-briefing-finance skill to produce a Chinese finance daily report with an explicit mode and report date. Cover China macro and policy, US macro and policy, US market volatility and risk appetite, China/Hong Kong market pulse, China property policy and financing signals, and tracked holdings over the last 7 days. Treat housing policy as a financing/market issue, not a politics-style policy recap. Persist Markdown and JSON outputs under ~/.oh-my-agent/reports/market-briefing/ and return a structured Chinese chat summary per the SKILL.md final-answer format."

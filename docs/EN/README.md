@@ -119,9 +119,9 @@ name: daily-ai-briefing
 enabled: true
 platform: discord
 channel_id: "${DISCORD_CHANNEL_ID}"
-prompt: "Run the market-briefing skill and produce today's AI brief."
+prompt: "Run the market-briefing-ai skill and produce today's AI brief."
 agent: claude
-skill_name: market-briefing
+skill_name: market-briefing-ai
 cron: "0 9 * * *"
 auto_approve: true
 ```
@@ -146,7 +146,10 @@ DRAFT → RUNNING → VALIDATING → WAITING_MERGE → MERGED / COMPLETED
 
 | Skill | Summary |
 |-------|---------|
-| `market-briefing` | Politics / finance / AI daily + weekly briefings with persistent report storage |
+| `market-briefing-ai` | AI daily briefing (frontier labs / paper layer / people pool / 5-layer / cross-layer); reads paper-digest's daily JSON; 4-section checkpoint persists |
+| `market-briefing-finance` | Finance daily briefing (China macro / US macro / volatility / China-HK / property / tracked holdings) with podcast prefetch |
+| `market-briefing-politics` | Politics daily briefing (China central / US federal / China-US geopolitics) |
+| `market-briefing-weekly` | Cross-domain weekly synthesis reading the past 7 days of stored daily reports |
 | `seattle-metro-housing-watch` | Seattle metro housing snapshot and deep-dive analysis |
 | `scheduler` | Create and validate automation YAML files |
 

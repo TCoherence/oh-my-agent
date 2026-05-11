@@ -139,8 +139,8 @@ def populated_db(tmp_path: Path) -> Path:
         ("t-bad-1", *base_args, "FAILED", "automation-bad", None, "Connection refused: socket"),
         ("t-bad-2", *base_args, "TIMEOUT", "automation-bad", None, "claude CLI timed out after 1500s"),
         ("t-running-1", *base_args, "RUNNING", None, None, None),
-        ("t-skill-success", *base_args, "COMPLETED", None, "market-briefing", None),
-        ("t-skill-fail", *base_args, "FAILED", None, "market-briefing", "boom"),
+        ("t-skill-success", *base_args, "COMPLETED", None, "market-briefing-ai", None),
+        ("t-skill-fail", *base_args, "FAILED", None, "market-briefing-ai", "boom"),
     ]
     conn.executemany(
         """
@@ -261,10 +261,10 @@ def test_fetch_cost_usage_populated(populated_db: Path) -> None:
     assert "automation_run" in today_sources
     assert "chat" in today_sources
 
-    # Top skill today — only market-briefing (one event)
+    # Top skill today — only market-briefing-ai (one event)
     skills = result["today_top_skills"]
     assert len(skills) == 1
-    assert skills[0]["skill"] == "market-briefing"
+    assert skills[0]["skill"] == "market-briefing-ai"
 
 
 # ---------------------------------------------------------------------------
@@ -330,10 +330,10 @@ entries:
 def test_fetch_skill_stats_populated(populated_db: Path) -> None:
     result = data.fetch_skill_stats(populated_db)
     by_skill = {row["skill"]: row for row in result}
-    assert "market-briefing" in by_skill
-    assert by_skill["market-briefing"]["total"] == 2
-    assert by_skill["market-briefing"]["success_count"] == 1
-    assert by_skill["market-briefing"]["success_rate"] == 0.5
+    assert "market-briefing-ai" in by_skill
+    assert by_skill["market-briefing-ai"]["total"] == 2
+    assert by_skill["market-briefing-ai"]["success_count"] == 1
+    assert by_skill["market-briefing-ai"]["success_rate"] == 0.5
 
 
 # ---------------------------------------------------------------------------

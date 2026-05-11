@@ -1,0 +1,4 @@
+interface:
+  display_name: "Market Briefing — Politics"
+  short_description: "Persisted Chinese politics daily briefings (China central / US federal / China-US geopolitics / impact)"
+  default_prompt: "Use the market-briefing-politics skill to produce a Chinese politics daily report with an explicit mode and report date. Cover China central policy signals, US federal policy signals, and China-US / geopolitics. Keep the political and legislative meaning primary; defer market-impact prose to the finance daily. Persist Markdown and JSON outputs under ~/.oh-my-agent/reports/market-briefing/ and return a structured Chinese chat summary per the SKILL.md final-answer format."

@@ -82,7 +82,7 @@ The system has nine major subsystems plus a config layer.
 - When `workspace` is configured, `_setup_workspace()` in `main.py` copies skills into `workspace/.claude/skills/` and `workspace/.gemini/skills/` (real files, not symlinks) so CLI agents find them from the workspace cwd.
 - `SkillValidator` (`skills/validator.py`): validates SKILL.md frontmatter (name+description required), script syntax, and executable permissions.
 - Agent-driven skill creation: `_try_skill_sync()` in `GatewayManager` detects new agent-created skills after each response, runs `full_sync()`, validates, and notifies via Discord.
-- Bundled skills under `skills/` (10): `adapt-community-skill`, `bilibili-video-summary`, `deals-scanner`, `market-briefing`, `paper-digest`, `scheduler`, `seattle-metro-housing-watch`, `skill-creator`, `youtube-podcast-digest`, `youtube-video-summary`. The `scheduler` skill creates/updates recurring jobs in `config.yaml` and validates job schema.
+- Bundled skills under `skills/` (13): `adapt-community-skill`, `bilibili-video-summary`, `deals-scanner`, `market-briefing-ai`, `market-briefing-finance`, `market-briefing-politics`, `market-briefing-weekly`, `paper-digest`, `scheduler`, `seattle-metro-housing-watch`, `skill-creator`, `youtube-podcast-digest`, `youtube-video-summary`. The `scheduler` skill creates/updates recurring jobs in `config.yaml` and validates job schema.
 
 **Runtime layer** (`src/oh_my_agent/runtime/`)
 

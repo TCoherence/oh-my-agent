@@ -1,6 +1,6 @@
 ---
 name: paper-digest
-description: 每日抓取 arXiv + HuggingFace Daily Papers + Semantic Scholar 三源候选，生成中文论文雷达日报（Top picks + 分类命中 + 延伸阅读 + 新作者发现），以 Markdown + JSON 双文件落盘到 ~/.oh-my-agent/reports/paper-digest/。与 market-briefing AI daily 正交：本 skill 锚在论文 PDF / 方法 / 结果层，AI daily 锚在 frontier lab 产品发布与宏观事件层。
+description: 每日抓取 arXiv + HuggingFace Daily Papers + Semantic Scholar 三源候选，生成中文论文雷达日报（Top picks + 分类命中 + 延伸阅读 + 新作者发现），以 Markdown + JSON 双文件落盘到 ~/.oh-my-agent/reports/paper-digest/。与 market-briefing-ai 正交：本 skill 锚在论文 PDF / 方法 / 结果层，market-briefing-ai 锚在 frontier lab 产品发布与宏观事件层。
 metadata:
   timeout_seconds: 1500
   max_turns: 60
@@ -10,23 +10,23 @@ metadata:
 
 每日论文雷达 skill，面向工程师的**技术层阅读 feed**。
 
-## 与 market-briefing AI daily 的边界
+## 与 market-briefing-ai 的边界
 
-| | paper-digest | market-briefing AI daily |
+| | paper-digest | market-briefing-ai |
 | --- | --- | --- |
 | 锚点 | arXiv PDF / 方法 / benchmark / 结果 | frontier lab 产品发布、社区信号、宏观 AI 事件 |
 | 候选源 | arXiv + HF Daily + Semantic Scholar | 官方公告 + 媒体 + X/播客 |
 | 产出节奏 | 每日 1 篇 JSON + Markdown | 每日 1 篇 JSON + Markdown |
-| 交集策略 | 同一篇 DeepSeek V4 论文可能两边都出现：paper-digest 写「方法和基准」，AI daily 写「产品影响」，**通过 JSON contract 让 AI daily 可引用 paper-digest 的 `top_picks[0:3]`，避免重复策划** |
+| 交集策略 | 同一篇 DeepSeek V4 论文可能两边都出现：paper-digest 写「方法和基准」，market-briefing-ai 写「产品影响」，**通过 JSON contract 让 market-briefing-ai 可引用 paper-digest 的 `top_picks[0:3]`，避免重复策划** |
 
-**不要**把 market-briefing AI daily 的 Frontier Labs Radar 改写成论文清单。本 skill 存在的意义就是把论文层 carve out 成独立视角。
+**不要**把 market-briefing-ai 的 Frontier Labs Radar 改写成论文清单。本 skill 存在的意义就是把论文层 carve out 成独立视角。
 
 ## When to use
 
 - `daily_digest`（v1，唯一支持的 mode）——用户请求今日 / 某日论文雷达
 - `weekly_synthesis`（v2 预留，当前不实现）——JSON schema 已留 `period_start/period_end/sections` 字段
 
-不要把 `market-briefing` 的 `bootstrap_backfill` / `weekly_synthesis` 概念混进来。paper-digest 只做 daily，周末需要回顾时用 `references/prompt_recipes.md` 里的「回看整理」人工 prompt。
+不要把 market-briefing 系列（`-ai` / `-finance` / `-politics` / `-weekly`）的 `bootstrap_backfill` / `weekly_synthesis` 概念混进来。paper-digest 只做 daily，周末需要回顾时用 `references/prompt_recipes.md` 里的「回看整理」人工 prompt。
 
 ## Required workflow
 
@@ -147,7 +147,7 @@ Saved: ~/.oh-my-agent/reports/paper-digest/daily/<DATE>.md
 
 ## Storage layout
 
-**单 domain**，不使用 domain 子路径（这是与 market-briefing 的关键差异）：
+**单 domain**，不使用 domain 子路径（这是与 market-briefing 系列的关键差异 —— 那 4 个 skill 都写到共享的 `reports/market-briefing/` 根下并带 domain 子路径）：
 
 ```
 ~/.oh-my-agent/reports/paper-digest/
@@ -213,17 +213,17 @@ JSON 顶层必需字段、`PaperEntry` / `AuthorEntry` / `LabEntry` / `SourceRef
 - record 时顺带 prune（默认 14 天），state 稳态大小 < 1MB
 - 候选 JSON 里的 `seen_before=true` 意味着这篇过去 14 天进过别的日报——**应该归入延伸阅读或忽略，而不是 Top picks**
 
-## 与 market-briefing AI daily 的集成
+## 与 market-briefing-ai 的集成
 
-paper-digest 发布**只读 JSON 契约 v1**，不反向依赖 market-briefing：
+paper-digest 发布**只读 JSON 契约 v1**，不反向依赖 market-briefing-ai：
 
 - 稳定路径：`~/.oh-my-agent/reports/paper-digest/daily/<YYYY-MM-DD>.json`
 - 稳定字段：`top_picks[].{arxiv_id, title, tldr_cn, arxiv_url}`
-- 消费方（market-briefing AI daily）可读该文件，在「关键人物与社区信号」前插一个「今日论文雷达」子段
+- 消费方（market-briefing-ai）可读该文件，在「关键人物与社区信号」前插一个「今日论文雷达」子段
 - 文件缺失 / 过期 / 解析失败——消费方写 `今日论文雷达暂无更新`，不报错
-- **paper-digest 绝不修改 market-briefing 的报告目录**，反之亦然
+- **paper-digest 绝不修改 market-briefing 系列的报告目录**，反之亦然
 
-完整契约见 `references/integration_contract.md`。本 skill **不**负责改 market-briefing 的 prompt；契约发布后由 AI daily 侧按自己的节奏引用。
+完整契约见 `references/integration_contract.md`。本 skill **不**负责改 market-briefing-ai 的 prompt；契约发布后由 market-briefing-ai 侧按自己的节奏引用。
 
 ## Density rule
 

@@ -4438,7 +4438,7 @@ class RuntimeService:
         return files
 
     def _scan_reports_dir_writes(self, task: RuntimeTask, workspace: Path) -> list[str]:
-        # Skills like paper-digest / market-briefing call ``report_store.py
+        # Skills like paper-digest / market-briefing-* call ``report_store.py
         # persist`` to write directly into ``reports_dir/<skill>/...`` —
         # absolute paths that live outside the task workspace, so the
         # workspace scan above misses them entirely. Without these the
@@ -4597,7 +4597,7 @@ class RuntimeService:
         # Body source priority:
         #  1. Agent reply (``task.output_summary``) — the canonical "what
         #     happened" text. This is what skills like paper-digest /
-        #     market-briefing populate via SKILL.md "paste markdown back
+        #     market-briefing-ai populate via SKILL.md "paste markdown back
         #     in the final reply" instructions.
         #  2. Single-artifact preview — fallback for agents that produce
         #     a short confirmation reply ("artifact ready") and write the
