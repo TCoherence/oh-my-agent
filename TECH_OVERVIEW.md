@@ -458,7 +458,10 @@ workspace/.agents/skills/<name>/
 
 | Skill | 用途 |
 |---|---|
-| `market-briefing-*` | 中文优先的政治 / 财经 / AI 市场简报，4 个原子 skill（`-ai` / `-finance` / `-politics` / `-weekly`）共享 `reports/market-briefing/` 输出目录；AI 与 finance daily 自带播客整合（`xiaoyuzhoufm.com`）|
+| `market-briefing-ai` | AI daily：frontier labs / 论文层 / 人物池 / 5 层 / 跨层；直读 paper-digest 的当日 JSON；含播客整合（`xiaoyuzhoufm.com` ai group）|
+| `market-briefing-finance` | 财经 daily：中国宏观 / 美国宏观 / 波动 / 中港 / 房地产 / 持仓；含播客整合（`xiaoyuzhoufm.com` finance group）|
+| `market-briefing-politics` | 政治 daily：中国中央 / 美国联邦 / 中美地缘 |
+| `market-briefing-weekly` | 跨域周报综合，读取过去 7 天的 stored daily reports + 各域 bootstrap 档案 |
 | `paper-digest` | 每日 arXiv + HuggingFace + Semantic Scholar 论文雷达（中文）|
 | `youtube-video-summary` | 单链 YouTube 视频摘要 |
 | `youtube-podcast-digest` | 每周订阅频道的 podcast digest |

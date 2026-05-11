@@ -18,13 +18,20 @@ The format is intentionally lightweight and release-oriented rather than exhaust
     "market-briefing-daily-politics-0900.yaml:market-briefing-politics" \
     "market-briefing-weekly-sunday-1000.yaml:market-briefing-weekly"; do
     file="${pair%%:*}"; new_skill="${pair##*:}"
-    sed -i.bak -e "s|^skill_name: market-briefing\$|skill_name: ${new_skill}|" \
-               -e "s| Post the full Markdown in chat\.\"$|\"|" \
-               -e "s|Follow the market-briefing SKILL.md workflow|Follow the SKILL.md workflow|" \
-               "${DIR}/${file}"
+    sed -i.bak \
+      -e "s|^skill_name: market-briefing\$|skill_name: ${new_skill}|" \
+      -e "s| Post the full Markdown in chat\.\"$|\"|" \
+      -e "s| Post the full Markdown in chat\.$||" \
+      -e "s|Follow the market-briefing SKILL.md workflow|Follow the SKILL.md workflow|" \
+      "${DIR}/${file}"
   done
   grep -E 'skill_name:|prompt:' "${DIR}"/market-briefing-*.yaml  # verify
   ```
+
+  The two `Post the full Markdown in chat` rules cover both the current
+  double-quoted-prompt form (rule 1) and an unquoted multiline-block form
+  (rule 2); whichever doesn't apply is a no-op. Compatible with both GNU
+  sed (Linux) and BSD sed (macOS).
 
   The prompt cleanup is mandatory because all 4 user YAMLs currently end the prompt with `Post the full Markdown in chat.` which directly contradicts the new SKILL.md `Final answer format` (structured chat summary, no verbatim re-paste). Forgetting to migrate `skill_name` is a loud-failure — scheduler will log `skill not found` on the next cron tick rather than silently routing somewhere else. No compat shim, no dual-name redirect.
 

@@ -158,15 +158,11 @@ def test_no_stray_bare_market_briefing_refs() -> None:
     Excludes ``CHANGELOG.md`` (historical entries are ground truth) and
     ``plans/`` (which discusses the split plan itself).
     """
-    # Allow-list tokens that legitimately appear:
-    # (a) output-path strings (the report tree under reports/market-briefing/),
+    # Allow-list tokens that legitimately appear regardless of path:
+    # (a) output-path strings (the report tree under reports/market-briefing/
+    #     stays shared across all 4 split skills),
     # (b) the plan slug `market-briefing-daily-ai-0900-fail-patt-mutable-nest`
-    #     (a stable git artifact name, not a skill identifier),
-    # (c) backtick-quoted ``market-briefing`` literals — markdown's standard
-    #     way of referring to the old monolithic skill by name in history /
-    #     migration prose. Scrubbing the literal lets test_no_stray catch the
-    #     bare unqualified usages while permitting prose like
-    #     "Stage 3 split the monolithic `market-briefing` into 4 atomic skills".
+    #     (a stable git artifact name, not a skill identifier).
     output_path_whitelist = (
         "reports/market-briefing/",
         "reports/market-briefing\"",
@@ -176,10 +172,32 @@ def test_no_stray_bare_market_briefing_refs() -> None:
         "/market-briefing-test",  # tests/test_market_briefing_ai_report_store.py temp dir
         # Plan slug (stable name; see plans/<slug>.md)
         "market-briefing-daily-ai-0900-fail-patt-mutable-nest",
-        # Historical / migration reference: the old skill mentioned by literal name
-        "`market-briefing`",
         # Section_schemas reference text uses bare slug
         "market-briefing-daily-ai",
+    )
+
+    # Backtick-quoted ``market-briefing`` literals — markdown's standard way
+    # of referring to the old monolithic skill by name in history / migration
+    # prose. Permitted ONLY in docs / changelog / tests / CN+EN guides where
+    # the term IS a historical citation. NOT permitted inside the new active
+    # skill directories (`skills/market-briefing-*/`) — if a new SKILL.md or
+    # prompt references the bare old name, that's almost certainly a missed
+    # rename, not a deliberate history mention. (Codex review:
+    # whitelist-too-wide hardening — `monolithic \`market-briefing\``-style
+    # phrasing in active skills would otherwise route the agent to a skill
+    # that no longer exists.)
+    HISTORICAL_LITERAL = "`market-briefing`"
+    HISTORICAL_OK_PREFIXES = (
+        "docs/",
+        "CHANGELOG.md:",
+        "tests/",
+        "README.md:",
+        "AGENT.md:",
+        "AGENTS.md:",
+        "CLAUDE.md:",
+        "GEMINI.md:",
+        "TECH_OVERVIEW.md:",
+        "CONTRIBUTING.md:",
     )
 
     proc = subprocess.run(
@@ -210,12 +228,19 @@ def test_no_stray_bare_market_briefing_refs() -> None:
         parts = line.split(":", 2)
         if len(parts) < 3:
             continue
-        _, _, body = parts
+        path_part, _, body = parts
         # Quick allow: any line that is fully covered by the output-path
         # whitelist is fine. Remove every whitelisted token before checking.
         scrubbed = body
         for token in output_path_whitelist:
             scrubbed = scrubbed.replace(token, "")
+        # Historical-literal allowance: ``market-briefing`` in backticks is
+        # OK only in docs / changelog / tests / repo-root guides — NOT
+        # inside the new active skill directories.
+        if HISTORICAL_LITERAL in scrubbed:
+            if path_part.startswith(HISTORICAL_OK_PREFIXES):
+                scrubbed = scrubbed.replace(HISTORICAL_LITERAL, "")
+            # else: leave the literal in `scrubbed` so the regex catches it.
         # After scrubbing, any remaining ``market-briefing`` substring must
         # be followed by an allowed suffix per ``_BARE_MENTION_RE``.
         if "market-briefing" not in scrubbed:
