@@ -4,28 +4,30 @@ from oh_my_agent.gateway.router import OpenAICompatibleRouter, normalize_intent
 
 
 def test_normalize_intent_passes_through_canonical_names():
-    """All five canonical intents must round-trip identical."""
-    for canonical in (
-        "chat_reply",
-        "invoke_skill",
-        "oneoff_artifact",
-        "propose_repo_change",
-        "update_skill",
-    ):
+    """All three v2 canonical intents must round-trip identical."""
+    for canonical in ("reply", "artifact", "repo_update"):
         assert normalize_intent(canonical) == canonical
 
 
 def test_normalize_intent_maps_legacy_aliases_to_canonical():
-    """Legacy router-output names from older models / fixtures must resolve
-    to the canonical intent set so the dispatcher only needs five arms."""
+    """Legacy router-output names (both v1 canonical and pre-v1 aliases)
+    from older models / fixtures must resolve to the v2 canonical set so
+    the dispatcher only needs three arms."""
     cases = {
-        "reply_once": "chat_reply",
-        "invoke_existing_skill": "invoke_skill",
-        "propose_artifact_task": "oneoff_artifact",
-        "propose_repo_task": "propose_repo_change",
-        "propose_task": "propose_repo_change",
-        "create_skill": "update_skill",
-        "repair_skill": "update_skill",
+        # v1 canonical → v2 canonical
+        "chat_reply": "reply",
+        "invoke_skill": "artifact",
+        "oneoff_artifact": "artifact",
+        "propose_repo_change": "repo_update",
+        "update_skill": "repo_update",
+        # Pre-v1 legacy → v2 canonical
+        "reply_once": "reply",
+        "invoke_existing_skill": "artifact",
+        "propose_artifact_task": "artifact",
+        "propose_repo_task": "repo_update",
+        "propose_task": "repo_update",
+        "create_skill": "repo_update",
+        "repair_skill": "repo_update",
     }
     for legacy, expected in cases.items():
         assert normalize_intent(legacy) == expected, f"{legacy!r} did not normalize"
@@ -34,17 +36,18 @@ def test_normalize_intent_maps_legacy_aliases_to_canonical():
 def test_normalize_intent_is_case_and_whitespace_insensitive():
     """Robustness against router models that emit ``CREATE_SKILL`` /
     leading whitespace / etc."""
-    assert normalize_intent("  CREATE_SKILL ") == "update_skill"
-    assert normalize_intent("Reply_Once") == "chat_reply"
-    assert normalize_intent("INVOKE_SKILL") == "invoke_skill"
+    assert normalize_intent("  CREATE_SKILL ") == "repo_update"
+    assert normalize_intent("Reply_Once") == "reply"
+    assert normalize_intent("INVOKE_SKILL") == "artifact"
+    assert normalize_intent("Repo_Update") == "repo_update"
 
 
-def test_normalize_intent_unknown_falls_back_to_chat_reply():
-    """Unknown / empty / garbage inputs fall back to chat_reply — the
+def test_normalize_intent_unknown_falls_back_to_reply():
+    """Unknown / empty / garbage inputs fall back to ``reply`` — the
     safe default that keeps the runtime in chat mode rather than
     spawning a task."""
     for bad in ("", "   ", "garbage", "destroy_database", "1234"):
-        assert normalize_intent(bad) == "chat_reply"
+        assert normalize_intent(bad) == "reply"
 
 
 @pytest.mark.asyncio
@@ -75,13 +78,16 @@ async def test_router_parses_valid_json_decision(monkeypatch):
     monkeypatch.setattr(router, "_post_json", _fake_post)
     out = await router.route("please fix and run tests")
     assert out is not None
-    assert out.decision == "propose_repo_change"
+    # Legacy ``propose_repo_change`` is normalized to v2 ``repo_update``.
+    assert out.decision == "repo_update"
     assert out.confidence == 0.88
     assert out.goal == "fix tests and docs"
     assert out.risk_hints == ["multi-step"]
     assert out.skill_name is None
     assert out.task_type == "repo_change"
     assert out.completion_mode == "merge"
+    # ``force_draft`` defaults False when missing from router payload.
+    assert out.force_draft is False
 
 
 @pytest.mark.asyncio
@@ -109,7 +115,8 @@ async def test_router_extracts_json_from_wrapped_text(monkeypatch):
     monkeypatch.setattr(router, "_post_json", _fake_post)
     out = await router.route("hi")
     assert out is not None
-    assert out.decision == "chat_reply"
+    # Legacy ``chat_reply`` is normalized to v2 ``reply``.
+    assert out.decision == "reply"
     assert out.confidence == 0.74
     assert out.skill_name is None
 
@@ -146,7 +153,8 @@ async def test_router_retries_once_then_succeeds(monkeypatch):
     out = await router.route("please do x")
     assert calls["n"] == 2
     assert out is not None
-    assert out.decision == "propose_repo_change"
+    # Legacy ``propose_repo_change`` is normalized to v2 ``repo_update``.
+    assert out.decision == "repo_update"
     assert out.skill_name is None
 
 
@@ -177,11 +185,10 @@ async def test_router_parses_create_skill_decision(monkeypatch):
     monkeypatch.setattr(router, "_post_json", _fake_post)
     out = await router.route("create a skill for checking weather")
     assert out is not None
-    # Legacy router models still emit "create_skill"; the parser
-    # normalizes that to the canonical ``update_skill`` intent so the
-    # dispatcher only needs one match arm. Distinguishing create vs
-    # repair happens downstream via the registered skill list.
-    assert out.decision == "update_skill"
+    # Pre-v1 ``create_skill`` and v1 ``update_skill`` both normalize to
+    # v2 ``repo_update``. Distinguishing create vs repair happens
+    # downstream via skill_name lookup against the registered skill list.
+    assert out.decision == "repo_update"
     assert out.skill_name == "weather"
 
 
@@ -212,7 +219,8 @@ async def test_router_parses_artifact_task_decision(monkeypatch):
     monkeypatch.setattr(router, "_post_json", _fake_post)
     out = await router.route("生成一份今日新闻速读并整理成 markdown")
     assert out is not None
-    assert out.decision == "oneoff_artifact"
+    # Legacy ``oneoff_artifact`` normalizes to v2 ``artifact``.
+    assert out.decision == "artifact"
     assert out.task_type == "artifact"
     assert out.completion_mode == "reply"
 
@@ -245,8 +253,12 @@ async def test_router_prompt_carries_disambiguation_and_examples(monkeypatch):
     assert "DISAMBIGUATION RULES" in system_content
     assert "EXAMPLES:" in system_content
     assert "Jensen Huang" in system_content
-    assert "oneoff_artifact" in system_content
-    assert "update_skill" in system_content
+    # v2 canonical intents named in the prompt.
+    assert "artifact" in system_content
+    assert "repo_update" in system_content
+    assert "reply" in system_content
+    # ``force_draft`` keyword documented in the schema description.
+    assert "force_draft" in system_content
 
 
 @pytest.mark.asyncio
@@ -323,10 +335,10 @@ async def test_router_parses_repair_skill_decision(monkeypatch):
         context="Recent thread context:\n- user: /top-5-daily-news",
     )
     assert out is not None
-    # Legacy ``repair_skill`` from older router models is normalized to
-    # the canonical ``update_skill`` intent. Repair-vs-create is decided
-    # downstream by checking ``skill_name`` against registered skills.
-    assert out.decision == "update_skill"
+    # Legacy ``repair_skill`` from older router models normalizes to v2
+    # ``repo_update``. Repair-vs-create is decided downstream by checking
+    # ``skill_name`` against registered skills.
+    assert out.decision == "repo_update"
     assert out.skill_name == "top-5-daily-news"
     assert out.task_type == "skill_change"
     assert out.completion_mode == "merge"
@@ -366,8 +378,9 @@ async def test_router_recovers_truncated_json_pretty_printed(monkeypatch):
     out = await router.route("飞书文档怎么接入比较方便？")
     assert out is not None, "truncated JSON must still produce a decision"
     # decision/confidence are what actually drive routing — those must
-    # round-trip exactly even from truncated input.
-    assert out.decision == "chat_reply"
+    # round-trip exactly even from truncated input. Legacy ``chat_reply``
+    # normalizes to v2 ``reply``.
+    assert out.decision == "reply"
     assert out.confidence == 0.95
     # ``risk_hints`` got cut mid-string. Strategy A closes the dangling
     # string and the open brackets, so we get the truncated literal back
@@ -398,7 +411,8 @@ async def test_router_recovers_truncated_json_after_complete_pair(monkeypatch):
     monkeypatch.setattr(router, "_post_json", _fake_post)
     out = await router.route("生成一份今日新闻速读")
     assert out is not None
-    assert out.decision == "oneoff_artifact"
+    # Legacy ``oneoff_artifact`` normalizes to v2 ``artifact``.
+    assert out.decision == "artifact"
     assert out.task_type == "artifact"
     assert out.completion_mode == "reply"
     assert out.goal == "daily news brief"
@@ -425,7 +439,8 @@ async def test_router_strips_markdown_code_fences(monkeypatch):
     monkeypatch.setattr(router, "_post_json", _fake_post)
     out = await router.route("hi")
     assert out is not None
-    assert out.decision == "chat_reply"
+    # Legacy ``chat_reply`` normalizes to v2 ``reply``.
+    assert out.decision == "reply"
 
 
 @pytest.mark.asyncio

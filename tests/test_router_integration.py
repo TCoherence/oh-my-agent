@@ -81,7 +81,9 @@ async def test_router_real_http_with_config_and_env(tmp_path, monkeypatch):
 
     decision = await router.route("请在 docs 下新增文件并跑测试")
     assert decision is not None
-    assert decision.decision == "propose_repo_change"
+    # Legacy ``propose_repo_change`` (still emitted by older / cached
+    # router models) normalizes to v2 canonical ``repo_update``.
+    assert decision.decision == "repo_update"
     assert decision.confidence == pytest.approx(0.92)
     assert "run tests" in decision.goal
     assert decision.task_type == "repo_change"

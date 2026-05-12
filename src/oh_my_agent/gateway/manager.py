@@ -27,7 +27,12 @@ from oh_my_agent.control.protocol import (
 from oh_my_agent.gateway.base import BaseChannel, IncomingMessage
 from oh_my_agent.gateway.session import ChannelSession
 from oh_my_agent.gateway.stream_relay import StreamingRelay
-from oh_my_agent.runtime.policy import is_artifact_intent, is_long_task_intent, is_skill_intent
+from oh_my_agent.runtime.policy import (
+    is_artifact_intent,
+    is_long_task_intent,
+    is_skill_intent,
+    strip_draft_prefix,
+)
 from oh_my_agent.skills.frontmatter import (
     read_skill_frontmatter,
     resolve_skill_frontmatter,
@@ -1307,7 +1312,15 @@ class GatewayManager:
             )
 
         # Runtime interception for long-running autonomous tasks.
+        # Router v2 emits 3 canonical intents: reply / artifact / repo_update.
+        # Old intents (chat_reply / invoke_skill / oneoff_artifact /
+        # propose_repo_change / update_skill) are accepted from older router
+        # models and normalized at parse time in ``router.normalize_intent``.
         router_decision = None
+        # Explicit "draft:" / "草稿:" prefix is a hard user opt-in for the
+        # approval gate, regardless of router heuristics. Compute once here
+        # and apply in the artifact branch below.
+        _, draft_prefix_forced = strip_draft_prefix(msg.content)
         if (
             (not msg.system)
             and not explicit_skill
@@ -1326,134 +1339,114 @@ class GatewayManager:
                 logger.info("[%s] ROUTER unavailable; fallback to heuristic/normal flow", req_id)
             else:
                 logger.info(
-                    "[%s] ROUTER decision=%s confidence=%.2f threshold=%.2f",
+                    "[%s] ROUTER decision=%s confidence=%.2f threshold=%.2f force_draft=%s",
                     req_id,
                     router_decision.decision,
                     router_decision.confidence,
                     threshold,
+                    router_decision.force_draft,
                 )
+
+            # repo_update: source-repo modification (was: propose_repo_change
+            # + update_skill). Always drafts — v2 doctrine: any task that
+            # touches the source repo requires user approval, regardless of
+            # router confidence. ``RouteDecision.force_draft`` is documented
+            # as ignored for this intent. The legacy v1 ``is_borderline``
+            # auto-run path for high-confidence skill repair/create is
+            # intentionally removed (v2 user choice: "repo_update must
+            # approve"). The ``is_borderline`` flag still affects the
+            # confirmation message text below (less confident → less
+            # assertive language).
             if (
                 router_decision
-                and router_decision.decision == "update_skill"
+                and router_decision.decision == "repo_update"
                 and router_decision.confidence >= threshold
             ):
-                # update_skill collapses the legacy create_skill / repair_skill
-                # intents. Distinguish create-vs-repair by whether the router-
-                # supplied skill_name resolves to a registered skill: known
-                # name → repair (existing skill needs feedback-driven update);
-                # unknown / missing → create (new skill).
                 await self._append_user_turn_if_needed(session, thread_id, msg)
                 user_turn_appended = True
-                known_skills = self._known_skill_names()
                 router_skill = (router_decision.skill_name or "").strip()
-                is_repair = bool(router_skill) and router_skill in known_skills
                 is_borderline = (
                     self._router_require_user_confirm
                     and router_decision.confidence < self._router_autonomy_threshold
                 )
-                if is_repair:
-                    skill_name = router_skill
-                    raw_request = self._build_skill_repair_request(skill_name, history, msg.content)
-                    goal = router_decision.goal or (
-                        f"Update existing skill '{skill_name}' based on recent user feedback."
+                if router_skill:
+                    # Skill source change (create or repair). Was the
+                    # legacy ``update_skill`` branch; mirrors that logic
+                    # exactly so existing tests keep passing.
+                    known_skills = self._known_skill_names()
+                    is_repair = router_skill in known_skills
+                    if is_repair:
+                        skill_name = router_skill
+                        raw_request = self._build_skill_repair_request(skill_name, history, msg.content)
+                        goal = router_decision.goal or (
+                            f"Update existing skill '{skill_name}' based on recent user feedback."
+                        )
+                        source = "repair_skill"
+                    else:
+                        skill_name = router_skill or (router_decision.goal or msg.content)
+                        raw_request = msg.content
+                        goal = router_decision.goal or msg.content
+                        source = "router"
+                    # v2 doctrine: repo_update always drafts (force_draft=True
+                    # hardcoded — not derived from is_borderline). Codex
+                    # round-1 of WS A review BLOCK-fix: skill_change in v1
+                    # let high-confidence non-borderline cases auto-run with
+                    # force_draft=None, contradicting the v2 doctrine.
+                    await self._runtime_service.create_skill_task(
+                        session=session,
+                        registry=registry,
+                        thread_id=thread_id,
+                        goal=goal,
+                        raw_request=raw_request,
+                        created_by=msg.author_id or msg.author,
+                        preferred_agent=msg.preferred_agent,
+                        skill_name=skill_name,
+                        source=source,
+                        force_draft=True,
                     )
-                    source = "repair_skill"
-                else:
-                    skill_name = router_skill or (router_decision.goal or msg.content)
-                    raw_request = msg.content
-                    goal = router_decision.goal or msg.content
-                    source = "router"
-                await self._runtime_service.create_skill_task(
-                    session=session,
-                    registry=registry,
-                    thread_id=thread_id,
-                    goal=goal,
-                    raw_request=raw_request,
-                    created_by=msg.author_id or msg.author,
-                    preferred_agent=msg.preferred_agent,
-                    skill_name=skill_name,
-                    source=source,
-                    force_draft=True if is_borderline else None,
-                )
-                if is_repair:
-                    if is_borderline:
-                        confirm_msg = (
-                            f"Router thinks this is feedback on skill `{skill_name}` "
-                            f"(confidence {router_decision.confidence:.2f}), but not confident enough. "
-                            "Created a draft — use `/task_approve` to let the agent update the skill, "
-                            "or `/task_reject` to cancel and rephrase."
-                        )
+                    if is_repair:
+                        if is_borderline:
+                            confirm_msg = (
+                                f"Router thinks this is feedback on skill `{skill_name}` "
+                                f"(confidence {router_decision.confidence:.2f}), but not confident enough. "
+                                "Created a draft — use `/task_approve` to let the agent update the skill, "
+                                "or `/task_reject` to cancel and rephrase."
+                            )
+                        else:
+                            confirm_msg = (
+                                f"Router classified this as feedback on skill `{skill_name}` "
+                                f"(confidence {router_decision.confidence:.2f}). Created a draft — "
+                                "use `/task_approve` to let the agent update the skill, "
+                                "or `/task_reject` to cancel and rephrase."
+                            )
                     else:
-                        confirm_msg = (
-                            f"Router classified this as feedback on skill `{skill_name}` "
-                            f"(confidence {router_decision.confidence:.2f}) and started the update. "
-                            "Use `/task_stop` to stop at any time."
-                        )
-                else:
-                    if is_borderline:
-                        confirm_msg = (
-                            f"Router thinks this is a skill-creation task "
-                            f"(confidence {router_decision.confidence:.2f}), but not confident enough. "
-                            "Created a draft — use `/task_approve` to start autonomous execution, "
-                            "or `/task_reject` to cancel and rephrase."
-                        )
-                    else:
-                        confirm_msg = (
-                            f"Router classified this as a skill-creation task "
-                            f"(confidence {router_decision.confidence:.2f}) and started execution. "
-                            "Use `/task_stop` to stop at any time."
-                        )
-                await channel.send(thread_id, confirm_msg)
-                logger.info(
-                    "[%s] ROUTER update_skill mode=%s confidence=%.2f goal=%r skill_name=%r borderline=%s",
-                    req_id,
-                    "repair" if is_repair else "create",
-                    router_decision.confidence,
-                    goal[:120],
-                    skill_name,
-                    is_borderline,
-                )
-                return
-            if (
-                router_decision
-                and router_decision.decision == "oneoff_artifact"
-                and router_decision.confidence >= threshold
-            ):
-                await self._append_user_turn_if_needed(session, thread_id, msg)
-                user_turn_appended = True
-                goal = router_decision.goal or msg.content
-                await self._runtime_service.create_artifact_task(
-                    session=session,
-                    registry=registry,
-                    thread_id=thread_id,
-                    goal=goal,
-                    raw_request=msg.content,
-                    created_by=msg.author_id or msg.author,
-                    preferred_agent=msg.preferred_agent,
-                    source="router",
-                    force_draft=True,
-                )
-                await channel.send(
-                    thread_id,
-                    (
-                        "Router suggested this as an artifact task and created a draft. "
-                        "Approve to start autonomous execution, or reject/suggest to keep it in chat flow."
-                    ),
-                )
-                logger.info(
-                    "[%s] ROUTER oneoff_artifact confidence=%.2f goal=%r",
-                    req_id,
-                    router_decision.confidence,
-                    goal[:120],
-                )
-                return
-            if (
-                router_decision
-                and router_decision.decision == "propose_repo_change"
-                and router_decision.confidence >= threshold
-            ):
-                await self._append_user_turn_if_needed(session, thread_id, msg)
-                user_turn_appended = True
+                        if is_borderline:
+                            confirm_msg = (
+                                f"Router thinks this is a skill-creation task "
+                                f"(confidence {router_decision.confidence:.2f}), but not confident enough. "
+                                "Created a draft — use `/task_approve` to start autonomous execution, "
+                                "or `/task_reject` to cancel and rephrase."
+                            )
+                        else:
+                            confirm_msg = (
+                                f"Router classified this as a skill-creation task "
+                                f"(confidence {router_decision.confidence:.2f}). Created a draft — "
+                                "use `/task_approve` to start autonomous execution, "
+                                "or `/task_reject` to cancel and rephrase."
+                            )
+                    await channel.send(thread_id, confirm_msg)
+                    logger.info(
+                        "[%s] ROUTER repo_update(skill) mode=%s confidence=%.2f goal=%r skill_name=%r borderline=%s",
+                        req_id,
+                        "repair" if is_repair else "create",
+                        router_decision.confidence,
+                        goal[:120],
+                        skill_name,
+                        is_borderline,
+                    )
+                    return
+                # Generic repo change (no skill_name). Was the legacy
+                # ``propose_repo_change`` branch; always drafts.
                 goal = router_decision.goal or msg.content
                 await self._runtime_service.create_repo_change_task(
                     session=session,
@@ -1474,57 +1467,151 @@ class GatewayManager:
                     ),
                 )
                 logger.info(
-                    "[%s] ROUTER propose_repo_change confidence=%.2f goal=%r",
+                    "[%s] ROUTER repo_update(generic) confidence=%.2f goal=%r",
                     req_id,
                     router_decision.confidence,
                     goal[:120],
                 )
                 return
+
+            # artifact: produces a deliverable, does NOT modify source repo
+            # (was: oneoff_artifact + invoke_skill). Default auto-approve;
+            # honors router-emitted ``force_draft`` for expensive long-runs
+            # and explicit ``"draft:"`` user-prefix opt-in.
             if (
                 router_decision
-                and router_decision.decision == "invoke_skill"
+                and router_decision.decision == "artifact"
                 and router_decision.confidence >= threshold
             ):
-                # Router-detected skill invocation goes through the same
-                # create_artifact_task pipeline as explicit /skill_name
-                # and scheduler cron jobs. Resolves to a registered
-                # skill via skill_syncer; falls back to inline AgentRegistry.run
-                # if the router couldn't pin a known skill_name.
                 router_skill = (router_decision.skill_name or "").strip()
-                known_skills = self._known_skill_names()
+                known_skills = self._known_skill_names() if router_skill else set()
                 if router_skill and router_skill in known_skills:
+                    # Resolved known-skill invocation. Default auto-approve
+                    # (was the legacy ``invoke_skill`` resolved sub-branch),
+                    # but honor the v2 force_draft signals so the user can
+                    # gate even known skills:
+                    # (a) router emits ``force_draft=true`` for known heavy
+                    #     skills (market-briefing-*, paper-digest, etc.)
+                    # (b) explicit ``draft:`` / ``草稿:`` user prefix
+                    # Codex round-1 of WS A review BLOCK-fix.
+                    effective_force_draft = bool(router_decision.force_draft) or draft_prefix_forced
+                    await self._append_user_turn_if_needed(session, thread_id, msg)
+                    user_turn_appended = True
                     logger.info(
-                        "[%s] ROUTER invoke_skill confidence=%.2f skill_name=%r -> create_artifact_task",
+                        "[%s] ROUTER artifact(skill) confidence=%.2f skill_name=%r force_draft=%s -> create_artifact_task",
+                        req_id,
+                        router_decision.confidence,
+                        router_skill,
+                        effective_force_draft,
+                    )
+                    if effective_force_draft:
+                        # Draft gate overrides auto-approve. The user (or
+                        # router heuristic for heavy skills) wants an
+                        # explicit approval step.
+                        await self._runtime_service.create_artifact_task(
+                            session=session,
+                            registry=registry,
+                            thread_id=thread_id,
+                            goal=msg.content,
+                            raw_request=msg.content,
+                            created_by=msg.author_id or msg.author,
+                            preferred_agent=msg.preferred_agent,
+                            skill_name=router_skill,
+                            source="router_invoke_skill",
+                            force_draft=True,
+                            agent_timeout_seconds=self._skill_timeout_seconds_by_name(router_skill),
+                            agent_max_turns=self._skill_max_turns_by_name(router_skill),
+                        )
+                    else:
+                        await self._runtime_service.create_artifact_task(
+                            session=session,
+                            registry=registry,
+                            thread_id=thread_id,
+                            goal=msg.content,
+                            raw_request=msg.content,
+                            created_by=msg.author_id or msg.author,
+                            preferred_agent=msg.preferred_agent,
+                            skill_name=router_skill,
+                            source="router_invoke_skill",
+                            auto_approve=True,
+                            agent_timeout_seconds=self._skill_timeout_seconds_by_name(router_skill),
+                            agent_max_turns=self._skill_max_turns_by_name(router_skill),
+                        )
+                    return
+                if router_skill:
+                    # Skill name present but not in known_skills. Fall
+                    # through to inline ``AgentRegistry.run`` (matches the
+                    # legacy ``invoke_skill`` unresolved sub-branch) — the
+                    # agent can still answer using whatever context exists.
+                    logger.info(
+                        "[%s] ROUTER artifact(skill) confidence=%.2f skill_name=%r unresolved -> inline",
                         req_id,
                         router_decision.confidence,
                         router_skill,
                     )
-                    await self._append_user_turn_if_needed(session, thread_id, msg)
-                    user_turn_appended = True
-                    await self._runtime_service.create_artifact_task(
-                        session=session,
-                        registry=registry,
-                        thread_id=thread_id,
-                        goal=msg.content,
-                        raw_request=msg.content,
-                        created_by=msg.author_id or msg.author,
-                        preferred_agent=msg.preferred_agent,
-                        skill_name=router_skill,
-                        source="router_invoke_skill",
-                        auto_approve=True,
-                        agent_timeout_seconds=self._skill_timeout_seconds_by_name(router_skill),
-                        agent_max_turns=self._skill_max_turns_by_name(router_skill),
-                    )
-                    return
-                # Skill name unresolved or unknown — fall through to
-                # inline AgentRegistry.run so the agent can still answer
-                # using whatever context is available.
-                logger.info(
-                    "[%s] ROUTER invoke_skill confidence=%.2f skill_name=%r (unresolved; inline)",
-                    req_id,
-                    router_decision.confidence,
-                    router_skill or None,
-                )
+                else:
+                    # ``skill_name`` absent. Check ``goal`` to disambiguate
+                    # between the two legacy intents that normalize here:
+                    #   - ``invoke_skill`` with no skill_name → router
+                    #     intended a skill call but couldn't pin one.
+                    #     Fall through to inline chat (matches old
+                    #     ``invoke_skill`` unresolved behavior).
+                    #   - ``oneoff_artifact`` → router intended a generic
+                    #     artifact and emits a non-empty ``goal``. Create
+                    #     the task.
+                    goal_str = (router_decision.goal or "").strip()
+                    if not goal_str:
+                        logger.info(
+                            "[%s] ROUTER artifact (no skill, no goal) confidence=%.2f -> inline",
+                            req_id,
+                            router_decision.confidence,
+                        )
+                        # fall through to inline chat below (no return).
+                    else:
+                        # Generic artifact task. Unlike the legacy
+                        # ``oneoff_artifact`` hardcoded ``force_draft=True``,
+                        # honor the router-emitted hint and "draft:" prefix
+                        # override — defaults to auto-execute (no draft).
+                        effective_force_draft = bool(router_decision.force_draft) or draft_prefix_forced
+                        await self._append_user_turn_if_needed(session, thread_id, msg)
+                        user_turn_appended = True
+                        await self._runtime_service.create_artifact_task(
+                            session=session,
+                            registry=registry,
+                            thread_id=thread_id,
+                            goal=goal_str,
+                            raw_request=msg.content,
+                            created_by=msg.author_id or msg.author,
+                            preferred_agent=msg.preferred_agent,
+                            source="router",
+                            force_draft=effective_force_draft,
+                        )
+                        if effective_force_draft:
+                            await channel.send(
+                                thread_id,
+                                (
+                                    "Router suggested this as an artifact task and created a draft. "
+                                    "Approve to start autonomous execution, or reject/suggest to keep it in chat flow."
+                                ),
+                            )
+                        else:
+                            await channel.send(
+                                thread_id,
+                                (
+                                    "Router suggested this as an artifact task and started execution. "
+                                    "Use `/task_stop` to stop at any time."
+                                ),
+                            )
+                        logger.info(
+                            "[%s] ROUTER artifact(generic) confidence=%.2f force_draft=%s(router=%s,prefix=%s) goal=%r",
+                            req_id,
+                            router_decision.confidence,
+                            effective_force_draft,
+                            router_decision.force_draft,
+                            draft_prefix_forced,
+                            goal_str[:120],
+                        )
+                        return
 
             should_try_heuristic = (
                 router_decision is None
@@ -1537,6 +1624,9 @@ class GatewayManager:
             if is_skill_intent(msg.content):
                 await self._append_user_turn_if_needed(session, thread_id, msg)
                 user_turn_appended = True
+                # Heuristic skill_task already drafts by default (v2 doctrine:
+                # repo_update always drafts). The explicit ``draft:`` prefix
+                # is redundant here but pass it through for log symmetry.
                 await self._runtime_service.create_skill_task(
                     session=session,
                     registry=registry,
@@ -1547,6 +1637,7 @@ class GatewayManager:
                     preferred_agent=msg.preferred_agent,
                     skill_name=msg.content,
                     source="heuristic",
+                    force_draft=True,
                 )
                 await channel.send(
                     thread_id,
@@ -1556,6 +1647,15 @@ class GatewayManager:
             if is_artifact_intent(msg.content) or is_long_task_intent(msg.content):
                 await self._append_user_turn_if_needed(session, thread_id, msg)
                 user_turn_appended = True
+            # Known limitation (Codex round-1 of WS A review, MED): the
+            # ``draft:`` / ``草稿:`` user prefix is not propagated into
+            # ``maybe_handle_incoming``. That path uses its own internal
+            # routing (see runtime.service.maybe_handle_incoming) which
+            # doesn't expose a force_draft kwarg today. The router-path
+            # `artifact` branch above DOES honor the prefix. Plumbing the
+            # flag into the heuristic artifact/repo path is deferred to a
+            # follow-up — heuristic is rarely hit in practice (LLM router
+            # is the primary intent classifier).
             handled = await self._runtime_service.maybe_handle_incoming(
                 session,
                 registry,
@@ -2274,9 +2374,17 @@ class GatewayManager:
             return "direct_reply"
         if router_decision.confidence < router_threshold:
             return "direct_reply"
-        if router_decision.decision == "chat_reply":
+        # Router v2 canonical decision names. The internal purpose label
+        # strings below intentionally keep their legacy spellings to
+        # preserve backward-compat with log/metric consumers (see
+        # ``_thread_log_mode_from_purpose`` note).
+        if router_decision.decision == "reply":
             return "router_reply_once"
-        if router_decision.decision == "invoke_skill":
+        if router_decision.decision == "artifact":
+            # Inline fall-through path is reached only when the dispatcher's
+            # artifact branch did NOT create a task — i.e. the router
+            # emitted ``artifact`` with an unresolved / missing skill_name.
+            # That's exactly the old "invoke_skill unresolved" case.
             return "router_invoke_existing_skill"
         return "direct_reply"
 
@@ -2516,7 +2624,13 @@ class GatewayManager:
             return None
         if router_decision.confidence < router_threshold:
             return None
-        if router_decision.decision != "invoke_skill":
+        # Router v2 canonical: ``artifact`` covers both generic artifact
+        # and the legacy ``invoke_skill``. This function only fires on the
+        # inline fall-through path (resolved skills returned earlier in
+        # the dispatcher), so ``decision == "artifact"`` here means the
+        # router intended a skill invocation but couldn't pin one — same
+        # semantics as the legacy ``invoke_skill`` unresolved branch.
+        if router_decision.decision != "artifact":
             return None
         known = self._known_skill_names()
         if router_decision.skill_name and router_decision.skill_name in known:

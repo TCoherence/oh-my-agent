@@ -82,6 +82,11 @@ _BLOCKED_RE = re.compile(r"^\s*TASK_STATE:\s*BLOCKED\s*$", re.MULTILINE)
 _CONTINUE_RE = re.compile(r"^\s*TASK_STATE:\s*CONTINUE\s*$", re.MULTILINE)
 _BLOCK_REASON_RE = re.compile(r"^\s*BLOCK_REASON:\s*(.+?)\s*$", re.MULTILINE)
 
+# Explicit user opt-in for approval-gated execution.
+# Matches "draft:", "DRAFT:", "草稿:", "草稿：" at the start of a message.
+# Both ASCII colon (":") and CJK colon ("：") are accepted.
+_DRAFT_PREFIX_RE = re.compile(r"^\s*(?:draft|草稿)\s*[:：]\s*", re.IGNORECASE)
+
 
 def is_long_task_intent(text: str) -> bool:
     lowered = text.lower()
@@ -96,6 +101,23 @@ def is_skill_intent(text: str) -> bool:
 def is_artifact_intent(text: str) -> bool:
     lowered = text.lower()
     return any(hint in lowered for hint in _ARTIFACT_HINTS)
+
+
+def strip_draft_prefix(text: str) -> tuple[str, bool]:
+    """Detect explicit ``draft:`` / ``草稿:`` user opt-in for approval gate.
+
+    Returns ``(stripped_text, prefix_found)``. When ``prefix_found`` is True,
+    the caller should set ``force_draft=True`` on the resulting task /
+    RouteDecision regardless of router-emitted hints — this is a hard
+    user signal.
+
+    Examples accepted: ``"draft: 帮我跑..."``, ``"DRAFT: do X"``,
+    ``"草稿：调研 ..."`` (CJK colon also matched).
+    """
+    match = _DRAFT_PREFIX_RE.match(text)
+    if match:
+        return text[match.end():], True
+    return text, False
 
 
 def extract_skill_name(text: str, existing_skills: set[str] | None = None) -> tuple[str, bool]:

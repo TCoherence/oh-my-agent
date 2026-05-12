@@ -110,7 +110,11 @@ See [`docs/EN/task-model.md`](docs/EN/task-model.md) ([中文](docs/CN/task-mode
 **Router layer** (`src/oh_my_agent/gateway/router.py`)
 
 - `OpenAICompatibleRouter`: optional LLM-based intent classification for incoming messages.
-- Canonical intents (5): `chat_reply`, `invoke_skill`, `oneoff_artifact`, `propose_repo_change`, `update_skill`. Legacy names (`reply_once` / `invoke_existing_skill` / `propose_artifact_task` / `propose_repo_task` / `create_skill` / `repair_skill`) are still accepted from older router models and normalized to canonical at parse time. `update_skill` collapses the old create/repair split — the dispatcher decides create-vs-repair by checking whether `skill_name` matches a registered skill.
+- Canonical intents (3, v2): `reply` / `artifact` / `repo_update`, organized around "does this modify the source repo?". Legacy v1 names (`chat_reply` → `reply`; `invoke_skill` + `oneoff_artifact` → `artifact`; `propose_repo_change` + `update_skill` → `repo_update`) and pre-v1 aliases (`reply_once` / `invoke_existing_skill` / `propose_artifact_task` / `propose_repo_task` / `create_skill` / `repair_skill`) are normalized to v2 at parse time AND in `RouteDecision.__post_init__` so test fixtures and older router models keep working through the migration window.
+- Dispatcher splits intents into 2 task-creating branches:
+  - `repo_update`: always drafts (user approval gated). With `skill_name` → `create_skill_task` (create-or-repair decided by registered-skill lookup); without → `create_repo_change_task`.
+  - `artifact`: defaults to auto-execute (no draft). With known `skill_name` → `create_artifact_task(auto_approve=True)`; with unknown `skill_name` OR empty `goal` → fall through to inline chat; otherwise → `create_artifact_task(force_draft=route.force_draft)`.
+- `RouteDecision.force_draft`: opt-in approval gate for `artifact` only (ignored for `repo_update`, irrelevant for `reply`). Triggered by (a) router LLM emitting `force_draft=true` (heavy-skill prompt heuristic), (b) explicit `draft:` / `草稿:` user prefix (hard override; see `runtime.policy.strip_draft_prefix`).
 - Confidence threshold gating (default `0.55`); falls back to heuristic detection.
 
 **Automation layer** (`src/oh_my_agent/automation/`)
