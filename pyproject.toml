@@ -65,9 +65,13 @@ oma-dashboard = "oh_my_agent.dashboard.cli:main"
 version = {attr = "oh_my_agent._version.__version__"}
 
 [tool.setuptools.package-data]
-# Ship Jinja2 templates with the dashboard package so non-editable
-# installs (wheel) can find them via importlib.resources / PackageLoader.
-"oh_my_agent.dashboard" = ["templates/*.html"]
+# Ship Jinja2 templates AND React SPA bundle with the dashboard package
+# so non-editable installs (wheel) can find them via
+# importlib.resources / PackageLoader / StaticFiles. The web_dist/ tree
+# is populated at wheel build time by setup.py's BuildPyWithFrontend
+# cmdclass (running pnpm/npm build in dashboard-web/). It's gitignored
+# — present only in build artifacts, not the repo.
+"oh_my_agent.dashboard" = ["templates/*.html", "web_dist/**/*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

@@ -135,6 +135,23 @@ See [`docs/EN/task-model.md`](docs/EN/task-model.md) ([中文](docs/CN/task-mode
 - Boot constructs the dispatcher once (`_build_push_dispatcher` in `boot.py`) and shares the same instance with `DiscordChannel` (mention peek) and `RuntimeService` (terminal pushes; forwarded to `NotificationManager` via constructor). Single `aclose()` at shutdown.
 - Config under top-level `notifications`: `enabled` (default false), `provider` (`bark` | `noop`), `bark.device_key_env` (env var name — secret never lives in YAML), `events` (per-kind allow-list), `levels` (per-kind Bark level). Validator (`_check_notifications` in `config_validator.py`) errors on unknown providers / missing `device_key_env` / invalid level enum, warns when the named env var is unset.
 
+**Dashboard layer** (`src/oh_my_agent/dashboard/` + `dashboard-web/`)
+
+- FastAPI app (`dashboard/app.py`) with four surfaces:
+  - `GET /` — legacy Jinja2 ops-monitoring page (always served; useful when SPA isn't built)
+  - `/healthz` + `/api/v1/healthz` — public liveness probes (both whitelisted from auth)
+  - `/api/v1/*` — read-only JSON API for the React SPA. Auth inherits the optional bearer-token middleware
+  - `/app/*` — React SPA static mount; only attached when `web_dist/index.html` exists (created at wheel build time)
+- Data access uses **separate read-only SQLite connections** (`mode=ro` URI; see `dashboard/data.py:_ro_connect` + `dashboard/data_sessions.py`). Intentionally does NOT reuse `SQLiteMemoryStore` which opens a writable WAL connection.
+- v1 endpoints:
+  - `GET /api/v1/sessions?limit=&cursor=` — paginated list via `data_sessions.fetch_session_list`. Composite cursor `base64("<last_turn_at>|<thread_id>")` for stability across equal-timestamp threads.
+  - `GET /api/v1/sessions/{platform}/{channel_id}/{thread_id}/history?limit=&before_id=` — turns via `data_sessions.fetch_session_history`, oldest-first.
+  - `GET /api/v1/sessions/{platform}/{channel_id}/{thread_id}/trace?date=&limit=` — tool events via `trace.trace_reader.read_thread_trace`. `date` is **required** (no scan-all fallback); returns `{enabled: false, items: []}` when `experiment.tool_trace` is off.
+- Frontend (`dashboard-web/`): React 19 + Vite + TypeScript + TanStack Router/Query + Tailwind + custom minimal AI-Elements-style components (`conversation` / `message` / `tool-event`). Polling-first refresh (sessions 5s, history+trace 2s) — no SSE/WS in MVP. Vite base path is `/app/` so asset URLs work behind the FastAPI mount.
+- Build & ship: `setup.py` defines `BuildPyWithFrontend` cmdclass that runs `pnpm install + pnpm run build` (or npm fallback) before `build_py` collects files. Output goes to `src/oh_my_agent/dashboard/web_dist/` and is shipped via `pyproject.toml [tool.setuptools.package-data]`. The `dashboard-web/` source is tracked; the `web_dist/` output is `.gitignore`d. Set `OMA_SKIP_FRONTEND=1` to skip the hook (used in CI when the frontend was built in a separate step, and for dev installs without Node).
+- New schema index: `idx_turns_thread_recency(platform, channel_id, thread_id, created_at)` in `memory/store.py` to support the GROUP-BY-MAX(created_at) sessions list query.
+- MVP is read-only. Write surfaces (post message, approve task, edit memory) are out of scope; the SPA is a viewer.
+
 **Test harness layer** (`tests/harness/`)
 
 Scripted/offline E2E harness for cross-subsystem regressions. Drives the **real** GatewayManager + RuntimeService stack with a `HarnessChannel(BaseChannel)`, `StubAgent`, and `StubBilibiliAuthProvider` — no network, no API keys, no daemons. Designed cross-platform-first: `HarnessChannel` deliberately does NOT import `DiscordChannel`, so the same yaml scenarios will run unmodified against future Slack/Feishu channels (post-v1.0).

@@ -598,6 +598,17 @@ CREATE TABLE IF NOT EXISTS turns (
 CREATE INDEX IF NOT EXISTS idx_thread
     ON turns(platform, channel_id, thread_id);
 
+-- Recency-aware composite index for dashboard read-only queries that
+-- aggregate by thread and order by last activity (data_sessions.py).
+-- The leading (platform, channel_id, thread_id) prefix keeps existing
+-- ``idx_thread`` query plans intact; the trailing ``created_at`` lets
+-- ``MAX(created_at) ... GROUP BY thread_id`` use the index for the
+-- aggregate evaluation. SQLite query planner may still sort for the
+-- ORDER BY MAX(created_at) DESC clause — that's acceptable on the
+-- ~10k-100k rows typical of single-user deployments.
+CREATE INDEX IF NOT EXISTS idx_turns_thread_recency
+    ON turns(platform, channel_id, thread_id, created_at);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS turns_fts
     USING fts5(content, content=turns, content_rowid=id);
 
