@@ -33,6 +33,12 @@ TASK_STATUS_STOPPED = "STOPPED"
 TASK_STATUS_REJECTED = "REJECTED"
 TASK_STATUS_PAUSED = "PAUSED"
 TASK_STATUS_WAITING_USER_INPUT = "WAITING_USER_INPUT"
+# v2 PR-based merge flow terminal status. Mirrors MERGED for the
+# ``target_branch_mode: pr`` path — the bot pushed the task branch and
+# opened a GitHub PR (URL stored on ``RuntimeTask.pr_url``). The actual
+# remote merge happens out-of-band; ``PR_OPENED`` is the bot's terminal
+# watermark. See ``runtime.service._execute_merge_pr``.
+TASK_STATUS_PR_OPENED = "PR_OPENED"
 
 TaskStatus = Literal[
     "DRAFT",
@@ -52,6 +58,7 @@ TaskStatus = Literal[
     "REJECTED",
     "PAUSED",
     "WAITING_USER_INPUT",
+    "PR_OPENED",
 ]
 TaskType = Literal["artifact", "repo_change", "skill_change"]
 TaskCompletionMode = Literal["reply", "artifact", "merge"]
@@ -124,6 +131,13 @@ class RuntimeTask:
     task_type: str = TASK_TYPE_REPO_CHANGE
     skill_name: str | None = None
     notify_channel_id: str | None = None
+    # PR-based merge flow (target_branch_mode=pr). Populated when the
+    # task lands in PR_OPENED state; null otherwise (including for all
+    # current-mode merges). Stored separately from ``merge_commit_hash``
+    # because PR_OPENED has no local commit on main — the remote PR
+    # carries the bot's branch and the user merges via GitHub.
+    pr_url: str | None = None
+    pr_number: int | None = None
 
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> "RuntimeTask":
@@ -173,6 +187,10 @@ class RuntimeTask:
             task_type=raw_task_type,
             skill_name=row.get("skill_name"),
             notify_channel_id=row.get("notify_channel_id"),
+            pr_url=row.get("pr_url"),
+            pr_number=(
+                int(row["pr_number"]) if row.get("pr_number") is not None else None
+            ),
         )
 
 

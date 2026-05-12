@@ -35,8 +35,10 @@ COST_LOOKBACK_DAYS = 7
 MEMORY_NEW_LOOKBACK_DAYS = 7
 
 # RuntimeService terminal states considered "successful" for success-rate calc.
-SUCCESS_STATES = ("COMPLETED", "MERGED")
-TERMINAL_STATES = ("COMPLETED", "MERGED", "FAILED", "CANCELLED", "TIMEOUT")
+# ``PR_OPENED`` (WS B, target_branch_mode=pr) is a success terminal — the
+# bot opened a GitHub PR; the user merges on GitHub.
+SUCCESS_STATES = ("COMPLETED", "MERGED", "PR_OPENED")
+TERMINAL_STATES = ("COMPLETED", "MERGED", "PR_OPENED", "FAILED", "CANCELLED", "TIMEOUT")
 
 # Regex matching service.log structured line:
 #   <ISO> level=<LEVEL> logger=<name> msg=<text>
