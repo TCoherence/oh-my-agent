@@ -12,3 +12,18 @@ dist/
 .gemini/
 .agents/
 .codex/
+
+# Dashboard React frontend artifacts. Source lives in dashboard-web/;
+# build output goes into src/oh_my_agent/dashboard/web_dist/ via the
+# setup.py BuildPyWithFrontend cmdclass and ships through wheel
+# package_data — never committed.
+dashboard-web/node_modules/
+dashboard-web/dist/
+src/oh_my_agent/dashboard/web_dist/
+
+# TanStack Router auto-generates this from src/app/** on dev/build.
+# Keep out of git so route additions don't churn the diff history.
+dashboard-web/src/routeTree.gen.ts
+
+# TypeScript incremental build info (regenerated on every build).
+dashboard-web/*.tsbuildinfo

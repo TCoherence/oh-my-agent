@@ -1,9 +1,17 @@
 """FastAPI app exposing the dashboard.
 
-Two routes:
+Three surfaces:
 
-- ``GET /`` — full HTML dashboard (Jinja2-rendered)
-- ``GET /healthz`` — JSON health check (always 200 if process is up)
+- ``GET /`` — legacy Jinja2-rendered HTML monitoring page (always served).
+- ``GET /healthz`` / ``GET /api/v1/healthz`` — JSON health checks (always
+  200 if process is up; both whitelisted from auth).
+- ``/api/v1/*`` — read-only JSON API for the React dashboard
+  (:mod:`oh_my_agent.dashboard.api.v1`).
+- ``/app/*`` — React SPA static assets, mounted only when
+  ``src/oh_my_agent/dashboard/web_dist/`` exists (created at wheel
+  build time by ``setup.py``'s ``BuildPyWithFrontend`` cmdclass). The
+  SPA is the recommended way to view sessions / tool traces; the legacy
+  Jinja page at ``/`` remains for ops-only health monitoring.
 
 The ``data.py`` layer is invoked synchronously per request — query each
 SQLite table on demand. SQLite reads with ``mode=ro`` URI are concurrent-safe
@@ -15,14 +23,27 @@ from __future__ import annotations
 import hmac
 import html
 from datetime import datetime, timezone
+from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, PackageLoader, select_autoescape
 
 from oh_my_agent import paths
+from oh_my_agent.dashboard.api.v1 import build_router as build_api_v1_router
 
 from . import data as dashboard_data
+
+# Auth-middleware path whitelist. Both /healthz endpoints are public so
+# liveness probes don't need to know the bearer token.
+_AUTH_PUBLIC_PATHS = frozenset({"/healthz", "/api/v1/healthz"})
+
+# Location of the React SPA build output. Created at wheel build time by
+# ``setup.py``'s cmdclass override (running ``pnpm/npm run build`` in
+# ``dashboard-web/``). Absent in source checkouts that haven't built
+# the frontend yet — the mount is a no-op in that case.
+_WEB_DIST_DIR = Path(__file__).resolve().parent / "web_dist"
 
 
 def create_app(
@@ -74,9 +95,11 @@ def create_app(
 
         @app.middleware("http")
         async def require_auth_token(request: Request, call_next):
-            # /healthz always public so liveness probes (Docker / k8s /
-            # uptime monitors) don't need to know the token.
-            if request.url.path == "/healthz":
+            # /healthz and /api/v1/healthz are always public so liveness
+            # probes (Docker / k8s / uptime monitors) don't need to know
+            # the token. Both are whitelisted via _AUTH_PUBLIC_PATHS so
+            # adding a new public path is a single-list edit.
+            if request.url.path in _AUTH_PUBLIC_PATHS:
                 return await call_next(request)
             if _check_auth_token(request, auth_token):
                 return await call_next(request)
@@ -96,6 +119,26 @@ def create_app(
         ctx = _build_context(config)
         ctx["refresh_seconds"] = refresh_seconds
         return HTMLResponse(template.render(**ctx))
+
+    # /api/v1/* — read-only JSON API for the React SPA. Lives on the
+    # same FastAPI app so it inherits the auth middleware above (the
+    # whitelist explicitly allows /api/v1/healthz).
+    app.include_router(build_api_v1_router(config), prefix="/api/v1")
+
+    # /app/* — React SPA static assets. Mounted only when the build
+    # output is present (created at wheel build time by ``setup.py``'s
+    # cmdclass override running pnpm/npm build in dashboard-web/). In
+    # source checkouts without a frontend build, this mount is skipped
+    # — operators still get the legacy Jinja monitoring page at ``/``.
+    # ``html=True`` enables SPA fallback: routes like /app/sessions/xxx
+    # resolve to index.html so TanStack Router can handle them
+    # client-side without 404s.
+    if _WEB_DIST_DIR.exists() and (_WEB_DIST_DIR / "index.html").exists():
+        app.mount(
+            "/app",
+            StaticFiles(directory=_WEB_DIST_DIR, html=True),
+            name="dashboard-web",
+        )
 
     return app
 
