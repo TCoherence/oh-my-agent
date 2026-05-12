@@ -178,11 +178,31 @@ runtime:
     #   default: 168  # fallback for non-task chat logs (router/direct_reply/etc.)
   merge_gate:
     enabled: true
-    auto_commit: true
-    require_clean_repo: true
-    preflight_check: true
-    target_branch_mode: current
+    auto_commit: true                              # only current mode (PR mode always commits workspace)
+    require_clean_repo: true                       # only current mode
+    preflight_check: true                          # both modes
+    target_branch_mode: current                    # "current" | "pr" (WS B; see below)
     commit_message_template: "runtime(task:{task_id}): {goal_short}"
+    # PR-mode config (target_branch_mode: pr). Bot pushes the task
+    # worktree branch to ``pr_remote`` and opens a GitHub PR against
+    # ``pr_base_branch`` via the ``gh`` CLI. The terminal state is
+    # PR_OPENED; the user reviews and merges the PR on GitHub.
+    # Skill auto-merge is disabled in PR mode — all skill tasks land
+    # in WAITING_MERGE so the user can review the PR before opening it.
+    pr_base_branch: main
+    pr_remote: origin
+    pr_draft: false                                # if true, opens PR as a draft
+    pr_title_template: "runtime(task:{task_id}): {goal_short}"
+    pr_body_template: |
+      Automated PR from oh-my-agent runtime task `{task_id}`.
+
+      **Goal**: {goal}
+
+      **Original request**: {original_request}
+
+      **Summary**: {summary}
+
+      Review and merge via the GitHub UI. The bot will not auto-merge.
 
 gateway:
   # Incremental in-place edit of the assistant's reply while the agent streams.

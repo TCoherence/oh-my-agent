@@ -54,6 +54,7 @@ from oh_my_agent.runtime.types import (
     TASK_STATUS_MERGED,
     TASK_STATUS_PAUSED,
     TASK_STATUS_PENDING,
+    TASK_STATUS_PR_OPENED,
     TASK_STATUS_REJECTED,
     TASK_STATUS_RUNNING,
     TASK_STATUS_STOPPED,
@@ -117,6 +118,7 @@ _TERMINAL_CLEANUP_STATUSES = {
     TASK_STATUS_APPLIED,  # legacy
     TASK_STATUS_COMPLETED,
     TASK_STATUS_MERGED,
+    TASK_STATUS_PR_OPENED,  # WS B: PR-mode terminal (PR opened on GitHub)
     TASK_STATUS_DISCARDED,
     TASK_STATUS_MERGE_FAILED,
     TASK_STATUS_FAILED,
@@ -129,6 +131,12 @@ _SUCCESS_CLEANUP_STATUSES = frozenset({
     TASK_STATUS_COMPLETED,
     TASK_STATUS_APPLIED,
     TASK_STATUS_MERGED,
+    # PR_OPENED is a success terminal — the bot's job is done; the
+    # user merges on GitHub at their leisure. Worth keeping in
+    # _SUCCESS_CLEANUP_STATUSES so the success retention applies
+    # (don't auto-clean too aggressively while user is still
+    # reviewing the PR).
+    TASK_STATUS_PR_OPENED,
 })
 
 _FAILURE_CLEANUP_STATUSES = frozenset({
@@ -286,6 +294,25 @@ class RuntimeService:
         self._merge_target_branch_mode = str(merge_cfg.get("target_branch_mode", "current"))
         self._merge_commit_template = str(
             merge_cfg.get("commit_message_template", "runtime(task:{task_id}): {goal_short}")
+        )
+        # PR-mode (target_branch_mode=pr) config knobs. Ignored when mode
+        # is "current". See WS B plan section in the dashboard plan.
+        self._pr_base_branch = str(merge_cfg.get("pr_base_branch", "main"))
+        self._pr_remote = str(merge_cfg.get("pr_remote", "origin"))
+        self._pr_draft = bool(merge_cfg.get("pr_draft", False))
+        self._pr_title_template = str(
+            merge_cfg.get("pr_title_template", "runtime(task:{task_id}): {goal_short}")
+        )
+        self._pr_body_template = str(
+            merge_cfg.get(
+                "pr_body_template",
+                "Automated PR from oh-my-agent runtime task `{task_id}`.\n\n"
+                "**Goal**: {goal}\n\n"
+                "**Original request**: {original_request}\n\n"
+                "**Summary**: {summary}\n\n"
+                "Review and merge via the GitHub UI. "
+                "The bot will not auto-merge.",
+            )
         )
 
         self._skill_auto_approve = bool(cfg.get("skill_auto_approve", True))
@@ -3278,8 +3305,21 @@ class RuntimeService:
                         )
                         for item in evaluation_findings
                     )
-                    # Auto-merge skill tasks when skill_auto_approve is enabled
-                    if self._skill_auto_approve and task.task_type == TASK_TYPE_SKILL_CHANGE and auto_merge_allowed:
+                    # Auto-merge skill tasks when skill_auto_approve is enabled.
+                    # WS B: in PR mode, ``auto-merge`` would push the
+                    # branch + open a PR without human review — which
+                    # contradicts the PR-mode intent of "always human-
+                    # gated via GitHub UI". Force the merge gate buttons
+                    # so the human decides whether to open the PR. The
+                    # current-mode behavior (auto-merge patch into main)
+                    # is unchanged.
+                    pr_mode_blocks_auto_merge = self._merge_target_branch_mode == "pr"
+                    if (
+                        self._skill_auto_approve
+                        and task.task_type == TASK_TYPE_SKILL_CHANGE
+                        and auto_merge_allowed
+                        and not pr_mode_blocks_auto_merge
+                    ):
                         try:
                             refreshed = await self._store.get_runtime_task(task.id) or task
                             result = await self._execute_merge(
@@ -3753,13 +3793,187 @@ class RuntimeService:
         safe_purpose = re.sub(r"[^a-zA-Z0-9._-]+", "-", purpose).strip("-") or "chat"
         return self._agent_logs_root / f"thread-{safe_thread}-{safe_purpose}-{request_id}.log"
 
+    async def _execute_merge_pr(
+        self, task: RuntimeTask, *, actor_id: str, source: str
+    ) -> str:
+        """Open a GitHub PR from the task's worktree branch instead of
+        merging locally. Lands the task in ``PR_OPENED`` terminal state.
+
+        Preflight is fail-loud (Codex round-1 NF5):
+        - gh CLI must be installed + authenticated
+        - configured remote must exist + have a URL
+        - workspace branch must have changes vs. fetched remote base
+
+        Out of scope (WS B MVP): tracking when the remote PR actually
+        merges. ``PR_OPENED`` is the bot's terminal state; the user
+        completes the merge via the GitHub UI.
+        """
+        from .worktree import GhError  # local import to avoid bumping module-level imports
+
+        if task.status not in {TASK_STATUS_WAITING_MERGE, TASK_STATUS_APPLIED, TASK_STATUS_MERGE_FAILED}:
+            return f"Task `{task.id}` is not waiting merge (status: {task.status})."
+
+        workspace = Path(task.workspace_path) if task.workspace_path else None
+        if workspace is None or not workspace.exists():
+            return await self._mark_merge_blocked(
+                task, "Workspace path is missing; cannot push branch."
+            )
+
+        try:
+            # 1. Preflight: gh ready.
+            gh_ready, gh_reason = await self._worktree.check_gh_ready()
+            if not gh_ready:
+                return await self._mark_merge_blocked(
+                    task, f"gh CLI preflight failed: {gh_reason}"
+                )
+            # 2. Preflight: remote configured.
+            remote_ok, remote_msg = await self._worktree.check_remote_configured(
+                self._pr_remote
+            )
+            if not remote_ok:
+                return await self._mark_merge_blocked(
+                    task,
+                    f"Remote '{self._pr_remote}' is not configured: {remote_msg}. "
+                    f"Run `git remote add {self._pr_remote} <url>` first.",
+                )
+
+            # 3. Compute branch name (matches WorktreeManager.ensure_worktree
+            # naming so we reuse the existing branch — no second push).
+            branch = f"codex/task-{task.id}"
+
+            # 4. Commit any dirty workspace changes. The agent may have
+            # left files dirty (no auto-commit during task execution),
+            # so we capture them as a single PR commit.
+            if await self._worktree.workspace_has_dirty_or_new_commits(workspace):
+                msg = self._merge_commit_template.format(
+                    task_id=task.id,
+                    goal_short=self._goal_short(task.goal),
+                )
+                try:
+                    await self._worktree.commit_workspace(workspace, msg)
+                except Exception as exc:  # noqa: BLE001
+                    # Likely "nothing to commit" if porcelain was just
+                    # noise. Move on to diff check; that's the real gate.
+                    logger.info(
+                        "Runtime task=%s commit_workspace skipped: %s", task.id, exc
+                    )
+
+            # 5. Fetch the latest base ref, then check for actual diff
+            # vs. the merge-base. Codex round-3 NF: stale local base
+            # refs let empty branches pass the check incorrectly.
+            try:
+                await self._worktree.fetch_base_ref(
+                    workspace, self._pr_remote, self._pr_base_branch
+                )
+            except Exception as exc:  # noqa: BLE001
+                return await self._mark_merge_blocked(
+                    task,
+                    f"git fetch {self._pr_remote} {self._pr_base_branch} failed: {exc}",
+                )
+            has_diff = await self._worktree.has_diff_vs_base(
+                workspace, self._pr_remote, self._pr_base_branch
+            )
+            if not has_diff:
+                return await self._mark_merge_blocked(
+                    task,
+                    f"Branch is identical to {self._pr_remote}/{self._pr_base_branch}; "
+                    "no PR to open.",
+                )
+
+            # 6. Push branch.
+            try:
+                await self._worktree.push_task_branch(
+                    workspace, branch, self._pr_remote
+                )
+            except Exception as exc:  # noqa: BLE001
+                return await self._mark_merge_blocked(
+                    task,
+                    f"git push -u {self._pr_remote} {branch} failed: {exc}",
+                )
+
+            # 7. gh pr create.
+            title = self._pr_title_template.format(
+                task_id=task.id,
+                goal_short=self._goal_short(task.goal),
+            )
+            body = self._pr_body_template.format(
+                task_id=task.id,
+                goal=task.goal,
+                original_request=task.original_request or "(none)",
+                summary=task.summary or "(none)",
+            )
+            try:
+                pr_url, pr_number = await self._worktree.create_pr(
+                    workspace,
+                    base=self._pr_base_branch,
+                    head=branch,
+                    title=title,
+                    body=body,
+                    draft=self._pr_draft,
+                )
+            except GhError as exc:
+                return await self._mark_merge_blocked(
+                    task, f"gh pr create failed: {exc}"
+                )
+
+            # 8. Persist terminal state + PR metadata.
+            await self._store.update_runtime_task(
+                task.id,
+                status=TASK_STATUS_PR_OPENED,
+                pr_url=pr_url,
+                pr_number=pr_number,
+                merge_error=None,
+                summary=f"PR opened: {pr_url}",
+                ended_at_now=True,
+            )
+            await self._store.add_runtime_event(
+                task.id,
+                "task.pr_opened",
+                {
+                    "actor_id": actor_id,
+                    "source": source,
+                    "pr_url": pr_url,
+                    "pr_number": pr_number,
+                    "branch": branch,
+                    "base": self._pr_base_branch,
+                },
+            )
+            logger.info(
+                "Runtime task=%s PR_OPENED url=%s number=%s",
+                task.id,
+                pr_url,
+                pr_number,
+            )
+
+            # 9. Notify the user. Skill-change tasks skip the
+            # _on_skill_task_merged hook in PR mode — the skill source
+            # isn't on main yet; the sync should happen after the
+            # human merges the PR. Documented in CLAUDE.md.
+            await self._signal_status_by_id(task, TASK_STATUS_PR_OPENED)
+            note = f"Task `{task.id}` opened PR: {pr_url}"
+            return note
+        except Exception as exc:  # noqa: BLE001
+            return await self._mark_merge_blocked(
+                task, f"Unexpected PR merge error: {exc}"
+            )
+
     async def _execute_merge(self, task: RuntimeTask, *, actor_id: str, source: str) -> str:
         if task.status not in {TASK_STATUS_WAITING_MERGE, TASK_STATUS_APPLIED, TASK_STATUS_MERGE_FAILED}:
             return f"Task `{task.id}` is not waiting merge (status: {task.status})."
         if not self._merge_gate_enabled:
             return "Merge gate is disabled."
+        # WS B: dispatch on target_branch_mode. ``current`` keeps the
+        # existing patch+apply+commit-to-main flow; ``pr`` switches to
+        # push-branch + gh-pr-create. Unknown modes fail loud rather
+        # than silently fall back (Codex round-1 NF5 catch).
+        if self._merge_target_branch_mode == "pr":
+            return await self._execute_merge_pr(task, actor_id=actor_id, source=source)
         if self._merge_target_branch_mode != "current":
-            return "Only target_branch_mode=current is supported in v0.5.2."
+            return await self._mark_merge_blocked(
+                task,
+                f"Unknown target_branch_mode: {self._merge_target_branch_mode!r}. "
+                "Set merge_gate.target_branch_mode to 'current' or 'pr'.",
+            )
 
         workspace = Path(task.workspace_path) if task.workspace_path else None
         if workspace is None or not workspace.exists():
@@ -6538,6 +6752,9 @@ class RuntimeService:
             return "🔐"
         if status in {TASK_STATUS_MERGED, TASK_STATUS_APPLIED, TASK_STATUS_COMPLETED}:
             return "✅"
+        if status == TASK_STATUS_PR_OPENED:
+            # WS B PR-mode terminal — bot opened the PR; user merges on GitHub.
+            return "🔀"
         if status == TASK_STATUS_DISCARDED:
             return "🗑️"
         if status == TASK_STATUS_PAUSED:

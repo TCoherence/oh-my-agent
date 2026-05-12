@@ -102,8 +102,13 @@ The system has nine major subsystems plus a config layer.
 
   The completion message renders `Published to:` as the primary path block; transport details (`Delivered via:`, `Attachments:`) and the ephemeral scratch dir (`_artifacts/<task_id>/`) are labeled subordinate. Follow-up threads seed the system turn with the absolute published path. Set `runtime.reports_dir: ""` to disable publishing.
 - Discord buttons for approval + slash command fallback.
+- **Merge flow dual-mode** (`merge_gate.target_branch_mode`):
+  - `current` (default, legacy): `_execute_merge` builds a patch from the worktree, applies it to the main repo working tree via `git apply`, optionally commits to the current branch. Terminal state: `MERGED` + `merge_commit_hash`.
+  - `pr` (WS B): `_execute_merge_pr` commits any dirty workspace changes to the task's worktree branch (`codex/task-<id>`), preflight-checks `gh` CLI + remote, `git fetch <remote> <base>` then 3-dot-diff vs. the fetched base (skips empty PRs even when the branch has commits), pushes the branch with `git push -u`, opens a PR via `gh pr create --base <base> --head <branch>`, lands at terminal state `PR_OPENED` + `pr_url` + `pr_number`. Tracking actual remote-merge is out of scope — user merges via the GitHub UI.
+  - Skill auto-merge (`skill_auto_approve=True` + non-borderline + `auto_merge_allowed`) is **disabled when `target_branch_mode=pr`** — the PR opening itself is meant to be human-reviewed. All skill tasks land in `WAITING_MERGE` so the operator decides whether to open the PR.
+  - Unknown `target_branch_mode` → `MERGE_BLOCKED` with a clear reason (never silently falls back).
 - Retry on transient agent errors (`rate_limit` / `api_5xx` / `timeout`) with per-kind backoff; on `max_turns` failure, `_fail` surfaces a "Re-run +30 turns" button that spawns a sibling task with a bumped `agent_max_turns` (parent+30, fallback base 25). Terminal kinds (`auth` / `cli_error`) never retry.
-- Janitor cleanup with configurable retention. Published tree under `reports_dir/` is **not** auto-pruned.
+- Janitor cleanup with configurable retention. Published tree under `reports_dir/` is **not** auto-pruned. `PR_OPENED` is treated as a success terminal for cleanup retention purposes (alongside `MERGED` / `COMPLETED` / `APPLIED`).
 
 See [`docs/EN/task-model.md`](docs/EN/task-model.md) ([中文](docs/CN/task-model.md)) for the full task-type, router-intent, status, and delivery catalog — plus known sharp edges.
 

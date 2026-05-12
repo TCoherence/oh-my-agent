@@ -678,6 +678,12 @@ CREATE TABLE IF NOT EXISTS runtime_tasks (
     task_type           TEXT NOT NULL DEFAULT 'repo_change',
     skill_name          TEXT,
     notify_channel_id   TEXT,
+    -- PR-based merge flow (target_branch_mode=pr). Populated when the
+    -- task reaches PR_OPENED terminal state. pr_url is the gh PR URL;
+    -- pr_number is the integer PR number (for future polling, not used
+    -- in v1 — see CLAUDE.md "out of scope").
+    pr_url              TEXT,
+    pr_number           INTEGER,
     created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     started_at          TIMESTAMP,
     updated_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -1093,6 +1099,10 @@ class SQLiteMemoryStore(MemoryStore):
         await self._ensure_column("runtime_tasks", "agent_timeout_seconds", "INTEGER")
         await self._ensure_column("runtime_tasks", "agent_max_turns", "INTEGER")
         await self._ensure_column("runtime_tasks", "notify_channel_id", "TEXT")
+        # WS B (PR-based merge flow): pr_url + pr_number for PR_OPENED
+        # terminal status. Idempotent via _ensure_column's PRAGMA probe.
+        await self._ensure_column("runtime_tasks", "pr_url", "TEXT")
+        await self._ensure_column("runtime_tasks", "pr_number", "INTEGER")
         await self._ensure_column("auth_credentials", "scope_key", "TEXT NOT NULL DEFAULT 'default'")
         await self._ensure_column("skill_provenance", "auto_disabled", "INTEGER NOT NULL DEFAULT 0")
         await self._ensure_column("skill_provenance", "auto_disabled_reason", "TEXT")
