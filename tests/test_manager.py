@@ -1208,15 +1208,20 @@ async def test_router_propose_artifact_task_creates_artifact_runtime_draft():
 
     router = MagicMock()
     router.confidence_threshold = 0.55
+    # Router emits ``force_draft=True`` for this prompt — legacy
+    # ``oneoff_artifact`` no longer carries an implicit DRAFT default;
+    # the router (or "draft:" prefix) must opt in. See the v2 router
+    # system prompt for the heuristics that trigger ``force_draft``.
     router.route = AsyncMock(
         return_value=RouteDecision(
-            decision="oneoff_artifact",
+            decision="oneoff_artifact",  # normalized to v2 ``artifact`` by __post_init__
             confidence=0.91,
             goal="Generate a markdown daily news brief",
             risk_hints=[],
             raw_text="{}",
             task_type="artifact",
             completion_mode="reply",
+            force_draft=True,
         )
     )
 
@@ -1850,7 +1855,13 @@ async def test_router_create_skill_borderline_forces_draft_and_confirm_text():
 
 
 @pytest.mark.asyncio
-async def test_router_create_skill_high_confidence_skips_borderline_and_auto_runs():
+async def test_router_create_skill_high_confidence_drafts_in_v2():
+    """v2 doctrine: ``repo_update`` (which absorbs the legacy
+    ``update_skill``) always drafts, regardless of router confidence.
+    The legacy v1 ``is_borderline``-bypass auto-run path was removed
+    (Codex round-1 of WS A review BLOCK-fix). High confidence still
+    affects the confirmation message wording but NOT the force_draft
+    flag — that's hardcoded True for all repo_update paths."""
     channel = _make_router_border_channel()
     registry = MagicMock(spec=AgentRegistry)
     registry.run = AsyncMock()
@@ -1869,11 +1880,13 @@ async def test_router_create_skill_high_confidence_skips_borderline_and_auto_run
 
     runtime.create_skill_task.assert_awaited_once()
     kwargs = runtime.create_skill_task.call_args.kwargs
-    # Non-borderline: manager must not override; force_draft passed through as None.
-    assert kwargs.get("force_draft") is None
+    # v2: force_draft hardcoded True (doctrine: any repo-modifying task
+    # requires approval). High-confidence skill paths no longer auto-run.
+    assert kwargs.get("force_draft") is True
     text = _last_send_text(channel)
-    assert "/task_stop" in text
-    assert "started execution" in text.lower() or "already started" in text.lower()
+    # Confirmation text still drafts; user approves via /task_approve.
+    assert "/task_approve" in text
+    assert "/task_reject" in text
 
 
 @pytest.mark.asyncio
@@ -1913,7 +1926,11 @@ async def test_router_repair_skill_borderline_forces_draft_and_confirm_text(tmp_
 
 
 @pytest.mark.asyncio
-async def test_router_repair_skill_high_confidence_skips_borderline_and_auto_runs(tmp_path):
+async def test_router_repair_skill_high_confidence_drafts_in_v2(tmp_path):
+    """v2 doctrine: ``repo_update`` skill repair always drafts, even at
+    high router confidence. The legacy v1 auto-run path for high-confidence
+    skill repair was removed in WS A's Codex round-1 BLOCK-fix because
+    repo-modifying tasks must always require explicit user approval."""
     channel = _make_router_border_channel()
     registry = MagicMock(spec=AgentRegistry)
     registry.run = AsyncMock()
@@ -1941,9 +1958,14 @@ async def test_router_repair_skill_high_confidence_skips_borderline_and_auto_run
 
     runtime.create_skill_task.assert_awaited_once()
     kwargs = runtime.create_skill_task.call_args.kwargs
-    assert kwargs.get("force_draft") is None
+    # v2: force_draft hardcoded True for all repo_update paths
+    # (Codex round-1 of WS A review BLOCK-fix). The legacy v1 auto-run
+    # bypass for high-confidence skill repair is intentionally removed.
+    assert kwargs.get("force_draft") is True
     text = _last_send_text(channel)
-    assert "/task_stop" in text
+    # Confirmation text drafts even on high confidence; user approves.
+    assert "/task_approve" in text
+    assert "/task_reject" in text
 
 
 @pytest.mark.asyncio

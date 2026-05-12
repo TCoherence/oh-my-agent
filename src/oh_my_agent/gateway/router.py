@@ -15,20 +15,25 @@ logger = logging.getLogger(__name__)
 class RouteDecision:
     """Router classification result.
 
-    The canonical intent set has 5 values:
+    Canonical intent set (3 values, oriented around "does this modify
+    the source repo?"):
 
-    - ``chat_reply`` — single-turn chat answer; no task is created.
-    - ``invoke_skill`` — invoke an existing skill (router supplies
-      ``skill_name`` when known).
-    - ``oneoff_artifact`` — generate a one-off deliverable (report,
-      summary, brief) that is not derived from a known skill.
-    - ``propose_repo_change`` — multi-step repository edit task.
-    - ``update_skill`` — create-or-repair a skill. The dispatcher
-      decides between create and repair by checking whether
-      ``skill_name`` matches a registered skill.
+    - ``reply`` — single-turn chat reply; no task is created.
+    - ``artifact`` — produce a deliverable that does NOT modify the
+      source repo (research report, summary, news digest, OR a known
+      skill invocation). Defaults to auto-approve / start-immediately;
+      set ``force_draft=True`` to add an approval gate (useful for
+      expensive long-running artifacts).
+    - ``repo_update`` — modify the source repo: code edit, refactor,
+      OR skill source create-or-repair. The dispatcher decides
+      ``skill_change`` vs ``repo_change`` task type by checking whether
+      ``skill_name`` is set. Always requires user approval.
 
-    Older intent names are accepted as aliases at parse time and
-    normalized to the canonical form above. See ``_INTENT_ALIASES``.
+    Pre-v2 intent names (``chat_reply``, ``invoke_skill``,
+    ``oneoff_artifact``, ``propose_repo_change``, ``update_skill``, plus
+    older aliases like ``reply_once``, ``create_skill``, ``repair_skill``)
+    are accepted at parse time and normalized to canonical. See
+    ``_INTENT_ALIASES``.
     """
 
     decision: str
@@ -39,38 +44,65 @@ class RouteDecision:
     skill_name: str | None = None
     task_type: str | None = None
     completion_mode: str | None = None
+    # When True the dispatcher creates an approval-gated DRAFT task
+    # instead of starting immediately. Only meaningful for ``artifact``
+    # (``repo_update`` always drafts regardless of this flag).
+    force_draft: bool = False
+
+    def __post_init__(self) -> None:
+        # Normalize ``decision`` on every RouteDecision construction so:
+        # (a) router-parsed payloads emitting legacy intent names land in
+        #     canonical form ready for dispatcher match
+        # (b) test fixtures and any direct constructor users can use either
+        #     v1 (chat_reply / oneoff_artifact / propose_repo_change /
+        #     update_skill / invoke_skill) or v2 names — both work without
+        #     test churn during the v1→v2 migration window
+        # ``frozen=True`` blocks regular assignment so we go through
+        # ``object.__setattr__`` (the documented escape hatch).
+        normalized = normalize_intent(self.decision)
+        if normalized != self.decision:
+            object.__setattr__(self, "decision", normalized)
 
 
 _RESERVED_PAYLOAD_KEYS = frozenset({"messages", "model", "max_tokens", "temperature"})
 
-# Canonical intents — what the router prompt asks the model to output.
+# Canonical intents — what the v2 router prompt asks the model to output.
 _CANONICAL_INTENTS = frozenset({
-    "chat_reply",
-    "invoke_skill",
-    "oneoff_artifact",
-    "propose_repo_change",
-    "update_skill",
+    "reply",
+    "artifact",
+    "repo_update",
 })
 
-# Legacy intent names accepted from older router models / test fixtures /
-# users typing in raw decision strings. Normalized to canonical at parse
-# time so ``RouteDecision.decision`` is always one of ``_CANONICAL_INTENTS``.
+# Intent name normalization. Includes:
+# (a) v1 canonical names (chat_reply / invoke_skill / oneoff_artifact /
+#     propose_repo_change / update_skill) so older router models still work.
+# (b) pre-v1 legacy aliases (reply_once / create_skill / repair_skill etc.)
+#     accepted from very old fixtures or hand-typed decision strings.
+# All normalized to v2 canonical at parse time so ``RouteDecision.decision``
+# is always one of ``_CANONICAL_INTENTS``.
 _INTENT_ALIASES: dict[str, str] = {
-    "reply_once": "chat_reply",
-    "invoke_existing_skill": "invoke_skill",
-    "propose_artifact_task": "oneoff_artifact",
-    "propose_repo_task": "propose_repo_change",
-    "propose_task": "propose_repo_change",
-    "create_skill": "update_skill",
-    "repair_skill": "update_skill",
+    # v1 canonical → v2 canonical
+    "chat_reply": "reply",
+    "invoke_skill": "artifact",  # resolution check happens in dispatcher
+    "oneoff_artifact": "artifact",
+    "propose_repo_change": "repo_update",
+    "update_skill": "repo_update",  # dispatcher decides create-vs-repair
+    # Pre-v1 legacy → v2 canonical
+    "reply_once": "reply",
+    "invoke_existing_skill": "artifact",
+    "propose_artifact_task": "artifact",
+    "propose_repo_task": "repo_update",
+    "propose_task": "repo_update",
+    "create_skill": "repo_update",
+    "repair_skill": "repo_update",
 }
 
 
 def normalize_intent(raw: str) -> str:
-    """Map a raw intent string (canonical or legacy) to canonical form.
+    """Map a raw intent string (v2 canonical or any legacy form) to v2 canonical.
 
-    Returns ``"chat_reply"`` for unknown values — the safe default that
-    keeps the runtime in chat mode rather than spawning a task.
+    Returns ``"reply"`` for unknown values — the safe default that keeps
+    the runtime in chat mode rather than spawning a task.
     """
     cleaned = raw.strip().lower()
     if cleaned in _CANONICAL_INTENTS:
@@ -78,7 +110,7 @@ def normalize_intent(raw: str) -> str:
     aliased = _INTENT_ALIASES.get(cleaned)
     if aliased is not None:
         return aliased
-    return "chat_reply"
+    return "reply"
 
 
 class OpenAICompatibleRouter:
@@ -128,50 +160,74 @@ class OpenAICompatibleRouter:
 
     async def route(self, message: str, *, context: str | None = None) -> RouteDecision | None:
         system_prompt = (
-            "Classify the user message into one of five intents:\n"
-            "  chat_reply         — single-turn chat answer (no task spawned)\n"
-            "  invoke_skill       — run an existing skill on this request\n"
-            "  oneoff_artifact    — produce a one-off deliverable (report, summary, brief)\n"
-            "  propose_repo_change — multi-step repository edit\n"
-            "  update_skill       — create or repair a skill (the dispatcher decides "
-            "create-vs-repair from the skill_name)\n\n"
+            "Classify the user message into one of three intents, organized around "
+            "WHETHER THE TASK MODIFIES THE SOURCE REPO:\n"
+            "  reply        — single-turn chat answer (no task spawned). DEFAULT.\n"
+            "  artifact     — produce a deliverable that does NOT modify the source "
+            "repo (research report, summary, news digest, analysis), OR invoke a "
+            "known skill. Defaults to auto-approve / start-immediately; set "
+            "force_draft=true only for expensive long-running ones.\n"
+            "  repo_update  — modify the source repo: edit code, fix bugs, refactor, "
+            "write tests, OR create/repair a skill (when skill_name is set). Always "
+            "requires user approval.\n\n"
             "DISAMBIGUATION RULES (read first):\n"
-            "- For one-time deliverables like research reports, summaries, analyses, "
-            "briefs, news digests (keywords: 报告/总结/调研/分析/research/summary/brief/report), "
-            "choose `oneoff_artifact`. This is the default for 'do this research and give me a report' requests.\n"
-            "- Choose `update_skill` ONLY when (a) the user explicitly asks to create/build/"
-            "make a skill (keywords: create a skill / 创建/新建/生成 skill / package as a workflow), "
-            "OR (b) the workflow is clearly recurring or parameterizable (scheduled, templated "
-            "with variable inputs like 'for any ticker I give', 'every morning'), OR (c) the "
-            "user is giving feedback on a recently invoked skill and asking to fix/improve/adapt it. "
-            "In the feedback case keep `skill_name` pointed at the existing skill — do not invent a "
-            "parallel new skill just because the user mentions an external repo, project, or tool.\n"
-            "- Never infer skill-creation intent just because the word 'skill' appears in prior "
-            "context or the known-skills list.\n"
-            "- When both artifact and skill could apply, prefer `oneoff_artifact` (lower blast radius).\n\n"
-            "Output strict JSON only with keys: decision, confidence, goal, risk_hints, skill_name, task_type, completion_mode.\n"
-            "decision must be one of: chat_reply, invoke_skill, oneoff_artifact, propose_repo_change, update_skill.\n"
-            "If invoke_skill, keep goal empty when possible and provide skill_name if obvious. "
-            "Known skills may be provided as name plus description; prefer invoke_skill when the "
-            "current message semantically matches one of those skill descriptions, or when recent "
-            "context shows a known skill was just merged / synced / recently used and the current "
-            "message is a follow-up asking to run it / try again / continue with that skill.\n"
-            "If oneoff_artifact, propose_repo_change, or update_skill, write a concise executable goal.\n"
-            "If update_skill, also provide skill_name as a hyphen-case slug.\n"
-            "If oneoff_artifact, task_type should be 'artifact' and completion_mode should be 'reply'.\n"
-            "If propose_repo_change, task_type should be 'repo_change' and completion_mode should be 'merge'.\n"
-            "If update_skill, task_type should be 'skill_change' and completion_mode should be 'merge'.\n"
-            "If chat_reply, goal can be empty string and skill_name should be empty string.\n"
+            "- Default to `reply` when in doubt — zero blast radius.\n"
+            "- For one-time deliverables (keywords: 报告/总结/调研/分析/research/summary/"
+            "brief/report/headlines/digest), choose `artifact` with task_type='artifact'.\n"
+            "- For invoking a known skill on this single request (e.g. 'run paper-digest "
+            "on today's arxiv'), choose `artifact` with skill_name set to the known skill. "
+            "Known skills may be provided as name plus description; prefer this when the "
+            "current message semantically matches one of those descriptions, or when "
+            "recent context shows a known skill was just merged / synced / recently used "
+            "and the current message is a follow-up asking to run it / try again.\n"
+            "- For skill SOURCE create-or-repair (build a new skill / edit existing skill "
+            "behavior — keywords: create a skill / 创建/新建/生成 skill / package as a "
+            "workflow / 改一下 skill / fix this skill), choose `repo_update` with "
+            "skill_name set. The dispatcher decides create-vs-repair by whether "
+            "skill_name matches a registered skill. In the feedback case keep skill_name "
+            "pointed at the existing skill — do not invent a parallel new skill just "
+            "because the user mentions an external repo, project, or tool.\n"
+            "- For generic repository edits (fix typo, add feature, run tests), choose "
+            "`repo_update` WITHOUT skill_name.\n"
+            "- Never infer skill-creation intent just because the word 'skill' appears in "
+            "prior context or the known-skills list.\n"
+            "- When both artifact and repo_update could apply, prefer `artifact` (lower "
+            "blast radius: no repo modification).\n\n"
+            "Output strict JSON only with keys: decision, confidence, goal, risk_hints, "
+            "skill_name, task_type, completion_mode, force_draft.\n"
+            "decision must be one of: reply, artifact, repo_update.\n"
+            "If artifact WITH skill_name, keep goal empty when possible.\n"
+            "If artifact WITHOUT skill_name, write a concise executable goal; "
+            "task_type='artifact', completion_mode='reply'.\n"
+            "If repo_update WITH skill_name, write a concise goal; "
+            "task_type='skill_change', completion_mode='merge'; "
+            "skill_name as hyphen-case slug.\n"
+            "If repo_update WITHOUT skill_name, write a concise executable goal; "
+            "task_type='repo_change', completion_mode='merge'.\n"
+            "If reply, goal can be empty string and skill_name should be empty string.\n"
+            "force_draft (bool, default false): set true ONLY for `artifact` decisions "
+            "when the task is expected to take 10+ minutes or invokes a heavy skill "
+            "(market-briefing-*, paper-digest, youtube-podcast-digest, deals-scanner). "
+            "Lets the user approve-before-execute. Ignored for `repo_update` "
+            "(always drafts) and `reply` (no task).\n"
             "confidence must be a float between 0 and 1.\n\n"
             "EXAMPLES:\n"
             "- User: \"调研 Jensen Huang 过去 3 年所有公开演讲，整理成报告\"\n"
-            "  → {\"decision\":\"oneoff_artifact\",\"task_type\":\"artifact\",\"completion_mode\":\"reply\"}\n"
+            "  → {\"decision\":\"artifact\",\"task_type\":\"artifact\","
+            "\"completion_mode\":\"reply\",\"force_draft\":true}\n"
             "- User: \"帮我做一个 skill，每天总结 AI 领域的新论文\"\n"
-            "  → {\"decision\":\"update_skill\",\"skill_name\":\"ai-paper-daily-digest\",\"task_type\":\"skill_change\",\"completion_mode\":\"merge\"}\n"
+            "  → {\"decision\":\"repo_update\",\"skill_name\":\"ai-paper-daily-digest\","
+            "\"task_type\":\"skill_change\",\"completion_mode\":\"merge\"}\n"
             "- User: \"paper-digest 这个 skill 昨天输出的 summary 太短了，改一下\"\n"
-            "  → {\"decision\":\"update_skill\",\"skill_name\":\"paper-digest\",\"task_type\":\"skill_change\",\"completion_mode\":\"merge\"}\n"
+            "  → {\"decision\":\"repo_update\",\"skill_name\":\"paper-digest\","
+            "\"task_type\":\"skill_change\",\"completion_mode\":\"merge\"}\n"
             "- User: \"用 paper-digest 看一下今天 arxiv 的 LLM 板块\"\n"
-            "  → {\"decision\":\"invoke_skill\",\"skill_name\":\"paper-digest\"}"
+            "  → {\"decision\":\"artifact\",\"skill_name\":\"paper-digest\"}\n"
+            "- User: \"把 README 里的 typo 修一下\"\n"
+            "  → {\"decision\":\"repo_update\",\"task_type\":\"repo_change\","
+            "\"completion_mode\":\"merge\"}\n"
+            "- User: \"现在几点了\"\n"
+            "  → {\"decision\":\"reply\"}"
         )
         core_payload: dict[str, Any] = {
             "model": self._model,
@@ -243,6 +299,17 @@ class OpenAICompatibleRouter:
         completion_mode = str(parsed.get("completion_mode", "")).strip() or None
         hints = parsed.get("risk_hints", [])
         risk_hints = [str(h).strip() for h in hints if str(h).strip()] if isinstance(hints, list) else []
+        # ``force_draft`` is a v2 field. Older routers won't emit it; treat
+        # missing / non-bool as False. JSON booleans deserialize as Python
+        # bool already; accept the literal strings "true"/"false" too for
+        # robustness against models that emit them as strings.
+        raw_force_draft = parsed.get("force_draft", False)
+        if isinstance(raw_force_draft, bool):
+            force_draft = raw_force_draft
+        elif isinstance(raw_force_draft, str):
+            force_draft = raw_force_draft.strip().lower() == "true"
+        else:
+            force_draft = False
 
         return RouteDecision(
             decision=decision,
@@ -253,6 +320,7 @@ class OpenAICompatibleRouter:
             skill_name=skill_name,
             task_type=task_type,
             completion_mode=completion_mode,
+            force_draft=force_draft,
         )
 
     def _post_json(self, payload: dict[str, Any]) -> dict[str, Any]:
