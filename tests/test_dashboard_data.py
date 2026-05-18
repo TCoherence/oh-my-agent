@@ -552,3 +552,139 @@ def test_fetch_bot_uptime_no_match(tmp_path: Path) -> None:
 def test_fetch_bot_uptime_missing_file(tmp_path: Path) -> None:
     r = data.fetch_bot_uptime(tmp_path / "missing.log")
     assert "error" in r
+
+
+# ---------------------------------------------------------------------------
+# fetch_trends
+# ---------------------------------------------------------------------------
+
+
+_TURNS_DDL = """
+CREATE TABLE turns (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    platform    TEXT NOT NULL,
+    channel_id  TEXT NOT NULL,
+    thread_id   TEXT NOT NULL,
+    role        TEXT NOT NULL,
+    content     TEXT NOT NULL,
+    author      TEXT,
+    agent       TEXT,
+    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+"""
+
+
+@pytest.fixture
+def trends_empty_db(tmp_path: Path) -> Path:
+    db = tmp_path / "trends-empty.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(_RUNTIME_TASKS_DDL + _USAGE_DDL + _TURNS_DDL)
+    conn.commit()
+    conn.close()
+    return db
+
+
+@pytest.fixture
+def trends_db(tmp_path: Path) -> Path:
+    """All three trend sources populated across distinct days."""
+
+    db = tmp_path / "trends.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(_RUNTIME_TASKS_DDL + _USAGE_DDL + _TURNS_DDL)
+
+    # ``datetime('now', ...)`` can't be a bound parameter, so the
+    # created_at offset is interpolated as a trusted SQL literal here
+    # (test fixture, no user input).
+    for tid, status, when in [
+        ("t-ok-today", "COMPLETED", "datetime('now')"),
+        ("t-merged-today", "MERGED", "datetime('now')"),
+        ("t-fail-2d", "FAILED", "datetime('now', '-2 days')"),
+        ("t-cancel-2d", "CANCELLED", "datetime('now', '-2 days')"),
+        ("t-running-today", "RUNNING", "datetime('now')"),
+    ]:
+        conn.execute(
+            f"""
+            INSERT INTO runtime_tasks
+            (id, platform, channel_id, thread_id, created_by, goal, max_steps,
+             max_minutes, status, test_command, created_at)
+            VALUES (?, 'discord', 'ch1', 'th1', 'user', 'goal', 1, 1, ?, 'true', {when})
+            """,
+            (tid, status),
+        )
+
+    conn.execute(
+        "INSERT INTO usage_events (ts, agent, source, input_tokens, output_tokens, cost_usd) "
+        "VALUES (datetime('now'), 'claude', 'chat', 1000, 200, 0.05)"
+    )
+    conn.execute(
+        "INSERT INTO usage_events (ts, agent, source, input_tokens, output_tokens, cost_usd) "
+        "VALUES (datetime('now', '-2 days'), 'claude', 'automation_run', 500, 100, 0.03)"
+    )
+
+    for when in ("datetime('now')", "datetime('now')", "datetime('now', '-2 days')"):
+        conn.execute(
+            f"INSERT INTO turns (platform, channel_id, thread_id, role, content, created_at) "
+            f"VALUES ('discord', 'ch1', 'th1', 'user', 'hi', {when})"
+        )
+
+    conn.commit()
+    conn.close()
+    return db
+
+
+def test_fetch_trends_missing_db(tmp_path: Path) -> None:
+    result = data.fetch_trends(tmp_path / "nope.db", days=7)
+    assert "error" in result
+
+
+def test_fetch_trends_empty_is_zero_filled(trends_empty_db: Path) -> None:
+    result = data.fetch_trends(trends_empty_db, days=7)
+    assert result["days"] == 7
+    assert len(result["buckets"]) == 7
+    assert all(b["cost"] == 0.0 and b["task_total"] == 0 and b["turns"] == 0 for b in result["buckets"])
+    assert result["totals"]["cost"] == 0.0
+    assert result["totals"]["task_total"] == 0
+    # Oldest-first, contiguous, ending today (UTC).
+    days = [b["day"] for b in result["buckets"]]
+    assert days == sorted(days)
+    assert days[-1] == datetime.now(timezone.utc).date().isoformat()
+
+
+def test_fetch_trends_aggregates_by_day(trends_db: Path) -> None:
+    result = data.fetch_trends(trends_db, days=7)
+    by_day = {b["day"]: b for b in result["buckets"]}
+    today = datetime.now(timezone.utc).date().isoformat()
+    two_days_ago = (datetime.now(timezone.utc).date() - timedelta(days=2)).isoformat()
+
+    today_bucket = by_day[today]
+    assert today_bucket["task_success"] == 2  # COMPLETED + MERGED
+    assert today_bucket["task_failed"] == 0
+    assert today_bucket["task_total"] == 3  # + RUNNING (not terminal)
+    assert today_bucket["turns"] == 2
+    assert today_bucket["cost"] == pytest.approx(0.05)
+
+    old_bucket = by_day[two_days_ago]
+    assert old_bucket["task_failed"] == 2  # FAILED + CANCELLED
+    assert old_bucket["task_success"] == 0
+    assert old_bucket["turns"] == 1
+    assert old_bucket["cost"] == pytest.approx(0.03)
+
+    totals = result["totals"]
+    assert totals["task_success"] == 2
+    assert totals["task_failed"] == 2
+    assert totals["task_total"] == 5
+    assert totals["turns"] == 3
+    assert totals["cost"] == pytest.approx(0.08)
+    assert totals["in_tok"] == 1500
+
+
+def test_fetch_trends_clamps_window(trends_empty_db: Path) -> None:
+    result = data.fetch_trends(trends_empty_db, days=9999)
+    assert result["days"] == data.TREND_MAX_DAYS
+    assert len(result["buckets"]) == data.TREND_MAX_DAYS
+
+
+def test_fetch_trends_minimum_one_day(trends_empty_db: Path) -> None:
+    result = data.fetch_trends(trends_empty_db, days=0)
+    assert result["days"] == 1
+    assert len(result["buckets"]) == 1

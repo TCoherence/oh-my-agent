@@ -170,3 +170,50 @@ def test_list_view_omits_active_marker_when_empty():
     output = _channel()._render_automation_status_result(result)
 
     assert "active" not in output
+
+
+def test_list_view_enabled_shows_timing_detail_line():
+    info = _automation_info(
+        next_run_at="2999-01-01T00:00:00Z",
+        last_run_at="2020-01-01T00:00:00Z",
+        last_success_at="2020-01-01T00:00:00Z",
+        skill_name="market-briefing-ai",
+    )
+    result = AutomationStatusResult(success=True, message="ok", automations=[info])
+
+    output = _channel()._render_automation_status_result(result)
+
+    assert "skill `market-briefing-ai`" in output
+    assert "next `in " in output  # far-future timestamp → "in <n>d"
+    assert "last run `" in output
+    assert "ago`" in output  # far-past timestamp → "<n>d ago"
+
+
+def test_list_view_enabled_shows_error_snippet_not_just_emoji():
+    info = _automation_info(
+        last_error="HTTP 502 from upstream provider while fetching the feed"
+    )
+    result = AutomationStatusResult(success=True, message="ok", automations=[info])
+
+    output = _channel()._render_automation_status_result(result)
+
+    assert "⚠️ HTTP 502 from upstream provider" in output
+
+
+def test_list_view_enabled_truncates_with_overflow_note():
+    infos = [_automation_info(name=f"auto-{i}") for i in range(13)]
+    result = AutomationStatusResult(success=True, message="ok", automations=infos)
+
+    output = _channel()._render_automation_status_result(result)
+
+    assert "…and 3 more enabled" in output  # cap 10, 13 enabled
+
+
+def test_list_view_disabled_shows_skill():
+    info = _automation_info(enabled=False, skill_name="paper-digest")
+    result = AutomationStatusResult(success=True, message="ok", automations=[info])
+
+    output = _channel()._render_automation_status_result(result)
+
+    assert "**Disabled**" in output
+    assert "skill `paper-digest`" in output

@@ -27,7 +27,7 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse
 
 from oh_my_agent import paths
-from oh_my_agent.dashboard import data_sessions
+from oh_my_agent.dashboard import data, data_sessions
 from oh_my_agent.trace import trace_reader
 
 
@@ -83,6 +83,23 @@ def build_router(config: dict) -> APIRouter:
             # memory.db on first boot. Tells the operator "service is
             # up but DB isn't there yet" rather than "code crashed".
             raise HTTPException(status_code=503, detail=result["error"])
+        return result
+
+    @router.get("/trends")
+    def get_trends(
+        weeks: int = Query(
+            default=4,
+            ge=1,
+            le=12,
+            description="Trailing window in weeks; daily buckets = weeks * 7",
+        ),
+    ) -> dict[str, Any]:
+        result = data.fetch_trends(_memory_db_path(), days=weeks * 7)
+        if "error" in result:
+            # 503 (not 500), symmetric with /sessions — the usual cause
+            # is a missing memory.db on first boot, not a code crash.
+            raise HTTPException(status_code=503, detail=result["error"])
+        result["weeks"] = weeks
         return result
 
     @router.get("/sessions/{platform}/{channel_id}/{thread_id}/history")

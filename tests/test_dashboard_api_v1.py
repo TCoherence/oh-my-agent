@@ -272,6 +272,69 @@ def test_trace_date_param_required(app_and_db) -> None:
     assert r.status_code == 422
 
 
+# ── /api/v1/trends ────────────────────────────────────────────────── #
+
+
+def test_trends_empty_zero_filled(app_and_db) -> None:
+    app, _ = app_and_db
+    client = TestClient(app)
+    r = client.get("/api/v1/trends?weeks=4")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["weeks"] == 4
+    assert body["days"] == 28
+    assert len(body["buckets"]) == 28
+    assert body["totals"]["cost"] == 0.0
+    assert body["totals"]["turns"] == 0
+    days = [b["day"] for b in body["buckets"]]
+    assert days == sorted(days)  # oldest-first
+
+
+def test_trends_default_window_is_4_weeks(app_and_db) -> None:
+    app, _ = app_and_db
+    client = TestClient(app)
+    body = client.get("/api/v1/trends").json()
+    assert body["weeks"] == 4
+    assert body["days"] == 28
+
+
+def test_trends_reflects_seeded_turns(app_and_db) -> None:
+    from datetime import datetime, timedelta, timezone
+
+    app, db = app_and_db
+    now = datetime.now(timezone.utc)
+    today = now.strftime("%Y-%m-%d %H:%M:%S")
+    three_days_ago = (now - timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")
+    _seed_turn(db, thread_id="t1", role="user", created_at=today)
+    _seed_turn(db, thread_id="t1", role="assistant", agent="claude", created_at=today)
+    _seed_turn(db, thread_id="t2", role="user", created_at=three_days_ago)
+
+    client = TestClient(app)
+    body = client.get("/api/v1/trends?weeks=1").json()
+    assert body["days"] == 7
+    assert body["totals"]["turns"] == 3
+    by_day = {b["day"]: b for b in body["buckets"]}
+    assert by_day[now.date().isoformat()]["turns"] == 2
+    assert by_day[(now.date() - timedelta(days=3)).isoformat()]["turns"] == 1
+
+
+def test_trends_weeks_validation(app_and_db) -> None:
+    app, _ = app_and_db
+    client = TestClient(app)
+    assert client.get("/api/v1/trends?weeks=0").status_code == 422
+    assert client.get("/api/v1/trends?weeks=13").status_code == 422
+    r = client.get("/api/v1/trends?weeks=12")
+    assert r.status_code == 200
+    assert r.json()["days"] == 84
+
+
+def test_trends_503_on_missing_db(tmp_path: Path) -> None:
+    config = {"memory": {"backend": "sqlite", "path": str(tmp_path / "nope.db")}}
+    app = create_app(config)
+    client = TestClient(app)
+    assert client.get("/api/v1/trends?weeks=1").status_code == 503
+
+
 # ── Legacy / regression ───────────────────────────────────────────── #
 
 

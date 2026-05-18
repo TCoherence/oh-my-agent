@@ -34,6 +34,16 @@ SKILL_STATS_LOOKBACK_DAYS = 30
 COST_LOOKBACK_DAYS = 7
 MEMORY_NEW_LOOKBACK_DAYS = 7
 
+# Hard ceiling on the trends window (12 weeks). The dashboard offers
+# 1/2/4/12-week presets; this caps any hand-crafted ``?weeks=`` so a
+# stray large value can't make the daily-bucket query unbounded.
+TREND_MAX_DAYS = 84
+
+# RuntimeService terminal states counted as "failed" in the trends view.
+# ``CANCELLED`` is grouped with hard failures here (operator-facing
+# reliability signal) even though it isn't an error per se.
+TREND_FAILED_STATES = ("FAILED", "TIMEOUT", "CANCELLED")
+
 # RuntimeService terminal states considered "successful" for success-rate calc.
 # ``PR_OPENED`` (WS B, target_branch_mode=pr) is a success terminal — the
 # bot opened a GitHub PR; the user merges on GitHub.
@@ -298,6 +308,112 @@ def fetch_cost_usage(db_path: Path) -> dict:
 
 def _today_str() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+# ---------------------------------------------------------------------------
+# Section 3b — Trends (daily series over a configurable window)
+# ---------------------------------------------------------------------------
+
+
+def fetch_trends(db_path: Path, days: int) -> dict:
+    """Daily series over the trailing ``days`` calendar days (UTC).
+
+    Three signals per day: spend (cost + tokens), runtime-task volume
+    (total / success / failed), and conversation turns. The series is
+    **zero-filled** for the full window so a quiet day renders as a gap
+    rather than collapsing the x-axis — the trend stays readable.
+
+    ``days`` is clamped to ``[1, TREND_MAX_DAYS]``. Buckets are oldest
+    -first. Self-contains error handling like the other ``fetch_*``.
+    """
+
+    days = max(1, min(int(days), TREND_MAX_DAYS))
+
+    try:
+        conn = _ro_connect(db_path)
+    except sqlite3.OperationalError as exc:
+        return _error_placeholder("trends unavailable", exc)
+
+    # ``date(col) >= date('now', '-(days-1) days')`` makes the SQL window
+    # line up exactly with the [today-(days-1) .. today] bucket range, so
+    # boundary-day rows are not silently fetched-then-dropped.
+    since = f"-{days - 1} days"
+
+    try:
+        cost_rows = conn.execute(
+            """
+            SELECT date(ts) AS day,
+                   COALESCE(SUM(input_tokens), 0) AS in_tok,
+                   COALESCE(SUM(output_tokens), 0) AS out_tok,
+                   COALESCE(SUM(cost_usd), 0.0) AS cost
+            FROM usage_events
+            WHERE date(ts) >= date('now', ?)
+            GROUP BY day
+            """,
+            (since,),
+        ).fetchall()
+
+        task_rows = conn.execute(
+            f"""
+            SELECT date(created_at) AS day,
+                   COUNT(*) AS total,
+                   SUM(CASE WHEN status IN ({",".join("?" * len(SUCCESS_STATES))}) THEN 1 ELSE 0 END) AS ok,
+                   SUM(CASE WHEN status IN ({",".join("?" * len(TREND_FAILED_STATES))}) THEN 1 ELSE 0 END) AS failed
+            FROM runtime_tasks
+            WHERE date(created_at) >= date('now', ?)
+            GROUP BY day
+            """,
+            (*SUCCESS_STATES, *TREND_FAILED_STATES, since),
+        ).fetchall()
+
+        turn_rows = conn.execute(
+            """
+            SELECT date(created_at) AS day, COUNT(*) AS n
+            FROM turns
+            WHERE date(created_at) >= date('now', ?)
+            GROUP BY day
+            """,
+            (since,),
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        conn.close()
+        return _error_placeholder("trends query failed", exc)
+    finally:
+        conn.close()
+
+    cost_by_day = {row["day"]: row for row in cost_rows}
+    task_by_day = {row["day"]: row for row in task_rows}
+    turn_by_day = {row["day"]: int(row["n"]) for row in turn_rows}
+
+    today = datetime.now(timezone.utc).date()
+    buckets: list[dict] = []
+    for offset in range(days - 1, -1, -1):
+        key = (today - timedelta(days=offset)).isoformat()
+        cost = cost_by_day.get(key)
+        task = task_by_day.get(key)
+        buckets.append(
+            {
+                "day": key,
+                "cost": float(cost["cost"] or 0.0) if cost else 0.0,
+                "in_tok": int(cost["in_tok"] or 0) if cost else 0,
+                "out_tok": int(cost["out_tok"] or 0) if cost else 0,
+                "task_total": int(task["total"] or 0) if task else 0,
+                "task_success": int(task["ok"] or 0) if task else 0,
+                "task_failed": int(task["failed"] or 0) if task else 0,
+                "turns": turn_by_day.get(key, 0),
+            }
+        )
+
+    totals = {
+        "cost": round(sum(b["cost"] for b in buckets), 6),
+        "in_tok": sum(b["in_tok"] for b in buckets),
+        "out_tok": sum(b["out_tok"] for b in buckets),
+        "task_total": sum(b["task_total"] for b in buckets),
+        "task_success": sum(b["task_success"] for b in buckets),
+        "task_failed": sum(b["task_failed"] for b in buckets),
+        "turns": sum(b["turns"] for b in buckets),
+    }
+    return {"days": days, "buckets": buckets, "totals": totals}
 
 
 # ---------------------------------------------------------------------------
