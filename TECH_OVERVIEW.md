@@ -1,8 +1,8 @@
 # Oh My Agent — Technical Overview
 
-> 截图时间：2026-05-04 · 版本：v0.9.5 · 主分支：`main`
+> 截图时间：2026-05-04 · 版本：v0.9.6 · 主分支：`main`
 >
-> 本文档是对当前 repo 的一份完整技术综述，覆盖项目定位、架构、粗/细粒度模块、关键技术决策与假设、当前限制以及未来规划。原始 repo 已经有非常翔实的 `docs/EN/` 与 `docs/CN/` 文档，本文是把它们 + `CHANGELOG.md` + 实际源码（~30k 行 Python，1129 测试通过）浓缩成一份单页技术索引。
+> 本文档是对当前 repo 的一份完整技术综述，覆盖项目定位、架构、粗/细粒度模块、关键技术决策与假设、当前限制以及未来规划。原始 repo 已经有非常翔实的 `docs/EN/` 与 `docs/CN/` 文档，本文是把它们 + `CHANGELOG.md` + 实际源码（~30k 行 Python，1303 测试通过）浓缩成一份单页技术索引。
 >
 > **v0.9.5 vs v0.9.4 关键变化**（看 CHANGELOG 的 `Unreleased` 段）：(a) `_invoke_thread_agent` 新加 `set_workspace_resolver` 钩子，suspended-resume / HITL 与 chat-reply 现在跑在同一个 short workspace cwd，claude `--resume` 不再因 `~/.claude/projects/<cwd-hash>/` 错位失效（PR #41）；(b) `RuntimeService.collect_provider_credential_hints()` 把已缓存的 bilibili 凭证主动注入到 task / chat-reply prompt，避免重复触发 QR（PR #41）；(c) `_artifact_reply_text` 修了读到陈旧 DB `output_summary` 导致用户看到空 `Run completed.` 的渲染 bug，加了 `_is_stub_artifact_reply` 启发式让短 ack 仍走 file preview 兜底（PR #44）；(d) `BaseChannel` ABC 把 `signal_task_status` 和 `send_hitl_prompt` 提到 ABC 加 text-fallback default（PR #44，cross-platform 第一步）；(e) 新加 `tests/harness/` 脚本化 E2E harness，覆盖 PR #41 全部三个回归（PR #44）；(f) AGENT.md 写入 harness 文档（PR #45）；(g) Streaming heartbeat finalize await（PR #40）。
 
@@ -641,7 +641,7 @@ HITL_CHOICES_CONTINUE = (continue, stop)
 
 不设 `workspace` 就是后向兼容模式（full env, process cwd）。
 
-### 4.10 Test harness（v0.9.5 / PR #44）
+### 4.10 Test harness（v0.9.6 / PR #44）
 
 `tests/harness/` 是个脚本化离线 E2E 框架，让 agent / CI 可以在不依赖 Discord / 真 CLI 子进程 / 真网络的前提下，端到端跑全栈回归测试。
 
@@ -654,10 +654,10 @@ HITL_CHOICES_CONTINUE = (continue, stop)
 | `StubBilibiliAuthProvider` | `tests/harness/stubs.py` | 短路 `api.bilibili.com` 调用，validation 永远 valid。三种模式：`valid`（cached cookie 路径）、`approving`（poll 即批准，覆盖 fresh-login）、`failing`（poll 返回 expired/failed，覆盖错误分支）。 |
 | 场景 yaml | `tests/harness/scenarios/*.yaml` | 声明式 scenario：`seed.credentials` 预置凭证、`seed.auth_provider` 选 stub 模式、`seed.agents.<name>.responses` 配 predicate-based 响应、`steps:` 用 `inject_user_message` / `await condition` 推进、`expect:` 跑 `events_in_order` / `events_not_present` / `task` / `metrics` 断言。 |
 | Runner | `tests/harness/runner.py` | yaml 加载 + `bootstrap_harness_env(spec)`（自己 wire 一份精简组件图，**不**复用 `boot.ignite()` 因为后者带信号 handler / push dispatcher daemon / scheduler supervisor 这些测试不要的副作用）+ step 分发 + 断言引擎。Teardown：`gateway.stop()` → `runtime.stop()` → `await gateway_task`（顺序对应 `boot.py:540-545`）。 |
-| CLI | `scripts/run_harness.py <yaml>` | 单场景独立运行。`--mode real` + `OMA_HARNESS_ALLOW_REAL=1` 会切到真 CLI agent + 真 bilibili API（**v0.9.5 暂未实现，raise `NotImplementedError`**，v2 工作）。 |
+| CLI | `scripts/run_harness.py <yaml>` | 单场景独立运行。`--mode real` + `OMA_HARNESS_ALLOW_REAL=1` 会切到真 CLI agent + 真 bilibili API（**v0.9.6 暂未实现，raise `NotImplementedError`**，v2 工作）。 |
 | pytest 入口 | `tests/harness/test_scenarios.py` | parametrized 自动发现并跑全部 yaml。额外有一个 guard test，把 `runtime.set_workspace_resolver(None)` 后跑 L 级 scenario，断言**必须失败** — 防止 harness 退化成 rubber-stamp。 |
 
-**v0.9.5 内置的三个回归 scenario**：
+**v0.9.6 内置的三个回归 scenario**：
 
 | scenario | 覆盖回归 | 关键断言 |
 |---|---|---|
@@ -669,7 +669,7 @@ HITL_CHOICES_CONTINUE = (continue, stop)
 
 **注意事项**：
 
-- `BaseChannel` ABC 在 v0.9.5 把 `signal_task_status` 和 `send_hitl_prompt` 从 Discord-only 提到 ABC + text-fallback default，正是为了让 harness 不用引用 `DiscordChannel` 也能 cover RuntimeService 调用面。`gateway/base.py` 里新增的 "BaseChannel surface contract" docstring 段落是后续加 Slack/Feishu 的可执行 spec。
+- `BaseChannel` ABC 在 v0.9.6 把 `signal_task_status` 和 `send_hitl_prompt` 从 Discord-only 提到 ABC + text-fallback default，正是为了让 harness 不用引用 `DiscordChannel` 也能 cover RuntimeService 调用面。`gateway/base.py` 里新增的 "BaseChannel surface contract" docstring 段落是后续加 Slack/Feishu 的可执行 spec。
 - Discord 平台扩展 hook（`set_session_context` / `set_skill_syncer` / `set_runtime_service` / `set_scheduler` / `register_dump_channel` / `ensure_dm_channel`）保持现状，GatewayManager 仍走 `hasattr` 守卫。HarnessChannel 不实现这些，guard 自然跳过。等 Slack/Feishu 上线确认这些 hook 都有 default 后再统一清理 `getattr`。
 
 ---
@@ -904,7 +904,8 @@ skills:          # 启用 + path
 | **v0.9.0** | **Memory rewrite (Judge model) — BREAKING**；老的 daily/curated 移除 | shipped |
 | **v0.9.1–v0.9.3** | Contract Freeze：剩余 service 抽离、restart/recovery 测试、operator docs；artifact archive、自动化 follow-up | shipped |
 | **v0.9.4** | Streaming、push notifications、watchdog、单一发布路径、dump channels、CI 三段 gate | shipped |
-| **v0.9.5 (current)** | Weekly reflection、daily reflection 默认开启、dashboard Docker 部署、cost chart 坐标轴、AI daily section checkpointing、Docker entrypoint flock、cwd 统一 + cached credential 复用 + 非空完成体（PR #41）、scripted offline E2E harness（PR #44） | shipped |
+| **v0.9.5** | Weekly reflection、daily reflection 默认开启、dashboard Docker 部署、cost chart 坐标轴、AI daily section checkpointing、Docker entrypoint flock | shipped |
+| **v0.9.6 (current)** | 本地只读 dashboard（React SPA + `/api/v1`）、PR-based merge flow（`target_branch_mode: pr`）、router 5→3 意图合并 + `force_draft`、DeepSeek-V4 router 鲁棒性、weekly trends + 更丰富 `/automation_status`、`transcribe-media` skill、`market-briefing-*` 原子拆 4、cwd 统一 + cached credential 复用 + 非空完成体（PR #41）、scripted offline E2E harness（PR #44） | shipped |
 | **v1.0** | **稳定版**：契约冻结，acceptance criteria 全过 | 当前目标 |
 | Post-1.0 / 1.x | 见 §11.4 | backlog |
 
@@ -1038,7 +1039,7 @@ skills:          # 启用 + path
 
 ---
 
-## 附录 A：关键数字（at v0.9.5）
+## 附录 A：关键数字（at v0.9.6）
 
 | 指标 | 值 |
 |---|---|

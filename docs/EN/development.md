@@ -13,15 +13,15 @@ Oh My Agent is a multi-platform bot that uses CLI-based AI agents as the executi
 
 ## Current Runtime Baseline
 
-Released: `v0.9.5` (2026-05-04). Branch is in v1.0 contract-freeze: nine major subsystems plus a config layer (see [`architecture.md`](architecture.md)). Memory was rewritten as the event-driven Judge model in v0.9.0 (see Migration in CHANGELOG); platform abstraction completed in v0.8 with service extraction; Slack stub was removed in v0.9.1 (Discord is the single supported platform for 1.0). Subsequent v0.9.x releases hardened streaming, push notifications, the central scheduler due-loop, dump channels, dashboard, weekly reflection, cost charting, and the runtime cwd / cached-credential / completion-body fixes that PR #41 / #44 surfaced via the new harness.
+Released: `v0.9.6` (2026-05-18). Branch is in v1.0 contract-freeze: nine major subsystems plus a config layer (see [`architecture.md`](architecture.md)). Memory was rewritten as the event-driven Judge model in v0.9.0 (see Migration in CHANGELOG); platform abstraction completed in v0.8 with service extraction; Slack stub was removed in v0.9.1 (Discord is the single supported platform for 1.0). Subsequent v0.9.x releases hardened streaming, push notifications, the central scheduler due-loop, dump channels, dashboard, weekly reflection, cost charting, and the runtime cwd / cached-credential / completion-body fixes that PR #41 / #44 surfaced via the new harness.
 
-Implemented (v0.9.5 surface):
+Implemented (v0.9.6 surface):
 - **Gateway**: Discord adapter, slash commands, message routing, `@agent` targeting, image attachments, dump-channel routing for automation completions, mention-peek push notifications.
 - **Agents**: CLI subprocess wrappers (`claude`, `gemini`, `codex`) with fallback registry; persisted session resume across restart for all three; cwd-keyed session storage matching real CLI semantics.
 - **Memory**: SQLite history + event-driven Judge agent writing single-tier `memories.yaml` + agent-synthesized `MEMORY.md`; idle / `/memorize` / keyword triggers; daily diary reflection (default-on as of v0.9.5) + weekly reflection (Tuesday 03:00 local default).
 - **Runtime**: durable state machine (DRAFT / RUNNING / VALIDATING / WAITING_MERGE / WAITING_USER_INPUT / COMPLETED / FAILED / TIMEOUT / PAUSED / STOPPED / BLOCKED); per-task worktree; true subprocess interruption; message-driven control (`stop`/`pause`/`resume` from natural language); HITL `ask_user` checkpoints with answer binding + restart rehydration; cached-credential injection into task + chat-reply prompts (PR #41); single published-artifact path under `runtime.reports_dir/` with no flat-copy duplication; COMPLETED post-notify watermark (callers reading `status=COMPLETED` are guaranteed the channel message landed).
 - **Skills**: bidirectional sync between `skills/` and CLI-native dirs; agent-driven creation + validation + merge gate; outcome tracking, feedback reactions, auto-disable on rolling failure, overlap guard, source-grounded review.
-- **Router**: optional OpenAI-compatible LLM intent classification (5 canonical intents: `chat_reply` / `invoke_skill` / `oneoff_artifact` / `propose_repo_change` / `update_skill`) with confidence threshold + heuristic fallback.
+- **Router**: optional OpenAI-compatible LLM intent classification (3 canonical v2 intents — `reply` / `artifact` / `repo_update`, organized around "does this modify the source repo?"; legacy 5-intent v1 names normalized for back-compat) with `force_draft` opt-in, confidence threshold + heuristic fallback; DeepSeek-V4 reasoning-model robustness (JSON mode + truncation recovery).
 - **Automation**: cron / interval scheduler with central due-loop (v0.9.4); per-automation `auto_approve`; reply-to-automation-post promotes to follow-up thread; persisted runtime state (`/automation_status` survives restart).
 - **Auth**: per-provider QR flow (bilibili shipped); cached credential reuse via `get_valid_credential` + auto-injected `--cookies-path` hints (PR #41).
 - **Push notifications**: off-platform delivery layer (Bark first; ntfy/wecom/feishu future); allow-listed event kinds with per-kind Bark levels; never blocks the main event loop.
@@ -41,17 +41,27 @@ Still missing (post-1.0 / 1.x — see [`todo.md`](todo.md) and [`v1.0-plan.md`](
 
 ## Next Product Direction
 
-- Current branch state: `v0.9.5` released; aiming at `v1.0` stable.
+- Current branch state: `v0.9.6` released; aiming at `v1.0` stable.
 - `v0.8` delivered platform abstraction + reliability hardening + deployment hardening (service extraction, graceful shutdown, log hygiene, error contract, docker compose, restart/recovery tests, operator docs).
 - `v0.9.0` rewrote memory as the event-driven Judge model — BREAKING; old daily/curated tiers + manual promotion command removed (migration script in `scripts/`).
 - `v0.9.1`–`v0.9.3` finished service extraction, restart/recovery hardening, experimental-surface cleanup, Slack stub removal.
 - `v0.9.4` shipped streaming anchor edits, push notifications, watchdog, single published-artifact path, dump channels, central scheduler due-loop, CI three-stage gate.
 - `v0.9.5` shipped weekly reflection, daily reflection default-on, dashboard + Docker deployment, cost chart with axes, configurable refresh, AI daily section-checkpointing, Docker entrypoint `flock` serialization. Also shipped the cwd-unification / cached-credential / completion-body fixes (PR #41) and the scripted E2E harness (PR #44).
+- `v0.9.6` shipped the local read-only dashboard (React SPA + `/api/v1`), PR-based merge flow (`target_branch_mode: pr`), router 5→3 intent consolidation + `force_draft` opt-in, DeepSeek-V4 router robustness, weekly trends + richer `/automation_status`, the `transcribe-media` skill, and the `market-briefing` atomic split into 4 per-domain skills.
 - `v1.0` is the stable contract freeze — Discord-only, single-user, self-hosted; acceptance criteria in [`v1.0-plan.md`](v1.0-plan.md).
 - Post-1.0 expansion (Slack / Feishu / WeChat, semantic retrieval, hybrid autonomy) lives off the 1.0 critical path; the cross-platform `BaseChannel` contract + harness are the foundation that will let those land without re-tooling.
 - Source-code self-modification remains a high-risk, strongly gated capability — not the default autonomy path.
 
 ## Historical Milestones
+
+### v0.9.6 (2026-05-18)
+
+- Local read-only dashboard: React 19 + Vite SPA at `/app/` + thin `/api/v1` JSON API over `mode=ro` SQLite (sessions list with composite cursor, history, date-bounded tool-trace) (PR #54); weekly trends endpoint + SPA page, resilient per-signal trend queries, FTS5 session search, SPA deep links, dark ops page (PRs #56 / #57 / #59 / #60); SPA auto-builds in the Docker entrypoint with npm pinned via corepack (PR #58)
+- PR-based merge flow `merge_gate.target_branch_mode: pr` — push the task branch + open a GitHub PR via `gh`, terminal state `PR_OPENED`; skill auto-merge disabled in PR mode (PR #55)
+- Router intent set consolidated 5 → 3 (`reply` / `artifact` / `repo_update`) with legacy-name normalization + `force_draft` opt-in (PR #53); DeepSeek-V4 reasoning-model robustness — `max_tokens` 400→4096, JSON mode, three-layer truncation recovery (PR #49)
+- `transcribe-media` skill — local audio/video → text wrapper around the `stt` CLI with first-call auto-install (PRs #42 / #43)
+- `market-briefing` atomically split into `-ai` / `-finance` / `-politics` / `-weekly`, sharing the `reports/market-briefing/` output root (PR #51)
+- Cwd-unification + cached bilibili credential reuse + non-empty completion body (PR #41); scripted offline E2E harness under `tests/harness/` with 3 regression scenarios + cwd-keyed `StubAgent` (PR #44); `BaseChannel` ABC promoted `signal_task_status` / `send_hitl_prompt` with text-fallback defaults (PR #44/#45); pretty multi-line console logs + Discord reconnect-backoff annotator (PR #47); optional dashboard bearer-token auth (PR #48); Docker entrypoint `flock`-serialized editable installs + macOS FUSE-race fast path (PRs #39 / #52); streaming-relay heartbeat finalize race fix (PR #40)
 
 ### v0.9.5 (2026-05-04)
 

@@ -1,11 +1,11 @@
 # Todo / 路线图
 
-## 当前快照（2026-05-04）
+## 当前快照（2026-05-18）
 
-- `v0.9.5` 已发布。1.0 契约冻结基本到位；剩下的工作是加固和 `v1.0-plan.md` 里的验收清单。**当前下一个目标：`v1.0` 稳定版。**
-- `v0.7.3`（phase 1–3 完成）→ `v0.8.0`（全部四个 hardening phase 完成）→ `v0.8.1`（记忆质量优化、skill contract 加固、播客集成、automation YAML 修复）→ `v0.9.0`（BREAKING：memory 重写为 Judge）→ `v0.9.1`–`v0.9.3`（Slack stub 移除、restart/recovery、experimental surface 清理）→ `v0.9.4`（streaming、push notifications、watchdog、中央 scheduler due-loop、dump channels、dashboard）→ `v0.9.5`（weekly reflection、daily reflection 默认开启、dashboard Docker 部署、带坐标轴 cost chart、可配置 refresh、AI daily Stage 2.2、Docker entrypoint flock 串行化、cwd 统一 + cached credential 复用 + 非空完成体（PR #41）、scripted offline E2E harness（PR #44））。每个版本的细节看 CHANGELOG。
+- `v0.9.6` 已发布。1.0 契约冻结基本到位；剩下的工作是加固和 `v1.0-plan.md` 里的验收清单。**当前下一个目标：`v1.0` 稳定版。**
+- `v0.7.3`（phase 1–3 完成）→ `v0.8.0`（全部四个 hardening phase 完成）→ `v0.8.1`（记忆质量优化、skill contract 加固、播客集成、automation YAML 修复）→ `v0.9.0`（BREAKING：memory 重写为 Judge）→ `v0.9.1`–`v0.9.3`（Slack stub 移除、restart/recovery、experimental surface 清理）→ `v0.9.4`（streaming、push notifications、watchdog、中央 scheduler due-loop、dump channels、dashboard）→ `v0.9.5`（weekly reflection、daily reflection 默认开启、dashboard Docker 部署、带坐标轴 cost chart、可配置 refresh、AI daily Stage 2.2、Docker entrypoint flock 串行化、cwd 统一 + cached credential 复用 + 非空完成体（PR #41）、scripted offline E2E harness（PR #44））→ `v0.9.6`（本地只读 dashboard React SPA + `/api/v1`、PR-based merge flow `target_branch_mode: pr`、router 5→3 意图合并 + `force_draft` opt-in、DeepSeek-V4 router 鲁棒性、weekly trends + 更丰富的 `/automation_status`、`transcribe-media` skill、`market-briefing` 原子拆 4）。每个版本的细节看 CHANGELOG。
 - v0.5 runtime-first 完成；v0.6 skill-first + adaptive memory 完成（memory 在 v0.9.0 被 Judge 取代）；v0.7 date-based memory + 多类型 runtime + skill 评估 + auth/HITL/operator 一波完成。
-- 可选 LLM router 已实现（canonical 5 个意图：`chat_reply` / `invoke_skill` / `oneoff_artifact` / `propose_repo_change` / `update_skill`）。
+- 可选 LLM router 已实现（canonical v2 共 3 个意图：`reply` / `artifact` / `repo_update`，按"是否改动源 repo"组织；老的 5 意图 v1 名做 back-compat 归一化；artifact draft gate 走 `force_draft` opt-in）。
 - Runtime 可观测性基线已实现；`WAITING_USER_INPUT` + 单选 `ask_user` HITL 已实现；`repair_skill` 已并入 `update_skill`（router 通过 skill 注册查找决定 create vs repair）。
 - 图片附件支持已实现（Discord 下载、per-agent 处理、临时文件生命周期）。
 - Codex repo/workspace skill 发现走官方 `.agents/skills/`；workspace 提示文件（`AGENTS.md` / `CLAUDE.md` / `GEMINI.md`）由 `WORKSPACE_AGENTS.md` 生成。

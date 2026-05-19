@@ -13,15 +13,15 @@ Oh My Agent 是一个多平台 bot，执行层直接使用 CLI Agent，而不是
 
 ## 当前 Runtime 基线
 
-已发布：`v0.9.5`（2026-05-04）。分支处于 v1.0 契约冻结阶段：九个主要子系统加一层 config（详见 [`architecture.md`](architecture.md)）。Memory 在 v0.9.0 重写为事件驱动 Judge 模型（迁移说明见 CHANGELOG）；平台抽象在 v0.8 完成 service 层抽离；Slack stub 在 v0.9.1 移除（1.0 唯一支持平台是 Discord）。后续 v0.9.x 加固了 streaming、push notifications、中央 scheduler due-loop、dump channels、dashboard、weekly reflection、cost chart，以及 PR #41 / #44 借助新 harness 暴露并修掉的 cwd 一致性 / cached-credential / 完成体内容三个 runtime 修复。
+已发布：`v0.9.6`（2026-05-18）。分支处于 v1.0 契约冻结阶段：九个主要子系统加一层 config（详见 [`architecture.md`](architecture.md)）。Memory 在 v0.9.0 重写为事件驱动 Judge 模型（迁移说明见 CHANGELOG）；平台抽象在 v0.8 完成 service 层抽离；Slack stub 在 v0.9.1 移除（1.0 唯一支持平台是 Discord）。后续 v0.9.x 加固了 streaming、push notifications、中央 scheduler due-loop、dump channels、dashboard、weekly reflection、cost chart，以及 PR #41 / #44 借助新 harness 暴露并修掉的 cwd 一致性 / cached-credential / 完成体内容三个 runtime 修复。
 
-已实现（v0.9.5 实际表面）：
+已实现（v0.9.6 实际表面）：
 - **Gateway**：Discord 适配器、slash 命令、消息路由、`@agent` 指定、图片附件、自动化完成消息的 dump-channel 路由、mention-peek push 通知。
 - **Agents**：CLI 子进程封装（`claude` / `gemini` / `codex`）+ fallback 注册表；三个 agent 都支持跨重启的 session 持久化恢复；session 存储按 cwd 区分键，匹配真实 CLI 语义。
 - **Memory**：SQLite history + 事件驱动 Judge agent 写单层 `memories.yaml` + agent 合成的 `MEMORY.md`；触发器 = 空闲 15 min / `/memorize` / 关键词；daily diary reflection（v0.9.5 起默认开启）+ weekly reflection（默认 Tuesday 03:00 local）。
 - **Runtime**：持久化状态机（DRAFT / RUNNING / VALIDATING / WAITING_MERGE / WAITING_USER_INPUT / COMPLETED / FAILED / TIMEOUT / PAUSED / STOPPED / BLOCKED）；per-task worktree；真正的子进程中断；消息驱动控制（自然语言里说 `stop` / `pause` / `resume`）；带答案绑定 + 重启重新注册的 HITL `ask_user` checkpoint；task + chat-reply prompt 中自动注入 cached-credential 提示（PR #41）；`runtime.reports_dir/` 下单一发布产物路径，无平铺重复；COMPLETED post-notify watermark（任何看到 `status=COMPLETED` 的 poller 保证 channel message 已落地）。
 - **Skills**：`skills/` 与各 CLI 原生目录的双向同步；agent 驱动的创建 + 校验 + merge gate；outcome 追踪、reaction 反馈、滚动失败率自动 disable、overlap guard、source-grounded review。
-- **Router**：可选 OpenAI 兼容 LLM 意图分类（5 个 canonical 意图：`chat_reply` / `invoke_skill` / `oneoff_artifact` / `propose_repo_change` / `update_skill`）+ 置信度阈值 + heuristic 回退。
+- **Router**：可选 OpenAI 兼容 LLM 意图分类（v2 共 3 个 canonical 意图——`reply` / `artifact` / `repo_update`，按"是否改动源 repo"组织；老的 5 意图 v1 名做 back-compat 归一化）+ `force_draft` opt-in + 置信度阈值 + heuristic 回退；DeepSeek-V4 reasoning 模型鲁棒性（JSON mode + 截断恢复）。
 - **Automation**：cron / interval scheduler，central due-loop（v0.9.4）；per-automation `auto_approve`；reply-to-automation-post 自动升格为 follow-up thread；持久化 runtime state（`/automation_status` 跨重启可见）。
 - **Auth**：每 provider QR flow（已落 bilibili）；通过 `get_valid_credential` + 自动注入 `--cookies-path` 提示复用 cached credential（PR #41）。
 - **Push notifications**：跨平台外推送层（首发 Bark；ntfy / wecom / feishu 待加）；按事件类型白名单 + per-kind Bark level；绝不阻塞主事件循环。
@@ -41,17 +41,27 @@ Oh My Agent 是一个多平台 bot，执行层直接使用 CLI Agent，而不是
 
 ## 下一阶段产品方向
 
-- 当前分支：`v0.9.5` 已发布；目标 `v1.0` 稳定版。
+- 当前分支：`v0.9.6` 已发布；目标 `v1.0` 稳定版。
 - `v0.8` 完成平台抽象 + 可靠性加固 + 部署加固（service 抽离、graceful shutdown、log 卫生、error contract、docker compose、restart/recovery 测试、operator 文档）。
 - `v0.9.0` 把 memory 重写为事件驱动 Judge 模型 — BREAKING；老的 daily/curated 双层 + 手动 promote 命令移除（迁移脚本在 `scripts/`）。
 - `v0.9.1`–`v0.9.3` 完成剩余 service 抽离、restart/recovery 加固、experimental surface 清理、Slack stub 移除。
 - `v0.9.4` 上 streaming anchor edits、push notifications、watchdog、单一发布产物路径、dump channels、central scheduler due-loop、CI 三段 gate。
 - `v0.9.5` 上 weekly reflection、daily reflection 默认开启、dashboard + Docker 部署、带坐标轴的 cost chart、可配置 refresh、AI daily section checkpointing、Docker entrypoint flock 串行化。同期落了 PR #41 的 cwd 统一 / cached credential / 完成体修复 + PR #44 的 scripted E2E harness。
+- `v0.9.6` 上本地只读 dashboard（React SPA + `/api/v1`）、PR-based merge flow（`target_branch_mode: pr`）、router 5→3 意图合并 + `force_draft` opt-in、DeepSeek-V4 router 鲁棒性、weekly trends + 更丰富的 `/automation_status`、`transcribe-media` skill，以及 `market-briefing` 拆成 4 个 per-domain skill。
 - `v1.0` 是稳定契约冻结 — Discord-only、单用户、自部署；验收标准在 [`v1.0-plan.md`](v1.0-plan.md)。
 - post-1.0 扩展（Slack / Feishu / WeChat、语义检索、hybrid autonomy）不在 1.0 关键路径上；cross-platform `BaseChannel` 契约 + harness 是后续扩展不需要 re-tooling 的基础。
 - 源代码自我更迭仍是高风险、强审批的特殊能力 — 不是默认自主性路径。
 
 ## 历史阶段
+
+### v0.9.6（2026-05-18）
+
+- 本地只读 dashboard：React 19 + Vite SPA 挂在 `/app/` + 薄 `/api/v1` JSON API，走 `mode=ro` SQLite（sessions 列表带 composite cursor、history、date-bounded tool-trace）（PR #54）；weekly trends endpoint + SPA 页、per-signal 韧性 trend 查询、FTS5 session 搜索、SPA deep link、深色 ops 页（PR #56 / #57 / #59 / #60）；SPA 在 Docker entrypoint 自动构建，npm 经 corepack pin（PR #58）
+- PR-based merge flow `merge_gate.target_branch_mode: pr` — 推 task 分支 + 经 `gh` 开 GitHub PR，终态 `PR_OPENED`；PR 模式下禁用 skill 自动合并（PR #55）
+- Router 意图集 5 → 3 合并（`reply` / `artifact` / `repo_update`），老名归一化 + `force_draft` opt-in（PR #53）；DeepSeek-V4 reasoning 模型鲁棒性——`max_tokens` 400→4096、JSON mode、三层截断恢复（PR #49）
+- `transcribe-media` skill — 本地音视频 → 文本，封装 `stt` CLI，首次调用自动安装（PR #42 / #43）
+- `market-briefing` 原子拆分为 `-ai` / `-finance` / `-politics` / `-weekly`，共享 `reports/market-briefing/` 输出根（PR #51）
+- Cwd 统一 + cached bilibili 凭证复用 + 非空完成体（PR #41）；`tests/harness/` 下脚本化离线 E2E harness 含 3 个回归 scenario + cwd-keyed `StubAgent`（PR #44）；`BaseChannel` ABC 把 `signal_task_status` / `send_hitl_prompt` 提到 ABC 默认走文本回退（PR #44/#45）；多行美化 console 日志 + Discord reconnect-backoff annotator（PR #47）；可选 dashboard bearer-token auth（PR #48）；Docker entrypoint `flock` 串行化 editable install + macOS FUSE-race 快路径（PR #39 / #52）；streaming-relay heartbeat finalize 竞态修复（PR #40）
 
 ### v0.9.5（2026-05-04）
 
