@@ -36,6 +36,7 @@ function readPaneWidth(): number {
 
 function SessionsLayout() {
   const asideRef = useRef<HTMLDivElement>(null);
+  const sepRef = useRef<HTMLDivElement>(null);
   // Drag state in refs only: the pane width is driven by mutating the
   // aside's inline style directly (no React re-render per mousemove —
   // that would re-render the whole session list 60×/s). React state
@@ -43,9 +44,16 @@ function SessionsLayout() {
   // committed to localStorage on mouseup and restored on mount.
   const drag = useRef<{ startX: number; startW: number } | null>(null);
 
-  useLayoutEffect(() => {
-    if (asideRef.current) asideRef.current.style.width = `${readPaneWidth()}px`;
+  const apply = useCallback((w: number, persist: boolean) => {
+    const clamped = Math.min(PANE_MAX, Math.max(PANE_MIN, Math.round(w)));
+    if (asideRef.current) asideRef.current.style.width = `${clamped}px`;
+    sepRef.current?.setAttribute("aria-valuenow", String(clamped));
+    if (persist) window.localStorage.setItem(PANE_KEY, String(clamped));
   }, []);
+
+  useLayoutEffect(() => {
+    apply(readPaneWidth(), false);
+  }, [apply]);
 
   const onHandleDown = useCallback((e: React.MouseEvent) => {
     if (!asideRef.current) return;
@@ -58,32 +66,50 @@ function SessionsLayout() {
     document.body.style.cursor = "col-resize";
   }, []);
 
+  const onHandleKey = useCallback(
+    (e: React.KeyboardEvent) => {
+      if (!asideRef.current) return;
+      const cur = asideRef.current.getBoundingClientRect().width;
+      const step = e.shiftKey ? 64 : 16;
+      let next: number;
+      if (e.key === "ArrowLeft") next = cur - step;
+      else if (e.key === "ArrowRight") next = cur + step;
+      else if (e.key === "Home") next = PANE_MIN;
+      else if (e.key === "End") next = PANE_MAX;
+      else return;
+      e.preventDefault();
+      apply(next, true);
+    },
+    [apply],
+  );
+
   useEffect(() => {
+    function endDragStyles() {
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+    }
     function onMove(e: MouseEvent) {
-      if (!drag.current || !asideRef.current) return;
-      const next = Math.min(
-        PANE_MAX,
-        Math.max(PANE_MIN, drag.current.startW + (e.clientX - drag.current.startX)),
-      );
-      asideRef.current.style.width = `${Math.round(next)}px`;
+      if (!drag.current) return;
+      apply(drag.current.startW + (e.clientX - drag.current.startX), false);
     }
     function onUp() {
       if (!drag.current || !asideRef.current) return;
       drag.current = null;
-      document.body.style.userSelect = "";
-      document.body.style.cursor = "";
-      window.localStorage.setItem(
-        PANE_KEY,
-        String(Math.round(asideRef.current.getBoundingClientRect().width)),
-      );
+      endDragStyles();
+      apply(asideRef.current.getBoundingClientRect().width, true);
     }
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
     return () => {
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
+      // Unmounted mid-drag (e.g. route change): release the body lock.
+      if (drag.current) {
+        drag.current = null;
+        endDragStyles();
+      }
     };
-  }, []);
+  }, [apply]);
 
   return (
     <div className="flex h-[calc(100vh-3.0625rem)] overflow-hidden">
@@ -95,11 +121,18 @@ function SessionsLayout() {
         <ListPane />
       </aside>
       <div
+        ref={sepRef}
         role="separator"
         aria-orientation="vertical"
+        aria-label="Resize session list (arrow keys)"
+        aria-valuemin={PANE_MIN}
+        aria-valuemax={PANE_MAX}
+        aria-valuenow={PANE_DEFAULT}
+        tabIndex={0}
         onMouseDown={onHandleDown}
-        title="Drag to resize"
-        className="group relative w-2 shrink-0 cursor-col-resize"
+        onKeyDown={onHandleKey}
+        title="Drag or use arrow keys to resize"
+        className="group relative w-2 shrink-0 cursor-col-resize outline-none focus-visible:bg-primary/30"
       >
         <div className="absolute inset-y-0 left-1/2 -translate-x-1/2 w-px bg-border group-hover:w-0.5 group-hover:bg-primary/60 transition-all" />
       </div>

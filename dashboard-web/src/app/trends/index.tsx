@@ -233,7 +233,11 @@ function ChartFrame({
   // ~1s native `title=` delay (the Grafana-style instant readout).
   const [hover, setHover] = useState<number | null>(null);
   const n = bars.length;
-  const frac = hover === null ? 0 : (hover + 0.5) / n;
+  // Guard a stale index: a window-size switch (4w→1w) shrinks `bars`
+  // while a hover index from the old, longer series is still set, so
+  // `bars[hover]` would throw on the next render before mouseleave.
+  const active = hover !== null && hover < n ? hover : null;
+  const frac = active === null ? 0 : (active + 0.5) / n;
   // Flip the tooltip near the edges so it doesn't clip off the plot.
   const tx = frac < 0.12 ? "0" : frac > 0.88 ? "-100%" : "-50%";
 
@@ -256,7 +260,7 @@ function ChartFrame({
             <div className="absolute inset-x-0 top-0 border-t border-border/70" />
             <div className="absolute inset-x-0 top-1/2 border-t border-border/40" />
             <div className="absolute inset-x-0 bottom-0 border-t border-border/70" />
-            {hover !== null ? (
+            {active !== null ? (
               <div
                 className="absolute -top-1.5 z-10 pointer-events-none rounded-md border border-border bg-accent px-2 py-1 text-[11px] text-foreground whitespace-nowrap shadow-lg"
                 style={{
@@ -264,7 +268,7 @@ function ChartFrame({
                   transform: `translate(${tx}, -100%)`,
                 }}
               >
-                {bars[hover].tip}
+                {bars[active].tip}
               </div>
             ) : null}
             <div className="absolute inset-0 flex items-end gap-px">
@@ -277,7 +281,7 @@ function ChartFrame({
                   }
                   className={cn(
                     "flex-1 min-w-0 flex flex-col justify-end h-full",
-                    hover === i && "bg-foreground/[0.06]",
+                    active === i && "bg-foreground/[0.06]",
                   )}
                 >
                   {bar.segments.map((s, si) => (
