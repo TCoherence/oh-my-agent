@@ -117,6 +117,23 @@ export interface TraceResponse {
   enabled: boolean;
 }
 
+export interface SessionSearchHit {
+  platform: string;
+  channel_id: string;
+  thread_id: string;
+  _id: number;
+  role: "user" | "assistant" | "system";
+  snippet: string;
+  author: string | null;
+  agent: string | null;
+  created_at: string;
+}
+
+export interface SessionSearchResponse {
+  items: SessionSearchHit[];
+  query: string;
+}
+
 export interface TrendBucket {
   day: string; // YYYY-MM-DD (UTC)
   cost: number;
@@ -141,6 +158,9 @@ export interface TrendsResponse {
     task_failed: number;
     turns: number;
   };
+  // Per-signal degradation notes (e.g. an old memory.db missing
+  // runtime_tasks). Empty when every signal queried cleanly.
+  warnings?: string[];
 }
 
 // ── Endpoint helpers ──────────────────────────────────────────────── //
@@ -159,6 +179,17 @@ export function fetchSessionList(opts: {
 export function fetchTrends(opts: { weeks: number }): Promise<TrendsResponse> {
   const params = new URLSearchParams({ weeks: String(opts.weeks) });
   return apiGet<TrendsResponse>(`/api/v1/trends?${params.toString()}`);
+}
+
+export function fetchSessionSearch(opts: {
+  q: string;
+  limit?: number;
+}): Promise<SessionSearchResponse> {
+  const params = new URLSearchParams({ q: opts.q });
+  if (opts.limit) params.set("limit", String(opts.limit));
+  return apiGet<SessionSearchResponse>(
+    `/api/v1/sessions/search?${params.toString()}`,
+  );
 }
 
 export function fetchSessionHistory(opts: {

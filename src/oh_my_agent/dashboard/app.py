@@ -29,6 +29,8 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, PackageLoader, select_autoescape
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.types import Scope
 
 from oh_my_agent import paths
 from oh_my_agent.dashboard.api.v1 import build_router as build_api_v1_router
@@ -44,6 +46,29 @@ _AUTH_PUBLIC_PATHS = frozenset({"/healthz", "/api/v1/healthz"})
 # ``dashboard-web/``). Absent in source checkouts that haven't built
 # the frontend yet — the mount is a no-op in that case.
 _WEB_DIST_DIR = Path(__file__).resolve().parent / "web_dist"
+
+
+class _SPAStaticFiles(StaticFiles):
+    """StaticFiles with single-page-app fallback.
+
+    Plain ``StaticFiles(html=True)`` only serves ``index.html`` for
+    *existing directory* paths. A hard navigation / refresh on a
+    client-side route like ``/app/trends`` or
+    ``/app/sessions/discord/1/2`` has no matching file, so stock
+    StaticFiles 404s — the SPA never gets to boot and resolve the route
+    itself. Here we catch that 404 and serve ``index.html`` instead, but
+    only for *route-shaped* paths (no filename extension). A genuinely
+    missing asset like ``assets/app.xyz.js`` still 404s honestly rather
+    than being masked by an HTML body.
+    """
+
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        try:
+            return await super().get_response(path, scope)
+        except StarletteHTTPException as exc:
+            if exc.status_code == 404 and "." not in path.rsplit("/", 1)[-1]:
+                return await super().get_response("index.html", scope)
+            raise
 
 
 def create_app(
@@ -130,13 +155,14 @@ def create_app(
     # cmdclass override running pnpm/npm build in dashboard-web/). In
     # source checkouts without a frontend build, this mount is skipped
     # — operators still get the legacy Jinja monitoring page at ``/``.
-    # ``html=True`` enables SPA fallback: routes like /app/sessions/xxx
-    # resolve to index.html so TanStack Router can handle them
-    # client-side without 404s.
+    # ``_SPAStaticFiles`` serves index.html for client-side routes
+    # (/app/trends, /app/sessions/x/y/z) on hard navigation / refresh —
+    # stock ``StaticFiles(html=True)`` only does so for existing dirs and
+    # would 404 deep links.
     if _WEB_DIST_DIR.exists() and (_WEB_DIST_DIR / "index.html").exists():
         app.mount(
             "/app",
-            StaticFiles(directory=_WEB_DIST_DIR, html=True),
+            _SPAStaticFiles(directory=_WEB_DIST_DIR, html=True),
             name="dashboard-web",
         )
 

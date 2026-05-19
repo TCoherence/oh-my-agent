@@ -89,6 +89,22 @@ def build_router(config: dict) -> APIRouter:
             raise HTTPException(status_code=503, detail=result["error"])
         return result
 
+    @router.get("/sessions/search")
+    def search_sessions(
+        q: str = Query(..., min_length=1, description="Full-text query over turns"),
+        limit: int = Query(default=50, ge=1, le=100),
+    ) -> dict[str, Any]:
+        # Distinct path from /sessions/{platform}/{channel_id}/{thread_id}/...
+        # (one segment vs four) so there's no route ambiguity.
+        result = data_sessions.search_sessions(
+            _memory_db_path(),
+            query=q,
+            limit=limit,
+        )
+        if "error" in result:
+            raise HTTPException(status_code=503, detail=result["error"])
+        return result
+
     @router.get("/trends")
     def get_trends(
         weeks: int = Query(

@@ -688,3 +688,55 @@ def test_fetch_trends_minimum_one_day(trends_empty_db: Path) -> None:
     result = data.fetch_trends(trends_empty_db, days=0)
     assert result["days"] == 1
     assert len(result["buckets"]) == 1
+
+
+def test_fetch_trends_no_warnings_when_all_tables_present(trends_empty_db: Path) -> None:
+    result = data.fetch_trends(trends_empty_db, days=7)
+    assert result["warnings"] == []
+    assert "error" not in result
+
+
+@pytest.fixture
+def trends_turns_only_db(tmp_path: Path) -> Path:
+    """Simulates an older memory.db that has `turns` but is missing the
+    runtime_tasks / usage_events tables entirely."""
+
+    db = tmp_path / "trends-turns-only.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(_TURNS_DDL)
+    for when in ("datetime('now')", "datetime('now')", "datetime('now', '-1 days')"):
+        conn.execute(
+            f"INSERT INTO turns (platform, channel_id, thread_id, role, content, created_at) "
+            f"VALUES ('discord', 'ch1', 'th1', 'user', 'hi', {when})"
+        )
+    conn.commit()
+    conn.close()
+    return db
+
+
+def test_fetch_trends_degrades_per_signal_instead_of_503(
+    trends_turns_only_db: Path,
+) -> None:
+    result = data.fetch_trends(trends_turns_only_db, days=7)
+
+    # No hard error — the page still renders.
+    assert "error" not in result
+    assert len(result["buckets"]) == 7
+
+    # The two missing tables each produced a warning; turns did not.
+    warns = " ".join(result["warnings"])
+    assert "usage_events unavailable" in warns
+    assert "runtime_tasks unavailable" in warns
+    assert "turns unavailable" not in warns
+
+    # turns still aggregated; cost/task signals are zero (degraded).
+    assert result["totals"]["turns"] == 3
+    assert result["totals"]["cost"] == 0.0
+    assert result["totals"]["task_total"] == 0
+
+
+def test_fetch_trends_missing_db_is_still_hard_error(tmp_path: Path) -> None:
+    # DB-open failure remains the one hard error (→ 503 at the API).
+    result = data.fetch_trends(tmp_path / "nope.db", days=7)
+    assert "error" in result
+    assert "buckets" not in result

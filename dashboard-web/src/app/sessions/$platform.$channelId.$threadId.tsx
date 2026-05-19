@@ -53,8 +53,11 @@ function SessionDetailPage() {
         </div>
         <div className="ml-auto text-xs text-muted-foreground">
           {trace.data && !trace.data.enabled ? (
-            <span title="enable experiment.tool_trace in config.yaml">
-              tool trace disabled
+            <span
+              className="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-amber-500"
+              title="Opt-in feature. Set experiment.tool_trace.enabled: true in config.yaml and restart — only sessions created after that get a trace."
+            >
+              tool trace off — opt-in via experiment.tool_trace
             </span>
           ) : (
             <span>auto-refresh 2s · trace: {date}</span>

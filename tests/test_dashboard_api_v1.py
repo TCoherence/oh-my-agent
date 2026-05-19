@@ -341,6 +341,57 @@ def test_trends_503_on_missing_db(tmp_path: Path) -> None:
     assert client.get("/api/v1/trends?weeks=1").status_code == 503
 
 
+def test_trends_response_carries_warnings_key(app_and_db) -> None:
+    """Full _SCHEMA db → every signal queried cleanly → warnings == []."""
+
+    app, _ = app_and_db
+    client = TestClient(app)
+    body = client.get("/api/v1/trends?weeks=1").json()
+    assert body["warnings"] == []
+
+
+# ── /api/v1/sessions/search ───────────────────────────────────────── #
+
+
+def test_session_search_requires_q(app_and_db) -> None:
+    app, _ = app_and_db
+    client = TestClient(app)
+    # Missing q → 422 (FastAPI required). Empty q → 422 (min_length=1).
+    assert client.get("/api/v1/sessions/search").status_code == 422
+    assert client.get("/api/v1/sessions/search?q=").status_code == 422
+
+
+def test_session_search_returns_hits(app_and_db) -> None:
+    app, db = app_and_db
+    _seed_turn(db, thread_id="t1", role="user", content="summarize the bilibili clip")
+    _seed_turn(db, thread_id="t2", role="user", content="totally unrelated")
+
+    client = TestClient(app)
+    r = client.get("/api/v1/sessions/search?q=bilibili")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["query"] == "bilibili"
+    assert len(body["items"]) == 1
+    assert body["items"][0]["thread_id"] == "t1"
+    assert "bilibili" in body["items"][0]["snippet"]
+
+
+def test_session_search_special_chars_no_500(app_and_db) -> None:
+    app, db = app_and_db
+    _seed_turn(db, thread_id="t1", role="user", content="path a-b:c and operators")
+    client = TestClient(app)
+    # Raw FTS5 metacharacters must not 500 — they're phrase-quoted.
+    for q in ("a-b:c", "AND OR", 'x" y', "trail*"):
+        assert client.get("/api/v1/sessions/search", params={"q": q}).status_code == 200
+
+
+def test_session_search_503_on_missing_db(tmp_path: Path) -> None:
+    config = {"memory": {"backend": "sqlite", "path": str(tmp_path / "nope.db")}}
+    app = create_app(config)
+    client = TestClient(app)
+    assert client.get("/api/v1/sessions/search?q=anything").status_code == 503
+
+
 # ── Legacy / regression ───────────────────────────────────────────── #
 
 
