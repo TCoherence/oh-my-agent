@@ -1883,6 +1883,16 @@ async def test_runtime_merge_sends_terminal_notification_and_records_history(run
     assert any("merged successfully" in text.lower() for _, text in channel.sent)
     assert any(text.startswith("**Task Update**") for _, text in channel.sent)
 
+    # Terminal dedup: the in-place status message collapses to a short
+    # pointer instead of re-rendering the full body, so the result is not
+    # posted twice in the channel. The full body rides only in Task Update.
+    status_texts = [t for _, t in channel.status_messages.values()]
+    assert status_texts, "expected an upserted status message"
+    assert all("merged successfully" not in t.lower() for t in status_texts)
+    assert any("see the **Task Update** below" in t for t in status_texts)
+    update_texts = [t for _, t in channel.sent if t.startswith("**Task Update**")]
+    assert any("merged successfully" in t.lower() for t in update_texts)
+
     history = await session.get_history("thread-terminal")
     assistant_turns = [turn["content"] for turn in history if turn["role"] == "assistant"]
     assert any("queued" in text for text in assistant_turns)

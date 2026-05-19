@@ -6,6 +6,7 @@ import {
   ConversationContent,
   ConversationEmptyState,
 } from "@/components/ai-elements/conversation";
+import { Markdown } from "@/components/ai-elements/markdown";
 import { Message, MessageContent, MessageMeta } from "@/components/ai-elements/message";
 import { ToolEvent } from "@/components/ai-elements/tool-event";
 import { Card } from "@/components/ui/card";
@@ -115,7 +116,9 @@ function LoadingMessages() {
 function TurnView({ row }: { row: TurnRow }) {
   return (
     <Message role={row.role}>
-      <MessageContent>{row.content}</MessageContent>
+      <MessageContent>
+        <Markdown>{row.content}</Markdown>
+      </MessageContent>
       <MessageMeta>
         {row.role === "assistant" && row.agent ? `${row.agent} · ` : ""}
         {row.role === "user" && row.author ? `${row.author} · ` : ""}

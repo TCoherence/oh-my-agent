@@ -85,6 +85,14 @@ logger = logging.getLogger(__name__)
 
 _STATUS_MESSAGE_PREFIX = "**Task Status**"
 _TERMINAL_MESSAGE_PREFIX = "**Task Update**"
+# On a terminal notify the full result rides in the separate Task Update
+# message; the in-place status message collapses to this pointer so the
+# body isn't rendered twice in the channel. Status-neutral on purpose —
+# a failed run also "finished", and the DB row may not be flipped yet.
+_TERMINAL_STATUS_POINTER = (
+    f"{_STATUS_MESSAGE_PREFIX}\n"
+    "Run finished — see the **Task Update** below for the full result."
+)
 _TASK_STATE_LINE_RE = re.compile(r"^\s*TASK_STATE:\s*\w+\s*$", re.MULTILINE)
 _BLOCK_REASON_LINE_RE = re.compile(r"^\s*BLOCK_REASON:\s*.+\s*$", re.MULTILINE)
 
@@ -5540,7 +5548,11 @@ class RuntimeService:
             activity = self._latest_activity_for_task(task.id)
             if activity:
                 enriched_text = f"{text}\n\n**Latest activity**\n```text\n{activity}\n```"
-        body = self._format_status_message(enriched_text)
+        body = (
+            _TERMINAL_STATUS_POINTER
+            if terminal
+            else self._format_status_message(enriched_text)
+        )
         upsert = getattr(session.channel, "upsert_status_message", None)
         if upsert and callable(upsert):
             msg_id = await upsert(task.thread_id, body[:1900], message_id=status_message_id)
