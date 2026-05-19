@@ -17,10 +17,12 @@ from pathlib import Path
 import pytest
 
 from oh_my_agent.dashboard.data_sessions import (
+    _SEARCH_SNIPPET_CHARS,
     _decode_cursor,
     _encode_cursor,
     fetch_session_history,
     fetch_session_list,
+    search_sessions,
 )
 from oh_my_agent.memory.store import _SCHEMA
 
@@ -316,3 +318,92 @@ def test_history_missing_db_returns_error(tmp_path: Path) -> None:
     )
     assert isinstance(out, dict)
     assert "error" in out
+
+
+# ── search_sessions (FTS5) ───────────────────────────────────────────── #
+
+
+def test_search_empty_query_returns_no_items(db_path: Path) -> None:
+    assert search_sessions(db_path, query="") == {"items": [], "query": ""}
+    assert search_sessions(db_path, query="   ") == {"items": [], "query": ""}
+
+
+def test_search_matches_content_with_thread_coords(db_path: Path) -> None:
+    _insert_turn(
+        db_path,
+        platform="discord",
+        channel_id="100",
+        thread_id="t1",
+        role="user",
+        content="please summarize the bilibili video",
+    )
+    _insert_turn(
+        db_path,
+        platform="discord",
+        channel_id="100",
+        thread_id="t2",
+        role="assistant",
+        content="unrelated content here",
+        agent="claude",
+    )
+
+    res = search_sessions(db_path, query="bilibili")
+    assert res["query"] == "bilibili"
+    assert len(res["items"]) == 1
+    hit = res["items"][0]
+    assert hit["thread_id"] == "t1"
+    assert hit["platform"] == "discord"
+    assert hit["channel_id"] == "100"
+    assert "bilibili" in hit["snippet"]
+    assert hit["role"] == "user"
+
+
+def test_search_special_chars_do_not_raise(db_path: Path) -> None:
+    _insert_turn(
+        db_path,
+        platform="discord",
+        channel_id="100",
+        thread_id="t1",
+        role="user",
+        content="check the a-b:c* path and AND OR NEAR operators",
+    )
+    # These would all be FTS5 syntax errors if passed raw to MATCH. The
+    # quoted-phrase wrapping must keep them as plain text → no error key.
+    for q in ['a-b:c*', 'AND OR NEAR', 'quote " inside', "trailing*"]:
+        res = search_sessions(db_path, query=q)
+        assert "error" not in res, f"{q!r} leaked an FTS5 error"
+
+
+def test_search_snippet_is_truncated(db_path: Path) -> None:
+    long_body = "needle " + ("x" * 1000)
+    _insert_turn(
+        db_path,
+        platform="discord",
+        channel_id="100",
+        thread_id="t1",
+        role="assistant",
+        content=long_body,
+        agent="claude",
+    )
+    res = search_sessions(db_path, query="needle")
+    assert len(res["items"]) == 1
+    assert len(res["items"][0]["snippet"]) <= _SEARCH_SNIPPET_CHARS
+
+
+def test_search_limit_clamped(db_path: Path) -> None:
+    for i in range(5):
+        _insert_turn(
+            db_path,
+            platform="discord",
+            channel_id="100",
+            thread_id=f"t{i}",
+            role="user",
+            content=f"shared keyword turn {i}",
+        )
+    res = search_sessions(db_path, query="keyword", limit=999)
+    assert len(res["items"]) == 5  # clamp doesn't error; all 5 returned
+
+
+def test_search_missing_db_returns_error(tmp_path: Path) -> None:
+    res = search_sessions(tmp_path / "missing.db", query="anything")
+    assert "error" in res

@@ -7,29 +7,80 @@
 {% endif %}
 <title>oh-my-agent dashboard</title>
 <style>
-  body { font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; max-width: 1100px; margin: 1em auto; padding: 0 1em; color: #1a1a1a; background: #fafafa; }
-  h1 { font-size: 1.4em; margin-bottom: 0.3em; }
-  h2 { font-size: 1.05em; margin: 1.5em 0 0.4em; padding-bottom: 0.2em; border-bottom: 1px solid #ddd; }
-  h3 { font-size: 0.9em; margin: 0.8em 0 0.3em; color: #555; font-weight: 600; }
-  table { border-collapse: collapse; font-size: 12px; margin-bottom: 0.6em; width: 100%; }
-  th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid #eee; vertical-align: top; }
-  th { background: #f0f0f0; font-weight: 600; }
+  /* Modern dark theme — palette mirrors the React SPA (dashboard-web
+     global.css .dark tokens) so the two surfaces feel like one product. */
+  :root {
+    --bg: 224 71.4% 4.1%;
+    --panel: 222 47% 9%;
+    --fg: 210 20% 98%;
+    --muted: 217.9 10.6% 64.9%;
+    --border: 215 27.9% 16.9%;
+    --accent: 160 84% 45%;
+    --err: 0 84% 70%;
+    --warn: 38 95% 62%;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font: 14px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+          Helvetica, Arial, sans-serif;
+    max-width: 1140px; margin: 0 auto; padding: 2rem 1.25rem 4rem;
+    color: hsl(var(--fg)); background: hsl(var(--bg));
+  }
+  h1 { font-size: 1.4rem; font-weight: 700; margin: 0 0 0.25rem; letter-spacing: -0.01em; }
+  h2 {
+    font-size: 1rem; font-weight: 600; margin: 2rem 0 0.6rem;
+    padding-bottom: 0.4rem; border-bottom: 1px solid hsl(var(--border));
+  }
+  h3 { font-size: 0.8rem; margin: 1rem 0 0.4rem; color: hsl(var(--muted));
+       font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+  table {
+    border-collapse: collapse; font-size: 12.5px; width: 100%;
+    margin-bottom: 0.75rem; background: hsl(var(--panel));
+    border: 1px solid hsl(var(--border)); border-radius: 8px; overflow: hidden;
+  }
+  th, td { text-align: left; padding: 7px 11px;
+           border-bottom: 1px solid hsl(var(--border)); vertical-align: top; }
+  tr:last-child td { border-bottom: 0; }
+  th { background: hsl(215 27.9% 13%); font-weight: 600;
+       color: hsl(var(--muted)); text-transform: uppercase;
+       font-size: 10.5px; letter-spacing: 0.03em; }
+  tbody tr:hover { background: hsl(215 27.9% 12%); }
   td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
-  .err { color: #b00; }
-  .warn { color: #b67400; }
-  .ok { color: #167400; }
-  .muted { color: #888; }
-  .placeholder { background: #fff8e6; padding: 0.5em 0.8em; border-left: 3px solid #d6a200; font-size: 12px; }
-  code { background: #eee; padding: 1px 4px; border-radius: 2px; font-size: 11px; }
-  .meta { color: #666; font-size: 11px; }
-  .pill { display: inline-block; padding: 1px 6px; border-radius: 8px; background: #e5e5e5; font-size: 10px; font-weight: 600; }
-  .pill.on { background: #c8e6c9; color: #1b5e20; }
-  .pill.off { background: #ffcdd2; color: #b71c1c; }
-  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1em; }
+  .err { color: hsl(var(--err)); }
+  .warn { color: hsl(var(--warn)); }
+  .ok { color: hsl(var(--accent)); }
+  .muted { color: hsl(var(--muted)); }
+  .placeholder {
+    background: hsl(38 95% 62% / 0.1); color: hsl(var(--warn));
+    padding: 0.7rem 1rem; border: 1px solid hsl(38 95% 62% / 0.35);
+    border-radius: 8px; font-size: 12.5px;
+  }
+  code {
+    background: hsl(215 27.9% 16.9%); padding: 1.5px 5px; border-radius: 4px;
+    font: 11.5px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color: hsl(210 20% 90%);
+  }
+  .meta { color: hsl(var(--muted)); font-size: 12px; }
+  .pill {
+    display: inline-block; padding: 2px 9px; border-radius: 999px;
+    background: hsl(215 27.9% 16.9%); font-size: 10px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.04em;
+  }
+  .pill.on { background: hsl(160 84% 45% / 0.18); color: hsl(160 70% 60%); }
+  .pill.off { background: hsl(0 84% 70% / 0.16); color: hsl(0 84% 74%); }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; }
   @media (max-width: 720px) { .grid2 { grid-template-columns: 1fr; } }
-  .chart-wrap { margin: 0.6em 0 0.8em; padding: 0.4em 0.2em; }
-  .chart-title { font-size: 11px; color: #555; font-weight: 600; margin-bottom: 0.2em; }
-  .chart-wrap svg { display: block; max-width: 100%; height: auto; color: #167400; }
+  .chart-wrap {
+    margin: 0.6rem 0 0.9rem; padding: 0.75rem; background: hsl(var(--panel));
+    border: 1px solid hsl(var(--border)); border-radius: 8px;
+  }
+  .chart-title { font-size: 11px; color: hsl(var(--muted)); font-weight: 600;
+                 margin-bottom: 0.35rem; text-transform: uppercase;
+                 letter-spacing: 0.04em; }
+  .chart-wrap svg { display: block; max-width: 100%; height: auto;
+                    color: hsl(var(--accent)); }
+  a { color: hsl(var(--accent)); }
 </style>
 </head>
 <body>

@@ -476,3 +476,58 @@ def test_safe_token_eq_handles_non_ascii_input() -> None:
     # Same-string ASCII still works
     assert _safe_token_eq("s3cret", "s3cret") is True
     assert _safe_token_eq("s3cret", "wrong") is False
+
+
+# ── SPA deep-link fallback ────────────────────────────────────────── #
+
+
+def _spa_app(tmp_path: Path):
+    """Mount _SPAStaticFiles over a tiny tmp web_dist (index.html + an
+    asset) so we test the fallback logic without a real frontend build."""
+
+    from fastapi import FastAPI
+
+    from oh_my_agent.dashboard.app import _SPAStaticFiles
+
+    dist = tmp_path / "web_dist"
+    (dist / "assets").mkdir(parents=True)
+    (dist / "index.html").write_text("<!doctype html><title>SPA</title>", "utf-8")
+    (dist / "assets" / "app.js").write_text("console.log(1)", "utf-8")
+
+    app = FastAPI()
+    app.mount("/app", _SPAStaticFiles(directory=dist, html=True), name="web")
+    return TestClient(app)
+
+
+def test_spa_root_serves_index(tmp_path: Path) -> None:
+    client = _spa_app(tmp_path)
+    r = client.get("/app/")
+    assert r.status_code == 200
+    assert "SPA" in r.text
+
+
+def test_spa_client_route_falls_back_to_index(tmp_path: Path) -> None:
+    """Hard navigation / refresh on a client route (no file extension)
+    must serve index.html so the router can resolve it — not 404."""
+
+    client = _spa_app(tmp_path)
+    for route in ("/app/trends", "/app/sessions/discord/100/12345"):
+        r = client.get(route)
+        assert r.status_code == 200, route
+        assert "SPA" in r.text
+
+
+def test_spa_real_asset_still_served(tmp_path: Path) -> None:
+    client = _spa_app(tmp_path)
+    r = client.get("/app/assets/app.js")
+    assert r.status_code == 200
+    assert "console.log" in r.text
+
+
+def test_spa_missing_asset_still_404s(tmp_path: Path) -> None:
+    """A file-shaped path (has an extension) that doesn't exist must
+    404 honestly — not be masked by an HTML index.html body."""
+
+    client = _spa_app(tmp_path)
+    r = client.get("/app/assets/missing.js")
+    assert r.status_code == 404

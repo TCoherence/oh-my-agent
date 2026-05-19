@@ -76,6 +76,22 @@ function TrendsPage() {
 
       {data ? (
         <div className="space-y-4">
+          {data.warnings && data.warnings.length > 0 ? (
+            <Card className="border-amber-500/40 bg-amber-500/10">
+              <CardContent className="py-3 text-xs">
+                <div className="font-medium text-amber-500">
+                  Some signals unavailable — showing zeros for those
+                </div>
+                <ul className="mt-1 space-y-0.5 text-muted-foreground">
+                  {data.warnings.map((w) => (
+                    <li key={w} className="font-mono">
+                      {w}
+                    </li>
+                  ))}
+                </ul>
+              </CardContent>
+            </Card>
+          ) : null}
           <SummaryRow data={data} />
           <ChartCard
             title="Spend"

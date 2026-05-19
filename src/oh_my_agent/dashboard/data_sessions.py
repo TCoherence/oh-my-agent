@@ -248,3 +248,80 @@ def fetch_session_history(
             }
         )
     return out
+
+
+# --------------------------------------------------------------------------- #
+# Session search (FTS5)                                                        #
+# --------------------------------------------------------------------------- #
+
+_SEARCH_SNIPPET_CHARS = 280
+
+
+def search_sessions(
+    db_path: Path,
+    *,
+    query: str,
+    limit: int = 50,
+) -> dict[str, Any]:
+    """Full-text search turns across all threads via the ``turns_fts`` FTS5
+    table (same index the Discord ``/search`` command uses).
+
+    Each hit carries its thread coordinates so the UI can deep-link to the
+    session. ``content`` is truncated to a snippet — the list view doesn't
+    need whole turns.
+
+    The raw user string is wrapped as a single quoted FTS5 phrase
+    (embedded ``"`` doubled). Without this, characters that are FTS5
+    operators (``*  :  -  ^  AND  OR  NEAR``) make ``MATCH`` raise
+    ``OperationalError`` on otherwise innocent search boxes.
+
+    Returns ``{"items": [...], "query": str}``; ``{"error": str}`` on db /
+    sql failure (matches the module's other helpers).
+    """
+
+    limit = max(1, min(int(limit), 100))
+    cleaned = query.strip()
+    if not cleaned:
+        return {"items": [], "query": ""}
+
+    fts_query = '"' + cleaned.replace('"', '""') + '"'
+
+    try:
+        conn = _ro_connect(db_path)
+    except sqlite3.OperationalError as exc:
+        return {"error": f"memory db unavailable: {type(exc).__name__}: {exc}"}
+
+    sql = """
+        SELECT t.platform, t.channel_id, t.thread_id, t.id,
+               t.role, t.content, t.author, t.agent, t.created_at
+        FROM turns_fts f
+        JOIN turns t ON f.rowid = t.id
+        WHERE turns_fts MATCH ?
+        ORDER BY rank
+        LIMIT ?
+    """
+
+    try:
+        rows = conn.execute(sql, (fts_query, limit)).fetchall()
+    except sqlite3.OperationalError as exc:
+        return {"error": f"session search failed: {type(exc).__name__}: {exc}"}
+    finally:
+        conn.close()
+
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        content = row["content"] or ""
+        items.append(
+            {
+                "platform": row["platform"],
+                "channel_id": row["channel_id"],
+                "thread_id": row["thread_id"],
+                "_id": int(row["id"]),
+                "role": row["role"],
+                "snippet": content[:_SEARCH_SNIPPET_CHARS],
+                "author": row["author"],
+                "agent": row["agent"],
+                "created_at": row["created_at"],
+            }
+        )
+    return {"items": items, "query": cleaned}

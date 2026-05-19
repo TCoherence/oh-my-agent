@@ -341,8 +341,23 @@ def fetch_trends(db_path: Path, days: int) -> dict:
     # from being fetched then silently discarded by the bucket loop.
     since = f"-{days - 1} days"
 
+    # Each signal is queried independently: a missing/broken table (older
+    # memory.db without runtime_tasks/usage_events, etc.) degrades that
+    # one signal to zeros instead of 503-ing the whole page. The DB-open
+    # failure above is still the only hard error. Warnings surface which
+    # signal degraded so the operator can see *why* without curling.
+    warnings: list[str] = []
+
+    def _signal(label: str, sql: str, params: tuple) -> list[sqlite3.Row]:
+        try:
+            return conn.execute(sql, params).fetchall()
+        except sqlite3.OperationalError as exc:
+            warnings.append(f"{label} unavailable: {type(exc).__name__}: {exc}")
+            return []
+
     try:
-        cost_rows = conn.execute(
+        cost_rows = _signal(
+            "usage_events",
             """
             SELECT date(ts) AS day,
                    COALESCE(SUM(input_tokens), 0) AS in_tok,
@@ -353,9 +368,9 @@ def fetch_trends(db_path: Path, days: int) -> dict:
             GROUP BY day
             """,
             (since,),
-        ).fetchall()
-
-        task_rows = conn.execute(
+        )
+        task_rows = _signal(
+            "runtime_tasks",
             f"""
             SELECT date(created_at) AS day,
                    COUNT(*) AS total,
@@ -366,9 +381,9 @@ def fetch_trends(db_path: Path, days: int) -> dict:
             GROUP BY day
             """,
             (*SUCCESS_STATES, *TREND_FAILED_STATES, since),
-        ).fetchall()
-
-        turn_rows = conn.execute(
+        )
+        turn_rows = _signal(
+            "turns",
             """
             SELECT date(created_at) AS day, COUNT(*) AS n
             FROM turns
@@ -376,10 +391,7 @@ def fetch_trends(db_path: Path, days: int) -> dict:
             GROUP BY day
             """,
             (since,),
-        ).fetchall()
-    except sqlite3.OperationalError as exc:
-        conn.close()
-        return _error_placeholder("trends query failed", exc)
+        )
     finally:
         conn.close()
 
@@ -415,7 +427,7 @@ def fetch_trends(db_path: Path, days: int) -> dict:
         "task_failed": sum(b["task_failed"] for b in buckets),
         "turns": sum(b["turns"] for b in buckets),
     }
-    return {"days": days, "buckets": buckets, "totals": totals}
+    return {"days": days, "buckets": buckets, "totals": totals, "warnings": warnings}
 
 
 # ---------------------------------------------------------------------------
