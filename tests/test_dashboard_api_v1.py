@@ -318,14 +318,20 @@ def test_trends_reflects_seeded_turns(app_and_db) -> None:
     assert by_day[(now.date() - timedelta(days=3)).isoformat()]["turns"] == 1
 
 
-def test_trends_weeks_validation(app_and_db) -> None:
+def test_trends_weeks_allowlist(app_and_db) -> None:
     app, _ = app_and_db
     client = TestClient(app)
-    assert client.get("/api/v1/trends?weeks=0").status_code == 422
-    assert client.get("/api/v1/trends?weeks=13").status_code == 422
-    r = client.get("/api/v1/trends?weeks=12")
-    assert r.status_code == 200
-    assert r.json()["days"] == 84
+    # Out of range and in-range-but-unsupported presets are all 400.
+    assert client.get("/api/v1/trends?weeks=0").status_code == 400
+    assert client.get("/api/v1/trends?weeks=3").status_code == 400
+    assert client.get("/api/v1/trends?weeks=13").status_code == 400
+    # Non-integer is a FastAPI type error (422), not our allowlist 400.
+    assert client.get("/api/v1/trends?weeks=abc").status_code == 422
+    # Every supported preset works.
+    for weeks in (1, 2, 4, 12):
+        r = client.get(f"/api/v1/trends?weeks={weeks}")
+        assert r.status_code == 200
+        assert r.json()["days"] == weeks * 7
 
 
 def test_trends_503_on_missing_db(tmp_path: Path) -> None:

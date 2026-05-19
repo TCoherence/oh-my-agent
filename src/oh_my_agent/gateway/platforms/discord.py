@@ -772,7 +772,7 @@ class DiscordChannel(BaseChannel):
                 )
                 lines.append(
                     f"- {health} `{record.name}` · {self._format_automation_schedule(record)}"
-                    f"{skill_part}{active_marker}"
+                    f" · {self._format_automation_target(record)}{skill_part}{active_marker}"
                 )
                 detail = (
                     f"  next `{_relative_time(record.next_run_at)}`"
@@ -793,7 +793,7 @@ class DiscordChannel(BaseChannel):
                 )
                 lines.append(
                     f"- `{record.name}` · {self._format_automation_schedule(record)}"
-                    f"{skill_part}{active_marker}"
+                    f" · {self._format_automation_target(record)}{skill_part}{active_marker}"
                 )
             if len(disabled_records) > 12:
                 lines.append(f"_…and {len(disabled_records) - 12} more disabled_")

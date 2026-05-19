@@ -334,9 +334,11 @@ def fetch_trends(db_path: Path, days: int) -> dict:
     except sqlite3.OperationalError as exc:
         return _error_placeholder("trends unavailable", exc)
 
-    # ``date(col) >= date('now', '-(days-1) days')`` makes the SQL window
-    # line up exactly with the [today-(days-1) .. today] bucket range, so
-    # boundary-day rows are not silently fetched-then-dropped.
+    # Bound on BOTH sides so the SQL window lines up exactly with the
+    # [today-(days-1) .. today] bucket range: the lower bound stops
+    # boundary-day rows from being fetched-then-dropped, the upper bound
+    # (`<= date('now')`) stops future-dated rows (clock skew / bad data)
+    # from being fetched then silently discarded by the bucket loop.
     since = f"-{days - 1} days"
 
     try:
@@ -347,7 +349,7 @@ def fetch_trends(db_path: Path, days: int) -> dict:
                    COALESCE(SUM(output_tokens), 0) AS out_tok,
                    COALESCE(SUM(cost_usd), 0.0) AS cost
             FROM usage_events
-            WHERE date(ts) >= date('now', ?)
+            WHERE date(ts) >= date('now', ?) AND date(ts) <= date('now')
             GROUP BY day
             """,
             (since,),
@@ -360,7 +362,7 @@ def fetch_trends(db_path: Path, days: int) -> dict:
                    SUM(CASE WHEN status IN ({",".join("?" * len(SUCCESS_STATES))}) THEN 1 ELSE 0 END) AS ok,
                    SUM(CASE WHEN status IN ({",".join("?" * len(TREND_FAILED_STATES))}) THEN 1 ELSE 0 END) AS failed
             FROM runtime_tasks
-            WHERE date(created_at) >= date('now', ?)
+            WHERE date(created_at) >= date('now', ?) AND date(created_at) <= date('now')
             GROUP BY day
             """,
             (*SUCCESS_STATES, *TREND_FAILED_STATES, since),
@@ -370,7 +372,7 @@ def fetch_trends(db_path: Path, days: int) -> dict:
             """
             SELECT date(created_at) AS day, COUNT(*) AS n
             FROM turns
-            WHERE date(created_at) >= date('now', ?)
+            WHERE date(created_at) >= date('now', ?) AND date(created_at) <= date('now')
             GROUP BY day
             """,
             (since,),
