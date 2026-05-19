@@ -69,6 +69,11 @@ def app_and_db(tmp_path: Path):
             "backend": "sqlite",
             "path": str(db),
         },
+        # Point the runtime state DB at the same _SCHEMA db so the
+        # trends endpoint (usage_events/runtime_tasks ← runtime.db,
+        # turns ← memory.db) resolves both to a real tmp file instead
+        # of the operator's real ~/.oh-my-agent/runtime/runtime.db.
+        "runtime": {"state_path": str(db)},
         # Don't enable experiment.tool_trace so the trace endpoint can
         # exercise its "disabled" branch.
         "experiment": {"tool_trace": {"enabled": False}},
@@ -334,11 +339,21 @@ def test_trends_weeks_allowlist(app_and_db) -> None:
         assert r.json()["days"] == weeks * 7
 
 
-def test_trends_503_on_missing_db(tmp_path: Path) -> None:
-    config = {"memory": {"backend": "sqlite", "path": str(tmp_path / "nope.db")}}
+def test_trends_resilient_when_dbs_missing(tmp_path: Path) -> None:
+    # Both DBs absent. trends no longer 503s (unlike /sessions) — it
+    # degrades to a zero-filled series + warnings so the page renders.
+    config = {
+        "memory": {"backend": "sqlite", "path": str(tmp_path / "no-mem.db")},
+        "runtime": {"state_path": str(tmp_path / "no-rt.db")},
+    }
     app = create_app(config)
     client = TestClient(app)
-    assert client.get("/api/v1/trends?weeks=1").status_code == 503
+    r = client.get("/api/v1/trends?weeks=1")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["totals"]["turns"] == 0
+    assert body["totals"]["task_total"] == 0
+    assert len(body["warnings"]) >= 1
 
 
 def test_trends_response_carries_warnings_key(app_and_db) -> None:

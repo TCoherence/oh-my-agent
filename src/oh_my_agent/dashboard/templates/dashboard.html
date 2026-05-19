@@ -81,12 +81,20 @@
   .chart-wrap svg { display: block; max-width: 100%; height: auto;
                     color: hsl(var(--accent)); }
   a { color: hsl(var(--accent)); }
+  .cta {
+    display: inline-block; margin: 0.4rem 0 0.2rem; padding: 7px 14px;
+    border-radius: 8px; background: hsl(var(--accent) / 0.16);
+    border: 1px solid hsl(var(--accent) / 0.4); color: hsl(160 70% 60%);
+    font-weight: 600; text-decoration: none; font-size: 12.5px;
+  }
+  .cta:hover { background: hsl(var(--accent) / 0.26); }
 </style>
 </head>
 <body>
 
 <h1>oh-my-agent dashboard</h1>
 <p class="meta">Snapshot at <code>{{ now_utc }}</code> · {% if refresh_seconds and refresh_seconds > 0 %}auto-refresh every {{ refresh_seconds }}s{% else %}auto-refresh disabled{% endif %} · loopback-only · read-only</p>
+<p><a class="cta" href="/app/">Open the interactive dashboard (sessions · search · trends) →</a></p>
 
 <!-- ─────────────────────────────────────────────────────────────────────── -->
 <h2>1. Automation health</h2>

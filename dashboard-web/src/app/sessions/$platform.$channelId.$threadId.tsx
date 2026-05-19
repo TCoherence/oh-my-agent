@@ -1,5 +1,4 @@
-import { Link, createFileRoute } from "@tanstack/react-router";
-import { ChevronLeft } from "lucide-react";
+import { createFileRoute } from "@tanstack/react-router";
 import { useMemo } from "react";
 
 import {
@@ -39,15 +38,9 @@ function SessionDetailPage() {
   );
 
   return (
-    <div className="flex flex-col h-[calc(100vh-3rem)]">
+    <div className="flex flex-col h-full">
       <div className="border-b border-border px-6 py-3 flex items-center gap-3">
-        <Link
-          to="/sessions"
-          className="text-muted-foreground hover:text-foreground transition-colors"
-        >
-          <ChevronLeft className="h-4 w-4" />
-        </Link>
-        <div className="text-sm font-mono">
+        <div className="text-sm font-mono min-w-0 truncate">
           <span className="text-muted-foreground">{platform}/{channelId}/</span>
           <span className="text-foreground">{threadId}</span>
         </div>

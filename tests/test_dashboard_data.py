@@ -632,18 +632,14 @@ def trends_db(tmp_path: Path) -> Path:
     return db
 
 
-def test_fetch_trends_missing_db(tmp_path: Path) -> None:
-    result = data.fetch_trends(tmp_path / "nope.db", days=7)
-    assert "error" in result
-
-
 def test_fetch_trends_empty_is_zero_filled(trends_empty_db: Path) -> None:
-    result = data.fetch_trends(trends_empty_db, days=7)
+    result = data.fetch_trends(trends_empty_db, trends_empty_db, days=7)
     assert result["days"] == 7
     assert len(result["buckets"]) == 7
     assert all(b["cost"] == 0.0 and b["task_total"] == 0 and b["turns"] == 0 for b in result["buckets"])
     assert result["totals"]["cost"] == 0.0
     assert result["totals"]["task_total"] == 0
+    assert result["warnings"] == []
     # Oldest-first, contiguous, ending today (UTC).
     days = [b["day"] for b in result["buckets"]]
     assert days == sorted(days)
@@ -651,7 +647,7 @@ def test_fetch_trends_empty_is_zero_filled(trends_empty_db: Path) -> None:
 
 
 def test_fetch_trends_aggregates_by_day(trends_db: Path) -> None:
-    result = data.fetch_trends(trends_db, days=7)
+    result = data.fetch_trends(trends_db, trends_db, days=7)
     by_day = {b["day"]: b for b in result["buckets"]}
     today = datetime.now(timezone.utc).date().isoformat()
     two_days_ago = (datetime.now(timezone.utc).date() - timedelta(days=2)).isoformat()
@@ -679,20 +675,82 @@ def test_fetch_trends_aggregates_by_day(trends_db: Path) -> None:
 
 
 def test_fetch_trends_clamps_window(trends_empty_db: Path) -> None:
-    result = data.fetch_trends(trends_empty_db, days=9999)
+    result = data.fetch_trends(trends_empty_db, trends_empty_db, days=9999)
     assert result["days"] == data.TREND_MAX_DAYS
     assert len(result["buckets"]) == data.TREND_MAX_DAYS
 
 
 def test_fetch_trends_minimum_one_day(trends_empty_db: Path) -> None:
-    result = data.fetch_trends(trends_empty_db, days=0)
+    result = data.fetch_trends(trends_empty_db, trends_empty_db, days=0)
     assert result["days"] == 1
     assert len(result["buckets"]) == 1
 
 
 def test_fetch_trends_no_warnings_when_all_tables_present(trends_empty_db: Path) -> None:
-    result = data.fetch_trends(trends_empty_db, days=7)
+    result = data.fetch_trends(trends_empty_db, trends_empty_db, days=7)
     assert result["warnings"] == []
+    assert "error" not in result
+
+
+@pytest.fixture
+def trends_split_dbs(tmp_path: Path) -> tuple[Path, Path]:
+    """The real deployment shape: runtime_tasks/usage_events in
+    runtime.db, turns in a separate memory.db."""
+
+    runtime_db = tmp_path / "runtime.db"
+    rconn = sqlite3.connect(runtime_db)
+    rconn.executescript(_RUNTIME_TASKS_DDL + _USAGE_DDL)
+    rconn.execute(
+        "INSERT INTO runtime_tasks (id, platform, channel_id, thread_id, "
+        "created_by, goal, max_steps, max_minutes, status, test_command, "
+        "created_at) VALUES ('t1','discord','c','t','u','g',1,1,'COMPLETED',"
+        "'true', datetime('now'))"
+    )
+    rconn.execute(
+        "INSERT INTO usage_events (ts, agent, source, input_tokens, "
+        "output_tokens, cost_usd) VALUES (datetime('now'),'claude','chat',"
+        "100,20,0.01)"
+    )
+    rconn.commit()
+    rconn.close()
+
+    memory_db = tmp_path / "memory.db"
+    mconn = sqlite3.connect(memory_db)
+    mconn.executescript(_TURNS_DDL)
+    mconn.execute(
+        "INSERT INTO turns (platform, channel_id, thread_id, role, content, "
+        "created_at) VALUES ('discord','c','t','user','hi', datetime('now'))"
+    )
+    mconn.commit()
+    mconn.close()
+    return runtime_db, memory_db
+
+
+def test_fetch_trends_split_dbs_read_both(trends_split_dbs: tuple[Path, Path]) -> None:
+    runtime_db, memory_db = trends_split_dbs
+    result = data.fetch_trends(runtime_db, memory_db, days=7)
+    # Each signal read from its own DB file → nothing degraded.
+    assert result["warnings"] == []
+    assert result["totals"]["task_success"] == 1
+    assert result["totals"]["task_total"] == 1
+    assert result["totals"]["turns"] == 1
+    assert result["totals"]["cost"] == pytest.approx(0.01)
+
+
+def test_fetch_trends_swapped_dbs_degrade_with_warnings(
+    trends_split_dbs: tuple[Path, Path],
+) -> None:
+    # Querying turns against runtime.db and usage/tasks against
+    # memory.db is exactly the original "no such table" bug. Must
+    # degrade with warnings, never silently wrong or 503.
+    runtime_db, memory_db = trends_split_dbs
+    result = data.fetch_trends(memory_db, runtime_db, days=7)
+    warns = " ".join(result["warnings"])
+    assert "usage_events unavailable" in warns
+    assert "runtime_tasks unavailable" in warns
+    assert "turns unavailable" in warns
+    assert result["totals"]["turns"] == 0
+    assert result["totals"]["task_total"] == 0
     assert "error" not in result
 
 
@@ -717,7 +775,9 @@ def trends_turns_only_db(tmp_path: Path) -> Path:
 def test_fetch_trends_degrades_per_signal_instead_of_503(
     trends_turns_only_db: Path,
 ) -> None:
-    result = data.fetch_trends(trends_turns_only_db, days=7)
+    # Same file used for both roles: the turns table exists, the
+    # runtime tables don't → those two signals degrade, turns survives.
+    result = data.fetch_trends(trends_turns_only_db, trends_turns_only_db, days=7)
 
     # No hard error — the page still renders.
     assert "error" not in result
@@ -735,8 +795,17 @@ def test_fetch_trends_degrades_per_signal_instead_of_503(
     assert result["totals"]["task_total"] == 0
 
 
-def test_fetch_trends_missing_db_is_still_hard_error(tmp_path: Path) -> None:
-    # DB-open failure remains the one hard error (→ 503 at the API).
-    result = data.fetch_trends(tmp_path / "nope.db", days=7)
-    assert "error" in result
-    assert "buckets" not in result
+def test_fetch_trends_missing_dbs_degrade_not_error(tmp_path: Path) -> None:
+    # Neither DB file exists. Fully resilient now: zeros + warnings
+    # naming both DBs, NO hard error (the API no longer 503s on this).
+    result = data.fetch_trends(
+        tmp_path / "no-runtime.db", tmp_path / "no-memory.db", days=7
+    )
+    assert "error" not in result
+    assert len(result["buckets"]) == 7
+    assert result["totals"]["turns"] == 0
+    assert result["totals"]["task_total"] == 0
+    assert result["totals"]["cost"] == 0.0
+    warns = " ".join(result["warnings"])
+    assert "runtime_tasks/usage_events unavailable" in warns
+    assert "turns unavailable" in warns
