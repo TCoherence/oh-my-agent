@@ -138,13 +138,15 @@ fi
 if [[ "${OMA_BUILD_FRONTEND:-1}" != "0" && "${1:-}" == "oma-dashboard" \
       && -f "${REPO_ROOT}/dashboard-web/package.json" ]]; then
   if command -v npm >/dev/null 2>&1; then
-    if (
-      cd "${REPO_ROOT}/dashboard-web"
-      echo "[oma] dashboard: installing frontend deps (npm ci)"
-      npm ci --no-audit --no-fund
-      echo "[oma] dashboard: building SPA (npm run build)"
-      npm run build
-    ); then
+    # &&-chained so ANY step failing makes the subshell exit non-zero
+    # and route to the warning. A plain newline-separated list would
+    # not: `set -e` is suppressed for a subshell used as an `if`
+    # condition, so a failing `npm ci` would fall through to
+    # `npm run build` and a lenient build could still print "OK".
+    echo "[oma] dashboard: npm ci + npm run build (SPA)"
+    if ( cd "${REPO_ROOT}/dashboard-web" \
+         && npm ci --no-audit --no-fund \
+         && npm run build ); then
       echo "[oma] dashboard: SPA build OK"
     else
       echo "[oma] dashboard: SPA build failed — serving legacy Jinja page at /" >&2
