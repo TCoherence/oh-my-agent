@@ -404,6 +404,27 @@ def test_search_limit_clamped(db_path: Path) -> None:
     assert len(res["items"]) == 5  # clamp doesn't error; all 5 returned
 
 
+def test_search_nul_byte_is_stripped_not_errored(db_path: Path) -> None:
+    _insert_turn(
+        db_path,
+        platform="discord",
+        channel_id="100",
+        thread_id="t1",
+        role="user",
+        content="needle in the haystack",
+    )
+    # A NUL survives quote-doubling and makes FTS5 raise "unterminated
+    # string" → spurious 503. It must be stripped, not error.
+    res = search_sessions(db_path, query="need\x00le")
+    assert "error" not in res
+    assert "\x00" not in res["query"]
+    assert len(res["items"]) == 1
+
+
+def test_search_only_nul_is_treated_as_empty(db_path: Path) -> None:
+    assert search_sessions(db_path, query="\x00\x00") == {"items": [], "query": ""}
+
+
 def test_search_missing_db_returns_error(tmp_path: Path) -> None:
     res = search_sessions(tmp_path / "missing.db", query="anything")
     assert "error" in res

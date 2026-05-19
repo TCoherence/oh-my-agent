@@ -280,7 +280,10 @@ def search_sessions(
     """
 
     limit = max(1, min(int(limit), 100))
-    cleaned = query.strip()
+    # Strip NUL first: ``"\x00"`` survives the quote-doubling below and
+    # still makes FTS5 raise ``unterminated string`` (→ a spurious 503).
+    # A NUL in a search box is never intentional, so drop it silently.
+    cleaned = query.replace("\x00", "").strip()
     if not cleaned:
         return {"items": [], "query": ""}
 
