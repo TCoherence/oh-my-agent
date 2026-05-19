@@ -37,7 +37,7 @@ WEB_DIST = REPO_ROOT / "src" / "oh_my_agent" / "dashboard" / "web_dist"
 
 
 class BuildPyWithFrontend(build_py):
-    """Runs ``pnpm install + pnpm build`` (or npm fallback) before build_py."""
+    """Runs ``npm ci`` + ``npm run build`` before build_py (no-op without npm)."""
 
     def run(self):  # type: ignore[override]
         self._maybe_build_frontend()

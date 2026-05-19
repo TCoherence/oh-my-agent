@@ -125,21 +125,23 @@ fi
 # gitignored and never baked into the image (the repo is bind-mounted,
 # not COPY'd), so without this the operator has to ``npm run build`` on
 # the host every time, which churns package-lock.json / .tanstack/ in
-# their checkout. ``npm ci`` (deterministic, never rewrites the lock)
-# runs only when node_modules is absent — it persists on the /home or
-# /repo mount across restarts; ``npm run build`` (~2s) runs every start
-# so a ``git pull`` of frontend changes is picked up on restart. Best
-# effort: a failure still leaves the legacy Jinja page at ``/``.
-# Opt out with OMA_BUILD_FRONTEND=0 (e.g. you build on the host).
+# their checkout. ``npm ci`` is run unconditionally (it never rewrites
+# the lockfile): it wipes and reinstalls node_modules from the lock, so
+# it self-heals a bind-mounted node_modules left over from a host
+# (macOS-arch) build and picks up any dependency/lock bump — a
+# directory-exists check would skip both. ``npm run build`` then runs
+# every start so a ``git pull`` of frontend changes is reflected on
+# restart. ~6s total on a service that restarts rarely; correctness
+# beats the seconds. Best effort: a failure still leaves the legacy
+# Jinja page at ``/``. Opt out with OMA_BUILD_FRONTEND=0 (e.g. you
+# build on the host and accept the host-side churn).
 if [[ "${OMA_BUILD_FRONTEND:-1}" != "0" && "${1:-}" == "oma-dashboard" \
       && -f "${REPO_ROOT}/dashboard-web/package.json" ]]; then
   if command -v npm >/dev/null 2>&1; then
     if (
       cd "${REPO_ROOT}/dashboard-web"
-      if [[ ! -d node_modules ]]; then
-        echo "[oma] dashboard: installing frontend deps (npm ci)"
-        npm ci --no-audit --no-fund
-      fi
+      echo "[oma] dashboard: installing frontend deps (npm ci)"
+      npm ci --no-audit --no-fund
       echo "[oma] dashboard: building SPA (npm run build)"
       npm run build
     ); then
