@@ -6,6 +6,10 @@ The format is intentionally lightweight and release-oriented rather than exhaust
 
 ## Unreleased
 
+### Fixed
+
+- **Dashboard renders session message bodies as Markdown; a terminal task no longer double-posts its full result in the channel** (PR #61). (1) The SPA session-replay view dropped `turn.content` into a `whitespace-pre-wrap` div, so agent output showed raw `**bold**`, `## headings`, and GFM `| tables |` as literal text. Added `react-markdown` + `remark-gfm` and a small `Markdown` component (`dashboard-web/src/components/ai-elements/markdown.tsx`) wired into `TurnView`. Raw HTML is intentionally NOT enabled (no `rehype-raw`) so untrusted model/user output can't inject markup; every element inherits `currentColor` so the one renderer looks right on both the colored user bubble and the muted assistant bubble; links carry `rel="noreferrer noopener"`. (2) On a terminal `_notify` the runtime upserted the in-place "Task Status" message to the full result body **and** posted a separate "Task Update" message carrying the same body, so the channel showed the completion text twice — while the dashboard only ever showed one, because exactly one turn is persisted to `memory.db`. The terminal status message now collapses to a short, status-neutral pointer (`Run finished — see the Task Update below for the full result.`) and the full body rides only in the Task Update post, which still fires the Discord completion notification. Memory persistence is unchanged, so dashboard replay (already the canonical one-turn view) and Discord now agree. The automation-path notify (`task.automation_name` set) is untouched.
+
 ## v0.9.6 - 2026-05-18
 
 ### Fixed
