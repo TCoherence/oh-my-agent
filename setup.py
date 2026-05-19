@@ -37,7 +37,7 @@ WEB_DIST = REPO_ROOT / "src" / "oh_my_agent" / "dashboard" / "web_dist"
 
 
 class BuildPyWithFrontend(build_py):
-    """Runs ``pnpm install + pnpm build`` (or npm fallback) before build_py."""
+    """Runs ``npm ci`` + ``npm run build`` before build_py (no-op without npm)."""
 
     def run(self):  # type: ignore[override]
         self._maybe_build_frontend()
@@ -55,15 +55,12 @@ class BuildPyWithFrontend(build_py):
             )
             return
 
-        # Prefer pnpm (per plan) when available, fall back to npm. The
-        # local install path requires nothing beyond Node.js, which any
-        # contributor running ``pip install -e .`` likely already has.
         installer = self._pick_installer()
         if installer is None:
             print(
-                "[setup] neither pnpm nor npm found on PATH — skipping "
-                "frontend build. Install Node.js or set OMA_SKIP_FRONTEND=1 "
-                "to silence this.",
+                "[setup] npm not found on PATH — skipping frontend build. "
+                "Install Node.js (>=22) or set OMA_SKIP_FRONTEND=1 to "
+                "silence this.",
                 file=sys.stderr,
             )
             return
@@ -84,18 +81,15 @@ class BuildPyWithFrontend(build_py):
 
     @staticmethod
     def _pick_installer() -> tuple[list[str], list[str]] | None:
-        # Returns (install_cmd, build_cmd) or None if no installer found.
-        if shutil.which("pnpm"):
-            return (
-                ["pnpm", "install", "--frozen-lockfile"],
-                ["pnpm", "run", "build"],
-            )
+        # npm only — the project is standardized on npm (committed
+        # package-lock.json, ``packageManager: npm@…``, the Docker image
+        # ships npm). ``npm ci`` installs strictly from the lockfile and
+        # never rewrites it, which is the whole point: ``npm install``
+        # silently re-normalizes peer markers across npm versions and
+        # churns package-lock.json on every dev's machine.
         if shutil.which("npm"):
-            # ``npm ci`` would be faster + reproducible, but it requires
-            # a clean package-lock.json + node_modules absent. Use
-            # ``npm install`` which is more forgiving for dev installs.
             return (
-                ["npm", "install", "--no-audit", "--no-fund"],
+                ["npm", "ci", "--no-audit", "--no-fund"],
                 ["npm", "run", "build"],
             )
         return None

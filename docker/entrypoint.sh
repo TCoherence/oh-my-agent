@@ -121,6 +121,41 @@ if [[ $# -eq 0 ]]; then
   set -- oh-my-agent
 fi
 
+# Build the dashboard SPA — dashboard container only. ``web_dist/`` is
+# gitignored and never baked into the image (the repo is bind-mounted,
+# not COPY'd), so without this the operator has to ``npm run build`` on
+# the host every time, which churns package-lock.json / .tanstack/ in
+# their checkout. ``npm ci`` is run unconditionally (it never rewrites
+# the lockfile): it wipes and reinstalls node_modules from the lock, so
+# it self-heals a bind-mounted node_modules left over from a host
+# (macOS-arch) build and picks up any dependency/lock bump — a
+# directory-exists check would skip both. ``npm run build`` then runs
+# every start so a ``git pull`` of frontend changes is reflected on
+# restart. ~6s total on a service that restarts rarely; correctness
+# beats the seconds. Best effort: a failure still leaves the legacy
+# Jinja page at ``/``. Opt out with OMA_BUILD_FRONTEND=0 (e.g. you
+# build on the host and accept the host-side churn).
+if [[ "${OMA_BUILD_FRONTEND:-1}" != "0" && "${1:-}" == "oma-dashboard" \
+      && -f "${REPO_ROOT}/dashboard-web/package.json" ]]; then
+  if command -v npm >/dev/null 2>&1; then
+    # &&-chained so ANY step failing makes the subshell exit non-zero
+    # and route to the warning. A plain newline-separated list would
+    # not: `set -e` is suppressed for a subshell used as an `if`
+    # condition, so a failing `npm ci` would fall through to
+    # `npm run build` and a lenient build could still print "OK".
+    echo "[oma] dashboard: npm ci + npm run build (SPA)"
+    if ( cd "${REPO_ROOT}/dashboard-web" \
+         && npm ci --no-audit --no-fund \
+         && npm run build ); then
+      echo "[oma] dashboard: SPA build OK"
+    else
+      echo "[oma] dashboard: SPA build failed — serving legacy Jinja page at /" >&2
+    fi
+  else
+    echo "[oma] dashboard: npm not found — serving legacy Jinja page at /" >&2
+  fi
+fi
+
 echo "[oma] mount_root=${MOUNT_ROOT}"
 echo "[oma] workdir=${WORKDIR}"
 echo "[oma] config_path=${CONFIG_PATH}"
