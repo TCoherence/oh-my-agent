@@ -315,7 +315,7 @@ def _today_str() -> str:
 # ---------------------------------------------------------------------------
 
 
-def fetch_trends(db_path: Path, days: int) -> dict:
+def fetch_trends(runtime_db_path: Path, memory_db_path: Path, days: int) -> dict:
     """Daily series over the trailing ``days`` calendar days (UTC).
 
     Three signals per day: spend (cost + tokens), runtime-task volume
@@ -323,16 +323,19 @@ def fetch_trends(db_path: Path, days: int) -> dict:
     **zero-filled** for the full window so a quiet day renders as a gap
     rather than collapsing the x-axis — the trend stays readable.
 
+    Two databases: ``usage_events`` + ``runtime_tasks`` live in the
+    runtime state DB (``runtime.state_path``), ``turns`` lives in the
+    memory DB (``memory.path``). They are physically separate files in a
+    real deployment, so each is opened independently — querying turns
+    against the runtime DB (or vice versa) is exactly the "no such
+    table" bug this split fixes.
+
     ``days`` is clamped to ``[1, TREND_MAX_DAYS]``. Buckets are oldest
-    -first. Self-contains error handling like the other ``fetch_*``.
+    -first. Fully resilient: a missing DB / table degrades only the
+    signals it backs (zeros + a warning naming it), never 503s.
     """
 
     days = max(1, min(int(days), TREND_MAX_DAYS))
-
-    try:
-        conn = _ro_connect(db_path)
-    except sqlite3.OperationalError as exc:
-        return _error_placeholder("trends unavailable", exc)
 
     # Bound on BOTH sides so the SQL window lines up exactly with the
     # [today-(days-1) .. today] bucket range: the lower bound stops
@@ -341,22 +344,31 @@ def fetch_trends(db_path: Path, days: int) -> dict:
     # from being fetched then silently discarded by the bucket loop.
     since = f"-{days - 1} days"
 
-    # Each signal is queried independently: a missing/broken table (older
-    # memory.db without runtime_tasks/usage_events, etc.) degrades that
-    # one signal to zeros instead of 503-ing the whole page. The DB-open
-    # failure above is still the only hard error. Warnings surface which
-    # signal degraded so the operator can see *why* without curling.
     warnings: list[str] = []
 
-    def _signal(label: str, sql: str, params: tuple) -> list[sqlite3.Row]:
+    def _open(path: Path, label: str) -> sqlite3.Connection | None:
+        try:
+            return _ro_connect(path)
+        except sqlite3.OperationalError as exc:
+            warnings.append(f"{label} unavailable: {type(exc).__name__}: {exc}")
+            return None
+
+    def _signal(
+        conn: sqlite3.Connection | None, label: str, sql: str, params: tuple
+    ) -> list[sqlite3.Row]:
+        if conn is None:
+            return []  # DB-open warning already recorded by _open
         try:
             return conn.execute(sql, params).fetchall()
         except sqlite3.OperationalError as exc:
             warnings.append(f"{label} unavailable: {type(exc).__name__}: {exc}")
             return []
 
+    runtime_conn = _open(runtime_db_path, "runtime_tasks/usage_events")
+    memory_conn = _open(memory_db_path, "turns")
     try:
         cost_rows = _signal(
+            runtime_conn,
             "usage_events",
             """
             SELECT date(ts) AS day,
@@ -370,6 +382,7 @@ def fetch_trends(db_path: Path, days: int) -> dict:
             (since,),
         )
         task_rows = _signal(
+            runtime_conn,
             "runtime_tasks",
             f"""
             SELECT date(created_at) AS day,
@@ -383,6 +396,7 @@ def fetch_trends(db_path: Path, days: int) -> dict:
             (*SUCCESS_STATES, *TREND_FAILED_STATES, since),
         )
         turn_rows = _signal(
+            memory_conn,
             "turns",
             """
             SELECT date(created_at) AS day, COUNT(*) AS n
@@ -393,7 +407,10 @@ def fetch_trends(db_path: Path, days: int) -> dict:
             (since,),
         )
     finally:
-        conn.close()
+        if runtime_conn is not None:
+            runtime_conn.close()
+        if memory_conn is not None:
+            memory_conn.close()
 
     cost_by_day = {row["day"]: row for row in cost_rows}
     task_by_day = {row["day"]: row for row in task_rows}

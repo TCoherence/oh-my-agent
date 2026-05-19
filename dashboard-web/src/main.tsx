@@ -27,8 +27,13 @@ const queryClient = new QueryClient({
   },
 });
 
+// basepath MUST match the FastAPI mount (`/app`) and Vite `base`.
+// Without it the router can't match `/app/...` URLs — every direct
+// load / refresh / bookmark renders the root NotFound. In-app <Link>s
+// resolve relative to this, so hrefs become `/app/sessions` etc.
 const router = createRouter({
   routeTree,
+  basepath: "/app",
   defaultPreload: "intent",
 });
 

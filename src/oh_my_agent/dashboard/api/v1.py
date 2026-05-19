@@ -47,6 +47,11 @@ def build_router(config: dict) -> APIRouter:
     def _memory_db_path() -> Path:
         return paths.memory_db_path(config)
 
+    def _runtime_db_path() -> Path:
+        # runtime_tasks / usage_events live in the runtime state DB,
+        # NOT memory.db (which only holds conversation `turns`).
+        return paths.runtime_state_path(config)
+
     def _trace_dir() -> Path | None:
         """Resolve the experiment.tool_trace path from config.
 
@@ -124,11 +129,12 @@ def build_router(config: dict) -> APIRouter:
                 status_code=400,
                 detail=f"weeks must be one of {list(_TREND_WEEK_PRESETS)}",
             )
-        result = data.fetch_trends(_memory_db_path(), days=weeks * 7)
-        if "error" in result:
-            # 503 (not 500), symmetric with /sessions — the usual cause
-            # is a missing memory.db on first boot, not a code crash.
-            raise HTTPException(status_code=503, detail=result["error"])
+        # usage_events/runtime_tasks ← runtime.db; turns ← memory.db.
+        # fetch_trends is fully resilient (degrades per-signal), so there
+        # is no error branch to translate into a 503.
+        result = data.fetch_trends(
+            _runtime_db_path(), _memory_db_path(), days=weeks * 7
+        )
         result["weeks"] = weeks
         return result
 

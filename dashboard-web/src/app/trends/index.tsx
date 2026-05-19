@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useState } from "react";
+import { type ReactNode, useState } from "react";
 
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -106,6 +106,7 @@ function TrendsPage() {
               )} tok`
             }
             barClass="bg-emerald-500"
+            formatY={fmtCost}
           />
           <TaskChartCard buckets={data.buckets} totals={data.totals} />
           <ChartCard
@@ -115,6 +116,7 @@ function TrendsPage() {
             value={(b) => b.turns}
             tooltip={(b) => `${b.day}: ${b.turns} turns`}
             barClass="bg-sky-500"
+            formatY={(n) => fmtCompact(Math.round(n))}
           />
         </div>
       ) : null}
@@ -193,22 +195,33 @@ interface TrendsTotals {
   turns: number;
 }
 
-function ChartCard({
+// Up to `n` evenly-spaced bucket dates, formatted MM-DD, for the x-axis.
+function pickTicks(buckets: TrendBucket[], n: number): string[] {
+  if (buckets.length === 0) return [];
+  if (buckets.length <= n) return buckets.map((b) => b.day.slice(5));
+  const out: string[] = [];
+  for (let i = 0; i < n; i++) {
+    const idx = Math.round((i * (buckets.length - 1)) / (n - 1));
+    out.push(buckets[idx].day.slice(5));
+  }
+  return out;
+}
+
+function ChartFrame({
   title,
   subtitle,
   buckets,
-  value,
-  tooltip,
-  barClass,
+  max,
+  formatY,
+  children,
 }: {
   title: string;
   subtitle: string;
   buckets: TrendBucket[];
-  value: (b: TrendBucket) => number;
-  tooltip: (b: TrendBucket) => string;
-  barClass: string;
+  max: number;
+  formatY: (n: number) => string;
+  children: ReactNode;
 }) {
-  const max = Math.max(1, ...buckets.map(value));
   return (
     <Card>
       <CardContent className="py-4">
@@ -216,27 +229,80 @@ function ChartCard({
           <div className="text-sm font-semibold">{title}</div>
           <div className="text-xs text-muted-foreground">{subtitle}</div>
         </div>
-        <div className="flex items-end gap-px h-28">
-          {buckets.map((b) => {
-            const v = value(b);
-            const pct = v > 0 ? Math.max(2, (v / max) * 100) : 0;
-            return (
-              <div
-                key={b.day}
-                title={tooltip(b)}
-                className="flex-1 min-w-0 flex items-end h-full"
-              >
-                <div
-                  className={cn("w-full rounded-sm", barClass)}
-                  style={{ height: `${pct}%` }}
-                />
-              </div>
-            );
-          })}
+        <div className="flex gap-2">
+          {/* y-axis */}
+          <div className="flex flex-col justify-between h-32 w-14 shrink-0 text-right text-[10px] text-muted-foreground tabular-nums">
+            <span>{formatY(max)}</span>
+            <span>{formatY(max / 2)}</span>
+            <span>0</span>
+          </div>
+          {/* plot area with gridlines */}
+          <div className="relative flex-1 h-32">
+            <div className="absolute inset-x-0 top-0 border-t border-border/70" />
+            <div className="absolute inset-x-0 top-1/2 border-t border-border/40" />
+            <div className="absolute inset-x-0 bottom-0 border-t border-border/70" />
+            <div className="absolute inset-0 flex items-end gap-px">
+              {children}
+            </div>
+          </div>
         </div>
-        <AxisLabels buckets={buckets} />
+        {/* x-axis */}
+        <div className="flex gap-2 mt-1.5">
+          <div className="w-14 shrink-0" />
+          <div className="flex-1 flex justify-between text-[10px] text-muted-foreground tabular-nums">
+            {pickTicks(buckets, 6).map((t, i) => (
+              <span key={`${t}-${i}`}>{t}</span>
+            ))}
+          </div>
+        </div>
       </CardContent>
     </Card>
+  );
+}
+
+function ChartCard({
+  title,
+  subtitle,
+  buckets,
+  value,
+  tooltip,
+  barClass,
+  formatY,
+}: {
+  title: string;
+  subtitle: string;
+  buckets: TrendBucket[];
+  value: (b: TrendBucket) => number;
+  tooltip: (b: TrendBucket) => string;
+  barClass: string;
+  formatY: (n: number) => string;
+}) {
+  const max = Math.max(1, ...buckets.map(value));
+  return (
+    <ChartFrame
+      title={title}
+      subtitle={subtitle}
+      buckets={buckets}
+      max={max}
+      formatY={formatY}
+    >
+      {buckets.map((b) => {
+        const v = value(b);
+        const pct = v > 0 ? Math.max(2, (v / max) * 100) : 0;
+        return (
+          <div
+            key={b.day}
+            title={tooltip(b)}
+            className="flex-1 min-w-0 flex items-end h-full"
+          >
+            <div
+              className={cn("w-full rounded-sm", barClass)}
+              style={{ height: `${pct}%` }}
+            />
+          </div>
+        );
+      })}
+    </ChartFrame>
   );
 }
 
@@ -249,54 +315,35 @@ function TaskChartCard({
 }) {
   const max = Math.max(1, ...buckets.map((b) => b.task_total));
   return (
-    <Card>
-      <CardContent className="py-4">
-        <div className="flex items-baseline justify-between mb-3">
-          <div className="text-sm font-semibold">Runtime tasks</div>
-          <div className="text-xs text-muted-foreground">
-            {totals.task_success} ok · {totals.task_failed} failed
+    <ChartFrame
+      title="Runtime tasks"
+      subtitle={`${totals.task_success} ok · ${totals.task_failed} failed`}
+      buckets={buckets}
+      max={max}
+      formatY={(n) => String(Math.round(n))}
+    >
+      {buckets.map((b) => {
+        const okPct =
+          b.task_success > 0 ? Math.max(2, (b.task_success / max) * 100) : 0;
+        const failPct =
+          b.task_failed > 0 ? Math.max(2, (b.task_failed / max) * 100) : 0;
+        return (
+          <div
+            key={b.day}
+            title={`${b.day}: ${b.task_success} ok · ${b.task_failed} failed · ${b.task_total} total`}
+            className="flex-1 min-w-0 flex flex-col justify-end h-full"
+          >
+            <div
+              className="w-full rounded-sm bg-rose-500"
+              style={{ height: `${failPct}%` }}
+            />
+            <div
+              className="w-full rounded-sm bg-emerald-500"
+              style={{ height: `${okPct}%` }}
+            />
           </div>
-        </div>
-        <div className="flex items-end gap-px h-28">
-          {buckets.map((b) => {
-            const okPct =
-              b.task_success > 0
-                ? Math.max(2, (b.task_success / max) * 100)
-                : 0;
-            const failPct =
-              b.task_failed > 0 ? Math.max(2, (b.task_failed / max) * 100) : 0;
-            return (
-              <div
-                key={b.day}
-                title={`${b.day}: ${b.task_success} ok · ${b.task_failed} failed · ${b.task_total} total`}
-                className="flex-1 min-w-0 flex flex-col justify-end h-full"
-              >
-                <div
-                  className="w-full rounded-sm bg-rose-500"
-                  style={{ height: `${failPct}%` }}
-                />
-                <div
-                  className="w-full rounded-sm bg-emerald-500"
-                  style={{ height: `${okPct}%` }}
-                />
-              </div>
-            );
-          })}
-        </div>
-        <AxisLabels buckets={buckets} />
-      </CardContent>
-    </Card>
-  );
-}
-
-function AxisLabels({ buckets }: { buckets: TrendBucket[] }) {
-  if (buckets.length === 0) return null;
-  const first = buckets[0].day;
-  const last = buckets[buckets.length - 1].day;
-  return (
-    <div className="flex justify-between mt-1.5 text-[10px] text-muted-foreground tabular-nums">
-      <span>{first}</span>
-      <span>{last}</span>
-    </div>
+        );
+      })}
+    </ChartFrame>
   );
 }
