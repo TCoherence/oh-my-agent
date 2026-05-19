@@ -49,7 +49,7 @@ export function MessageContent({
 }) {
   return (
     <div
-      className={cn("whitespace-pre-wrap break-words leading-relaxed", className)}
+      className={cn("break-words leading-relaxed", className)}
     >
       {children}
     </div>
