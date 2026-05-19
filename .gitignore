@@ -25,5 +25,8 @@ src/oh_my_agent/dashboard/web_dist/
 # Keep out of git so route additions don't churn the diff history.
 dashboard-web/src/routeTree.gen.ts
 
+# TanStack Router plugin scratch/cache dir (created on dev/build).
+dashboard-web/.tanstack/
+
 # TypeScript incremental build info (regenerated on every build).
 dashboard-web/*.tsbuildinfo

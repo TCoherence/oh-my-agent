@@ -121,6 +121,37 @@ if [[ $# -eq 0 ]]; then
   set -- oh-my-agent
 fi
 
+# Build the dashboard SPA — dashboard container only. ``web_dist/`` is
+# gitignored and never baked into the image (the repo is bind-mounted,
+# not COPY'd), so without this the operator has to ``npm run build`` on
+# the host every time, which churns package-lock.json / .tanstack/ in
+# their checkout. ``npm ci`` (deterministic, never rewrites the lock)
+# runs only when node_modules is absent — it persists on the /home or
+# /repo mount across restarts; ``npm run build`` (~2s) runs every start
+# so a ``git pull`` of frontend changes is picked up on restart. Best
+# effort: a failure still leaves the legacy Jinja page at ``/``.
+# Opt out with OMA_BUILD_FRONTEND=0 (e.g. you build on the host).
+if [[ "${OMA_BUILD_FRONTEND:-1}" != "0" && "${1:-}" == "oma-dashboard" \
+      && -f "${REPO_ROOT}/dashboard-web/package.json" ]]; then
+  if command -v npm >/dev/null 2>&1; then
+    if (
+      cd "${REPO_ROOT}/dashboard-web"
+      if [[ ! -d node_modules ]]; then
+        echo "[oma] dashboard: installing frontend deps (npm ci)"
+        npm ci --no-audit --no-fund
+      fi
+      echo "[oma] dashboard: building SPA (npm run build)"
+      npm run build
+    ); then
+      echo "[oma] dashboard: SPA build OK"
+    else
+      echo "[oma] dashboard: SPA build failed — serving legacy Jinja page at /" >&2
+    fi
+  else
+    echo "[oma] dashboard: npm not found — serving legacy Jinja page at /" >&2
+  fi
+fi
+
 echo "[oma] mount_root=${MOUNT_ROOT}"
 echo "[oma] workdir=${WORKDIR}"
 echo "[oma] config_path=${CONFIG_PATH}"
