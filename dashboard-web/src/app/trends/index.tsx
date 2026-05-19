@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { type ReactNode, useState } from "react";
+import { useState } from "react";
 
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -207,21 +207,40 @@ function pickTicks(buckets: TrendBucket[], n: number): string[] {
   return out;
 }
 
+interface BarSpec {
+  key: string;
+  tip: string;
+  // bottom-up stack; rendered inside a flex-col justify-end column.
+  segments: { pct: number; className: string }[];
+}
+
 function ChartFrame({
   title,
   subtitle,
   buckets,
   max,
   formatY,
-  children,
+  bars,
 }: {
   title: string;
   subtitle: string;
   buckets: TrendBucket[];
   max: number;
   formatY: (n: number) => string;
-  children: ReactNode;
+  bars: BarSpec[];
 }) {
+  // Custom hover state → tooltip shows on the first mouseenter, with no
+  // ~1s native `title=` delay (the Grafana-style instant readout).
+  const [hover, setHover] = useState<number | null>(null);
+  const n = bars.length;
+  // Guard a stale index: a window-size switch (4w→1w) shrinks `bars`
+  // while a hover index from the old, longer series is still set, so
+  // `bars[hover]` would throw on the next render before mouseleave.
+  const active = hover !== null && hover < n ? hover : null;
+  const frac = active === null ? 0 : (active + 0.5) / n;
+  // Flip the tooltip near the edges so it doesn't clip off the plot.
+  const tx = frac < 0.12 ? "0" : frac > 0.88 ? "-100%" : "-50%";
+
   return (
     <Card>
       <CardContent className="py-4">
@@ -241,8 +260,39 @@ function ChartFrame({
             <div className="absolute inset-x-0 top-0 border-t border-border/70" />
             <div className="absolute inset-x-0 top-1/2 border-t border-border/40" />
             <div className="absolute inset-x-0 bottom-0 border-t border-border/70" />
+            {active !== null ? (
+              <div
+                className="absolute -top-1.5 z-10 pointer-events-none rounded-md border border-border bg-accent px-2 py-1 text-[11px] text-foreground whitespace-nowrap shadow-lg"
+                style={{
+                  left: `${frac * 100}%`,
+                  transform: `translate(${tx}, -100%)`,
+                }}
+              >
+                {bars[active].tip}
+              </div>
+            ) : null}
             <div className="absolute inset-0 flex items-end gap-px">
-              {children}
+              {bars.map((bar, i) => (
+                <div
+                  key={bar.key}
+                  onMouseEnter={() => setHover(i)}
+                  onMouseLeave={() =>
+                    setHover((h) => (h === i ? null : h))
+                  }
+                  className={cn(
+                    "flex-1 min-w-0 flex flex-col justify-end h-full",
+                    active === i && "bg-foreground/[0.06]",
+                  )}
+                >
+                  {bar.segments.map((s, si) => (
+                    <div
+                      key={si}
+                      className={cn("w-full rounded-sm", s.className)}
+                      style={{ height: `${s.pct}%` }}
+                    />
+                  ))}
+                </div>
+              ))}
             </div>
           </div>
         </div>
@@ -278,6 +328,16 @@ function ChartCard({
   formatY: (n: number) => string;
 }) {
   const max = Math.max(1, ...buckets.map(value));
+  const bars: BarSpec[] = buckets.map((b) => {
+    const v = value(b);
+    return {
+      key: b.day,
+      tip: tooltip(b),
+      segments: [
+        { pct: v > 0 ? Math.max(2, (v / max) * 100) : 0, className: barClass },
+      ],
+    };
+  });
   return (
     <ChartFrame
       title={title}
@@ -285,24 +345,8 @@ function ChartCard({
       buckets={buckets}
       max={max}
       formatY={formatY}
-    >
-      {buckets.map((b) => {
-        const v = value(b);
-        const pct = v > 0 ? Math.max(2, (v / max) * 100) : 0;
-        return (
-          <div
-            key={b.day}
-            title={tooltip(b)}
-            className="flex-1 min-w-0 flex items-end h-full"
-          >
-            <div
-              className={cn("w-full rounded-sm", barClass)}
-              style={{ height: `${pct}%` }}
-            />
-          </div>
-        );
-      })}
-    </ChartFrame>
+      bars={bars}
+    />
   );
 }
 
@@ -314,6 +358,20 @@ function TaskChartCard({
   totals: TrendsTotals;
 }) {
   const max = Math.max(1, ...buckets.map((b) => b.task_total));
+  const bars: BarSpec[] = buckets.map((b) => ({
+    key: b.day,
+    tip: `${b.day}: ${b.task_success} ok · ${b.task_failed} failed · ${b.task_total} total`,
+    segments: [
+      {
+        pct: b.task_failed > 0 ? Math.max(2, (b.task_failed / max) * 100) : 0,
+        className: "bg-rose-500",
+      },
+      {
+        pct: b.task_success > 0 ? Math.max(2, (b.task_success / max) * 100) : 0,
+        className: "bg-emerald-500",
+      },
+    ],
+  }));
   return (
     <ChartFrame
       title="Runtime tasks"
@@ -321,29 +379,7 @@ function TaskChartCard({
       buckets={buckets}
       max={max}
       formatY={(n) => String(Math.round(n))}
-    >
-      {buckets.map((b) => {
-        const okPct =
-          b.task_success > 0 ? Math.max(2, (b.task_success / max) * 100) : 0;
-        const failPct =
-          b.task_failed > 0 ? Math.max(2, (b.task_failed / max) * 100) : 0;
-        return (
-          <div
-            key={b.day}
-            title={`${b.day}: ${b.task_success} ok · ${b.task_failed} failed · ${b.task_total} total`}
-            className="flex-1 min-w-0 flex flex-col justify-end h-full"
-          >
-            <div
-              className="w-full rounded-sm bg-rose-500"
-              style={{ height: `${failPct}%` }}
-            />
-            <div
-              className="w-full rounded-sm bg-emerald-500"
-              style={{ height: `${okPct}%` }}
-            />
-          </div>
-        );
-      })}
-    </ChartFrame>
+      bars={bars}
+    />
   );
 }

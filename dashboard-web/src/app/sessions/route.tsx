@@ -1,6 +1,12 @@
 import { Link, Outlet, createFileRoute } from "@tanstack/react-router";
 import { Search, X } from "lucide-react";
-import { useEffect, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -12,17 +18,124 @@ import { cn, formatRelative } from "@/lib/utils";
 // Layout route for /sessions: a persistent list/search pane on the left,
 // the selected session rendered in the right pane via <Outlet/>. Clicking
 // a session navigates a child route, so the list stays mounted (no
-// refetch, no full-page jump).
+// refetch, no full-page jump). The divider is drag-resizable.
 export const Route = createFileRoute("/sessions")({
   component: SessionsLayout,
 });
 
+const PANE_KEY = "oma-sessions-pane-w";
+const PANE_MIN = 240;
+const PANE_MAX = 680;
+const PANE_DEFAULT = 352;
+
+function readPaneWidth(): number {
+  if (typeof window === "undefined") return PANE_DEFAULT;
+  const saved = Number(window.localStorage.getItem(PANE_KEY));
+  return saved >= PANE_MIN && saved <= PANE_MAX ? saved : PANE_DEFAULT;
+}
+
 function SessionsLayout() {
+  const asideRef = useRef<HTMLDivElement>(null);
+  const sepRef = useRef<HTMLDivElement>(null);
+  // Drag state in refs only: the pane width is driven by mutating the
+  // aside's inline style directly (no React re-render per mousemove —
+  // that would re-render the whole session list 60×/s). React state
+  // would also make the change async, defeating the point. Width is
+  // committed to localStorage on mouseup and restored on mount.
+  const drag = useRef<{ startX: number; startW: number } | null>(null);
+
+  const apply = useCallback((w: number, persist: boolean) => {
+    const clamped = Math.min(PANE_MAX, Math.max(PANE_MIN, Math.round(w)));
+    if (asideRef.current) asideRef.current.style.width = `${clamped}px`;
+    sepRef.current?.setAttribute("aria-valuenow", String(clamped));
+    if (persist) window.localStorage.setItem(PANE_KEY, String(clamped));
+  }, []);
+
+  useLayoutEffect(() => {
+    apply(readPaneWidth(), false);
+  }, [apply]);
+
+  const onHandleDown = useCallback((e: React.MouseEvent) => {
+    if (!asideRef.current) return;
+    e.preventDefault();
+    drag.current = {
+      startX: e.clientX,
+      startW: asideRef.current.getBoundingClientRect().width,
+    };
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "col-resize";
+  }, []);
+
+  const onHandleKey = useCallback(
+    (e: React.KeyboardEvent) => {
+      if (!asideRef.current) return;
+      const cur = asideRef.current.getBoundingClientRect().width;
+      const step = e.shiftKey ? 64 : 16;
+      let next: number;
+      if (e.key === "ArrowLeft") next = cur - step;
+      else if (e.key === "ArrowRight") next = cur + step;
+      else if (e.key === "Home") next = PANE_MIN;
+      else if (e.key === "End") next = PANE_MAX;
+      else return;
+      e.preventDefault();
+      apply(next, true);
+    },
+    [apply],
+  );
+
+  useEffect(() => {
+    function endDragStyles() {
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+    }
+    function onMove(e: MouseEvent) {
+      if (!drag.current) return;
+      apply(drag.current.startW + (e.clientX - drag.current.startX), false);
+    }
+    function onUp() {
+      if (!drag.current || !asideRef.current) return;
+      drag.current = null;
+      endDragStyles();
+      apply(asideRef.current.getBoundingClientRect().width, true);
+    }
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      // Unmounted mid-drag (e.g. route change): release the body lock.
+      if (drag.current) {
+        drag.current = null;
+        endDragStyles();
+      }
+    };
+  }, [apply]);
+
   return (
-    <div className="flex h-[calc(100vh-3.0625rem)]">
-      <aside className="w-[22rem] shrink-0 border-r border-border overflow-y-auto">
+    <div className="flex h-[calc(100vh-3.0625rem)] overflow-hidden">
+      <aside
+        ref={asideRef}
+        style={{ width: PANE_DEFAULT }}
+        className="shrink-0 overflow-y-auto overflow-x-hidden"
+      >
         <ListPane />
       </aside>
+      <div
+        ref={sepRef}
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize session list (arrow keys)"
+        aria-valuemin={PANE_MIN}
+        aria-valuemax={PANE_MAX}
+        aria-valuenow={PANE_DEFAULT}
+        tabIndex={0}
+        onMouseDown={onHandleDown}
+        onKeyDown={onHandleKey}
+        title="Drag or use arrow keys to resize"
+        className="group relative w-2 shrink-0 cursor-col-resize outline-none focus-visible:bg-primary/30"
+      >
+        <div className="absolute inset-y-0 left-1/2 -translate-x-1/2 w-px bg-border group-hover:w-0.5 group-hover:bg-primary/60 transition-all" />
+      </div>
       <main className="flex-1 min-w-0 overflow-y-auto">
         <Outlet />
       </main>
@@ -117,7 +230,7 @@ function SessionRows() {
               "transition-colors px-3 py-2",
             )}
           >
-            <div className="text-xs font-medium truncate">
+            <div className="text-xs font-medium break-all">
               <span className="text-muted-foreground">{s.platform}/</span>
               <span className="text-primary">{s.thread_id}</span>
             </div>
@@ -194,8 +307,8 @@ function SearchHitRow({ hit }: { hit: SessionSearchHit }) {
         "transition-colors px-3 py-2",
       )}
     >
-      <div className="flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
-        <span className="truncate">
+      <div className="flex items-start justify-between gap-2 text-[11px] text-muted-foreground">
+        <span className="break-all">
           <span className="text-primary">{hit.thread_id}</span>
         </span>
         <span className="shrink-0">
