@@ -256,6 +256,38 @@ def _hours_ago_utc(hours: int) -> str:
     return ts.strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _relative_time(ts: str | None) -> str:
+    """Compact relative label for a stored ISO timestamp.
+
+    Tolerant of a ``Z`` suffix and naive timestamps (assumed UTC — that's
+    how the runtime persists ``last_run_at`` / ``next_run_at``). Future
+    instants read ``in 3h``, past read ``3h ago``. Returns ``—`` when
+    missing and the raw string when unparseable so callers never crash on
+    a malformed value.
+    """
+
+    if not ts:
+        return "—"
+    try:
+        parsed = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except ValueError:
+        return str(ts)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    delta = (datetime.now(timezone.utc) - parsed).total_seconds()
+    future = delta < 0
+    secs = int(abs(delta))
+    if secs < 45:
+        return "now" if future else "just now"
+    if secs < 5400:  # < 90 min
+        unit = f"{max(1, round(secs / 60))}m"
+    elif secs < 172800:  # < 48 h
+        unit = f"{round(secs / 3600)}h"
+    else:
+        unit = f"{round(secs / 86400)}d"
+    return f"in {unit}" if future else f"{unit} ago"
+
+
 def _render_reflection_result(result: Any) -> str:
     """Render a DiaryReflector.ReflectionResult for Discord ephemeral replies."""
     lines = [f"**Diary reflection — {result.diary_date.isoformat()}**"]
@@ -725,23 +757,46 @@ class DiscordChannel(BaseChannel):
             lines.append(
                 f"- Recent failures: `{len(failed_names)}` ({', '.join(f'`{name}`' for name in failed_names[:5])})"
             )
+        # Two-line entries: identity/schedule on top, the timing + health
+        # the user would otherwise drill into on an indented detail line.
+        # Capped lower than disabled since each entry is twice as tall and
+        # the message is hard-truncated at 1900 chars.
+        enabled_cap = 10
         if enabled_records:
             lines.append("**Enabled**")
-            for record in enabled_records[:12]:
-                suffix = " ⚠️" if record.last_error else (" ✓" if record.last_success_at else "")
-                active_marker = f" · {len(record.active_tasks)} active" if record.active_tasks else ""
-                lines.append(
-                    f"- `{record.name}` · {self._format_automation_schedule(record)} · {self._format_automation_target(record)}{active_marker}{suffix}"
+            for record in enabled_records[:enabled_cap]:
+                health = "⚠️" if record.last_error else ("✓" if record.last_success_at else "·")
+                skill_part = f" · skill `{record.skill_name}`" if record.skill_name else ""
+                active_marker = (
+                    f" · {len(record.active_tasks)} active" if record.active_tasks else ""
                 )
+                lines.append(
+                    f"- {health} `{record.name}` · {self._format_automation_schedule(record)}"
+                    f" · {self._format_automation_target(record)}{skill_part}{active_marker}"
+                )
+                detail = (
+                    f"  next `{_relative_time(record.next_run_at)}`"
+                    f" · last run `{_relative_time(record.last_run_at)}`"
+                    f" · ok `{_relative_time(record.last_success_at)}`"
+                )
+                if record.last_error:
+                    detail += f" · ⚠️ {record.last_error.strip()[:90]}"
+                lines.append(detail)
+            if len(enabled_records) > enabled_cap:
+                lines.append(f"_…and {len(enabled_records) - enabled_cap} more enabled_")
         if disabled_records:
             lines.append("**Disabled**")
             for record in disabled_records[:12]:
-                active_marker = f" · {len(record.active_tasks)} active" if record.active_tasks else ""
-                lines.append(
-                    f"- `{record.name}` · {self._format_automation_schedule(record)} · {self._format_automation_target(record)}{active_marker}"
+                skill_part = f" · skill `{record.skill_name}`" if record.skill_name else ""
+                active_marker = (
+                    f" · {len(record.active_tasks)} active" if record.active_tasks else ""
                 )
-        if len(result.automations) > 24:
-            lines.append(f"_…and {len(result.automations) - 24} more_")
+                lines.append(
+                    f"- `{record.name}` · {self._format_automation_schedule(record)}"
+                    f" · {self._format_automation_target(record)}{skill_part}{active_marker}"
+                )
+            if len(disabled_records) > 12:
+                lines.append(f"_…and {len(disabled_records) - 12} more disabled_")
         lines.append("_Invalid or conflicting automation files remain log-visible only._")
         return "\n".join(lines)[:1900]
 

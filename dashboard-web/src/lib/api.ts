@@ -117,6 +117,32 @@ export interface TraceResponse {
   enabled: boolean;
 }
 
+export interface TrendBucket {
+  day: string; // YYYY-MM-DD (UTC)
+  cost: number;
+  in_tok: number;
+  out_tok: number;
+  task_total: number;
+  task_success: number;
+  task_failed: number;
+  turns: number;
+}
+
+export interface TrendsResponse {
+  weeks: number;
+  days: number;
+  buckets: TrendBucket[];
+  totals: {
+    cost: number;
+    in_tok: number;
+    out_tok: number;
+    task_total: number;
+    task_success: number;
+    task_failed: number;
+    turns: number;
+  };
+}
+
 // ── Endpoint helpers ──────────────────────────────────────────────── //
 
 export function fetchSessionList(opts: {
@@ -128,6 +154,11 @@ export function fetchSessionList(opts: {
   if (opts.cursor) params.set("cursor", opts.cursor);
   const qs = params.toString();
   return apiGet<SessionListResponse>(`/api/v1/sessions${qs ? `?${qs}` : ""}`);
+}
+
+export function fetchTrends(opts: { weeks: number }): Promise<TrendsResponse> {
+  const params = new URLSearchParams({ weeks: String(opts.weeks) });
+  return apiGet<TrendsResponse>(`/api/v1/trends?${params.toString()}`);
 }
 
 export function fetchSessionHistory(opts: {

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from oh_my_agent.gateway.platforms.discord import DiscordChannel
+from oh_my_agent.gateway.platforms.discord import DiscordChannel, _relative_time
 from oh_my_agent.gateway.services.types import AutomationInfo, AutomationStatusResult
 from oh_my_agent.runtime.types import (
     TASK_COMPLETION_MERGE,
@@ -170,3 +171,124 @@ def test_list_view_omits_active_marker_when_empty():
     output = _channel()._render_automation_status_result(result)
 
     assert "active" not in output
+
+
+def test_list_view_enabled_shows_timing_detail_line():
+    info = _automation_info(
+        next_run_at="2999-01-01T00:00:00Z",
+        last_run_at="2020-01-01T00:00:00Z",
+        last_success_at="2020-01-01T00:00:00Z",
+        skill_name="market-briefing-ai",
+    )
+    result = AutomationStatusResult(success=True, message="ok", automations=[info])
+
+    output = _channel()._render_automation_status_result(result)
+
+    assert "skill `market-briefing-ai`" in output
+    assert "next `in " in output  # far-future timestamp → "in <n>d"
+    assert "last run `" in output
+    assert "ago`" in output  # far-past timestamp → "<n>d ago"
+
+
+def test_list_view_enabled_shows_error_snippet_not_just_emoji():
+    info = _automation_info(
+        last_error="HTTP 502 from upstream provider while fetching the feed"
+    )
+    result = AutomationStatusResult(success=True, message="ok", automations=[info])
+
+    output = _channel()._render_automation_status_result(result)
+
+    assert "⚠️ HTTP 502 from upstream provider" in output
+
+
+def test_list_view_enabled_truncates_with_overflow_note():
+    infos = [_automation_info(name=f"auto-{i}") for i in range(13)]
+    result = AutomationStatusResult(success=True, message="ok", automations=infos)
+
+    output = _channel()._render_automation_status_result(result)
+
+    assert "…and 3 more enabled" in output  # cap 10, 13 enabled
+
+
+def test_list_view_disabled_shows_skill():
+    info = _automation_info(enabled=False, skill_name="paper-digest")
+    result = AutomationStatusResult(success=True, message="ok", automations=[info])
+
+    output = _channel()._render_automation_status_result(result)
+
+    assert "**Disabled**" in output
+    assert "skill `paper-digest`" in output
+
+
+def test_list_view_keeps_delivery_target():
+    info = _automation_info(target="channel `999`")
+    result = AutomationStatusResult(success=True, message="ok", automations=[info])
+
+    output = _channel()._render_automation_status_result(result)
+
+    assert "channel `999`" in output
+
+
+def test_list_view_truncates_below_discord_cap():
+    """Many automations with long names + errors must never exceed the
+    1900-char hard slice (Discord rejects > 2000)."""
+
+    infos = [
+        _automation_info(
+            name=f"automation-with-a-fairly-long-name-{i}",
+            last_error="upstream returned HTTP 502 " * 10,
+            skill_name="market-briefing-finance",
+        )
+        for i in range(40)
+    ]
+    result = AutomationStatusResult(
+        success=True, message="ok", automations=infos, scheduler_timezone="PDT"
+    )
+
+    output = _channel()._render_automation_status_result(result)
+
+    assert len(output) <= 1900
+
+
+# --- _relative_time ------------------------------------------------------- #
+
+
+def test_relative_time_missing_returns_dash():
+    assert _relative_time(None) == "—"
+    assert _relative_time("") == "—"
+
+
+def test_relative_time_unparseable_returns_raw():
+    assert _relative_time("not-a-timestamp") == "not-a-timestamp"
+
+
+def test_relative_time_recent_past_is_just_now():
+    ts = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat()
+    assert _relative_time(ts) == "just now"
+
+
+def test_relative_time_past_units():
+    now = datetime.now(timezone.utc)
+    assert _relative_time((now - timedelta(minutes=5)).isoformat()) == "5m ago"
+    assert _relative_time((now - timedelta(hours=2)).isoformat()) == "2h ago"
+    assert _relative_time((now - timedelta(days=3)).isoformat()) == "3d ago"
+
+
+def test_relative_time_future_reads_in():
+    ts = (datetime.now(timezone.utc) + timedelta(hours=3)).isoformat()
+    assert _relative_time(ts) == "in 3h"
+
+
+def test_relative_time_naive_timestamp_assumed_utc():
+    # No tzinfo and no 'Z' — runtime persists naive UTC strings.
+    naive = (datetime.now(timezone.utc) - timedelta(hours=2)).strftime(
+        "%Y-%m-%dT%H:%M:%S"
+    )
+    assert _relative_time(naive) == "2h ago"
+
+
+def test_relative_time_handles_z_suffix():
+    z = (datetime.now(timezone.utc) - timedelta(days=2)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    assert _relative_time(z) == "2d ago"

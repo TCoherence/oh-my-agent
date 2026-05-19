@@ -22,6 +22,13 @@ function RootLayout() {
           >
             sessions
           </Link>
+          <Link
+            to="/trends"
+            activeProps={{ className: "text-foreground" }}
+            className="hover:text-foreground transition-colors"
+          >
+            trends
+          </Link>
           <a
             href="/"
             className="hover:text-foreground transition-colors"
