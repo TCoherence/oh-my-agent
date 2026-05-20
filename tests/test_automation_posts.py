@@ -281,3 +281,186 @@ async def test_reply_without_matching_post_falls_through(store):
     channel.create_followup_thread.assert_not_awaited()
     # Normal thread creation path was taken.
     channel.create_thread.assert_awaited()
+
+
+# --- manual-thread-creation routing (Fix B) --------------------------------
+#
+# When the user clicks "Create Thread" in the Discord UI on a bot's automation
+# post, Discord guarantees ``thread.id == anchor_message.id`` for
+# message-anchored threads. The first message arrives with ``thread_id`` set
+# to that anchor id and ``reply_to_message_id`` empty. The manager has to
+# recognize this as a follow-up and seed the system turn — otherwise the
+# agent sees an empty history and ignores the automation context entirely.
+
+
+@pytest.mark.asyncio
+async def test_manual_thread_creation_seeds_when_post_exists(store):
+    # The anchor message id is what Discord uses as both the message id and
+    # the new thread's id.
+    anchor_id = "msg-anchor-99"
+    await store.record_automation_post(
+        platform="discord",
+        channel_id="ch1",
+        message_id=anchor_id,
+        automation_name="politics-daily",
+        artifact_paths=["/abs/politics.md", "/abs/politics.json"],
+    )
+
+    channel = MagicMock()
+    channel.platform = "discord"
+    channel.channel_id = "ch1"
+    channel.create_thread = AsyncMock(return_value="should-not-be-called")
+    channel.create_followup_thread = AsyncMock(return_value="should-not-be-called")
+
+    registry = MagicMock()
+    session = ChannelSession(
+        platform="discord",
+        channel_id="ch1",
+        channel=channel,
+        registry=registry,
+        memory_store=store,
+    )
+
+    manager = _make_manager(store)
+    msg = IncomingMessage(
+        platform="discord",
+        channel_id="ch1",
+        thread_id=anchor_id,  # Discord: thread.id == anchor message.id
+        author="alice",
+        content="can you see the digest?",
+        reply_to_message_id=None,
+    )
+
+    try:
+        await manager._handle_message_impl(session, registry, msg)
+    except Exception:
+        # Downstream agent/router wiring isn't set up — by the time we get
+        # to those code paths the seed has already been written.
+        pass
+
+    # Neither thread-creation path should have been called: the thread
+    # already exists (user-created).
+    channel.create_thread.assert_not_awaited()
+    channel.create_followup_thread.assert_not_awaited()
+
+    # The system-authored seed should be in history with automation name +
+    # artifact paths.
+    history = await store.load_history("discord", "ch1", anchor_id)
+    seed_turns = [t for t in history if t.get("role") == "assistant"]
+    assert any(
+        "politics-daily" in t.get("content", "")
+        and "/abs/politics.md" in t.get("content", "")
+        for t in seed_turns
+    )
+
+    # Mapping should be persisted: follow_up_thread_id == anchor_id since
+    # Discord makes them identical for message-anchored threads.
+    post = await store.get_automation_post("discord", "ch1", anchor_id)
+    assert post.follow_up_thread_id == anchor_id
+
+
+@pytest.mark.asyncio
+async def test_manual_thread_no_reseed_on_subsequent_messages(store):
+    """Once the seed is in history, the second message must not duplicate
+    it — otherwise every turn in the thread would prepend another seed."""
+    anchor_id = "msg-anchor-77"
+    await store.record_automation_post(
+        platform="discord",
+        channel_id="ch1",
+        message_id=anchor_id,
+        automation_name="weekly-brief",
+        artifact_paths=["/abs/weekly.md"],
+    )
+
+    channel = MagicMock()
+    channel.platform = "discord"
+    channel.channel_id = "ch1"
+    channel.create_thread = AsyncMock()
+    channel.create_followup_thread = AsyncMock()
+
+    registry = MagicMock()
+    session = ChannelSession(
+        platform="discord",
+        channel_id="ch1",
+        channel=channel,
+        registry=registry,
+        memory_store=store,
+    )
+
+    manager = _make_manager(store)
+
+    # First message → seeds.
+    msg1 = IncomingMessage(
+        platform="discord",
+        channel_id="ch1",
+        thread_id=anchor_id,
+        author="alice",
+        content="hello",
+    )
+    try:
+        await manager._handle_message_impl(session, registry, msg1)
+    except Exception:
+        pass
+
+    # Second message → should NOT reseed.
+    msg2 = IncomingMessage(
+        platform="discord",
+        channel_id="ch1",
+        thread_id=anchor_id,
+        author="alice",
+        content="follow-up question",
+    )
+    try:
+        await manager._handle_message_impl(session, registry, msg2)
+    except Exception:
+        pass
+
+    history = await store.load_history("discord", "ch1", anchor_id)
+    seed_turns = [
+        t for t in history
+        if t.get("role") == "assistant" and "weekly-brief" in t.get("content", "")
+    ]
+    assert len(seed_turns) == 1, (
+        f"expected exactly one seed turn, got {len(seed_turns)}: {seed_turns}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_manual_thread_with_no_matching_post_skips_seed(store):
+    """A user-created thread on a regular (non-automation) message must NOT
+    inject any seed — there's nothing to seed from."""
+    channel = MagicMock()
+    channel.platform = "discord"
+    channel.channel_id = "ch1"
+    channel.create_thread = AsyncMock()
+    channel.create_followup_thread = AsyncMock()
+
+    registry = MagicMock()
+    session = ChannelSession(
+        platform="discord",
+        channel_id="ch1",
+        channel=channel,
+        registry=registry,
+        memory_store=store,
+    )
+
+    manager = _make_manager(store)
+    msg = IncomingMessage(
+        platform="discord",
+        channel_id="ch1",
+        thread_id="thread-no-post",
+        author="alice",
+        content="just chatting",
+    )
+
+    try:
+        await manager._handle_message_impl(session, registry, msg)
+    except Exception:
+        pass
+
+    history = await store.load_history("discord", "ch1", "thread-no-post")
+    seed_turns = [
+        t for t in history
+        if t.get("role") == "assistant" and "Follow-up on automation" in t.get("content", "")
+    ]
+    assert seed_turns == []
