@@ -29,6 +29,12 @@ from oh_my_agent.gateway.base import (
     MessageHandler,
     OutgoingAttachment,
 )
+from oh_my_agent.gateway.services.automation_service import AutomationService
+from oh_my_agent.gateway.services.doctor_service import DoctorService
+from oh_my_agent.gateway.services.memory_service import MemoryService
+from oh_my_agent.gateway.services.skill_eval_service import SkillEvalService
+from oh_my_agent.gateway.services.task_service import TaskService
+from oh_my_agent.gateway.services.types import TaskActionResult, TaskListResult
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +102,132 @@ class HarnessChannel(BaseChannel):
         # streaming-edit final state without losing the intermediate
         # edits in self.events.
         self._final_message_text: dict[tuple[str, str], str] = {}
+
+        # Slash command services context
+        self._session = None
+        self._registry = None
+        self._memory_store = None
+        self._skill_syncer = None
+        self._workspace_skills_dirs = None
+        self._runtime_service = None
+        self._judge_store = None
+        self._gateway_manager = None
+        self._scheduler = None
+        self._diary_reflector = None
+        self._skill_eval_enabled = True
+        self._skill_stats_recent_days = 7
+        self._skill_feedback_emojis = {"👍", "👎"}
+
+        self._task_service: TaskService
+        self._doctor_service: DoctorService
+        self._automation_service: AutomationService
+        self._memory_service: MemoryService
+        self._skill_eval_service: SkillEvalService
+        self._refresh_services()
+
+    # -- Service Setters and Refresher ------------------------------------
+
+    def set_session_context(self, session, registry, memory_store=None) -> None:
+        """Inject session objects needed by slash commands."""
+        self._session = session
+        self._registry = registry
+        self._memory_store = memory_store
+        self._refresh_services()
+
+    def set_skill_syncer(self, syncer, workspace_skills_dirs=None) -> None:
+        """Inject skill syncer."""
+        self._skill_syncer = syncer
+        self._workspace_skills_dirs = workspace_skills_dirs
+
+    def set_runtime_service(self, runtime_service) -> None:
+        """Inject runtime service."""
+        self._runtime_service = runtime_service
+        self._refresh_services()
+
+    def set_diary_reflector(self, reflector) -> None:
+        """Inject diary reflector."""
+        self._diary_reflector = reflector
+
+    def set_scheduler(self, scheduler) -> None:
+        """Inject scheduler."""
+        self._scheduler = scheduler
+        self._refresh_services()
+
+    def set_judge_store(self, store, gateway_manager=None) -> None:
+        """Inject judge store."""
+        self._judge_store = store
+        if gateway_manager is not None:
+            self._gateway_manager = gateway_manager
+        self._refresh_services()
+
+    def set_skill_evaluation_config(self, cfg: dict | None) -> None:
+        """Inject skill evaluation config."""
+        cfg = cfg or {}
+        self._skill_eval_enabled = bool(cfg.get("enabled", True))
+        self._skill_stats_recent_days = int(cfg.get("stats_recent_days", 7))
+        emojis = cfg.get("feedback_emojis", ["👍", "👎"])
+        self._skill_feedback_emojis = {str(e) for e in emojis if str(e)}
+        self._refresh_services()
+
+    def _refresh_services(self) -> None:
+        """Re-instantiate business services with current injected components."""
+        fire_automation = self._scheduler.fire_job_now if self._scheduler is not None else None
+        self._task_service = TaskService(
+            self._runtime_service,
+            self._memory_store,
+            fire_automation=fire_automation,
+        )
+        self._doctor_service = DoctorService(self._runtime_service)
+        self._automation_service = AutomationService(self._scheduler, self._memory_store)
+        self._memory_service = MemoryService(
+            self._judge_store,
+            gateway_manager=self._gateway_manager,
+            registry=self._registry,
+        )
+        self._skill_eval_service = SkillEvalService(
+            self._memory_store,
+            recent_days=self._skill_stats_recent_days,
+            feedback_emojis=self._skill_feedback_emojis,
+        )
+
+    def _render_task_action_result(self, result: TaskActionResult) -> str:
+        task = result.task
+        if task is None:
+            return result.message[:1900]
+        lines = [
+            f"**Task** `{task.id}`",
+            f"- Status: `{task.status}`",
+            f"- Type: `{task.task_type}`",
+            f"- Goal: {task.goal[:200]}",
+            f"- Step: {task.step_no}/{task.max_steps}",
+            f"- Budget: {task.max_minutes} min",
+            f"- Agent: `{task.preferred_agent or 'fallback'}`",
+        ]
+        if task.blocked_reason:
+            lines.append(f"- Blocked: {task.blocked_reason[:300]}")
+        if task.error:
+            lines.append(f"- Error: {task.error[:300]}")
+        if task.output_summary:
+            lines.append(f"- Output: {task.output_summary[:300]}")
+        if task.artifact_manifest:
+            lines.append(f"- Artifacts: {', '.join(task.artifact_manifest[:8])[:300]}")
+        if task.merge_commit_hash:
+            lines.append(f"- Commit: `{task.merge_commit_hash}`")
+        if task.merge_error:
+            lines.append(f"- Merge error: {task.merge_error[:300]}")
+        if task.workspace_path:
+            lines.append(f"- Workspace: `{task.workspace_path}`")
+        return "\n".join(lines)[:1900]
+
+    def _render_task_list_result(self, result: TaskListResult) -> str:
+        if not result.tasks:
+            return "No runtime tasks found."
+        lines = [f"**Runtime tasks** ({len(result.tasks)})"]
+        for task in result.tasks:
+            lines.append(
+                f"- `{task.task_id}` [{task.status}] `{task.task_type}` {task.step_info or ''} · {task.goal[:80]}".rstrip()
+            )
+        return "\n".join(lines)[:1900]
 
     # -- BaseChannel mandatory surface ------------------------------------
 
@@ -355,6 +487,81 @@ class HarnessChannel(BaseChannel):
         return msg_id
 
     # -- driver-only API (NOT in BaseChannel) -----------------------------
+
+    async def inject_slash_command(
+        self,
+        name: str,
+        args: dict[str, Any],
+        *,
+        author_id: str = "owner-1",
+        thread_id: str | None = None,
+    ) -> str:
+        """Simulate a slash command invocation by routing to the appropriate service."""
+        if not self._task_service:
+            raise RuntimeError("TaskService not ready in HarnessChannel.")
+
+        # Resolve aliases in args
+        resolved_args = {}
+        for k, v in args.items():
+            if isinstance(v, str):
+                resolved_args[k] = self.resolve_alias(v) or v
+            else:
+                resolved_args[k] = v
+
+        resolved_thread = self.resolve_alias(thread_id) or thread_id or "1"
+
+        if name == "task_start":
+            result = await self._task_service.create_task(
+                session=self._session,
+                registry=self._registry,
+                thread_id=resolved_thread,
+                goal=resolved_args["goal"],
+                actor_id=author_id,
+                preferred_agent=resolved_args.get("agent"),
+                test_command=resolved_args.get("test_command"),
+                max_steps=resolved_args.get("max_steps"),
+                max_minutes=resolved_args.get("max_minutes"),
+            )
+            reply = self._render_task_action_result(result)
+        elif name == "task_stop":
+            task_id = resolved_args.get("task_id")
+            result = await self._task_service.stop(task_id, actor_id=author_id)
+            reply = self._render_task_action_result(result)
+        elif name == "task_status":
+            task_id = resolved_args.get("task_id")
+            result = await self._task_service.get_status(task_id)
+            reply = self._render_task_action_result(result)
+        elif name == "task_list":
+            result = await self._task_service.list_tasks(
+                platform=self.platform,
+                channel_id=self.channel_id,
+                status=resolved_args.get("status"),
+                limit=resolved_args.get("limit", 20),
+            )
+            reply = self._render_task_list_result(result)
+        elif name in {"task_approve", "task_reject", "task_suggest", "task_merge", "task_discard"}:
+            task_id = resolved_args.get("task_id")
+            action = name.replace("task_", "")
+            result = await self._task_service.decide(
+                platform=self.platform,
+                channel_id=self.channel_id,
+                thread_id=resolved_thread,
+                task_id=task_id,
+                action=action,
+                actor_id=author_id,
+                suggestion=resolved_args.get("suggestion"),
+            )
+            reply = self._render_task_action_result(result)
+        else:
+            raise NotImplementedError(f"Slash command {name!r} not implemented in HarnessChannel.")
+
+        # Record this command result as a send event so assertions can check it!
+        self._record(
+            "send",
+            thread_id=resolved_thread,
+            payload={"message_id": f"sc-{next(self._next_msg_id)}", "text": reply},
+        )
+        return reply
 
     async def wait_ready(self, *, timeout: float = 5.0) -> None:
         """Block until ``start()`` has installed the handler.

@@ -180,9 +180,20 @@ async def bootstrap_harness_env(spec: ScenarioSpec, *, mode: str = "stub") -> Ha
             )
     registry = AgentRegistry(registry_agents)
 
-    runtime = RuntimeService(
-        store,
-        config={
+    channel = HarnessChannel()
+
+    # Define configuration bundle for the Component Graph Builder
+    config = {
+        "access": {
+            "owner_user_ids": ["owner-1"],
+        },
+        "auth": {
+            "enabled": True,
+            "storage_root": str(auth_storage),
+            "qr_poll_interval_seconds": 0.05,
+            "qr_default_timeout_seconds": 30,
+        },
+        "runtime": {
             "enabled": True,
             "worker_concurrency": 1,
             "worktree_root": str(tmp_root / "runtime" / "tasks"),
@@ -200,33 +211,61 @@ async def bootstrap_harness_env(spec: ScenarioSpec, *, mode: str = "stub") -> Ha
             "merge_gate": {"enabled": False},
             "skill_auto_approve": True,
         },
-        owner_user_ids={"owner-1"},
-        repo_root=repo_root,
-        auth_service=auth_service,
-    )
-
-    channel = HarnessChannel()
-    session = ChannelSession(
-        platform=channel.platform,
-        channel_id=channel.channel_id,
-        channel=channel,
-        registry=registry,
-        memory_store=store,
-    )
-    runtime.register_session(session, registry)
-
-    gateway = GatewayManager(
-        channels=[(channel, registry)],
-        runtime_service=runtime,
-        owner_user_ids={"owner-1"},
-        short_workspace={
+        "gateway": {
+            "channels": [
+                {
+                    "platform": channel.platform,
+                    "channel_id": channel.channel_id,
+                    "agents": [a.name for a in registry_agents],
+                }
+            ],
+        },
+        "short_workspace": {
             "enabled": True,
             "root": str(tmp_root / "agent-workspace" / "sessions"),
             "ttl_hours": 24,
             "cleanup_interval_minutes": 1440,
         },
-        repo_root=repo_root,
+        "skills": {
+            "enabled": False,
+        },
+        "automations": {
+            "enabled": False,
+        },
+        "memory": {
+            "backend": "sqlite",
+            "judge": {
+                "enabled": False,
+            },
+            "diary": {
+                "enabled": False,
+            },
+        },
+    }
+
+    from oh_my_agent.boot import BootContext, build_runtime_graph
+
+    ctx = BootContext(
+        config=config,
+        config_path=tmp_root / "config.yaml",
+        project_root=repo_root,
+        runtime_root=tmp_root,
+        logger=logger,
     )
+
+    # Use the extracted component graph builder with stub overrides
+    graph = await build_runtime_graph(
+        ctx,
+        override_memory_store=store,
+        override_agents={a.name: a for a in registry_agents},
+        override_channels=[(channel, registry)],
+        override_auth_providers=[auth_provider],
+    )
+
+    runtime = graph.runtime_service
+    gateway = graph.gateway
+    auth_service = graph.auth_service
+    session = gateway._get_session(channel, registry)
 
     # See plan §Driver: GatewayManager.start() blocks at
     # ``await asyncio.gather(*background_tasks)`` (manager.py:742) — it
@@ -297,6 +336,8 @@ def _init_test_git_repo(repo_root: Path) -> None:
 async def dispatch_step(env: HarnessEnv, step: dict[str, Any]) -> None:
     if "inject_user_message" in step:
         await _step_inject_user_message(env, step["inject_user_message"])
+    elif "inject_slash_command" in step:
+        await _step_inject_slash_command(env, step["inject_slash_command"])
     elif "await" in step:
         await _step_await(env, step["await"])
     elif "sleep" in step:
@@ -305,6 +346,42 @@ async def dispatch_step(env: HarnessEnv, step: dict[str, Any]) -> None:
         await asyncio.sleep(float(step["sleep"]))
     else:
         raise ValueError(f"Unknown step shape: {sorted(step.keys())}")
+
+
+async def _step_inject_slash_command(env: HarnessEnv, payload: dict[str, Any]) -> None:
+    capture = payload.get("capture") or {}
+    name = str(payload.get("name") or "")
+    args = dict(payload.get("args") or {})
+    author_id = str(payload.get("author_id") or "owner-1")
+    thread_id = payload.get("thread_id")
+
+    pre_event_count = len(env.channel.events)
+    await env.channel.inject_slash_command(
+        name=name,
+        args=args,
+        author_id=author_id,
+        thread_id=thread_id,
+    )
+
+    new_send_event: ChannelEvent | None = None
+    for event in env.channel.events[pre_event_count:]:
+        if event.type == "send" and new_send_event is None:
+            new_send_event = event
+
+    msg_alias = capture.get("message_id_as")
+    if msg_alias and new_send_event is not None:
+        env.channel.bind_alias(msg_alias, new_send_event.payload.get("message_id"))
+
+    task_alias = capture.get("task_id_as")
+    if task_alias:
+        tasks = await env.store.list_runtime_tasks(
+            platform=env.channel.platform,
+            channel_id=env.channel.channel_id,
+            limit=50,
+        )
+        if tasks:
+            latest_task = max(tasks, key=lambda t: t.created_at or "")
+            env.channel.bind_alias(task_alias, latest_task.id)
 
 
 async def _step_inject_user_message(env: HarnessEnv, payload: dict[str, Any]) -> None:

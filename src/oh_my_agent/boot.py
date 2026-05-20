@@ -25,6 +25,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from oh_my_agent import paths as _paths
 
@@ -674,13 +675,41 @@ def verify_integrity(
 # ---------------------------------------------------------------------------
 
 
-async def ignite(ctx: BootContext) -> None:
-    """Async entry point — builds agents, memory, and starts gateway.
+@dataclass
+class ComponentGraph:
+    """Graph of all runtime components constructed during the ignite phase."""
 
-    This is the ``_igniteKernel`` equivalent: once verify has produced a valid
-    ``BootContext``, this function owns the full lifecycle (construction →
-    runtime loop → orderly shutdown).
-    """
+    push_dispatcher: Any
+    workspace: Path | None
+    trace_writer: Any | None
+    agents: dict[str, Any]
+    memory_store: Any | None
+    compressor: Any | None
+    judge_store: Any | None
+    judge: Any | None
+    idle_tracker: Any | None
+    skill_syncer: Any | None
+    scheduler: Any | None
+    auth_service: Any | None
+    runtime_service: Any | None
+    intent_router: Any | None
+    channel_pairs: list[tuple[Any, Any]]
+    gateway: Any
+    diary_writer: Any | None
+    diary_reflect_loop: Any | None
+    weekly_reflect_loop: Any | None
+
+
+async def build_runtime_graph(
+    ctx: BootContext,
+    *,
+    override_memory_store: Any | None = None,
+    override_agents: dict[str, Any] | None = None,
+    override_channels: list[tuple[Any, Any]] | None = None,
+    override_auth_providers: list[Any] | None = None,
+    override_push_dispatcher: Any | None = None,
+) -> ComponentGraph:
+    """Construct all runtime components during the ignite phase."""
     config = ctx.config
     logger = ctx.logger
     project_root = ctx.project_root
@@ -690,20 +719,23 @@ async def ignite(ctx: BootContext) -> None:
         for uid in config.get("access", {}).get("owner_user_ids", [])
         if str(uid).strip()
     }
-    if owner_user_ids:
+    if owner_user_ids and not override_channels:
         logger.info("Owner-only mode enabled for %d user(s)", len(owner_user_ids))
 
-    notifications_cfg = config.get("notifications") if isinstance(config.get("notifications"), dict) else None
-    try:
-        push_dispatcher = _build_push_dispatcher(notifications_cfg)
-    except Exception as exc:
-        logger.error("Failed to build push notification dispatcher: %s", exc)
-        sys.exit(1)
-    if notifications_cfg and notifications_cfg.get("enabled", False):
-        logger.info(
-            "Push notifications enabled (provider=%s)",
-            notifications_cfg.get("provider", "bark"),
-        )
+    if override_push_dispatcher is not None:
+        push_dispatcher = override_push_dispatcher
+    else:
+        notifications_cfg = config.get("notifications") if isinstance(config.get("notifications"), dict) else None
+        try:
+            push_dispatcher = _build_push_dispatcher(notifications_cfg)
+        except Exception as exc:
+            logger.error("Failed to build push notification dispatcher: %s", exc)
+            sys.exit(1)
+        if notifications_cfg and notifications_cfg.get("enabled", False):
+            logger.info(
+                "Push notifications enabled (provider=%s)",
+                notifications_cfg.get("provider", "bark"),
+            )
 
     # Setup workspace (Layer 0 sandbox isolation)
     workspace: Path | None = None
@@ -735,65 +767,71 @@ async def ignite(ctx: BootContext) -> None:
         logger.info("[experiment] tool_trace enabled at %s", trace_dir)
 
     # Build agent registry map
-    agents_cfg: dict = config.get("agents", {})
     agent_instances: dict = {}
-    for agent_name, agent_cfg in agents_cfg.items():
-        try:
-            agent_instances[agent_name] = _build_agent(agent_name, agent_cfg, workspace=workspace)
-            if trace_writer is not None and hasattr(agent_instances[agent_name], "set_trace_writer"):
-                agent_instances[agent_name].set_trace_writer(trace_writer)
-            logger.info("Loaded agent '%s' (%s)", agent_name, agent_cfg.get("type"))
-        except Exception as exc:
-            logger.error("Failed to build agent '%s': %s", agent_name, exc)
-            sys.exit(1)
+    if override_agents is not None:
+        agent_instances = dict(override_agents)
+    else:
+        agents_cfg: dict = config.get("agents", {})
+        for agent_name, agent_cfg in agents_cfg.items():
+            try:
+                agent_instances[agent_name] = _build_agent(agent_name, agent_cfg, workspace=workspace)
+                if trace_writer is not None and hasattr(agent_instances[agent_name], "set_trace_writer"):
+                    agent_instances[agent_name].set_trace_writer(trace_writer)
+                logger.info("Loaded agent '%s' (%s)", agent_name, agent_cfg.get("type"))
+            except Exception as exc:
+                logger.error("Failed to build agent '%s': %s", agent_name, exc)
+                sys.exit(1)
 
     # Build memory store
     memory_cfg = config.get("memory", {})
     memory_store = None
     compressor = None
 
-    if memory_cfg.get("backend", "sqlite") == "sqlite":
-        from typing import cast
+    if override_memory_store is not None:
+        memory_store = override_memory_store
+    else:
+        if memory_cfg.get("backend", "sqlite") == "sqlite":
+            from typing import cast
 
-        from oh_my_agent.memory.compressor import HistoryCompressor
-        from oh_my_agent.memory.store import (
-            MemoryStore,
-            SplitSQLiteMemoryStore,
-            maybe_split_legacy_memory_db,
-        )
+            from oh_my_agent.memory.compressor import HistoryCompressor
+            from oh_my_agent.memory.store import (
+                MemoryStore,
+                SplitSQLiteMemoryStore,
+                maybe_split_legacy_memory_db,
+            )
 
-        conversation_db_path = _paths.memory_db_path(config)
-        runtime_db_path = _paths.runtime_state_path(config)
-        skills_db_path = _paths.skills_telemetry_path(config)
+            conversation_db_path = _paths.memory_db_path(config)
+            runtime_db_path = _paths.runtime_state_path(config)
+            skills_db_path = _paths.skills_telemetry_path(config)
 
-        await maybe_split_legacy_memory_db(
-            memory_path=conversation_db_path,
-            runtime_state_path=runtime_db_path,
-            skills_telemetry_path=skills_db_path,
-            logger=logger,
-        )
+            await maybe_split_legacy_memory_db(
+                memory_path=conversation_db_path,
+                runtime_state_path=runtime_db_path,
+                skills_telemetry_path=skills_db_path,
+                logger=logger,
+            )
 
-        memory_store = SplitSQLiteMemoryStore(
-            conversation_path=conversation_db_path,
-            runtime_state_path=runtime_db_path,
-            skills_telemetry_path=skills_db_path,
-        )
-        await memory_store.init()
-        logger.info(
-            "Memory stores ready: conversation=%s runtime=%s skills=%s",
-            conversation_db_path,
-            runtime_db_path,
-            skills_db_path,
-        )
+            memory_store = SplitSQLiteMemoryStore(
+                conversation_path=conversation_db_path,
+                runtime_state_path=runtime_db_path,
+                skills_telemetry_path=skills_db_path,
+            )
+            await memory_store.init()
+            logger.info(
+                "Memory stores ready: conversation=%s runtime=%s skills=%s",
+                conversation_db_path,
+                runtime_db_path,
+                skills_db_path,
+            )
 
-        compressor = HistoryCompressor(
-            # SplitSQLiteMemoryStore is duck-compatible with MemoryStore;
-            # making it a true subclass would require implementing every
-            # abstract method. Cast for now.
-            store=cast(MemoryStore, memory_store),
-            max_turns=int(memory_cfg.get("max_turns", 20)),
-            summary_max_chars=int(memory_cfg.get("summary_max_chars", 500)),
-        )
+            compressor = HistoryCompressor(
+                # SplitSQLiteMemoryStore is duck-compatible with MemoryStore;
+                # making it a true subclass would require implementing every
+                # abstract method. Cast for now.
+                store=cast(MemoryStore, memory_store),
+                max_turns=int(memory_cfg.get("max_turns", 20)),
+                summary_max_chars=int(memory_cfg.get("summary_max_chars", 500)),
+            )
 
     # Build judge-driven memory (optional, replaces legacy adaptive memory)
     judge_store = None
@@ -881,10 +919,11 @@ async def ignite(ctx: BootContext) -> None:
         from oh_my_agent.auth.service import AuthService
         from oh_my_agent.runtime import RuntimeService
 
+        providers = override_auth_providers if override_auth_providers is not None else [BilibiliAuthProvider()]
         auth_service = AuthService(
             memory_store,
             config=config.get("auth", {}),
-            providers=[BilibiliAuthProvider()],
+            providers=providers,
         )
         runtime_service = RuntimeService(
             memory_store,
@@ -957,34 +996,35 @@ async def ignite(ctx: BootContext) -> None:
                 )
 
     # Build (channel, registry) pairs
-    from oh_my_agent.agents.registry import AgentRegistry
-    from oh_my_agent.gateway.manager import GatewayManager
-
     channel_pairs = []
-    for ch_cfg in config.get("gateway", {}).get("channels", []):
-        channel = _build_channel(
-            ch_cfg,
-            owner_user_ids=owner_user_ids,
-            push_dispatcher=push_dispatcher,
-        )
-        agent_names: list[str] = ch_cfg.get("agents", [])
-        selected = []
-        for name in agent_names:
-            if name not in agent_instances:
-                logger.error("Agent '%s' referenced in channel config but not defined", name)
+    if override_channels is not None:
+        channel_pairs = list(override_channels)
+    else:
+        from oh_my_agent.agents.registry import AgentRegistry
+        for ch_cfg in config.get("gateway", {}).get("channels", []):
+            channel = _build_channel(
+                ch_cfg,
+                owner_user_ids=owner_user_ids,
+                push_dispatcher=push_dispatcher,
+            )
+            agent_names: list[str] = ch_cfg.get("agents", [])
+            selected = []
+            for name in agent_names:
+                if name not in agent_instances:
+                    logger.error("Agent '%s' referenced in channel config but not defined", name)
+                    sys.exit(1)
+                selected.append(agent_instances[name])
+            if not selected:
+                logger.error("Channel %s:%s has no agents configured", ch_cfg["platform"], ch_cfg["channel_id"])
                 sys.exit(1)
-            selected.append(agent_instances[name])
-        if not selected:
-            logger.error("Channel %s:%s has no agents configured", ch_cfg["platform"], ch_cfg["channel_id"])
-            sys.exit(1)
-        registry = AgentRegistry(selected)
-        channel_pairs.append((channel, registry))
-        logger.info(
-            "Channel %s:%s → agents: %s",
-            ch_cfg["platform"],
-            ch_cfg["channel_id"],
-            [a.name for a in selected],
-        )
+            registry = AgentRegistry(selected)
+            channel_pairs.append((channel, registry))
+            logger.info(
+                "Channel %s:%s → agents: %s",
+                ch_cfg["platform"],
+                ch_cfg["channel_id"],
+                [a.name for a in selected],
+            )
 
     if not channel_pairs:
         logger.error("No channels configured in config.yaml")
@@ -997,6 +1037,7 @@ async def ignite(ctx: BootContext) -> None:
         except Exception as exc:
             logger.warning("MEMORY.md startup synthesis failed: %s", exc)
 
+    from oh_my_agent.gateway.manager import GatewayManager
     gateway = GatewayManager(
         channel_pairs,
         compressor=compressor,
@@ -1113,6 +1154,51 @@ async def ignite(ctx: BootContext) -> None:
             logger.info(
                 "Weekly reflector ready (no channel registry to auto-fire)"
             )
+
+    return ComponentGraph(
+        push_dispatcher=push_dispatcher,
+        workspace=workspace,
+        trace_writer=trace_writer,
+        agents=agent_instances,
+        memory_store=memory_store,
+        compressor=compressor,
+        judge_store=judge_store,
+        judge=memory_judge,
+        idle_tracker=idle_tracker,
+        skill_syncer=skill_syncer,
+        scheduler=scheduler,
+        auth_service=auth_service,
+        runtime_service=runtime_service,
+        intent_router=intent_router,
+        channel_pairs=channel_pairs,
+        gateway=gateway,
+        diary_writer=diary_writer,
+        diary_reflect_loop=diary_reflect_loop,
+        weekly_reflect_loop=weekly_reflect_loop,
+    )
+
+
+async def ignite(ctx: BootContext) -> None:
+    """Async entry point — builds agents, memory, and starts gateway.
+
+    This is the ``_igniteKernel`` equivalent: once verify has produced a valid
+    ``BootContext``, this function owns the full lifecycle (construction →
+    runtime loop → orderly shutdown).
+    """
+    logger = ctx.logger
+
+    graph = await build_runtime_graph(ctx)
+
+    gateway = graph.gateway
+    scheduler = graph.scheduler
+    runtime_service = graph.runtime_service
+    memory_store = graph.memory_store
+    diary_writer = graph.diary_writer
+    trace_writer = graph.trace_writer
+    diary_reflect_loop = graph.diary_reflect_loop
+    weekly_reflect_loop = graph.weekly_reflect_loop
+    push_dispatcher = graph.push_dispatcher
+    channel_pairs = graph.channel_pairs
 
     logger.info("Starting gateway with %d channel(s)...", len(channel_pairs))
     loop = asyncio.get_running_loop()

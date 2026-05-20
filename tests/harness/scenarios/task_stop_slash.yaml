@@ -1,0 +1,53 @@
+scenario: task-stop-slash-command
+description: |
+  Start an autonomous task via /task_start, verify it enters the RUNNING state,
+  then stop it mid-flight using /task_stop with the captured task ID.
+  Assert that the task cleanly transitions to STOPPED.
+
+seed:
+  auth_provider: approving
+  agents:
+    claude:
+      responses:
+        - when:
+            step_no_eq: 1
+          text: |
+            I am executing the dummy task.
+            TASK_STATE: CONTINUE
+
+steps:
+  - inject_slash_command:
+      name: task_start
+      args:
+        goal: "implement a dummy task"
+        agent: "claude"
+        test_command: "true"
+        max_steps: 4
+        max_minutes: 1
+      capture:
+        task_id_as: "@task1"
+        message_id_as: "@msg1"
+  - await:
+      condition: task_status_eq
+      task_index: 0
+      status: RUNNING
+      timeout_seconds: 15
+  - inject_slash_command:
+      name: task_stop
+      args:
+        task_id: "@task1"
+  - await:
+      condition: task_status_eq
+      task_index: 0
+      status: STOPPED
+      timeout_seconds: 15
+
+expect:
+  events_in_order:
+    - type: send
+      payload_contains: "Status: `PENDING`"
+    - type: send
+      payload_contains: "Status: `STOPPED`"
+  task:
+    index: 0
+    status: STOPPED
