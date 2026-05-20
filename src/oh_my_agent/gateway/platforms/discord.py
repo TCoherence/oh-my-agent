@@ -2080,6 +2080,27 @@ class DiscordChannel(BaseChannel):
             if message.author == client.user or message.author.bot:
                 return
 
+            # Input filter: Discord publishes system events (THREAD_CREATED,
+            # pins_add, member_join, …) through the same ``on_message`` channel
+            # as real user input. We whitelist the two user-input message
+            # types so anything else short-circuits before we try to construct
+            # an ``IncomingMessage``. Without this, a THREAD_CREATED event
+            # (type 18, ``content`` set to the new thread's name) would be
+            # treated as a brand-new user message and ``create_thread`` would
+            # blow up with ``400 50068 Invalid message type`` — surfacing as
+            # a bogus "Internal server error" reply in the channel.
+            if message.type not in (
+                discord.MessageType.default,
+                discord.MessageType.reply,
+            ):
+                logger.debug(
+                    "[discord] skipping non-user message type=%s channel=%s author=%s",
+                    message.type,
+                    getattr(message.channel, "id", None),
+                    getattr(message.author, "id", None),
+                )
+                return
+
             # Build accepted channel set first — needed for both mention peek
             # (below) and the regular message routing further down. Pulled
             # ahead of the owner gate so a third-party @-mention of the owner

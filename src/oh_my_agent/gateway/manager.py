@@ -13,6 +13,10 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from oh_my_agent.runtime.types import AutomationPost
 
 from oh_my_agent.agents.registry import AgentRegistry
 from oh_my_agent.automation import ScheduledJob, Scheduler
@@ -1093,6 +1097,59 @@ class GatewayManager:
                     last_error=str(exc)[:1000],
                 )
 
+    def _build_automation_followup_seed(self, post: AutomationPost) -> str:
+        """Render the system-turn seed for an automation follow-up thread.
+
+        Lists the published artifact paths (capped at 8) so the agent knows
+        what files belong to the original run. Stays focused on file pointers
+        — the agent should ``Read`` them on demand rather than relying on a
+        verbose context dump.
+        """
+        seed_lines = [f"[Follow-up on automation '{post.automation_name}'.]"]
+        # ``post.artifact_paths`` records the absolute **published** artifact
+        # paths from the original run (populated from
+        # ``delivery.archived_paths`` — legacy name, semantic is "single
+        # durable location per artifact under reports_dir"). These are
+        # stable (reports_dir is not auto-pruned), which is why we prefer
+        # them over the workspace scratch path.
+        if post.artifact_paths:
+            seed_lines.append("Artifacts from that run (read them as needed):")
+            for path in post.artifact_paths[:8]:
+                seed_lines.append(f"- {path}")
+            if len(post.artifact_paths) > 8:
+                seed_lines.append(f"- ... and {len(post.artifact_paths) - 8} more")
+        else:
+            seed_lines.append("(No published artifact paths were recorded.)")
+        return "\n".join(seed_lines)
+
+    async def _persist_automation_followup_mapping(
+        self,
+        *,
+        platform: str,
+        channel_id: str,
+        anchor_message_id: str,
+        follow_up_thread_id: str,
+        req_id: str,
+    ) -> None:
+        """Record (anchor message → follow-up thread) so future lookups
+        observe the mapping. Best-effort: log + swallow on failure since
+        seeding has already succeeded by the time we get here."""
+        if self._memory_store_ref is None:
+            return
+        try:
+            await self._memory_store_ref.set_automation_post_follow_up_thread(
+                platform=platform,
+                channel_id=channel_id,
+                message_id=anchor_message_id,
+                follow_up_thread_id=follow_up_thread_id,
+            )
+        except Exception:
+            logger.debug(
+                "[%s] set_automation_post_follow_up_thread failed",
+                req_id,
+                exc_info=True,
+            )
+
     async def handle_message(
         self,
         session: ChannelSession,
@@ -1160,16 +1217,30 @@ class GatewayManager:
                 )
                 return
 
-        # Reply-to-automation-post → spawn a follow-up thread anchored on the
-        # original bot message, and seed it with a system turn referencing the
-        # automation's archived artifacts. TTL is enforced by the runtime
-        # janitor, so we just trust whatever get_automation_post returns.
+        # Automation follow-up seeding has two entry paths into the same final
+        # state ("thread with a system turn pointing at the original run's
+        # artifacts"):
+        #
+        #   Case A: user *replied in the main channel* to a bot's automation
+        #           post → we create the thread on their behalf, anchored on
+        #           the post.
+        #   Case B: user *manually created a Discord thread* on the post via
+        #           the "Create Thread" UI before sending anything → the
+        #           thread already exists. We detect this on the first
+        #           message because Discord guarantees ``thread.id ==
+        #           anchor_message.id`` for message-anchored threads, so the
+        #           same ``get_automation_post`` lookup keyed on the thread
+        #           id finds the post.
+        #
+        # TTL is enforced by the runtime janitor; we trust whatever
+        # ``get_automation_post`` returns.
         if (
             msg.thread_id is None
             and msg.reply_to_message_id
             and not msg.system
             and self._memory_store_ref is not None
         ):
+            # Case A: reply-in-channel.
             post = None
             try:
                 post = await self._memory_store_ref.get_automation_post(
@@ -1195,50 +1266,67 @@ class GatewayManager:
                 )
                 if new_thread_id:
                     logger.info(
-                        "[%s] AUTOMATION_FOLLOWUP thread=%s automation=%s anchor_msg=%s",
+                        "[%s] AUTOMATION_FOLLOWUP thread=%s automation=%s anchor_msg=%s mode=reply",
                         req_id,
                         new_thread_id,
                         post.automation_name,
                         msg.reply_to_message_id,
                     )
                     msg.thread_id = new_thread_id
-                    seed_lines = [
-                        f"[Follow-up on automation '{post.automation_name}'.]",
-                    ]
-                    # ``post.artifact_paths`` records the absolute **published**
-                    # artifact paths from the original run (populated from
-                    # ``delivery.archived_paths`` — legacy name, semantic is
-                    # "single durable location per artifact under reports_dir").
-                    # These are stable (reports_dir is not auto-pruned), which
-                    # is why we prefer them over the workspace scratch path.
-                    if post.artifact_paths:
-                        seed_lines.append(
-                            "Artifacts from that run (read them as needed):"
-                        )
-                        for path in post.artifact_paths[:8]:
-                            seed_lines.append(f"- {path}")
-                        if len(post.artifact_paths) > 8:
-                            seed_lines.append(
-                                f"- ... and {len(post.artifact_paths) - 8} more"
-                            )
-                    else:
-                        seed_lines.append("(No published artifact paths were recorded.)")
                     await session.append_assistant(
-                        new_thread_id, "\n".join(seed_lines), "system",
+                        new_thread_id,
+                        self._build_automation_followup_seed(post),
+                        "system",
                     )
-                    try:
-                        await self._memory_store_ref.set_automation_post_follow_up_thread(
-                            platform=msg.platform,
-                            channel_id=msg.channel_id,
-                            message_id=msg.reply_to_message_id,
-                            follow_up_thread_id=new_thread_id,
-                        )
-                    except Exception:
-                        logger.debug(
-                            "[%s] set_automation_post_follow_up_thread failed",
-                            req_id,
-                            exc_info=True,
-                        )
+                    await self._persist_automation_followup_mapping(
+                        platform=msg.platform,
+                        channel_id=msg.channel_id,
+                        anchor_message_id=msg.reply_to_message_id,
+                        follow_up_thread_id=new_thread_id,
+                        req_id=req_id,
+                    )
+        elif (
+            msg.thread_id is not None
+            and not msg.system
+            and self._memory_store_ref is not None
+        ):
+            # Case B: user manually created the thread. Only seed on the
+            # FIRST message in the thread — if there's already history we've
+            # either seeded before or this thread isn't a follow-up.
+            existing_history = await session.get_history(msg.thread_id)
+            if not existing_history:
+                post = None
+                try:
+                    post = await self._memory_store_ref.get_automation_post(
+                        msg.platform, msg.channel_id, msg.thread_id,
+                    )
+                except Exception:
+                    logger.debug(
+                        "[%s] get_automation_post failed thread=%s",
+                        req_id,
+                        msg.thread_id,
+                        exc_info=True,
+                    )
+                if post is not None:
+                    logger.info(
+                        "[%s] AUTOMATION_FOLLOWUP thread=%s automation=%s anchor_msg=%s mode=manual",
+                        req_id,
+                        msg.thread_id,
+                        post.automation_name,
+                        msg.thread_id,
+                    )
+                    await session.append_assistant(
+                        msg.thread_id,
+                        self._build_automation_followup_seed(post),
+                        "system",
+                    )
+                    await self._persist_automation_followup_mapping(
+                        platform=msg.platform,
+                        channel_id=msg.channel_id,
+                        anchor_message_id=msg.thread_id,
+                        follow_up_thread_id=msg.thread_id,
+                        req_id=req_id,
+                    )
 
         # Determine thread: use existing or create a new one
         thread_id = msg.thread_id
