@@ -88,6 +88,7 @@ class GatewayManager:
         memory_inject_limit: int = 12,
         memory_keyword_patterns: list[str] | None = None,
         streaming_config: dict | None = None,
+        feedback_collector=None,
     ) -> None:
         self._channels = channels
         self._compressor = compressor
@@ -126,6 +127,7 @@ class GatewayManager:
         self._judge = judge
         self._idle_tracker = idle_tracker
         self._memory_inject_limit = max(1, int(memory_inject_limit))
+        self._feedback_collector = feedback_collector  # M1 PR2 — implicit feedback
         default_keywords = ["记一下", "记下", "记住这个", "记下来", "remember this", "memorize this"]
         self._memory_keyword_patterns = [
             kw.lower() for kw in (memory_keyword_patterns or default_keywords) if kw
@@ -651,6 +653,11 @@ class GatewayManager:
             # Inject judge store + manager reference for /memories, /forget, /memorize (Discord)
             if hasattr(channel, "set_judge_store") and self._judge_store is not None:
                 channel.set_judge_store(self._judge_store, self)
+
+            # M1 PR2: wire the implicit-feedback collector so Discord's
+            # reaction handler can record self_eval signals.
+            if hasattr(channel, "set_feedback_collector") and self._feedback_collector is not None:
+                channel.set_feedback_collector(self._feedback_collector)
 
             # Inject runtime service for /task_* (Discord-specific)
             if hasattr(channel, "set_runtime_service") and self._runtime_service:
