@@ -23,7 +23,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Body, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
 from oh_my_agent import paths
@@ -198,5 +198,113 @@ def build_router(config: dict) -> APIRouter:
             raise HTTPException(status_code=503, detail=msg)
         result["enabled"] = True
         return result
+
+    # ------------------------------------------------------------------
+    # M2 PR3 — Automation control (write surface, colocated mode only)
+    # ------------------------------------------------------------------
+
+    def _require_colocated(request: Request):
+        """Pull the live DashboardContext; 503 unless co-located."""
+        ctx = getattr(request.app.state, "oma", None)
+        if ctx is None or ctx.mode != "colocated":
+            raise HTTPException(
+                status_code=503,
+                detail="automation control requires the co-located dashboard "
+                "(runs inside the bot process)",
+            )
+        return ctx
+
+    def _require_write(request: Request):
+        """Colocated + bearer-header auth for mutating routes (M2 PR1 deps)."""
+        from oh_my_agent.dashboard.app import require_write_auth
+
+        return require_write_auth(request)
+
+    @router.get("/automations")
+    def list_automations(request: Request) -> dict[str, Any]:
+        ctx = _require_colocated(request)
+        scheduler = ctx.scheduler
+        if scheduler is None:
+            raise HTTPException(status_code=503, detail="scheduler not available")
+        records = scheduler.list_automations()
+        next_runs = scheduler.compute_all_next_run_at()
+        items = []
+        for rec in records:
+            next_at = next_runs.get(rec.name)
+            items.append(
+                {
+                    "name": rec.name,
+                    "enabled": rec.enabled,
+                    "schedule_kind": rec.schedule_kind,
+                    "cron": rec.cron,
+                    "interval_seconds": rec.interval_seconds,
+                    "agent": rec.agent,
+                    "skill_name": rec.skill_name,
+                    "platform": rec.platform,
+                    "channel_id": rec.channel_id,
+                    "next_run_at": next_at.isoformat() if next_at else None,
+                }
+            )
+        return {"items": items}
+
+    @router.post("/automations/{name}/fire")
+    async def fire_automation(name: str, request: Request) -> dict[str, Any]:
+        _require_write(request)
+        ctx = _require_colocated(request)
+        scheduler = ctx.scheduler
+        if scheduler is None:
+            raise HTTPException(status_code=503, detail="scheduler not available")
+        result = await scheduler.fire_job_now(name)
+        if result == "not_found":
+            raise HTTPException(status_code=404, detail=f"automation {name!r} not found")
+        if result == "scheduler_down":
+            raise HTTPException(status_code=503, detail="scheduler not running")
+        if result == "already_firing":
+            # Codex M2 PR3: 409 Conflict — the job is mid-run, the manual
+            # fire was refused (not a success).
+            raise HTTPException(
+                status_code=409,
+                detail=f"automation {name!r} is already firing",
+            )
+        return {"name": name, "result": result}
+
+    @router.patch("/automations/{name}")
+    async def patch_automation(
+        name: str,
+        request: Request,
+        body: dict[str, Any] = Body(...),
+    ) -> dict[str, Any]:
+        _require_write(request)
+        ctx = _require_colocated(request)
+        scheduler = ctx.scheduler
+        if scheduler is None:
+            raise HTTPException(status_code=503, detail="scheduler not available")
+        allowed = {"enabled", "cron", "interval_seconds"}
+        # Codex M2 PR3 fix: reject ANY disallowed key explicitly. Previously
+        # disallowed keys were silently filtered out, so a body like
+        # {"enabled": false, "prompt": "x"} succeeded — bypassing the
+        # whitelist contract entirely.
+        bad = set(body) - allowed
+        if bad:
+            raise HTTPException(
+                status_code=400,
+                detail=f"disallowed keys {sorted(bad)} (allowed: {sorted(allowed)})",
+            )
+        updates = {k: v for k, v in body.items() if k in allowed}
+        if not updates:
+            raise HTTPException(
+                status_code=400,
+                detail=f"no patchable keys in body (allowed: {sorted(allowed)})",
+            )
+        try:
+            rec = await scheduler.patch_automation(name, updates)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "name": rec.name,
+            "enabled": rec.enabled,
+            "cron": rec.cron,
+            "interval_seconds": rec.interval_seconds,
+        }
 
     return router
