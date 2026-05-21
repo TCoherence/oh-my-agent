@@ -640,6 +640,104 @@ def test_format_memory_block_custom_header():
     assert block.startswith("[Past Insights]\n")
 
 
+# =====================================================================
+# M1 PR4 — upsert_self_eval_signal merge primitive
+# =====================================================================
+
+
+@pytest.mark.asyncio
+async def test_upsert_self_eval_creates_then_merges(store_dir: Path):
+    store = _build_store(store_dir)
+    await store.load()
+    # First signal → new entry
+    id1 = await store.upsert_self_eval_signal(
+        automation_name="auto-m",
+        task_id="task-m",
+        source="implicit",
+        quality="fail",
+        confidence=0.55,
+        reason="user reacted 👎",
+    )
+    assert id1 is not None
+    assert len(store.get_active()) == 1
+
+    # Second signal same task → MERGE (no new entry)
+    id2 = await store.upsert_self_eval_signal(
+        automation_name="auto-m",
+        task_id="task-m",
+        source="explicit",
+        quality="pass",
+        confidence=0.9,
+        reason="actually fine",
+    )
+    assert id2 == id1  # same entry
+    assert len(store.get_active()) == 1
+    entry = store.get_active()[0]
+    # Higher-confidence signal (explicit 0.9) wins
+    assert entry.confidence == 0.9
+    assert entry.quality == "pass"
+    assert entry.feedback_source == "explicit"
+    assert entry.observation_count == 2
+    signal_sources = {s["source"] for s in entry.signals}
+    assert signal_sources == {"implicit", "explicit"}
+
+
+@pytest.mark.asyncio
+async def test_upsert_self_eval_different_tasks_separate_entries(store_dir: Path):
+    store = _build_store(store_dir)
+    await store.load()
+    await store.upsert_self_eval_signal(
+        automation_name="auto-x", task_id="t1", source="implicit",
+        quality="pass", confidence=0.5, reason="r1",
+    )
+    await store.upsert_self_eval_signal(
+        automation_name="auto-x", task_id="t2", source="implicit",
+        quality="fail", confidence=0.5, reason="r2",
+    )
+    assert len(store.get_active()) == 2
+
+
+@pytest.mark.asyncio
+async def test_upsert_self_eval_rejects_invalid_quality(store_dir: Path):
+    store = _build_store(store_dir)
+    await store.load()
+    res = await store.upsert_self_eval_signal(
+        automation_name="auto-x", task_id="t", source="implicit",
+        quality="amazing", confidence=0.5, reason="r",
+    )
+    assert res is None
+    assert store.get_active() == []
+
+
+@pytest.mark.asyncio
+async def test_upsert_self_eval_rejects_invalid_source(store_dir: Path):
+    store = _build_store(store_dir)
+    await store.load()
+    res = await store.upsert_self_eval_signal(
+        automation_name="auto-x", task_id="t", source="bogus",
+        quality="pass", confidence=0.5, reason="r",
+    )
+    assert res is None
+
+
+@pytest.mark.asyncio
+async def test_upsert_self_eval_round_trips_via_save_load(store_dir: Path):
+    store = _build_store(store_dir)
+    await store.load()
+    await store.upsert_self_eval_signal(
+        automation_name="auto-rt", task_id="task-rt", source="llm_judge",
+        quality="borderline", confidence=0.5, reason="meh",
+    )
+    # Reload from disk
+    store2 = _build_store(store_dir)
+    await store2.load()
+    entries = [e for e in store2.get_active() if e.category == "self_eval"]
+    assert len(entries) == 1
+    assert entries[0].source_automation == "auto-rt"
+    assert entries[0].quality == "borderline"
+    assert entries[0].signals[0]["source"] == "llm_judge"
+
+
 @pytest.mark.asyncio
 async def test_apply_supersede_inherits_quality_when_action_omits_it(store_dir: Path):
     """Round-4/PR1: explicitly verify supersede inheritance vs override semantics."""

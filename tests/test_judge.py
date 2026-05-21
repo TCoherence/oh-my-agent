@@ -204,6 +204,7 @@ async def test_run_for_task_self_eval_writes_quality_entry(tmp_path: Path):
         skill_name="paper-digest",
         source_workspace=str(tmp_path),
         thread_id="automation:paper-digest",
+        task_id="task-paper-1",  # M1 PR4: self_eval now requires task_id
     )
     assert result.error is None
     assert result.stats["add"] == 1

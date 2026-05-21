@@ -44,6 +44,10 @@ VALID_SCOPES = frozenset(
 VALID_STATUS = frozenset({"active", "superseded"})
 VALID_FEEDBACK_SOURCES = frozenset({"llm_judge", "implicit", "explicit"})
 VALID_QUALITIES = frozenset({"pass", "borderline", "fail"})
+# M1 PR4 tie-break: when two signals share confidence, prefer the more
+# deliberate source. explicit (user typed) > implicit (user reacted) >
+# llm_judge (automated guess).
+_SIGNAL_SOURCE_RANK = {"explicit": 3, "implicit": 2, "llm_judge": 1}
 
 _SCOPE_PRIORITY = {"thread": 0, "skill": 1, "workspace": 2, "global_user": 3, "automation": 0}
 _RETRIEVAL_SCOPE_BONUS = {
@@ -473,6 +477,139 @@ class JudgeStore:
     @property
     def last_load_stats(self) -> dict[str, int]:
         return dict(self._last_load_stats)
+
+    # ------------------------------------------------------------------
+    # M1 PR4 — self_eval signal merge
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _self_eval_task_key(automation_name: str, task_id: str) -> str:
+        """Stable evidence thread_id for per-task self_eval dedupe / merge.
+
+        All three feedback sources (llm_judge / implicit / explicit) write
+        through ``upsert_self_eval_signal`` keyed on this string so they
+        consolidate into ONE entry per task rather than N siblings.
+        """
+        return f"automation:{automation_name}::task:{task_id}"
+
+    def _find_self_eval_for_task(
+        self, automation_name: str, task_id: str
+    ) -> MemoryEntry | None:
+        key = self._self_eval_task_key(automation_name, task_id)
+        for entry in self.get_active():
+            if entry.category != "self_eval":
+                continue
+            if entry.source_automation != automation_name:
+                continue
+            for ev in entry.evidence_log:
+                if ev.thread_id == key:
+                    return entry
+        return None
+
+    async def upsert_self_eval_signal(
+        self,
+        *,
+        automation_name: str,
+        task_id: str,
+        source: str,
+        quality: str,
+        confidence: float,
+        reason: str,
+        skill_name: str | None = None,
+        source_workspace: str | None = None,
+    ) -> str | None:
+        """Merge a feedback signal into the per-task self_eval entry.
+
+        If an active self_eval entry already exists for (automation_name,
+        task_id): append ``{source, value, ts, confidence}`` to its
+        ``signals`` list, recompute ``confidence = max(signal confidences)``
+        and ``quality = value of the highest-confidence signal``, bump
+        ``observation_count``. Otherwise create a fresh entry.
+
+        Returns the entry id, or None on validation reject / read-only.
+        """
+        if self._load_failed_readonly:
+            return None
+        if quality not in VALID_QUALITIES:
+            logger.warning("upsert_self_eval_signal: invalid quality %r", quality)
+            return None
+        if source not in VALID_FEEDBACK_SOURCES:
+            logger.warning("upsert_self_eval_signal: invalid source %r", source)
+            return None
+        confidence = max(0.0, min(1.0, float(confidence)))
+        key = self._self_eval_task_key(automation_name, task_id)
+        signal = {
+            "source": source,
+            "value": quality,
+            "confidence": confidence,
+            "ts": _now_iso(),
+        }
+        async with self._lock:
+            existing = self._find_self_eval_for_task(automation_name, task_id)
+            if existing is not None:
+                existing.signals.append(signal)
+                # Quality = value of the WINNING signal. Tie-break (Codex M1
+                # PR4): (1) highest confidence, (2) source rank
+                # explicit > implicit > llm_judge, (3) latest timestamp.
+                best = max(
+                    existing.signals,
+                    key=lambda s: (
+                        float(s.get("confidence", 0)),
+                        _SIGNAL_SOURCE_RANK.get(str(s.get("source", "")), 0),
+                        str(s.get("ts", "")),
+                    ),
+                )
+                best_quality = str(best.get("value", quality))
+                if best_quality in VALID_QUALITIES:
+                    existing.quality = cast(
+                        Literal["pass", "borderline", "fail"], best_quality
+                    )
+                existing.confidence = max(
+                    float(s.get("confidence", 0)) for s in existing.signals
+                )
+                # Latest-writer feedback_source wins as the "primary" tag.
+                existing.feedback_source = cast(
+                    Literal["llm_judge", "implicit", "explicit"], source
+                )
+                existing.observation_count += 1
+                existing.last_observed_at = _now_iso()
+                existing.evidence_log.append(
+                    EvidenceRecord(thread_id=key, ts=_now_iso(), snippet=reason[:280])
+                )
+                if len(existing.evidence_log) > self._max_evidence_per_entry:
+                    existing.evidence_log = existing.evidence_log[
+                        -self._max_evidence_per_entry :
+                    ]
+                self._dirty = True
+                await self.save()
+                return existing.id
+            # New entry
+            try:
+                entry = MemoryEntry(
+                    summary=f"reason={reason}; task={task_id}"[:280],
+                    category="self_eval",
+                    scope="automation",
+                    source_automation=automation_name,
+                    feedback_source=cast(
+                        Literal["llm_judge", "implicit", "explicit"], source
+                    ),
+                    quality=cast(Literal["pass", "borderline", "fail"], quality),
+                    confidence=confidence,
+                    observation_count=1,
+                    signals=[signal],
+                    source_skills=[skill_name] if skill_name else [],
+                    source_workspace=source_workspace or "",
+                    evidence_log=[
+                        EvidenceRecord(thread_id=key, ts=_now_iso(), snippet=reason[:280])
+                    ],
+                )
+            except Exception as exc:
+                logger.warning("upsert_self_eval_signal: entry construction failed: %s", exc)
+                return None
+            self._memories.append(entry)
+            self._dirty = True
+            await self.save()
+            return entry.id
 
     # ------------------------------------------------------------------
     # Lookup helpers
