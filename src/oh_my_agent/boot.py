@@ -528,8 +528,24 @@ async def _shutdown(
     weekly_reflect_loop=None,
     push_dispatcher=None,
     feedback_scan_worker=None,
+    dashboard_server=None,
+    dashboard_task=None,
 ) -> None:
     logger.info("Shutdown started reason=%s", reason)
+    # M2 PR1: stop the co-located dashboard FIRST so in-flight requests
+    # drain before the runtime/store they read from go away. Complete
+    # shutdown sequence: should_exit=True → await with timeout → cancel.
+    if dashboard_server is not None:
+        dashboard_server.should_exit = True
+        if dashboard_task is not None:
+            try:
+                await asyncio.wait_for(dashboard_task, timeout=10)
+            except asyncio.TimeoutError:
+                logger.warning("dashboard did not drain in 10s; cancelling")
+                dashboard_task.cancel()
+                await asyncio.gather(dashboard_task, return_exceptions=True)
+            except Exception:
+                logger.warning("dashboard task raised on shutdown", exc_info=True)
     if scheduler:
         with suppress(Exception):
             scheduler.stop()
@@ -1201,6 +1217,69 @@ async def ignite(ctx: BootContext) -> None:
                 "Weekly reflector ready (no channel registry to auto-fire)"
             )
 
+    # M2 PR1 — optionally co-locate the dashboard inside the bot process so
+    # write routes can act on the live Scheduler / RuntimeService / store.
+    dashboard_server = None
+    dashboard_task = None
+    dashboard_cfg = config.get("dashboard", {}) if isinstance(config.get("dashboard"), dict) else {}
+    if dashboard_cfg.get("colocated", False):
+        try:
+            import uvicorn
+
+            from oh_my_agent.dashboard.app import create_app as _create_dash_app
+
+            dash_token_env = dashboard_cfg.get("auth_token_env")
+            dash_token = os.environ.get(dash_token_env) if dash_token_env else None
+            dash_app = _create_dash_app(
+                config,
+                refresh_seconds=int(dashboard_cfg.get("refresh_seconds", 300)),
+                auth_token=dash_token,
+                mode="colocated",
+                scheduler=scheduler,
+                runtime_service=runtime_service,
+                store=memory_store,
+            )
+            uconfig = uvicorn.Config(
+                dash_app,
+                host=str(dashboard_cfg.get("host", "127.0.0.1")),
+                port=int(dashboard_cfg.get("port", 8765)),
+                log_config=None,
+                lifespan="off",
+            )
+            dashboard_server = uvicorn.Server(uconfig)
+            # Codex M2 PR1 blocker: uvicorn.Server.serve() installs its own
+            # SIGINT/SIGTERM handlers, which would steal signal ownership
+            # from boot.py (SIGTERM would stop only uvicorn while the bot
+            # keeps running). Disable uvicorn's signal handling so boot.py
+            # stays the sole signal owner.
+            dashboard_server.install_signal_handlers = lambda: None  # type: ignore[attr-defined]
+            dashboard_task = asyncio.create_task(
+                dashboard_server.serve(), name="dashboard:serve"
+            )
+
+            def _log_dashboard_exit(task: asyncio.Task) -> None:
+                if task.cancelled():
+                    return
+                exc = task.exception()
+                if exc is not None:
+                    logger.error("Co-located dashboard exited with error: %s", exc)
+                else:
+                    logger.info("Co-located dashboard task exited")
+
+            dashboard_task.add_done_callback(_log_dashboard_exit)
+            logger.info(
+                "Co-located dashboard serving on %s:%s (mode=colocated)",
+                dashboard_cfg.get("host", "127.0.0.1"),
+                dashboard_cfg.get("port", 8765),
+            )
+        except ImportError:
+            logger.warning(
+                "dashboard.colocated=true but fastapi/uvicorn not installed; "
+                "skipping co-located dashboard"
+            )
+        except Exception as exc:
+            logger.error("Failed to start co-located dashboard: %s", exc, exc_info=True)
+
     logger.info("Starting gateway with %d channel(s)...", len(channel_pairs))
     loop = asyncio.get_running_loop()
     shutdown_event = asyncio.Event()
@@ -1233,6 +1312,8 @@ async def ignite(ctx: BootContext) -> None:
             weekly_reflect_loop=weekly_reflect_loop,
             push_dispatcher=push_dispatcher,
             feedback_scan_worker=feedback_scan_worker,
+            dashboard_server=dashboard_server,
+            dashboard_task=dashboard_task,
         )
 
     try:

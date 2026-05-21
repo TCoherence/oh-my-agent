@@ -22,10 +22,12 @@ from __future__ import annotations
 
 import hmac
 import html
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, Literal
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, PackageLoader, select_autoescape
@@ -36,6 +38,27 @@ from oh_my_agent import paths
 from oh_my_agent.dashboard.api.v1 import build_router as build_api_v1_router
 
 from . import data as dashboard_data
+
+
+@dataclass
+class DashboardContext:
+    """M2 PR1 — live-handle bundle for the co-located dashboard.
+
+    In ``readonly`` mode (standalone ``oma dashboard`` CLI) all live handles
+    are None and write routes degrade to 503. In ``colocated`` mode (mounted
+    inside the bot process by boot.py) the handles point at the running
+    Scheduler / RuntimeService / store so write routes can act.
+
+    Stored on ``app.state.oma`` so route dependencies can reach it via the
+    request without a global.
+    """
+
+    mode: Literal["readonly", "colocated"] = "readonly"
+    scheduler: Any | None = None
+    runtime_service: Any | None = None
+    store: Any | None = None
+    auth_token: str | None = None
+    config: dict = field(default_factory=dict)
 
 # Auth-middleware path whitelist. Both /healthz endpoints are public so
 # liveness probes don't need to know the bearer token.
@@ -76,6 +99,10 @@ def create_app(
     *,
     refresh_seconds: int = 300,
     auth_token: str | None = None,
+    mode: Literal["readonly", "colocated"] = "readonly",
+    scheduler: Any | None = None,
+    runtime_service: Any | None = None,
+    store: Any | None = None,
 ) -> FastAPI:
     """Build a FastAPI app bound to the given top-level oh-my-agent config.
 
@@ -87,6 +114,11 @@ def create_app(
             token via either an ``Authorization: Bearer <token>`` header or
             a ``?token=<value>`` query parameter. ``None`` (default) means
             no auth — only safe for loopback-only deployments.
+        mode: ``"readonly"`` (default, standalone CLI) → write routes 503;
+            ``"colocated"`` (mounted in bot process) → write routes act on
+            the supplied live handles.
+        scheduler / runtime_service / store: live handles, only meaningful in
+            ``colocated`` mode (None in readonly).
 
     The app keeps a reference to the config dict and resolves all paths fresh
     on each request (cheap — just dict lookups + string ops). No caching.
@@ -102,6 +134,16 @@ def create_app(
         auth_token = auth_token.strip() or None
 
     app = FastAPI(title="oh-my-agent dashboard", docs_url=None, redoc_url=None)
+    # M2 PR1: stash the live-handle context on app.state so write-route
+    # dependencies (require_writable / require_auth_token) can reach it.
+    app.state.oma = DashboardContext(
+        mode=mode,
+        scheduler=scheduler,
+        runtime_service=runtime_service,
+        store=store,
+        auth_token=auth_token,
+        config=config,
+    )
     env = Environment(
         loader=PackageLoader("oh_my_agent.dashboard", "templates"),
         autoescape=select_autoescape(["html"]),
@@ -167,6 +209,75 @@ def create_app(
         )
 
     return app
+
+
+def get_dashboard_context(request: Request) -> DashboardContext:
+    """FastAPI dependency: pull the DashboardContext off app.state.
+
+    Future write routes (M2 PR3/PR4) depend on this + ``require_writable``
+    + ``require_write_auth`` to gate mutations.
+    """
+    ctx = getattr(request.app.state, "oma", None)
+    if ctx is None:
+        # Should never happen — create_app always sets it. Defensive.
+        raise HTTPException(status_code=500, detail="dashboard context missing")
+    return ctx
+
+
+def require_writable(request: Request) -> DashboardContext:
+    """Dependency for write routes — 503 unless co-located in the bot process.
+
+    503 ordering (Codex M2 plan): readonly check FIRST so a standalone CLI
+    user gets a clear "start with --colocated" message before the token
+    check fires.
+    """
+    ctx = get_dashboard_context(request)
+    if ctx.mode != "colocated":
+        raise HTTPException(
+            status_code=503,
+            detail="dashboard read-only mode — write surface requires the "
+            "co-located dashboard (runs inside the bot process)",
+        )
+    return ctx
+
+
+def require_write_auth(request: Request) -> DashboardContext:
+    """Dependency for write routes — enforce bearer token AFTER writability.
+
+    Returns 503 (not 401) when auth_token is unconfigured, because the
+    correct fix is operator config, not a client retry. When configured,
+    returns 401 on a bad/missing token.
+    """
+    ctx = require_writable(request)
+    if not ctx.auth_token:
+        raise HTTPException(
+            status_code=503,
+            detail="write surface requires dashboard.auth_token to be set",
+        )
+    # Codex M2 PR1 blocker: write routes accept the bearer HEADER ONLY.
+    # The `?token=` query param (accepted on read routes for browser
+    # convenience) leaks through access logs / browser history / proxy
+    # logs / referers — unacceptable for mutating endpoints.
+    if not _check_bearer_header(request, ctx.auth_token):
+        raise HTTPException(
+            status_code=401,
+            detail="auth required (Authorization: Bearer header only for writes)",
+            headers={"WWW-Authenticate": 'Bearer realm="oma-dashboard"'},
+        )
+    return ctx
+
+
+def _check_bearer_header(request: Request, expected: str) -> bool:
+    """Header-only token check for WRITE routes (no ?token= query param).
+
+    M2 PR1: query-param tokens leak via logs/history; mutating endpoints
+    must use the ``Authorization: Bearer`` header exclusively.
+    """
+    header = request.headers.get("authorization", "")
+    if header.lower().startswith("bearer "):
+        presented = header.split(" ", 1)[1].strip()
+        return bool(presented and _safe_token_eq(presented, expected))
+    return False
 
 
 def _check_auth_token(request: Request, expected: str) -> bool:

@@ -531,3 +531,145 @@ def test_spa_missing_asset_still_404s(tmp_path: Path) -> None:
     client = _spa_app(tmp_path)
     r = client.get("/app/assets/missing.js")
     assert r.status_code == 404
+
+
+# =====================================================================
+# M2 PR1 — co-location mode + write-route dependencies
+# =====================================================================
+
+
+def test_create_app_defaults_to_readonly_mode(tmp_path: Path) -> None:
+    config = _seed_minimal_runtime_tree(tmp_path)
+    app = create_app(config)
+    assert app.state.oma.mode == "readonly"
+    assert app.state.oma.scheduler is None
+    assert app.state.oma.runtime_service is None
+
+
+def test_create_app_colocated_mode_carries_handles(tmp_path: Path) -> None:
+    config = _seed_minimal_runtime_tree(tmp_path)
+    sentinel_sched = object()
+    sentinel_runtime = object()
+    app = create_app(
+        config,
+        mode="colocated",
+        scheduler=sentinel_sched,
+        runtime_service=sentinel_runtime,
+        auth_token="secret",
+    )
+    assert app.state.oma.mode == "colocated"
+    assert app.state.oma.scheduler is sentinel_sched
+    assert app.state.oma.runtime_service is sentinel_runtime
+    assert app.state.oma.auth_token == "secret"
+
+
+def test_require_writable_503_in_readonly() -> None:
+    """require_writable raises 503 when not co-located."""
+    from fastapi import HTTPException
+
+    from oh_my_agent.dashboard.app import DashboardContext, require_writable
+
+    class _FakeRequest:
+        class app:
+            class state:
+                oma = DashboardContext(mode="readonly")
+
+    with pytest.raises(HTTPException) as exc_info:
+        require_writable(_FakeRequest())  # type: ignore[arg-type]
+    assert exc_info.value.status_code == 503
+    assert "read-only" in exc_info.value.detail
+
+
+def test_require_write_auth_503_when_token_unset() -> None:
+    """Co-located but no auth_token → 503 (not 401)."""
+    from fastapi import HTTPException
+
+    from oh_my_agent.dashboard.app import DashboardContext, require_write_auth
+
+    class _FakeRequest:
+        headers: dict = {}
+        query_params: dict = {}
+
+        class app:
+            class state:
+                oma = DashboardContext(mode="colocated", auth_token=None)
+
+    with pytest.raises(HTTPException) as exc_info:
+        require_write_auth(_FakeRequest())  # type: ignore[arg-type]
+    assert exc_info.value.status_code == 503
+    assert "auth_token" in exc_info.value.detail
+
+
+def test_require_write_auth_passes_with_valid_token() -> None:
+    from oh_my_agent.dashboard.app import DashboardContext, require_write_auth
+
+    class _FakeRequest:
+        headers = {"authorization": "Bearer s3cr3t"}
+        query_params: dict = {}
+
+        class app:
+            class state:
+                oma = DashboardContext(mode="colocated", auth_token="s3cr3t")
+
+    ctx = require_write_auth(_FakeRequest())  # type: ignore[arg-type]
+    assert ctx.mode == "colocated"
+
+
+def test_require_write_auth_401_with_bad_token() -> None:
+    from fastapi import HTTPException
+
+    from oh_my_agent.dashboard.app import DashboardContext, require_write_auth
+
+    class _FakeRequest:
+        headers = {"authorization": "Bearer wrong"}
+        query_params: dict = {}
+
+        class app:
+            class state:
+                oma = DashboardContext(mode="colocated", auth_token="right")
+
+    with pytest.raises(HTTPException) as exc_info:
+        require_write_auth(_FakeRequest())  # type: ignore[arg-type]
+    assert exc_info.value.status_code == 401
+
+
+def test_require_write_auth_rejects_query_token() -> None:
+    """Codex M2 PR1: write routes must NOT accept ?token= query param
+    (leaks via logs); header-only."""
+    from fastapi import HTTPException
+
+    from oh_my_agent.dashboard.app import DashboardContext, require_write_auth
+
+    class _FakeRequest:
+        headers: dict = {}  # no Authorization header
+        query_params = {"token": "s3cr3t"}  # token only in query
+
+        class app:
+            class state:
+                oma = DashboardContext(mode="colocated", auth_token="s3cr3t")
+
+    with pytest.raises(HTTPException) as exc_info:
+        require_write_auth(_FakeRequest())  # type: ignore[arg-type]
+    assert exc_info.value.status_code == 401  # query token rejected for writes
+
+
+def test_503_ordering_readonly_before_token() -> None:
+    """Codex M2 plan: readonly check fires before token check so a
+    standalone user gets the clearer message."""
+    from fastapi import HTTPException
+
+    from oh_my_agent.dashboard.app import DashboardContext, require_write_auth
+
+    class _FakeRequest:
+        headers: dict = {}
+        query_params: dict = {}
+
+        class app:
+            class state:
+                # readonly AND no token — readonly should win
+                oma = DashboardContext(mode="readonly", auth_token=None)
+
+    with pytest.raises(HTTPException) as exc_info:
+        require_write_auth(_FakeRequest())  # type: ignore[arg-type]
+    assert exc_info.value.status_code == 503
+    assert "read-only" in exc_info.value.detail  # readonly message, not token
