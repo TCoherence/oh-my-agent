@@ -111,13 +111,16 @@ Use sources in this order:
 
 1. primary market context
    - NWMLS monthly market snapshot
-   - Freddie Mac PMMS / FRED mortgage rate context
+   - **Rate block — multi-source spread, not single source**: Freddie Mac PMMS 30Y / 15Y baseline **plus** MBA Weekly Applications Survey **plus** Mortgage News Daily index **plus** ≥2 big-lender rack rates (Chase / BofA / Wells Fargo / U.S. Bank with a Seattle ZIP like 98004 or 98052) **plus** ≥1 local credit union (BECU / WSECU / Sound CU). Always render a "source | 30Y | 15Y | snapshot date" table for the current week. See `references/source_policy.md` §Mortgage comparison defaults for the full tiering and minimum-coverage rules.
 2. area trend layer
+   - Beyond RE 7-city + King + Snohomish pages (current production primary)
    - Redfin city / neighborhood housing market pages when publicly readable
    - Zillow city / local market pages when publicly readable
-3. sample listing layer
-   - Redfin public listings first
-   - Zillow listings second
+3. sample listing layer — **order changed 2026-05-21 due to Redfin/Zillow 403s**
+   - **Primary**: Realtor.com listing detail pages
+   - **Primary**: Local Seattle brokerage listing detail pages — Windermere, John L. Scott, Coldwell Banker Bain, Compass
+   - **Fallback**: Redfin / Zillow public listing detail pages when reachable
+   - **Last resort**: builder-direct pages (TriPointe, Toll Brothers, Lennar, DR Horton) for new construction
 
 Important:
 
@@ -125,6 +128,7 @@ Important:
 - Do **not** rely on DOM parsing, JS execution, or brittle page scraping as the default contract.
 - Listing samples are **secondary illustration**, not the factual spine.
 - If listing samples fail, finish the report anyway and record the gap in `coverage_gaps`.
+- **Never** use a city / neighborhood / search-results URL as a "listing" link — see `references/source_policy.md` §Listing link discipline. If no listing-level URL is reachable, render the sample as plain text (no markdown link).
 
 ## Listing contract
 
@@ -193,7 +197,7 @@ Unlike paste-the-full-body skills (e.g. `market-briefing-weekly`), this skill is
 
 1. **Headline metro conclusion** (2–3 sentences): direction of the market this week, the one number that summarizes it (e.g. median price MoM/YoY, inventory delta, rate level), and the main coverage caveat.
 2. **Per-area one-liner block** (one line per area in scope, in fixed order: Seattle / Bellevue / Redmond / Kirkland / Issaquah / Bothell / Lynnwood). Each line: median price + inventory direction + one notable observation. Skip an area only if `coverage_gaps` covers it.
-3. **2–3 representative listing picks** with `[address](listing_url) · price · sqft · short take`. The full sample list of up to 18 lives in the file.
+3. **2–3 representative listing picks** with `[address](listing_url) · price · sqft · short take` when a listing-level URL is reachable, OR plain `sub-market · price band · property type · short take` when only aggregate sources were available (see `references/source_policy.md` §Listing link discipline). The full sample list of up to 18 lives in the file.
 4. **Storage paths** at the end (weekly + any per-area files generated).
 
 ❌ Don't end the turn with "Done.", "Report saved.", "本周报告已写入文件" — those are status notes, not the answer.
