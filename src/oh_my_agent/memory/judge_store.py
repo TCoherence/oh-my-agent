@@ -487,6 +487,29 @@ class JudgeStore:
                 return m
         return None
 
+    @staticmethod
+    def format_memory_block(
+        entries: list[MemoryEntry], *, header: str = "Remembered context"
+    ) -> str:
+        """Render entries as a ``[<header>]`` prompt prefix block.
+
+        Returns an empty string when entries is empty. The format matches the
+        previous inline rendering used by chat path so chat + runtime paths
+        produce identical text.
+
+        Output shape::
+
+            [Remembered context]
+            - first summary
+            - second summary
+
+        Callers concatenate this to the user prompt (with a separating ``\\n\\n``).
+        """
+        if not entries:
+            return ""
+        lines = [f"- {entry.summary}" for entry in entries]
+        return f"[{header}]\n" + "\n".join(lines)
+
     def get_relevant(
         self,
         *,
