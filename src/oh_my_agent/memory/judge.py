@@ -8,9 +8,11 @@ explicit actions (``add`` / ``strengthen`` / ``supersede`` / ``no_op``) that the
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Literal
 
 from oh_my_agent.memory.judge_store import JudgeStore, parse_judge_actions
@@ -24,6 +26,27 @@ _MAX_WINDOW_CHARS = 8000
 # M0 PR3 — task-completion judge truncation budgets (synthetic input, not chat)
 _TASK_PROMPT_MAX_CHARS = 6000
 _TASK_OUTPUT_MAX_CHARS = 10000
+
+# M1 PR1 — model pricing for budget gating (USD per million tokens).
+# Updated when Anthropic changes price lists; defaults pinned to plan's
+# 2026 sonnet-4-6 quote. Unknown models fall back to a conservative
+# "treat as sonnet-4-6" so budget tracking errs on the side of caution.
+_MODEL_PRICING_USD_PER_MTOK: dict[str, tuple[float, float]] = {
+    # (input_price, output_price) per million tokens
+    "claude-sonnet-4-6": (3.0, 15.0),
+    "claude-haiku-4-5": (1.0, 5.0),
+    "claude-opus-4-7": (15.0, 75.0),
+}
+_DEFAULT_SELF_EVAL_MODEL = "claude-sonnet-4-6"
+# IMPORTANT (M1 PR1 known limitation, see plan + codex round-1 review):
+# The ``self_eval_model`` / per-skill ``model`` config knobs are used for
+# COST CALCULATION only; the actual LLM is selected by the AgentRegistry
+# default. Wiring real model routing through registry.run() is a follow-up
+# (touches AgentRegistry signature). For now, set this to match what the
+# registry actually picks so the budget ledger isn't misleading.
+# Hard upper bound used by reserve step (worst-case 15k input + 800 output)
+_SELF_EVAL_MAX_INPUT_TOKENS = 15000
+_SELF_EVAL_MAX_OUTPUT_TOKENS = 800
 
 _JUDGE_PROMPT = """\
 You are a long-term memory judge. Decide what (if anything) about the USER should be \
@@ -168,6 +191,137 @@ Output ONLY a JSON object like:
 """
 
 
+def _current_year_month() -> str:
+    """``YYYY-MM`` bucket for monthly budget reset (UTC)."""
+    return datetime.now(timezone.utc).strftime("%Y-%m")
+
+
+def _model_price(model: str) -> tuple[float, float]:
+    """Return (input_price, output_price) USD/MTok for a given model.
+
+    Unknown models fall back to the default self-eval model price so the
+    budget always tracks something rather than silently free-running.
+    """
+    if model in _MODEL_PRICING_USD_PER_MTOK:
+        return _MODEL_PRICING_USD_PER_MTOK[model]
+    logger.warning(
+        "judge: unknown model %r for cost calc — falling back to %s pricing",
+        model,
+        _DEFAULT_SELF_EVAL_MODEL,
+    )
+    return _MODEL_PRICING_USD_PER_MTOK[_DEFAULT_SELF_EVAL_MODEL]
+
+
+def _calculate_cost_usd(model: str, input_tokens: int, output_tokens: int) -> float:
+    """Convert token counts → USD using the model's price list."""
+    in_price, out_price = _model_price(model)
+    return (input_tokens / 1_000_000) * in_price + (output_tokens / 1_000_000) * out_price
+
+
+class SelfEvalBudget:
+    """M1 PR1 — opt-in budget gate for LLM self-eval calls.
+
+    Reads/writes the ``self_eval_budget`` SQLite table (year_month PK) so
+    budgets survive bot restarts. Uses an in-process ``asyncio.Lock`` to
+    serialize ``read → reserve → call → reconcile`` across concurrent
+    task completions; reservations cap the optimistic-spend window so a
+    burst of concurrent completions can't all sneak past the gate.
+
+    Disable by passing ``monthly_budget_usd <= 0`` — the tracker then
+    short-circuits ``check_and_reserve`` to always allow.
+    """
+
+    def __init__(
+        self,
+        store,
+        *,
+        monthly_budget_usd: float,
+        default_model: str = _DEFAULT_SELF_EVAL_MODEL,
+    ) -> None:
+        self._store = store
+        self._budget = float(monthly_budget_usd)
+        self._default_model = default_model
+        self._lock = asyncio.Lock()
+
+    @property
+    def enabled(self) -> bool:
+        return self._budget > 0
+
+    async def check_and_reserve(self, model: str | None = None) -> tuple[bool, float]:
+        """Atomically check budget + reserve worst-case spend for one call.
+
+        Returns ``(allowed, reserved_amount)``. On allow, the caller must
+        invoke :meth:`reconcile` with the actual spend after the LLM call
+        returns. Reserved amount is computed from the model's price + worst-
+        case 15k+800 tokens. If reserved + current spend exceeds budget,
+        returns ``(False, 0.0)`` without touching the ledger.
+        """
+        if not self.enabled:
+            return True, 0.0
+        async with self._lock:
+            current = await self._store.get_self_eval_budget(_current_year_month())
+            reserve = _calculate_cost_usd(
+                model or self._default_model,
+                _SELF_EVAL_MAX_INPUT_TOKENS,
+                _SELF_EVAL_MAX_OUTPUT_TOKENS,
+            )
+            if current + reserve > self._budget:
+                logger.warning(
+                    "self_eval_budget gate REJECT: spent=%.4f reserve=%.4f budget=%.4f month=%s",
+                    current,
+                    reserve,
+                    self._budget,
+                    _current_year_month(),
+                )
+                return False, 0.0
+            new_total = await self._store.add_self_eval_spend(
+                _current_year_month(), reserve
+            )
+            logger.debug(
+                "self_eval_budget gate ALLOW: reserved=%.4f new_total=%.4f budget=%.4f",
+                reserve,
+                new_total,
+                self._budget,
+            )
+            return True, reserve
+
+    async def reconcile(self, reserved: float, actual: float) -> None:
+        """Refund the over-reserved difference, or charge any shortfall.
+
+        ``reserved`` is what was added in ``check_and_reserve``. ``actual``
+        is the real cost computed from the LLM response's token counts.
+        Result: row contains the real cumulative spend, not the worst-case.
+        """
+        if not self.enabled:
+            return
+        delta = actual - reserved
+        if abs(delta) < 1e-9:
+            return
+        await self._store.add_self_eval_spend(_current_year_month(), delta)
+        logger.debug(
+            "self_eval_budget reconcile: reserved=%.4f actual=%.4f delta=%.4f",
+            reserved,
+            actual,
+            delta,
+        )
+
+
+def _extract_response_tokens(response: Any) -> tuple[int, int]:
+    """Pull (input_tokens, output_tokens) off an AgentResponse-like object.
+
+    Returns ``(0, 0)`` if usage is absent / malformed. Stubs in tests may
+    not carry usage fields; we treat that as "zero cost" so the budget
+    tracker simply doesn't move.
+    """
+    usage = getattr(response, "usage", None)
+    if not isinstance(usage, dict):
+        return 0, 0
+    try:
+        return int(usage.get("input_tokens", 0) or 0), int(usage.get("output_tokens", 0) or 0)
+    except (TypeError, ValueError):
+        return 0, 0
+
+
 def _truncate(text: str, max_chars: int) -> str:
     """Trim text to ``max_chars`` with a marker so the judge knows it was cut."""
     if not text:
@@ -225,8 +379,25 @@ class Judge:
     plus the current memory state.
     """
 
-    def __init__(self, store: JudgeStore) -> None:
+    def __init__(
+        self,
+        store: JudgeStore,
+        *,
+        memory_store: Any | None = None,
+        self_eval_budget_usd: float = 0.0,
+        self_eval_model: str = _DEFAULT_SELF_EVAL_MODEL,
+    ) -> None:
         self._store = store
+        # M1 PR1: budget tracker. Only created when monthly_budget_usd > 0
+        # AND a memory_store with the self_eval_budget table is wired.
+        self._budget: SelfEvalBudget | None = None
+        if memory_store is not None and self_eval_budget_usd > 0:
+            self._budget = SelfEvalBudget(
+                memory_store,
+                monthly_budget_usd=self_eval_budget_usd,
+                default_model=self_eval_model,
+            )
+        self._self_eval_model = self_eval_model
 
     async def run(
         self,
@@ -384,6 +555,25 @@ class Judge:
                 prompt, registry, req_id=req_id, label="memory_judge_task_completion"
             )
         elif mode == "self_eval":
+            # M1 PR1: budget gate. If a SelfEvalBudget is wired and over
+            # budget, skip the LLM call entirely (no action, no error).
+            effective_model = model or self._self_eval_model
+            reserved = 0.0
+            if self._budget is not None:
+                allowed, reserved = await self._budget.check_and_reserve(effective_model)
+                if not allowed:
+                    stats = {"add": 0, "strengthen": 0, "supersede": 0, "no_op": 1, "rejected": 0}
+                    logger.info(
+                        "memory_judge_self_eval SKIPPED automation=%s reason=budget_exceeded",
+                        automation_name,
+                    )
+                    return JudgeResult(
+                        actions=[{"op": "no_op", "reason": "self_eval_budget_exceeded"}],
+                        stats=stats,
+                        raw_response="",
+                        error=None,
+                    )
+
             prompt = _PROMPT_SELF_EVAL.format(
                 task_prompt=prompt_trunc,
                 task_output=output_trunc,
@@ -392,12 +582,35 @@ class Judge:
             # "suggested_improvement"} (not {"actions": [...]}), so the action
             # list ``parse_judge_actions`` returns is always empty here — we
             # discard it and re-parse the raw text for self_eval shape below.
-            _discard, raw_text, err = await self._invoke(
+            _discard, raw_text, err, response = await self._invoke_with_response(
                 prompt,
                 registry,
                 req_id=req_id,
                 label="memory_judge_self_eval",
             )
+            # Reconcile budget: refund the worst-case reservation against the
+            # actual usage from the LLM response (if available). Codex round-1
+            # catch: when usage is absent/malformed (e.g. provider doesn't
+            # surface token counts), DO NOT refund — fail closed and keep the
+            # worst-case reserve so the budget can't be silently bypassed.
+            if self._budget is not None and reserved > 0:
+                input_tokens, output_tokens = _extract_response_tokens(response)
+                if input_tokens == 0 and output_tokens == 0:
+                    # No usage signal — keep the reserve. Log so operators
+                    # can debug a budget that drains faster than expected.
+                    logger.info(
+                        "memory_judge_self_eval: response carried no usage; "
+                        "keeping reserved=%.4f (fail-closed budget gate)",
+                        reserved,
+                    )
+                else:
+                    actual_cost = _calculate_cost_usd(
+                        effective_model, input_tokens, output_tokens
+                    )
+                    try:
+                        await self._budget.reconcile(reserved, actual_cost)
+                    except Exception as exc:
+                        logger.warning("self_eval_budget reconcile failed: %s", exc)
             actions = []
             if err is None:
                 parsed = _try_parse_self_eval(raw_text)
@@ -483,14 +696,31 @@ class Judge:
         req_id: str | None,
         label: str,
     ) -> tuple[list[dict[str, Any]], str, str | None]:
+        actions, raw, err, _ = await self._invoke_with_response(
+            prompt, registry, req_id=req_id, label=label
+        )
+        return actions, raw, err
+
+    async def _invoke_with_response(
+        self,
+        prompt: str,
+        registry,
+        *,
+        req_id: str | None,
+        label: str,
+    ) -> tuple[list[dict[str, Any]], str, str | None, Any]:
+        """Variant of :meth:`_invoke` that also returns the raw AgentResponse.
+
+        Used by self_eval to extract ``response.usage`` for budget reconcile.
+        """
         try:
             _agent, response = await registry.run(prompt, run_label=label)
         except Exception as exc:
-            return [], "", f"agent_exception: {exc}"
+            return [], "", f"agent_exception: {exc}", None
         if response.error:
-            return [], response.text or "", response.error
+            return [], response.text or "", response.error, response
         actions = parse_judge_actions(response.text or "")
-        return actions, response.text or "", None
+        return actions, response.text or "", None, response
 
     @staticmethod
     def _format_execution_context(

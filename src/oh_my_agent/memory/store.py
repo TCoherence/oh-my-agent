@@ -507,6 +507,21 @@ class MemoryStore(ABC):
         """Aggregate usage events in the given window. Returns empty dict for stores that don't track usage."""
         return {"total": {}, "by_agent": [], "by_source": []}
 
+    # -- M1 PR1 self-eval budget ledger ----------------------------------
+
+    async def get_self_eval_budget(self, year_month: str) -> float:
+        """Return cumulative USD spent on self-eval LLM calls this month."""
+        return 0.0
+
+    async def add_self_eval_spend(self, year_month: str, amount_usd: float) -> float:
+        """Atomically add ``amount_usd`` to the month's budget row, returning new total.
+
+        Stores that don't track self-eval budget should return the input
+        amount and act as a no-op; callers must NOT rely on the returned
+        value for hard gating in that case.
+        """
+        return amount_usd
+
     # -- schema version ---------------------------------------------------
 
     async def get_schema_version(self) -> int:
@@ -1011,6 +1026,16 @@ CREATE INDEX IF NOT EXISTS idx_usage_events_thread
     ON usage_events(platform, channel_id, thread_id, ts);
 CREATE INDEX IF NOT EXISTS idx_usage_events_source
     ON usage_events(source, ts);
+
+-- M1 PR1: monthly budget ledger for LLM self-eval judge calls.
+-- Decoupled from usage_events (raw per-call) so budget gating reads a
+-- single row per month instead of aggregating thousands. year_month is
+-- the natural month bucket (YYYY-MM) which doubles as the PK.
+CREATE TABLE IF NOT EXISTS self_eval_budget (
+    year_month   TEXT PRIMARY KEY,           -- YYYY-MM
+    usd_spent    REAL NOT NULL DEFAULT 0.0,
+    updated_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 
 CREATE TABLE IF NOT EXISTS schema_version (
     id          INTEGER PRIMARY KEY CHECK (id = 1),
@@ -1704,6 +1729,42 @@ class SQLiteMemoryStore(MemoryStore):
                 ),
             )
             await db.commit()
+
+    # -- M1 PR1 self-eval budget ledger ----------------------------------
+
+    async def get_self_eval_budget(self, year_month: str) -> float:
+        db = await self._conn()
+        cursor = await db.execute(
+            "SELECT usd_spent FROM self_eval_budget WHERE year_month=?",
+            (year_month,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return 0.0
+        return float(row[0] or 0.0)
+
+    async def add_self_eval_spend(self, year_month: str, amount_usd: float) -> float:
+        """Atomically add ``amount_usd`` to the month bucket; returns new total.
+
+        Negative amount is allowed for reconcile (refund) flows.
+        """
+        async with self._write_lock:
+            db = await self._conn()
+            await db.execute(
+                "INSERT INTO self_eval_budget (year_month, usd_spent, updated_at) "
+                "VALUES (?, ?, CURRENT_TIMESTAMP) "
+                "ON CONFLICT(year_month) DO UPDATE SET "
+                " usd_spent = usd_spent + excluded.usd_spent, "
+                " updated_at = CURRENT_TIMESTAMP",
+                (year_month, float(amount_usd)),
+            )
+            await db.commit()
+            cursor = await db.execute(
+                "SELECT usd_spent FROM self_eval_budget WHERE year_month=?",
+                (year_month,),
+            )
+            row = await cursor.fetchone()
+            return float(row[0] or 0.0) if row else 0.0
 
     async def get_usage_summary(
         self,
