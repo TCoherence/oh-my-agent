@@ -1238,6 +1238,7 @@ async def ignite(ctx: BootContext) -> None:
                 scheduler=scheduler,
                 runtime_service=runtime_service,
                 store=memory_store,
+                gateway=gateway,
             )
             uconfig = uvicorn.Config(
                 dash_app,
