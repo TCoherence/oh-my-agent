@@ -806,7 +806,7 @@ async def ignite(ctx: BootContext) -> None:
     if memory_cfg_block.get("enabled", False):
         from oh_my_agent.memory.idle_trigger import IdleTracker
         from oh_my_agent.memory.judge import Judge
-        from oh_my_agent.memory.judge_store import JudgeStore
+        from oh_my_agent.memory.judge_store import JudgeStore, MemoryStoreLoadError
 
         memory_dir = str(_paths.judge_memory_dir(config))
         _warn_if_legacy_memory_layout(Path(memory_dir), logger)
@@ -815,7 +815,19 @@ async def ignite(ctx: BootContext) -> None:
             synthesize_after_seconds=int(memory_cfg_block.get("synthesize_after_seconds", 6 * 3600)),
             max_evidence_per_entry=int(memory_cfg_block.get("max_evidence_per_entry", 8)),
         )
-        await judge_store.load()
+        # M0 PR1: degrade to read-only mode if memories.yaml is unrecoverable
+        # (top-level malformation, etc.) rather than crashing the bot at boot.
+        # Read-only mode lets the bot continue serving chat while memory writes
+        # short-circuit; operator fixes the file then restarts.
+        try:
+            await judge_store.load()
+        except MemoryStoreLoadError as exc:
+            logger.error(
+                "Memory store at %s is unrecoverable: %s — continuing in "
+                "read-only memory mode (judge writes will be no-ops).",
+                memory_dir,
+                exc,
+            )
         memory_judge = Judge(judge_store)
         idle_seconds = float(memory_cfg_block.get("idle_seconds", 15 * 60))
         poll_interval = float(memory_cfg_block.get("idle_poll_seconds", 60))
@@ -824,12 +836,27 @@ async def ignite(ctx: BootContext) -> None:
             idle_seconds=idle_seconds,
             poll_interval_seconds=poll_interval,
         )
-        logger.info(
-            "Judge memory enabled: %s active=%d idle=%ss",
-            memory_dir,
-            judge_store.stats()["active"],
-            int(idle_seconds),
-        )
+        load_stats = judge_store.last_load_stats
+        if judge_store.is_readonly:
+            logger.info(
+                "Judge memory READ-ONLY: %s (judge writes disabled)",
+                memory_dir,
+            )
+        elif load_stats.get("skipped", 0) > 0:
+            logger.warning(
+                "Judge memory enabled: %s active=%d skipped=%d (quarantine backup written) idle=%ss",
+                memory_dir,
+                judge_store.stats()["active"],
+                load_stats["skipped"],
+                int(idle_seconds),
+            )
+        else:
+            logger.info(
+                "Judge memory enabled: %s active=%d idle=%ss",
+                memory_dir,
+                judge_store.stats()["active"],
+                int(idle_seconds),
+            )
 
     # Sync skills
     skills_cfg = config.get("skills", {})
