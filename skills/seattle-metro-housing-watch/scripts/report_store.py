@@ -276,6 +276,7 @@ def build_json_scaffold(
         "summary": "",
         "key_takeaways": [],
         "rate_context": "",
+        "rate_sources": [],
         "metro_context": "",
         "area_scoreboard": _blank_area_scoreboard(CORE_AREAS if mode != "area_deep_dive" else [normalize_area(area)]),
         "sample_listings": [],
