@@ -283,6 +283,89 @@ async def test_feedback_scan_worker_runs_and_stops(memory_store, judge_store):
     assert worker._task.done()
 
 
+# =====================================================================
+# M1 PR3 — explicit feedback path
+# =====================================================================
+
+
+@pytest.mark.asyncio
+async def test_record_explicit_feedback_good(memory_store, judge_store):
+    await memory_store.record_automation_post(
+        platform="discord",
+        channel_id="ch-1",
+        message_id="msg-explicit",
+        automation_name="auto-exp",
+        task_id="task-exp",
+    )
+    collector = FeedbackCollector(memory_store=memory_store, judge_store=judge_store)
+    ok = await collector.record_explicit_feedback(
+        task_id="task-exp", verdict="good", note="great", actor_id="owner-1"
+    )
+    assert ok
+    entry = judge_store.get_active()[0]
+    assert entry.category == "self_eval"
+    assert entry.feedback_source == "explicit"
+    assert entry.quality == "pass"
+    assert entry.confidence == 0.9
+    assert "great" in entry.summary
+
+
+@pytest.mark.asyncio
+async def test_record_explicit_feedback_bad(memory_store, judge_store):
+    await memory_store.record_automation_post(
+        platform="discord",
+        channel_id="ch-1",
+        message_id="msg-bad",
+        automation_name="auto-bad",
+        task_id="task-bad",
+    )
+    collector = FeedbackCollector(memory_store=memory_store, judge_store=judge_store)
+    ok = await collector.record_explicit_feedback(
+        task_id="task-bad", verdict="bad", note=None, actor_id="owner-1"
+    )
+    assert ok
+    entry = judge_store.get_active()[0]
+    assert entry.quality == "fail"
+    assert entry.feedback_source == "explicit"
+
+
+@pytest.mark.asyncio
+async def test_record_explicit_feedback_missing_automation_returns_false(
+    memory_store, judge_store
+):
+    collector = FeedbackCollector(memory_store=memory_store, judge_store=judge_store)
+    ok = await collector.record_explicit_feedback(
+        task_id="never-existed", verdict="good"
+    )
+    assert not ok
+    assert judge_store.get_active() == []
+
+
+@pytest.mark.asyncio
+async def test_record_explicit_overrides_implicit_via_lock(memory_store, judge_store):
+    """Both implicit + explicit can write for the same task — per-task
+    lock makes them serial so both writes succeed (PR4 merges them)."""
+    await memory_store.record_automation_post(
+        platform="discord",
+        channel_id="ch-1",
+        message_id="msg-both",
+        automation_name="auto-both",
+        task_id="task-both",
+    )
+    collector = FeedbackCollector(memory_store=memory_store, judge_store=judge_store)
+    # Implicit first
+    await collector.record_reaction(
+        message_id="msg-both", emoji="👎", action="add", actor_id="owner-1"
+    )
+    # Explicit second
+    await collector.record_explicit_feedback(
+        task_id="task-both", verdict="good", note="actually it's fine", actor_id="owner-1"
+    )
+    entries = judge_store.get_active()
+    sources = {e.feedback_source for e in entries}
+    assert sources == {"implicit", "explicit"}
+
+
 def test_parse_ts_handles_iso_and_sql_formats():
     from datetime import datetime, timezone
 

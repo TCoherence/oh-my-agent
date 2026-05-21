@@ -5933,6 +5933,22 @@ class RuntimeService:
                     first_message_id,
                     exc_info=True,
                 )
+            # M1 PR3: bot-emitted 👍/👎 reaction prompts on the completion
+            # message. Channels without reaction support no-op via the
+            # BaseChannel default. Fire-and-forget — never block completion.
+            channel = getattr(session, "channel", None)
+            if channel is not None and hasattr(channel, "add_reactions"):
+                try:
+                    await channel.add_reactions(
+                        notify_thread_id, first_message_id, ["👍", "👎"]
+                    )
+                except Exception:
+                    logger.debug(
+                        "add_reactions failed task=%s msg=%s",
+                        task.id,
+                        first_message_id,
+                        exc_info=True,
+                    )
 
     def _session_for_notify(
         self, task: RuntimeTask, notify_channel_id: str
