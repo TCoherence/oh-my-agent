@@ -511,6 +511,7 @@ class Judge:
         skill_name: str | None = None,
         source_workspace: str | None = None,
         thread_id: str | None = None,
+        task_id: str | None = None,
         req_id: str | None = None,
         model: str | None = None,
     ) -> JudgeResult:
@@ -611,17 +612,62 @@ class Judge:
                         await self._budget.reconcile(reserved, actual_cost)
                     except Exception as exc:
                         logger.warning("self_eval_budget reconcile failed: %s", exc)
-            actions = []
+            # M1 PR4: self_eval persists via upsert_self_eval_signal so the
+            # LLM verdict merges with implicit/explicit signals into ONE
+            # entry per task. Requires automation_name + task_id.
             if err is None:
                 parsed = _try_parse_self_eval(raw_text)
-                if parsed is not None and automation_name:
-                    coerced = self._coerce_self_eval_to_action(
-                        parsed, automation_name=automation_name
-                    )
-                    if coerced is not None:
-                        actions = [coerced]
-                elif parsed is None:
+                if parsed is None:
                     err = "self_eval_parse_failed"
+                elif automation_name and task_id:
+                    quality = str(parsed.get("quality", "")).strip().lower()
+                    if quality not in {"pass", "borderline", "fail"}:
+                        err = "self_eval_invalid_quality"
+                    else:
+                        reason = str(parsed.get("reason", "")).strip() or "(unspecified)"
+                        suggested = str(parsed.get("suggested_improvement", "")).strip()
+                        # upsert prefixes "reason=" itself; pass clean text.
+                        reason_full = reason
+                        if suggested:
+                            reason_full = f"{reason}; suggested={suggested}"
+                        confidence = {"pass": 0.5, "borderline": 0.4, "fail": 0.5}[quality]
+                        entry_id = await self._store.upsert_self_eval_signal(
+                            automation_name=automation_name,
+                            task_id=task_id,
+                            source="llm_judge",
+                            quality=quality,
+                            confidence=confidence,
+                            reason=reason_full,
+                            skill_name=skill_name,
+                            source_workspace=source_workspace,
+                        )
+                        stats = {
+                            "add": 1 if entry_id else 0,
+                            "strengthen": 0,
+                            "supersede": 0,
+                            "no_op": 0,
+                            "rejected": 0 if entry_id else 1,
+                        }
+                        logger.info(
+                            "memory_judge_self_eval merged automation=%s task=%s "
+                            "quality=%s entry=%s",
+                            automation_name,
+                            task_id,
+                            quality,
+                            entry_id,
+                        )
+                        return JudgeResult(
+                            actions=[{"op": "add", "category": "self_eval", "quality": quality}]
+                            if entry_id
+                            else [],
+                            stats=stats,
+                            raw_response=raw_text,
+                            error=None,
+                        )
+                # No automation_name/task_id → can't write self_eval (manual run)
+                actions = []
+            else:
+                actions = []
         else:
             raise ValueError(f"unknown Judge.run_for_task mode: {mode!r}")
 

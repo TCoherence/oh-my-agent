@@ -193,6 +193,49 @@ async def test_scan_no_reply_dedupes_existing(memory_store, judge_store):
 
 
 @pytest.mark.asyncio
+async def test_scan_no_reply_merges_into_llm_only_entry(memory_store, judge_store):
+    """Codex M1 PR4 fix: no-reply scan must MERGE into an LLM-only self_eval
+    entry (not be suppressed by it). The dedupe is on implicit-signal
+    presence, not any self_eval."""
+    # Simulate the LLM self_eval already having written a per-task entry
+    await judge_store.upsert_self_eval_signal(
+        automation_name="auto-llm",
+        task_id="task-llm",
+        source="llm_judge",
+        quality="pass",
+        confidence=0.5,
+        reason="looked fine to the LLM",
+    )
+    # Pre-record an old automation post for the same task (no engagement)
+    await memory_store.record_automation_post(
+        platform="discord",
+        channel_id="ch-1",
+        message_id="msg-llm",
+        automation_name="auto-llm",
+        task_id="task-llm",
+    )
+    db = await memory_store._conn()
+    await db.execute(
+        "UPDATE automation_posts SET fired_at = datetime('now', '-48 hours') WHERE message_id=?",
+        ("msg-llm",),
+    )
+    await db.commit()
+    collector = FeedbackCollector(
+        memory_store=memory_store, judge_store=judge_store, no_reply_window_hours=1
+    )
+    written = await collector.scan_no_reply_negative()
+    assert written == 1  # merged, not suppressed
+    # Still ONE entry, now with both llm_judge + implicit signals
+    self_evals = [e for e in judge_store.get_active() if e.category == "self_eval"]
+    assert len(self_evals) == 1
+    sources = {s["source"] for s in self_evals[0].signals}
+    assert sources == {"llm_judge", "implicit"}
+    # Second scan is a no-op (implicit signal now present)
+    written2 = await collector.scan_no_reply_negative()
+    assert written2 == 0
+
+
+@pytest.mark.asyncio
 async def test_scan_skips_engaged_posts(memory_store, judge_store):
     """Codex round-1 catch: posts with follow_up_thread_id are user-engaged
     and must NOT receive a no-reply weak-negative."""
@@ -342,9 +385,9 @@ async def test_record_explicit_feedback_missing_automation_returns_false(
 
 
 @pytest.mark.asyncio
-async def test_record_explicit_overrides_implicit_via_lock(memory_store, judge_store):
-    """Both implicit + explicit can write for the same task — per-task
-    lock makes them serial so both writes succeed (PR4 merges them)."""
+async def test_implicit_and_explicit_merge_into_one_entry(memory_store, judge_store):
+    """M1 PR4: implicit + explicit feedback for the same task MERGE into
+    ONE self_eval entry with both in the signals list."""
     await memory_store.record_automation_post(
         platform="discord",
         channel_id="ch-1",
@@ -353,17 +396,29 @@ async def test_record_explicit_overrides_implicit_via_lock(memory_store, judge_s
         task_id="task-both",
     )
     collector = FeedbackCollector(memory_store=memory_store, judge_store=judge_store)
-    # Implicit first
+    # Implicit first (👎 → fail, confidence 0.55)
     await collector.record_reaction(
         message_id="msg-both", emoji="👎", action="add", actor_id="owner-1"
     )
-    # Explicit second
+    # Explicit second (good → pass, confidence 0.9 — higher, so it wins)
     await collector.record_explicit_feedback(
         task_id="task-both", verdict="good", note="actually it's fine", actor_id="owner-1"
     )
     entries = judge_store.get_active()
-    sources = {e.feedback_source for e in entries}
-    assert sources == {"implicit", "explicit"}
+    # Exactly ONE merged entry
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry.category == "self_eval"
+    # Both signals captured
+    signal_sources = {s["source"] for s in entry.signals}
+    assert signal_sources == {"implicit", "explicit"}
+    # Highest-confidence signal (explicit 0.9) wins on quality + confidence
+    assert entry.confidence == 0.9
+    assert entry.quality == "pass"
+    # Latest writer is the primary feedback_source tag
+    assert entry.feedback_source == "explicit"
+    # observation_count reflects 2 signals
+    assert entry.observation_count == 2
 
 
 def test_parse_ts_handles_iso_and_sql_formats():

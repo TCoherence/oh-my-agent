@@ -1,0 +1,34 @@
+scenario: outcome-feedback-explicit
+description: |
+  M1 PR4 / M3.2 — explicit /feedback writes a self_eval entry with
+  feedback_source=explicit and quality derived from the verdict.
+
+  Pre-seeds an automation_post (no need to run a real automation) so the
+  feedback collector can resolve task_id → automation. record_feedback
+  drives FeedbackCollector.record_explicit_feedback directly (HarnessChannel
+  doesn't model Discord slash commands).
+
+seed:
+  judge: fake
+  automation_posts:
+    - message_id: "msg-explicit-1"
+      automation_name: "auto-explicit"
+      task_id: "task-explicit-1"
+  agents:
+    claude:
+      responses:
+        - when: { default: true }
+          text: "(stub) ok\nTASK_STATE: DONE"
+
+steps:
+  - record_feedback:
+      task_id: "task-explicit-1"
+      verdict: "bad"
+      note: "too long, cut it down"
+      actor_id: "owner-1"
+
+expect:
+  memory:
+    self_eval_count: 1
+    self_eval_quality: "fail"
+    self_eval_feedback_source: "explicit"

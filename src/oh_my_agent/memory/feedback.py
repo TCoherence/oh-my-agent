@@ -249,7 +249,13 @@ class FeedbackCollector:
             # Per-task lock: covers dedupe check + write, race-safe with
             # record_reaction() running concurrently on the same task.
             async with self._lock_for_task(lookup.task_id):
-                if await self._has_existing_self_eval_for_task(lookup.task_id):
+                # Codex M1 PR4 fix: dedupe on existing IMPLICIT signal, not
+                # any self_eval. The LLM self_eval now writes a per-task
+                # entry on completion, so checking "any self_eval" would
+                # suppress the no-reply signal forever. We only skip if the
+                # user already engaged (reaction → implicit signal present)
+                # or a prior scan already added a no-reply implicit signal.
+                if self._has_implicit_signal_for_task(lookup.task_id):
                     continue
                 ok = await self._write_self_eval(
                     lookup=lookup,
@@ -340,20 +346,30 @@ class FeedbackCollector:
             source_workspace=row.get("source_workspace"),
         )
 
-    async def _has_existing_self_eval_for_task(self, task_id: str) -> bool:
-        """Check whether any active self_eval entry already carries this
-        task_id in its evidence trail. Cheap dedupe so the scan worker
-        doesn't pile on duplicates.
+    def _has_implicit_signal_for_task(self, task_id: str) -> bool:
+        """True if an active self_eval entry for this task already carries an
+        ``implicit`` signal.
+
+        Codex M1 PR4: the no-reply scan dedupes on this (not "any self_eval")
+        because the LLM self_eval writes a per-task entry on completion. We
+        want the no-reply weak-negative to still merge into an LLM-only entry,
+        but never pile on top of an existing implicit signal (user reacted,
+        or a prior scan already fired).
         """
         active = self._judge_store.get_active()
         for entry in active:
             if entry.category != "self_eval":
                 continue
-            for evidence in entry.evidence_log:
-                if str(evidence.thread_id or "").endswith(task_id):
+            # Match by evidence thread_id (the per-task key) ending with task.
+            matches_task = any(
+                str(ev.thread_id or "").endswith(f"task:{task_id}")
+                for ev in entry.evidence_log
+            )
+            if not matches_task:
+                continue
+            for sig in entry.signals:
+                if str(sig.get("source")) == "implicit":
                     return True
-            if entry.source_automation and task_id in (entry.summary or ""):
-                return True
         return False
 
     async def _write_self_eval(
@@ -366,49 +382,38 @@ class FeedbackCollector:
         feedback_source: Literal["implicit", "explicit"],
         actor_id: str | None,
     ) -> bool:
-        """Apply a self_eval add action via the shared JudgeStore path.
+        """Merge a feedback signal into the per-task self_eval entry.
 
-        Returns True if the action was persisted (write succeeded), False
-        on validation reject or any exception.
+        M1 PR4: routes through ``JudgeStore.upsert_self_eval_signal`` so the
+        three feedback sources (llm_judge / implicit / explicit) consolidate
+        into ONE entry per task, with a ``signals`` list and confidence =
+        max across sources. Returns True on a real write.
         """
         actor_tag = f"actor={actor_id}" if actor_id else "actor=unknown"
-        summary = f"reason={reason}; task={lookup.task_id}; {actor_tag}"
-        action = {
-            "op": "add",
-            "summary": summary[:280],
-            "category": "self_eval",
-            "scope": "automation",
-            "source_automation": lookup.automation_name,
-            "feedback_source": feedback_source,
-            "quality": quality,
-            "confidence": confidence,
-            "evidence": reason,
-        }
-        # Pass a synthetic thread_id so the evidence_log lookup later can
-        # dedupe by task. Mirrors RuntimeService._spawn_post_completion_judge
-        # convention: `automation:<name>` for shared automation memory +
-        # ``task:<id>`` suffix appended below for per-task dedupe.
-        synthetic_thread = (
-            f"automation:{lookup.automation_name}::task:{lookup.task_id}"
-        )
+        reason_full = f"{reason}; {actor_tag}"
         try:
-            stats = await self._judge_store.apply_actions(
-                [action],
-                thread_id=synthetic_thread,
+            entry_id = await self._judge_store.upsert_self_eval_signal(
+                automation_name=lookup.automation_name,
+                task_id=lookup.task_id,
+                source=feedback_source,
+                quality=quality,
+                confidence=confidence,
+                reason=reason_full,
                 skill_name=lookup.skill_name,
                 source_workspace=lookup.source_workspace,
             )
         except Exception as exc:
-            logger.warning("FeedbackCollector apply_actions failed: %s", exc)
+            logger.warning("FeedbackCollector upsert_self_eval_signal failed: %s", exc)
             return False
-        if stats.get("add", 0) > 0:
+        if entry_id is not None:
             logger.info(
-                "FeedbackCollector wrote self_eval automation=%s task=%s "
-                "quality=%s source=%s",
+                "FeedbackCollector merged self_eval automation=%s task=%s "
+                "quality=%s source=%s entry=%s",
                 lookup.automation_name,
                 lookup.task_id,
                 quality,
                 feedback_source,
+                entry_id,
             )
             return True
         return False

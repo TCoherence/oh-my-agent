@@ -3859,6 +3859,7 @@ class RuntimeService:
                 skill_name=task.skill_name,
                 source_workspace=str(self._repo_root),
                 thread_id=synthetic_thread,
+                task_id=task.id,
                 model=model_override,
             )
         except Exception as exc:
