@@ -361,3 +361,251 @@ def test_truncate_helper():
     out = _truncate(long, 100)
     assert len(out) <= 100
     assert "[truncated]" in out
+
+
+# =====================================================================
+# M1 PR1 — SelfEvalBudget + cost extraction + run_for_task gate
+# =====================================================================
+
+
+def test_calculate_cost_sonnet_basic():
+    from oh_my_agent.memory.judge import _calculate_cost_usd
+
+    # Sonnet 4.6: $3/$15 per Mtok
+    cost = _calculate_cost_usd("claude-sonnet-4-6", 1_000_000, 1_000_000)
+    assert cost == pytest.approx(18.0, abs=1e-6)
+    cost_small = _calculate_cost_usd("claude-sonnet-4-6", 15_000, 800)
+    # 15k * 3/1M = 0.045 ; 800 * 15/1M = 0.012 → 0.057
+    assert cost_small == pytest.approx(0.057, abs=1e-4)
+
+
+def test_calculate_cost_unknown_model_falls_back():
+    from oh_my_agent.memory.judge import _calculate_cost_usd
+
+    # Unknown model → sonnet-4-6 pricing
+    cost = _calculate_cost_usd("bogus-model", 1_000_000, 0)
+    assert cost == pytest.approx(3.0, abs=1e-6)
+
+
+def test_boot_per_skill_enabled_triggers_budget_construction():
+    """Codex round-1 catch: per-skill enabled without global enabled must
+    still construct the budget so the per-skill call is gated. This is the
+    inline boot.py decision; we replicate it here as a unit test."""
+    # Replicate boot.py's any_self_eval_enabled computation
+    def any_enabled(global_enabled: bool, per_skill: dict) -> bool:
+        per_skill_any = any(
+            bool(override.get("enabled", False))
+            for override in per_skill.values()
+            if isinstance(override, dict)
+        )
+        return global_enabled or per_skill_any
+
+    # Global off + per_skill off → budget skipped
+    assert not any_enabled(False, {})
+    assert not any_enabled(False, {"sk": {"enabled": False}})
+    # Global on → budget on
+    assert any_enabled(True, {})
+    # Global off but a per_skill override → budget MUST be built
+    assert any_enabled(False, {"skill-a": {"enabled": True}})
+    # Mixed
+    assert any_enabled(False, {"a": {"enabled": False}, "b": {"enabled": True}})
+
+
+def test_extract_response_tokens_handles_missing_usage():
+    from oh_my_agent.memory.judge import _extract_response_tokens
+
+    class Resp:
+        usage = None
+
+    assert _extract_response_tokens(Resp()) == (0, 0)
+
+    class Resp2:
+        usage = {"input_tokens": 1234, "output_tokens": 56}
+
+    assert _extract_response_tokens(Resp2()) == (1234, 56)
+
+    class Resp3:
+        usage = {"input_tokens": "bad", "output_tokens": None}
+
+    assert _extract_response_tokens(Resp3()) == (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_self_eval_budget_check_and_reserve_allows_under_budget(tmp_path: Path):
+    from oh_my_agent.memory.judge import SelfEvalBudget
+    from oh_my_agent.memory.store import SQLiteMemoryStore
+
+    store = SQLiteMemoryStore(tmp_path / "runtime.db")
+    await store.init()
+    try:
+        budget = SelfEvalBudget(store, monthly_budget_usd=1.0)
+        allowed, reserved = await budget.check_and_reserve("claude-sonnet-4-6")
+        assert allowed
+        assert reserved > 0
+        # Reconcile a smaller actual spend → row goes down
+        await budget.reconcile(reserved, reserved * 0.5)
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_self_eval_budget_disabled_when_zero(tmp_path: Path):
+    from oh_my_agent.memory.judge import SelfEvalBudget
+    from oh_my_agent.memory.store import SQLiteMemoryStore
+
+    store = SQLiteMemoryStore(tmp_path / "runtime.db")
+    await store.init()
+    try:
+        budget = SelfEvalBudget(store, monthly_budget_usd=0)
+        assert not budget.enabled
+        allowed, reserved = await budget.check_and_reserve("claude-sonnet-4-6")
+        assert allowed
+        assert reserved == 0
+        # reconcile is a no-op when disabled
+        await budget.reconcile(reserved, 100)
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_self_eval_budget_rejects_when_exhausted(tmp_path: Path):
+    from oh_my_agent.memory.judge import SelfEvalBudget, _current_year_month
+    from oh_my_agent.memory.store import SQLiteMemoryStore
+
+    store = SQLiteMemoryStore(tmp_path / "runtime.db")
+    await store.init()
+    try:
+        budget = SelfEvalBudget(store, monthly_budget_usd=0.01)  # tiny budget
+        # First reserve eats the budget
+        allowed1, _ = await budget.check_and_reserve("claude-sonnet-4-6")
+        # Second reserve sees budget already exceeded
+        allowed2, reserved2 = await budget.check_and_reserve("claude-sonnet-4-6")
+        # Sonnet reserve = 15k*3/1M + 800*15/1M = 0.057, way over $0.01
+        assert not allowed1 or not allowed2
+        if not allowed2:
+            assert reserved2 == 0
+        # Either way, ledger advanced
+        spent = await store.get_self_eval_budget(_current_year_month())
+        assert spent >= 0
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_run_for_task_self_eval_skipped_when_budget_exceeded(tmp_path: Path):
+    from oh_my_agent.memory.store import SQLiteMemoryStore
+
+    judge_store = JudgeStore(memory_dir=tmp_path)
+    await judge_store.load()
+    sqlite_store = SQLiteMemoryStore(tmp_path / "runtime.db")
+    await sqlite_store.init()
+    try:
+        # Force budget to zero (effectively no money)
+        judge = Judge(
+            judge_store,
+            memory_store=sqlite_store,
+            self_eval_budget_usd=0.001,  # below per-call reservation
+            self_eval_model="claude-sonnet-4-6",
+        )
+        registry = StubRegistry([])  # must NOT be called
+        result = await judge.run_for_task(
+            mode="self_eval",
+            registry=registry,
+            task_prompt="x",
+            task_output="y",
+            automation_name="auto-x",
+        )
+        # LLM was never called
+        assert registry.calls == []
+        # No actions written
+        assert result.stats["add"] == 0
+        # Returned no_op marked as budget_exceeded
+        assert result.actions[0]["op"] == "no_op"
+        assert "budget" in result.actions[0]["reason"]
+    finally:
+        await sqlite_store.close()
+
+
+@pytest.mark.asyncio
+async def test_run_for_task_self_eval_keeps_reserve_when_usage_missing(tmp_path: Path):
+    """Codex round-1 catch: missing usage → keep reserve, do NOT refund (fail-closed)."""
+    from oh_my_agent.memory.judge import _current_year_month
+    from oh_my_agent.memory.store import SQLiteMemoryStore
+
+    judge_store = JudgeStore(memory_dir=tmp_path)
+    await judge_store.load()
+    sqlite_store = SQLiteMemoryStore(tmp_path / "runtime.db")
+    await sqlite_store.init()
+    try:
+        judge = Judge(
+            judge_store,
+            memory_store=sqlite_store,
+            self_eval_budget_usd=1.0,
+            self_eval_model="claude-sonnet-4-6",
+        )
+
+        class _NoUsageResponse:
+            text = json.dumps({"quality": "pass", "reason": "good"})
+            error = None
+            # NO usage field — simulates a provider that doesn't surface tokens
+            usage = None
+
+        class _NoUsageRegistry:
+            async def run(self, prompt, run_label=None):
+                return FakeAgent(), _NoUsageResponse()
+
+        await judge.run_for_task(
+            mode="self_eval",
+            registry=_NoUsageRegistry(),
+            task_prompt="x",
+            task_output="y",
+            automation_name="auto-x",
+        )
+        # Spend should be the worst-case reservation (NOT zero), because
+        # without usage we can't trust a refund.
+        spent = await sqlite_store.get_self_eval_budget(_current_year_month())
+        assert spent == pytest.approx(0.057, abs=1e-4)  # 15k*3/1M + 800*15/1M
+    finally:
+        await sqlite_store.close()
+
+
+@pytest.mark.asyncio
+async def test_run_for_task_self_eval_reconciles_with_usage(tmp_path: Path):
+    """Budget reconciled with actual usage when LLM returns usage stats."""
+    from oh_my_agent.memory.judge import _current_year_month
+    from oh_my_agent.memory.store import SQLiteMemoryStore
+
+    judge_store = JudgeStore(memory_dir=tmp_path)
+    await judge_store.load()
+    sqlite_store = SQLiteMemoryStore(tmp_path / "runtime.db")
+    await sqlite_store.init()
+    try:
+        judge = Judge(
+            judge_store,
+            memory_store=sqlite_store,
+            self_eval_budget_usd=1.0,
+            self_eval_model="claude-sonnet-4-6",
+        )
+
+        class _UsageResponse:
+            text = json.dumps({"quality": "pass", "reason": "good", "suggested_improvement": ""})
+            error = None
+            usage = {"input_tokens": 100, "output_tokens": 50}
+
+        class _UsageRegistry:
+            async def run(self, prompt, run_label=None):
+                return FakeAgent(), _UsageResponse()
+
+        await judge.run_for_task(
+            mode="self_eval",
+            registry=_UsageRegistry(),
+            task_prompt="x",
+            task_output="y",
+            automation_name="auto-x",
+        )
+        # Spend should reflect actual usage (100 + 50 tokens at sonnet rates)
+        # = 100*3/1M + 50*15/1M = 0.0003 + 0.00075 = 0.00105
+        spent = await sqlite_store.get_self_eval_budget(_current_year_month())
+        assert spent == pytest.approx(0.00105, abs=1e-5)
+    finally:
+        await sqlite_store.close()

@@ -799,13 +799,15 @@ async def ignite(ctx: BootContext) -> None:
     judge_store = None
     memory_judge = None
     idle_tracker = None
+    self_eval_enabled_global = False  # M1 PR1: default off; set in judge block below
+    self_eval_cfg: dict = {}
     _warn_if_legacy_memory_config(memory_cfg, logger)
     memory_cfg_block = memory_cfg.get("judge", memory_cfg.get("adaptive", {}))
     memory_inject_limit = int(memory_cfg_block.get("inject_limit", 12))
     memory_keyword_patterns = memory_cfg_block.get("keyword_patterns") or None
     if memory_cfg_block.get("enabled", False):
         from oh_my_agent.memory.idle_trigger import IdleTracker
-        from oh_my_agent.memory.judge import Judge
+        from oh_my_agent.memory.judge import _DEFAULT_SELF_EVAL_MODEL, Judge
         from oh_my_agent.memory.judge_store import JudgeStore, MemoryStoreLoadError
 
         memory_dir = str(_paths.judge_memory_dir(config))
@@ -828,7 +830,29 @@ async def ignite(ctx: BootContext) -> None:
                 memory_dir,
                 exc,
             )
-        memory_judge = Judge(judge_store)
+        # M1 PR1: optional self_eval LLM judging gated by monthly budget.
+        # All keys default to off / safe — production must opt in via config.
+        self_eval_cfg = memory_cfg_block.get("self_eval", {}) or {}
+        self_eval_enabled_global = bool(self_eval_cfg.get("enabled", False))
+        self_eval_budget_usd = float(self_eval_cfg.get("monthly_budget_usd", 5.0))
+        self_eval_model = str(self_eval_cfg.get("model", _DEFAULT_SELF_EVAL_MODEL))
+        # Codex M1 PR1 fix: per-skill enabled MUST also build the budget,
+        # otherwise an override that says `enabled: true` while global is
+        # `false` runs unbudgeted self-eval. Construct the budget if ANY
+        # gate is open.
+        per_skill_cfg = dict(self_eval_cfg.get("per_skill") or {})
+        per_skill_any_enabled = any(
+            bool(override.get("enabled", False))
+            for override in per_skill_cfg.values()
+            if isinstance(override, dict)
+        )
+        any_self_eval_enabled = self_eval_enabled_global or per_skill_any_enabled
+        memory_judge = Judge(
+            judge_store,
+            memory_store=memory_store,
+            self_eval_budget_usd=self_eval_budget_usd if any_self_eval_enabled else 0.0,
+            self_eval_model=self_eval_model,
+        )
         idle_seconds = float(memory_cfg_block.get("idle_seconds", 15 * 60))
         poll_interval = float(memory_cfg_block.get("idle_poll_seconds", 60))
         idle_tracker = IdleTracker(
@@ -934,6 +958,8 @@ async def ignite(ctx: BootContext) -> None:
             judge_store=judge_store,  # M0 PR2: memory injection in runtime path
             memory_inject_limit=int(memory_cfg_block.get("automation_inject_limit", 8)),
             memory_judge=memory_judge,  # M0 PR3: post-completion judge trigger
+            self_eval_enabled=self_eval_enabled_global if judge_store is not None else False,
+            self_eval_per_skill=dict(self_eval_cfg.get("per_skill") or {}),
         )
         logger.info(
             "Runtime enabled (workers=%s, default_agent=%s)",
