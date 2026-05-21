@@ -614,6 +614,32 @@ async def test_get_relevant_automation_no_match_excludes(store_dir: Path):
     assert relevant == []
 
 
+# =====================================================================
+# M0 PR2 — format_memory_block helper for chat + runtime shared injection
+# =====================================================================
+
+
+def test_format_memory_block_empty_returns_empty():
+    assert JudgeStore.format_memory_block([]) == ""
+
+
+def test_format_memory_block_renders_remembered_context():
+    entries = [
+        MemoryEntry(summary="user prefers terse", category="preference"),
+        MemoryEntry(summary="repo uses pytest", category="project_knowledge"),
+    ]
+    block = JudgeStore.format_memory_block(entries)
+    assert block.startswith("[Remembered context]\n")
+    assert "- user prefers terse" in block
+    assert "- repo uses pytest" in block
+
+
+def test_format_memory_block_custom_header():
+    entries = [MemoryEntry(summary="x")]
+    block = JudgeStore.format_memory_block(entries, header="Past Insights")
+    assert block.startswith("[Past Insights]\n")
+
+
 @pytest.mark.asyncio
 async def test_apply_supersede_inherits_quality_when_action_omits_it(store_dir: Path):
     """Round-4/PR1: explicitly verify supersede inheritance vs override semantics."""

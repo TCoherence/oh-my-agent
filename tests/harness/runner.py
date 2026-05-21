@@ -41,7 +41,7 @@ from oh_my_agent.gateway.session import ChannelSession
 from oh_my_agent.memory.store import SQLiteMemoryStore
 from oh_my_agent.runtime import RuntimeService
 from tests.harness.scripted_channel import ChannelEvent, HarnessChannel, make_incoming
-from tests.harness.stubs import StubAgent, StubBilibiliAuthProvider, seed_credential
+from tests.harness.stubs import FakeJudge, StubAgent, StubBilibiliAuthProvider, seed_credential
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +87,11 @@ class HarnessEnv:
     registry: AgentRegistry
     auth_service: AuthService
     auth_provider: StubBilibiliAuthProvider
+    # M0 PR3 — optional judge_store + memory_judge for scenarios that
+    # exercise post-completion judge trigger / memory roundtrip. None when
+    # seed.judge is unset (default).
+    judge_store: Any | None = None
+    memory_judge: Any | None = None
     cleanup_paths: list[Path] = field(default_factory=list)
 
 
@@ -180,6 +185,32 @@ async def bootstrap_harness_env(spec: ScenarioSpec, *, mode: str = "stub") -> Ha
             )
     registry = AgentRegistry(registry_agents)
 
+    # M0 PR3: optional JudgeStore + Judge for scenarios that exercise the
+    # post-completion judge trigger (memory roundtrip etc.). Opt-in via
+    # ``seed.judge`` ("fake" → FakeJudge from stubs; "real" → real Judge
+    # which still needs a StubAgent registry to produce JSON actions).
+    # Default (None) leaves judge_store and memory_judge unset — runtime
+    # treats them as no-ops.
+    judge_store = None
+    memory_judge = None
+    seed_judge = spec.seed.get("judge")
+    if seed_judge is not None:
+        from oh_my_agent.memory.judge_store import JudgeStore
+
+        memory_dir = tmp_root / "memory"
+        judge_store = JudgeStore(memory_dir=memory_dir)
+        await judge_store.load()
+        if seed_judge == "fake":
+            memory_judge = FakeJudge(judge_store)
+        elif seed_judge == "real":
+            from oh_my_agent.memory.judge import Judge
+
+            memory_judge = Judge(judge_store)
+        else:
+            raise ValueError(
+                f"unknown seed.judge mode: {seed_judge!r} (allowed: fake | real)"
+            )
+
     runtime = RuntimeService(
         store,
         config={
@@ -203,6 +234,8 @@ async def bootstrap_harness_env(spec: ScenarioSpec, *, mode: str = "stub") -> Ha
         owner_user_ids={"owner-1"},
         repo_root=repo_root,
         auth_service=auth_service,
+        judge_store=judge_store,
+        memory_judge=memory_judge,
     )
 
     channel = HarnessChannel()
@@ -253,6 +286,8 @@ async def bootstrap_harness_env(spec: ScenarioSpec, *, mode: str = "stub") -> Ha
         registry=registry,
         auth_service=auth_service,
         auth_provider=auth_provider,
+        judge_store=judge_store,
+        memory_judge=memory_judge,
         cleanup_paths=cleanup_paths,
     )
 
@@ -387,6 +422,50 @@ async def _step_await(env: HarnessEnv, payload: dict[str, Any]) -> None:
         raise AssertionError(
             f"await event_seen timeout — type={event_type!r} "
             f"payload_contains={payload_contains!r} thread={thread_id!r}"
+        )
+
+    if condition == "runtime_event":
+        # M0 PR3 — poll MemoryStore.list_runtime_events for a specific
+        # task_id + event_type. Plan: harness needs this to sync on
+        # task.judge_extracted (written by the background judge task
+        # after task.completed).
+        # Either ``task_id`` (literal or alias) OR ``task_index`` may be
+        # specified. ``task_index`` is more common in scenarios since task
+        # IDs are generated at runtime.
+        event_type = str(payload.get("event_type") or "")
+        min_count = int(payload.get("min_count") or 1)
+        if not event_type:
+            raise ValueError("await condition=runtime_event requires event_type payload field")
+        explicit_task_id = payload.get("task_id")
+        task_index = payload.get("task_index")
+        if explicit_task_id is None and task_index is None:
+            raise ValueError(
+                "await condition=runtime_event requires task_id or task_index payload field"
+            )
+        while asyncio.get_running_loop().time() < deadline:
+            target_task_id: str | None = None
+            if explicit_task_id is not None:
+                target_task_id = str(explicit_task_id)
+            else:
+                tasks = await env.store.list_runtime_tasks(
+                    platform=env.channel.platform,
+                    channel_id=env.channel.channel_id,
+                    limit=50,
+                )
+                tasks_sorted = sorted(tasks, key=lambda t: t.created_at or "")
+                idx = int(task_index)
+                if 0 <= idx < len(tasks_sorted):
+                    target_task_id = tasks_sorted[idx].id
+            if target_task_id is not None:
+                events = await env.store.list_runtime_events(target_task_id, limit=100)
+                matches = [e for e in events if e["event_type"] == event_type]
+                if len(matches) >= min_count:
+                    return
+            await asyncio.sleep(interval)
+        raise AssertionError(
+            f"await runtime_event timeout — task_index={task_index!r} "
+            f"task_id={explicit_task_id!r} event_type={event_type!r} "
+            f"min_count={min_count} (timeout={timeout}s)"
         )
 
     if condition == "auth_flow_event":

@@ -1,0 +1,78 @@
+scenario: automation-memory-roundtrip
+description: |
+  M0 PR3 — verify the post-completion judge writes durable knowledge from
+  task1's output, and that knowledge is injected into task2's prompt.
+
+  Uses FakeJudge (seed.judge: fake) which regex-extracts `KEY_INSIGHT: <text>`
+  markers, sidestepping a real LLM. The agent stub script returns a marker
+  in task1's output; on the second message we verify the agent receives a
+  prompt containing the extracted insight by branching its response on
+  `content_contains` of that insight string.
+
+seed:
+  judge: fake
+  agents:
+    claude:
+      responses:
+        # Task 1: emits a KEY_INSIGHT marker that FakeJudge will pick up.
+        - when:
+            content_contains: "summarize the foo report"
+          text: |
+            Summary of foo report.
+            KEY_INSIGHT: tech sector recovering through Q3
+            TASK_STATE: DONE
+        # Task 2 path A: prompt contains injected memory from task 1.
+        - when:
+            content_contains: "tech sector recovering through Q3"
+          text: |
+            MATCH FOUND: insight is present in prompt
+            TASK_STATE: DONE
+        # Task 2 path B: fallback — prompt is missing the insight.
+        - when:
+            default: true
+          text: |
+            NO MATCH: insight is absent
+            TASK_STATE: DONE
+
+steps:
+  # Task 1 — produce the insight
+  - inject_user_message:
+      thread_id: null
+      author_id: "owner-1"
+      content: "/task_start summarize the foo report"
+      capture:
+        thread_id_as: "@thread1"
+  - await:
+      condition: task_status_eq
+      task_index: 0
+      status: COMPLETED
+      timeout_seconds: 30
+  # Wait for the background post-completion judge to land its event.
+  # Generous timeout: background asyncio.Task may not be scheduled
+  # promptly when the suite runs under load.
+  - await:
+      condition: runtime_event
+      task_index: 0
+      event_type: task.judge_extracted
+      min_count: 1
+      timeout_seconds: 30
+  # Task 2 — should see memory injection
+  - inject_user_message:
+      thread_id: null
+      author_id: "owner-1"
+      content: "/task_start follow up on the report"
+      capture:
+        thread_id_as: "@thread2"
+  - await:
+      condition: task_status_eq
+      task_index: 1
+      status: COMPLETED
+      timeout_seconds: 30
+
+expect:
+  events_in_order:
+    - type: send
+      payload_contains: "MATCH FOUND"
+  events_not_present:
+    - type: send
+      payload_contains: "NO MATCH"
