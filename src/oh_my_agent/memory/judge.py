@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from oh_my_agent.memory.judge_store import JudgeStore, parse_judge_actions
 
@@ -21,6 +21,9 @@ _MAX_TURNS = 20
 _MAX_USER_TURN_CHARS = 1200
 _MAX_ASSISTANT_TURN_CHARS = 600
 _MAX_WINDOW_CHARS = 8000
+# M0 PR3 — task-completion judge truncation budgets (synthetic input, not chat)
+_TASK_PROMPT_MAX_CHARS = 6000
+_TASK_OUTPUT_MAX_CHARS = 10000
 
 _JUDGE_PROMPT = """\
 You are a long-term memory judge. Decide what (if anything) about the USER should be \
@@ -89,6 +92,120 @@ Conversation:
 
 Output ONLY JSON like: {{"actions": [{{"op":"no_op","reason":"..."}}]}}
 """
+
+# M0 PR3 — task-completion judge prompts.
+# These are NOT the chat judge prompt (which talks about users). They feed
+# Judge.run_for_task() with headless automation / runtime context where the
+# "conversation" is synthetic (prompt + agent output, no human turns).
+
+_PROMPT_TASK_COMPLETION = """\
+You are a memory judge for an automated task that just finished. Decide what \
+DURABLE KNOWLEDGE about the task domain (NOT about a user) should be \
+remembered so the next run of the same automation / skill benefits.
+
+Input:
+1. The task prompt the agent received.
+2. The agent's final output.
+3. The current active memories already known for this automation / skill.
+
+Emit a JSON list of ACTIONS. Allowed ops:
+- "add": brand new memory derived from this run's output.
+  Required: summary, category, scope, confidence, evidence.
+- "strengthen": existing memory was reinforced by this run.
+  Required: id, evidence. Optional: confidence_bump (0.0-0.20).
+- "supersede": existing memory was contradicted by this run.
+  Required: old_id, new_summary, category, scope, confidence, evidence.
+- "no_op": nothing in this run deserves long-term memory.
+  Required: reason.
+
+Categories: preference | workflow | project_knowledge | fact
+Scopes:     global_user | workspace | skill | thread
+
+Strict rules for headless task memory:
+- DO memorize: domain facts the output discovered, recurring patterns, gotchas,
+  data shapes, repeatable preferences inferred from the run.
+- DO NOT memorize: this specific run's transient output (article text, summary
+  body, etc.); use the published artifact for that. The memory store is for
+  cross-run signal, not the artifact itself.
+- Confidence 0.85+ for clearly stated facts ("the API returns paginated…").
+  0.5-0.7 for inferred patterns. Lower than 0.5 → emit no_op.
+
+Execution context:
+{execution_context}
+
+Current active memories ({active_count} entries):
+{active_memories}
+
+Task prompt:
+{task_prompt}
+
+Agent output:
+{task_output}
+
+Output ONLY a JSON object: {{"actions": [...]}}
+"""
+
+_PROMPT_SELF_EVAL = """\
+You are evaluating how well an automated task ran. Output a single JSON object \
+with three fields: quality, reason, suggested_improvement.
+
+- quality: one of "pass" | "borderline" | "fail".
+- reason: 1-2 sentences explaining the verdict.
+- suggested_improvement: 1 sentence, may be empty for "pass".
+
+Judge the agent OUTPUT against the task PROMPT. Things that count against \
+quality: unhelpful or off-topic output, partial completion, ignoring \
+instructions, runtime errors visible in output, hallucinated facts.
+
+Task prompt:
+{task_prompt}
+
+Agent output:
+{task_output}
+
+Output ONLY a JSON object like:
+{{"quality": "pass", "reason": "...", "suggested_improvement": ""}}
+"""
+
+
+def _truncate(text: str, max_chars: int) -> str:
+    """Trim text to ``max_chars`` with a marker so the judge knows it was cut."""
+    if not text:
+        return ""
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 20].rstrip() + "\n... [truncated]"
+
+
+def _try_parse_self_eval(raw_text: str) -> dict[str, Any] | None:
+    """Parse a Judge self_eval LLM response into ``{quality, reason, suggested_improvement}``.
+
+    Tolerant of fenced code blocks and surrounding prose, mirroring
+    :func:`parse_judge_actions`. Returns ``None`` on parse failure or when the
+    required ``quality`` field is missing.
+    """
+    if not raw_text:
+        return None
+    text = raw_text.strip()
+    if text.startswith("```"):
+        first_nl = text.find("\n")
+        if first_nl > 0:
+            text = text[first_nl + 1 :]
+        if text.endswith("```"):
+            text = text[:-3]
+        text = text.strip()
+    candidates: list[str] = [text]
+    start = text.find("{")
+    if start > 0:
+        candidates.append(text[start:])
+    for cand in candidates:
+        try:
+            data = json.loads(cand)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict) and "quality" in data:
+            return data
+    return None
 
 
 @dataclass
@@ -211,6 +328,152 @@ class Judge:
             stats,
         )
         return JudgeResult(actions=actions, stats=stats, raw_response=raw_text, error=None)
+
+    async def run_for_task(
+        self,
+        *,
+        mode: Literal["completion", "self_eval"],
+        registry,
+        task_prompt: str,
+        task_output: str,
+        automation_name: str | None = None,
+        skill_name: str | None = None,
+        source_workspace: str | None = None,
+        thread_id: str | None = None,
+        req_id: str | None = None,
+        model: str | None = None,
+    ) -> JudgeResult:
+        """M0 PR3: judge entry for headless task completion + self-evaluation.
+
+        ``mode`` toggles the prompt template only. Both modes share the parse
+        helper (``parse_judge_actions``) and the persist helper
+        (``JudgeStore.apply_actions``). ``self_eval`` mode's response shape is
+        translated into a same-shape add-action via
+        :meth:`_coerce_self_eval_to_action` so persist plumbing stays unified.
+
+        The ``model`` kwarg is accepted for forward-compat with per-skill /
+        per-call model overrides (M1 PR1); current implementation passes it
+        through ``registry.run`` only if the registry supports it.
+
+        Returns a :class:`JudgeResult`. On agent / parse failure the result
+        carries ``error`` non-None and persist is skipped.
+        """
+        prompt_trunc = _truncate(task_prompt, _TASK_PROMPT_MAX_CHARS)
+        output_trunc = _truncate(task_output, _TASK_OUTPUT_MAX_CHARS)
+
+        if mode == "completion":
+            active_context = self._store.to_judge_context()
+            active_text = (
+                json.dumps(active_context, ensure_ascii=False, indent=2)
+                if active_context
+                else "[]"
+            )
+            execution_context = self._format_execution_context(
+                skill_name=skill_name,
+                source_workspace=source_workspace,
+                thread_topic=automation_name or "headless task",
+            )
+            prompt = _PROMPT_TASK_COMPLETION.format(
+                execution_context=execution_context,
+                active_count=len(active_context),
+                active_memories=active_text,
+                task_prompt=prompt_trunc,
+                task_output=output_trunc,
+            )
+            actions, raw_text, err = await self._invoke(
+                prompt, registry, req_id=req_id, label="memory_judge_task_completion"
+            )
+        elif mode == "self_eval":
+            prompt = _PROMPT_SELF_EVAL.format(
+                task_prompt=prompt_trunc,
+                task_output=output_trunc,
+            )
+            # self_eval prompt returns {"quality", "reason",
+            # "suggested_improvement"} (not {"actions": [...]}), so the action
+            # list ``parse_judge_actions`` returns is always empty here — we
+            # discard it and re-parse the raw text for self_eval shape below.
+            _discard, raw_text, err = await self._invoke(
+                prompt,
+                registry,
+                req_id=req_id,
+                label="memory_judge_self_eval",
+            )
+            actions = []
+            if err is None:
+                parsed = _try_parse_self_eval(raw_text)
+                if parsed is not None and automation_name:
+                    coerced = self._coerce_self_eval_to_action(
+                        parsed, automation_name=automation_name
+                    )
+                    if coerced is not None:
+                        actions = [coerced]
+                elif parsed is None:
+                    err = "self_eval_parse_failed"
+        else:
+            raise ValueError(f"unknown Judge.run_for_task mode: {mode!r}")
+
+        if err:
+            stats = {"add": 0, "strengthen": 0, "supersede": 0, "no_op": 0, "rejected": 0}
+            logger.warning(
+                "memory_judge_run_for_task mode=%s automation=%s err=%s",
+                mode,
+                automation_name,
+                err,
+            )
+            return JudgeResult(actions=[], stats=stats, raw_response=raw_text, error=err)
+
+        # Persist via the shared apply_actions path. For self_eval, the coerced
+        # action's source_automation will be passed through judge metadata so
+        # _apply_add picks it up.
+        stats = await self._store.apply_actions(
+            actions,
+            thread_id=thread_id,
+            skill_name=skill_name,
+            source_workspace=source_workspace,
+        )
+        logger.info(
+            "memory_judge_run_for_task mode=%s automation=%s actions=%d stats=%s",
+            mode,
+            automation_name,
+            len(actions),
+            stats,
+        )
+        return JudgeResult(actions=actions, stats=stats, raw_response=raw_text, error=None)
+
+    @staticmethod
+    def _coerce_self_eval_to_action(
+        parsed: dict[str, Any], *, automation_name: str
+    ) -> dict[str, Any] | None:
+        """Translate self_eval LLM output → same-shape add action.
+
+        self_eval response: ``{quality, reason, suggested_improvement}``
+        ⇒ ``{op:"add", category:"self_eval", scope:"automation", ...}``
+
+        The ``quality`` value is preserved as a structured field on the
+        MemoryEntry (queryable for skill-health rejection-rate metrics);
+        ``reason`` and ``suggested_improvement`` go into the summary.
+        """
+        quality = str(parsed.get("quality", "")).strip().lower()
+        if quality not in {"pass", "borderline", "fail"}:
+            return None
+        reason = str(parsed.get("reason", "")).strip()
+        suggested = str(parsed.get("suggested_improvement", "")).strip()
+        summary = f"reason={reason}" if reason else "reason=(unspecified)"
+        if suggested:
+            summary = f"{summary}; suggested={suggested}"
+        # confidence: pass=high, borderline=mid, fail=mid (a failure verdict is
+        # itself a signal worth keeping, but verdict-quality is not high).
+        confidence = {"pass": 0.7, "borderline": 0.55, "fail": 0.6}[quality]
+        return {
+            "op": "add",
+            "summary": summary[:280],
+            "category": "self_eval",
+            "scope": "automation",
+            "source_automation": automation_name,
+            "feedback_source": "llm_judge",
+            "quality": quality,
+            "confidence": confidence,
+        }
 
     async def _invoke(
         self,

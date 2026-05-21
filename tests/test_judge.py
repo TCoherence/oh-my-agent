@@ -143,3 +143,221 @@ async def test_judge_with_empty_conversation_returns_no_op(tmp_path: Path):
     assert result.actions[0]["op"] == "no_op"
     assert result.stats["no_op"] == 1
     assert registry.calls == []
+
+
+# =====================================================================
+# M0 PR3 — Judge.run_for_task (mode=completion + mode=self_eval)
+# =====================================================================
+
+
+@pytest.mark.asyncio
+async def test_run_for_task_completion_persists_actions(tmp_path: Path):
+    store = JudgeStore(memory_dir=tmp_path)
+    await store.load()
+    judge = Judge(store)
+    response = json.dumps({
+        "actions": [
+            {
+                "op": "add",
+                "summary": "the foo API returns paginated data",
+                "category": "fact",
+                "scope": "global_user",
+                "confidence": 0.9,
+                "evidence": "agent output discovered pagination",
+            },
+        ]
+    })
+    registry = StubRegistry([response])
+    result = await judge.run_for_task(
+        mode="completion",
+        registry=registry,
+        task_prompt="fetch foo data",
+        task_output="fetched 100 rows over 4 pages of 25 each",
+        automation_name="auto-foo",
+        skill_name="foo-fetcher",
+        source_workspace=str(tmp_path),
+        thread_id="automation:auto-foo",
+    )
+    assert result.error is None
+    assert result.stats["add"] == 1
+    # Verify label is task_completion (distinct from chat memory_judge)
+    assert registry.calls[0][1] == "memory_judge_task_completion"
+
+
+@pytest.mark.asyncio
+async def test_run_for_task_self_eval_writes_quality_entry(tmp_path: Path):
+    store = JudgeStore(memory_dir=tmp_path)
+    await store.load()
+    judge = Judge(store)
+    response = json.dumps({
+        "quality": "fail",
+        "reason": "output cut off mid-sentence",
+        "suggested_improvement": "increase max_turns",
+    })
+    registry = StubRegistry([response])
+    result = await judge.run_for_task(
+        mode="self_eval",
+        registry=registry,
+        task_prompt="summarize the paper",
+        task_output="The paper discusses... [output truncated]",
+        automation_name="paper-digest",
+        skill_name="paper-digest",
+        source_workspace=str(tmp_path),
+        thread_id="automation:paper-digest",
+    )
+    assert result.error is None
+    assert result.stats["add"] == 1
+    active = store.get_active()
+    assert len(active) == 1
+    entry = active[0]
+    assert entry.category == "self_eval"
+    assert entry.scope == "automation"
+    assert entry.source_automation == "paper-digest"
+    assert entry.feedback_source == "llm_judge"
+    assert entry.quality == "fail"
+    assert "reason=output cut off" in entry.summary
+    assert "suggested=" in entry.summary
+    # Verify label
+    assert registry.calls[0][1] == "memory_judge_self_eval"
+
+
+@pytest.mark.asyncio
+async def test_run_for_task_self_eval_no_automation_name_no_action(tmp_path: Path):
+    """self_eval translation requires automation_name; manual task gets no entry."""
+    store = JudgeStore(memory_dir=tmp_path)
+    await store.load()
+    judge = Judge(store)
+    response = json.dumps({"quality": "pass", "reason": "good"})
+    registry = StubRegistry([response])
+    result = await judge.run_for_task(
+        mode="self_eval",
+        registry=registry,
+        task_prompt="x",
+        task_output="y",
+        automation_name=None,  # manual /task_start
+    )
+    assert result.error is None
+    assert result.stats == {"add": 0, "strengthen": 0, "supersede": 0, "no_op": 0, "rejected": 0}
+    assert store.get_active() == []
+
+
+@pytest.mark.asyncio
+async def test_run_for_task_self_eval_invalid_quality_returns_error(tmp_path: Path):
+    store = JudgeStore(memory_dir=tmp_path)
+    await store.load()
+    judge = Judge(store)
+    response = json.dumps({"quality": "amazing", "reason": "x"})  # invalid quality
+    registry = StubRegistry([response])
+    result = await judge.run_for_task(
+        mode="self_eval",
+        registry=registry,
+        task_prompt="x",
+        task_output="y",
+        automation_name="auto-x",
+    )
+    # _coerce returns None → actions empty → persist still runs but writes nothing
+    assert result.stats["add"] == 0
+    assert store.get_active() == []
+
+
+@pytest.mark.asyncio
+async def test_run_for_task_self_eval_parse_failure_returns_error(tmp_path: Path):
+    store = JudgeStore(memory_dir=tmp_path)
+    await store.load()
+    judge = Judge(store)
+    registry = StubRegistry(["not json at all"])
+    result = await judge.run_for_task(
+        mode="self_eval",
+        registry=registry,
+        task_prompt="x",
+        task_output="y",
+        automation_name="auto-x",
+    )
+    assert result.error == "self_eval_parse_failed"
+
+
+@pytest.mark.asyncio
+async def test_run_for_task_completion_truncates_huge_inputs(tmp_path: Path):
+    """Verify large prompts/outputs are truncated with a marker before being fed to LLM."""
+    from oh_my_agent.memory.judge import _TASK_OUTPUT_MAX_CHARS, _TASK_PROMPT_MAX_CHARS
+
+    store = JudgeStore(memory_dir=tmp_path)
+    await store.load()
+    judge = Judge(store)
+    response = json.dumps({"actions": [{"op": "no_op", "reason": "ok"}]})
+    registry = StubRegistry([response])
+    huge_prompt = "P" * (_TASK_PROMPT_MAX_CHARS * 3)
+    huge_output = "O" * (_TASK_OUTPUT_MAX_CHARS * 3)
+    await judge.run_for_task(
+        mode="completion",
+        registry=registry,
+        task_prompt=huge_prompt,
+        task_output=huge_output,
+        automation_name="auto-x",
+    )
+    sent_prompt = registry.calls[0][0]
+    assert "[truncated]" in sent_prompt
+    assert len(sent_prompt) < (_TASK_PROMPT_MAX_CHARS + _TASK_OUTPUT_MAX_CHARS + 5000)
+
+
+def test_run_for_task_unknown_mode_raises(tmp_path: Path):
+    import asyncio as aio
+    store = JudgeStore(memory_dir=tmp_path)
+    judge = Judge(store)
+    registry = StubRegistry([])
+    with pytest.raises(ValueError, match="unknown Judge.run_for_task mode"):
+        aio.run(
+            judge.run_for_task(
+                mode="bogus",  # type: ignore[arg-type]
+                registry=registry,
+                task_prompt="x",
+                task_output="y",
+            )
+        )
+
+
+def test_coerce_self_eval_to_action_shapes():
+    """_coerce_self_eval_to_action: structured-only happy path + invalid quality."""
+    action = Judge._coerce_self_eval_to_action(
+        {"quality": "fail", "reason": "r", "suggested_improvement": "s"},
+        automation_name="auto-Y",
+    )
+    assert action is not None
+    assert action["op"] == "add"
+    assert action["category"] == "self_eval"
+    assert action["scope"] == "automation"
+    assert action["source_automation"] == "auto-Y"
+    assert action["feedback_source"] == "llm_judge"
+    assert action["quality"] == "fail"
+    assert action["confidence"] == 0.6
+    assert "reason=r; suggested=s" in action["summary"]
+
+    none_action = Judge._coerce_self_eval_to_action(
+        {"quality": "bogus"}, automation_name="auto-Y"
+    )
+    assert none_action is None
+
+
+def test_try_parse_self_eval_handles_fenced_and_prose():
+    from oh_my_agent.memory.judge import _try_parse_self_eval
+
+    raw = '```json\n{"quality":"pass","reason":"ok"}\n```'
+    assert _try_parse_self_eval(raw) == {"quality": "pass", "reason": "ok"}
+
+    raw_with_prose = 'Here is the verdict:\n{"quality":"fail","reason":"x"}'
+    assert _try_parse_self_eval(raw_with_prose) == {"quality": "fail", "reason": "x"}
+
+    assert _try_parse_self_eval("nothing here") is None
+    assert _try_parse_self_eval('{"no_quality":"oops"}') is None
+    assert _try_parse_self_eval("") is None
+
+
+def test_truncate_helper():
+    from oh_my_agent.memory.judge import _truncate
+
+    assert _truncate("", 100) == ""
+    assert _truncate("short", 100) == "short"
+    long = "x" * 200
+    out = _truncate(long, 100)
+    assert len(out) <= 100
+    assert "[truncated]" in out
