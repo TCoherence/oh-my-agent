@@ -508,6 +508,7 @@ class DiscordChannel(BaseChannel):
         self._workspace_skills_dirs = None  # list[Path] | None
         self._runtime_service = None  # RuntimeService
         self._judge_store = None  # JudgeStore
+        self._feedback_collector = None  # M1 PR2: optional FeedbackCollector for self_eval
         self._gateway_manager = None  # GatewayManager (for /memorize)
         self._scheduler = None  # Scheduler
         self._diary_reflector = None  # DiaryReflector
@@ -1179,6 +1180,10 @@ class DiscordChannel(BaseChannel):
         if gateway_manager is not None:
             self._gateway_manager = gateway_manager
         self._refresh_services()
+
+    def set_feedback_collector(self, collector) -> None:
+        """M1 PR2: inject the implicit-feedback collector (None to disable)."""
+        self._feedback_collector = collector
 
     def _refresh_services(self) -> None:
         fire_automation = self._scheduler.fire_job_now if self._scheduler is not None else None
@@ -1985,6 +1990,73 @@ class DiscordChannel(BaseChannel):
             prefix = "✅ " if result.success else "❌ "
             await interaction.followup.send(prefix + result.message[:1900], ephemeral=True)
 
+        @tree.command(
+            name="feedback",
+            description="📊 Rate an automation task's output (writes self_eval memory)",
+        )
+        @app_commands.describe(
+            task_id="Task ID (from /task_list or the completion message)",
+            verdict="Rating: 'good' if the output helped, 'bad' if it missed",
+            note="Optional: short note about what was wrong / right",
+        )
+        async def slash_feedback(
+            interaction: discord.Interaction,
+            task_id: str,
+            verdict: str,
+            note: str | None = None,
+        ):
+            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
+                await interaction.response.send_message(
+                    "This command is restricted to the configured owner.",
+                    ephemeral=True,
+                )
+                return
+            verdict_clean = verdict.strip().lower()
+            if verdict_clean not in {"good", "bad", "👍", "👎"}:
+                await interaction.response.send_message(
+                    "Verdict must be 'good' or 'bad' (or 👍 / 👎).",
+                    ephemeral=True,
+                )
+                return
+            if verdict_clean in {"👍"}:
+                verdict_clean = "good"
+            elif verdict_clean in {"👎"}:
+                verdict_clean = "bad"
+            if self._feedback_collector is None:
+                await interaction.response.send_message(
+                    "Feedback collector is not enabled (memory.judge.enabled=true required).",
+                    ephemeral=True,
+                )
+                return
+            await interaction.response.defer(ephemeral=True)
+            try:
+                from typing import cast as _cast
+
+                ok = await self._feedback_collector.record_explicit_feedback(
+                    task_id=task_id.strip(),
+                    verdict=_cast(Literal["good", "bad"], verdict_clean),
+                    note=note,
+                    actor_id=str(interaction.user.id),
+                )
+            except Exception as exc:
+                logger.warning("/feedback failed task_id=%s err=%s", task_id, exc)
+                await interaction.followup.send(
+                    f"❌ Feedback failed: {type(exc).__name__}", ephemeral=True
+                )
+                return
+            if ok:
+                await interaction.followup.send(
+                    f"✅ Recorded {verdict_clean} feedback for task `{task_id}`.",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.followup.send(
+                    f"⚠️ Could not record feedback — task `{task_id}` has no "
+                    f"automation_post (manual /task_start runs are excluded "
+                    f"from self_eval).",
+                    ephemeral=True,
+                )
+
         @tree.command(name="reflect_yesterday", description="Run a memory reflection pass over yesterday's diary")
         async def slash_reflect_yesterday(interaction: discord.Interaction):
             if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
@@ -2217,12 +2289,48 @@ class DiscordChannel(BaseChannel):
 
             await _handler(msg)
 
+        async def _sync_implicit_feedback_from_payload(
+            payload: discord.RawReactionActionEvent, *, action: str
+        ) -> None:
+            """M1 PR2: route reactions on automation posts → FeedbackCollector.
+
+            Independent of the skill-eval handler (which uses 👍/👎 to score
+            skill suggestions). Implicit-feedback routes to self_eval memory.
+            """
+            if self._feedback_collector is None:
+                return
+            # Don't react to bot's own reactions or non-owner reactions when
+            # an owner gate is configured.
+            if (
+                hasattr(client, "user")
+                and client.user
+                and payload.user_id == client.user.id
+            ):
+                return
+            if self._owner_user_ids and str(payload.user_id) not in self._owner_user_ids:
+                return
+            try:
+                await self._feedback_collector.record_reaction(
+                    message_id=str(payload.message_id),
+                    emoji=str(payload.emoji),
+                    action=action,
+                    actor_id=str(payload.user_id) if payload.user_id else None,
+                )
+            except Exception:
+                logger.debug(
+                    "FeedbackCollector record_reaction failed", exc_info=True
+                )
+
         @client.event
         async def on_raw_reaction_add(payload: discord.RawReactionActionEvent) -> None:
             try:
                 await _sync_skill_feedback_from_payload(payload)
             except Exception:
                 logger.debug("Failed to sync skill feedback from reaction add", exc_info=True)
+            try:
+                await _sync_implicit_feedback_from_payload(payload, action="add")
+            except Exception:
+                logger.debug("Failed to sync implicit feedback (add)", exc_info=True)
 
         @client.event
         async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent) -> None:
@@ -2230,6 +2338,10 @@ class DiscordChannel(BaseChannel):
                 await _sync_skill_feedback_from_payload(payload)
             except Exception:
                 logger.debug("Failed to sync skill feedback from reaction remove", exc_info=True)
+            try:
+                await _sync_implicit_feedback_from_payload(payload, action="remove")
+            except Exception:
+                logger.debug("Failed to sync implicit feedback (remove)", exc_info=True)
 
         @tree.error
         async def on_app_command_error(
@@ -2354,6 +2466,43 @@ class DiscordChannel(BaseChannel):
             file=discord.File(attachment.local_path, filename=attachment.filename),
         )
         return str(msg.id)
+
+    async def add_reactions(
+        self, thread_id: str, message_id: str, emojis: list[str]
+    ) -> None:
+        """M1 PR3: bot adds prompt reactions on its own messages.
+
+        Goes through the existing rate limiter so bursts of completion
+        messages don't trip Discord's 50/s HTTP cap. Each emoji is one
+        add_reaction call; errors are logged + swallowed (a missing
+        reaction prompt is non-fatal).
+        """
+        if not emojis or not message_id:
+            return
+        try:
+            thread = await self._resolve_channel(thread_id)
+        except Exception:
+            logger.debug("add_reactions: cannot resolve channel %s", thread_id)
+            return
+        # Rate-limit the fetch too (Codex M1 PR3 note) so a burst of
+        # automation completions doesn't trip Discord's HTTP cap.
+        await self._acquire_outbound_slot()
+        try:
+            message = await thread.fetch_message(int(message_id))
+        except Exception:
+            logger.debug("add_reactions: cannot fetch message %s", message_id)
+            return
+        for emoji in emojis:
+            await self._acquire_outbound_slot()
+            try:
+                await message.add_reaction(emoji)
+            except Exception as exc:
+                logger.debug(
+                    "add_reactions: failed to add %s to msg=%s err=%s",
+                    emoji,
+                    message_id,
+                    exc,
+                )
 
     async def send_attachments(
         self,

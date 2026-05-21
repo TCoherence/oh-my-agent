@@ -474,6 +474,38 @@ class MemoryStore(ABC):
     async def purge_expired_automation_posts(self, ttl_days: int) -> int:
         return 0
 
+    # -- M1 PR2 feedback collector helpers --------------------------------
+
+    async def get_automation_post_by_message(
+        self, *, message_id: str
+    ) -> dict[str, Any] | None:
+        """Lookup automation post by message_id only (cross-channel).
+
+        Returns dict-shape so callers don't depend on the AutomationPost
+        dataclass. Default no-op for stores without automation_posts.
+        """
+        return None
+
+    async def get_automation_post_by_task(
+        self, *, task_id: str
+    ) -> dict[str, Any] | None:
+        """Lookup most-recent automation post by task_id.
+
+        Used by /feedback to resolve a user-typed task_id back to the
+        automation that produced it. Default no-op.
+        """
+        return None
+
+    async def list_automation_posts_older_than(
+        self, *, hours: int
+    ) -> list[dict[str, Any]]:
+        """Return posts whose ``posted_at`` is older than ``hours`` ago.
+
+        Used by the FeedbackScanWorker. Default empty for stores without
+        automation_posts.
+        """
+        return []
+
     # -- usage ledger -----------------------------------------------------
 
     async def record_usage_event(
@@ -506,6 +538,21 @@ class MemoryStore(ABC):
     ) -> dict[str, Any]:
         """Aggregate usage events in the given window. Returns empty dict for stores that don't track usage."""
         return {"total": {}, "by_agent": [], "by_source": []}
+
+    # -- M1 PR1 self-eval budget ledger ----------------------------------
+
+    async def get_self_eval_budget(self, year_month: str) -> float:
+        """Return cumulative USD spent on self-eval LLM calls this month."""
+        return 0.0
+
+    async def add_self_eval_spend(self, year_month: str, amount_usd: float) -> float:
+        """Atomically add ``amount_usd`` to the month's budget row, returning new total.
+
+        Stores that don't track self-eval budget should return the input
+        amount and act as a no-op; callers must NOT rely on the returned
+        value for hard gating in that case.
+        """
+        return amount_usd
 
     # -- schema version ---------------------------------------------------
 
@@ -1011,6 +1058,16 @@ CREATE INDEX IF NOT EXISTS idx_usage_events_thread
     ON usage_events(platform, channel_id, thread_id, ts);
 CREATE INDEX IF NOT EXISTS idx_usage_events_source
     ON usage_events(source, ts);
+
+-- M1 PR1: monthly budget ledger for LLM self-eval judge calls.
+-- Decoupled from usage_events (raw per-call) so budget gating reads a
+-- single row per month instead of aggregating thousands. year_month is
+-- the natural month bucket (YYYY-MM) which doubles as the PK.
+CREATE TABLE IF NOT EXISTS self_eval_budget (
+    year_month   TEXT PRIMARY KEY,           -- YYYY-MM
+    usd_spent    REAL NOT NULL DEFAULT 0.0,
+    updated_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 
 CREATE TABLE IF NOT EXISTS schema_version (
     id          INTEGER PRIMARY KEY CHECK (id = 1),
@@ -1649,6 +1706,100 @@ class SQLiteMemoryStore(MemoryStore):
             await db.commit()
         return int(count)
 
+    # -- M1 PR2 feedback collector helpers --------------------------------
+
+    async def get_automation_post_by_message(
+        self, *, message_id: str
+    ) -> dict[str, Any] | None:
+        """Lookup by message_id alone (cross-channel). FIRST match wins.
+
+        Discord's `RawReactionActionEvent` carries message_id + channel_id
+        but the feedback collector resolves against message_id only since
+        automation_posts are unique on message_id within a deployment.
+        """
+        db = await self._conn()
+        cursor = await db.execute(
+            "SELECT platform, channel_id, message_id, automation_name, "
+            " task_id, agent_name, skill_name, fired_at, "
+            " artifact_paths, follow_up_thread_id "
+            "FROM automation_posts WHERE message_id=? LIMIT 1",
+            (str(message_id),),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return {
+            "platform": row["platform"],
+            "channel_id": row["channel_id"],
+            "message_id": row["message_id"],
+            "automation_name": row["automation_name"],
+            "task_id": row["task_id"],
+            "agent_name": row["agent_name"],
+            "skill_name": row["skill_name"],
+            "posted_at": row["fired_at"],
+        }
+
+    async def get_automation_post_by_task(
+        self, *, task_id: str
+    ) -> dict[str, Any] | None:
+        """Most-recent automation post for a given task_id."""
+        db = await self._conn()
+        cursor = await db.execute(
+            "SELECT platform, channel_id, message_id, automation_name, "
+            " task_id, agent_name, skill_name, fired_at, follow_up_thread_id "
+            "FROM automation_posts WHERE task_id=? "
+            "ORDER BY fired_at DESC LIMIT 1",
+            (str(task_id),),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return {
+            "platform": row["platform"],
+            "channel_id": row["channel_id"],
+            "message_id": row["message_id"],
+            "automation_name": row["automation_name"],
+            "task_id": row["task_id"],
+            "agent_name": row["agent_name"],
+            "skill_name": row["skill_name"],
+            "posted_at": row["fired_at"],
+            "follow_up_thread_id": row["follow_up_thread_id"],
+        }
+
+    async def list_automation_posts_older_than(
+        self, *, hours: int
+    ) -> list[dict[str, Any]]:
+        """Posts whose ``fired_at`` is older than ``hours`` ago (UTC).
+
+        Used by ``FeedbackScanWorker`` to detect "no-reply" silence.
+        Returns minimal dict shape so callers don't depend on AutomationPost.
+        """
+        if hours <= 0:
+            return []
+        db = await self._conn()
+        cursor = await db.execute(
+            "SELECT message_id, platform, channel_id, automation_name, "
+            " task_id, skill_name, fired_at, follow_up_thread_id "
+            "FROM automation_posts "
+            "WHERE fired_at < datetime('now', '-' || ? || ' hours') "
+            "ORDER BY fired_at DESC LIMIT 200",
+            (int(hours),),
+        )
+        rows = await cursor.fetchall()
+        return [
+            {
+                "message_id": row["message_id"],
+                "platform": row["platform"],
+                "channel_id": row["channel_id"],
+                "automation_name": row["automation_name"],
+                "task_id": row["task_id"],
+                "skill_name": row["skill_name"],
+                "posted_at": row["fired_at"],
+                "follow_up_thread_id": row["follow_up_thread_id"],
+            }
+            for row in rows
+        ]
+
     # -- usage ledger -----------------------------------------------------
 
     async def record_usage_event(
@@ -1704,6 +1855,42 @@ class SQLiteMemoryStore(MemoryStore):
                 ),
             )
             await db.commit()
+
+    # -- M1 PR1 self-eval budget ledger ----------------------------------
+
+    async def get_self_eval_budget(self, year_month: str) -> float:
+        db = await self._conn()
+        cursor = await db.execute(
+            "SELECT usd_spent FROM self_eval_budget WHERE year_month=?",
+            (year_month,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return 0.0
+        return float(row[0] or 0.0)
+
+    async def add_self_eval_spend(self, year_month: str, amount_usd: float) -> float:
+        """Atomically add ``amount_usd`` to the month bucket; returns new total.
+
+        Negative amount is allowed for reconcile (refund) flows.
+        """
+        async with self._write_lock:
+            db = await self._conn()
+            await db.execute(
+                "INSERT INTO self_eval_budget (year_month, usd_spent, updated_at) "
+                "VALUES (?, ?, CURRENT_TIMESTAMP) "
+                "ON CONFLICT(year_month) DO UPDATE SET "
+                " usd_spent = usd_spent + excluded.usd_spent, "
+                " updated_at = CURRENT_TIMESTAMP",
+                (year_month, float(amount_usd)),
+            )
+            await db.commit()
+            cursor = await db.execute(
+                "SELECT usd_spent FROM self_eval_budget WHERE year_month=?",
+                (year_month,),
+            )
+            row = await cursor.fetchone()
+            return float(row[0] or 0.0) if row else 0.0
 
     async def get_usage_summary(
         self,

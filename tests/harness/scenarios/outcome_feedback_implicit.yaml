@@ -1,0 +1,40 @@
+scenario: outcome-feedback-implicit
+description: |
+  M1 PR4 / M3.3 — implicit reaction feedback writes a self_eval entry,
+  and a follow-up explicit rating MERGES into the same entry (signals
+  list carries both sources, highest-confidence wins on quality).
+
+seed:
+  judge: fake
+  automation_posts:
+    - message_id: "msg-implicit-1"
+      automation_name: "auto-implicit"
+      task_id: "task-implicit-1"
+  agents:
+    claude:
+      responses:
+        - when: { default: true }
+          text: "(stub) ok\nTASK_STATE: DONE"
+
+steps:
+  # Implicit negative reaction
+  - inject_reaction:
+      message_id: "msg-implicit-1"
+      emoji: "❌"
+      action: "add"
+      actor_id: "owner-1"
+  # Explicit positive override (higher confidence → wins on quality)
+  - record_feedback:
+      task_id: "task-implicit-1"
+      verdict: "good"
+      note: "on second look it's fine"
+      actor_id: "owner-1"
+
+expect:
+  memory:
+    # Single merged entry (not two siblings)
+    self_eval_count: 1
+    # Explicit (0.9) beats implicit (0.55) → quality=pass
+    self_eval_quality: "pass"
+    # Both sources captured in the signals list
+    self_eval_signal_sources: ["implicit", "explicit"]

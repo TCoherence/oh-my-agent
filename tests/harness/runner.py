@@ -92,6 +92,7 @@ class HarnessEnv:
     # seed.judge is unset (default).
     judge_store: Any | None = None
     memory_judge: Any | None = None
+    feedback_collector: Any | None = None
     cleanup_paths: list[Path] = field(default_factory=list)
 
 
@@ -193,6 +194,7 @@ async def bootstrap_harness_env(spec: ScenarioSpec, *, mode: str = "stub") -> Ha
     # treats them as no-ops.
     judge_store = None
     memory_judge = None
+    feedback_collector = None
     seed_judge = spec.seed.get("judge")
     if seed_judge is not None:
         from oh_my_agent.memory.judge_store import JudgeStore
@@ -209,6 +211,24 @@ async def bootstrap_harness_env(spec: ScenarioSpec, *, mode: str = "stub") -> Ha
         else:
             raise ValueError(
                 f"unknown seed.judge mode: {seed_judge!r} (allowed: fake | real)"
+            )
+        # M1 PR4: feedback collector for scenarios exercising implicit /
+        # explicit feedback → self_eval merge.
+        from oh_my_agent.memory.feedback import FeedbackCollector
+
+        feedback_collector = FeedbackCollector(
+            memory_store=store, judge_store=judge_store
+        )
+        # M1 PR4: pre-seed automation_posts so feedback scenarios can target
+        # a known task_id/message_id without running a full automation.
+        for post in spec.seed.get("automation_posts") or []:
+            await store.record_automation_post(
+                platform=str(post.get("platform", "harness")),
+                channel_id=str(post.get("channel_id", "test-channel")),
+                message_id=str(post["message_id"]),
+                automation_name=str(post["automation_name"]),
+                task_id=str(post.get("task_id")) if post.get("task_id") else None,
+                skill_name=post.get("skill_name"),
             )
 
     runtime = RuntimeService(
@@ -288,6 +308,7 @@ async def bootstrap_harness_env(spec: ScenarioSpec, *, mode: str = "stub") -> Ha
         auth_provider=auth_provider,
         judge_store=judge_store,
         memory_judge=memory_judge,
+        feedback_collector=feedback_collector,
         cleanup_paths=cleanup_paths,
     )
 
@@ -334,12 +355,50 @@ async def dispatch_step(env: HarnessEnv, step: dict[str, Any]) -> None:
         await _step_inject_user_message(env, step["inject_user_message"])
     elif "await" in step:
         await _step_await(env, step["await"])
+    elif "record_feedback" in step:
+        await _step_record_feedback(env, step["record_feedback"])
+    elif "inject_reaction" in step:
+        await _step_inject_reaction(env, step["inject_reaction"])
     elif "sleep" in step:
         # Escape hatch — strongly discouraged. Surfaces explicit timing
         # assumptions when polling-based awaits don't fit.
         await asyncio.sleep(float(step["sleep"]))
     else:
         raise ValueError(f"Unknown step shape: {sorted(step.keys())}")
+
+
+async def _step_record_feedback(env: HarnessEnv, payload: dict[str, Any]) -> None:
+    """M1 PR4 / M3.2 — drive explicit /feedback through the collector.
+
+    HarnessChannel doesn't model Discord slash commands, so this step
+    invokes FeedbackCollector.record_explicit_feedback directly — the same
+    method the Discord /feedback handler calls. Exercises the full
+    automation_post lookup → self_eval merge path.
+    """
+    if env.feedback_collector is None:
+        raise AssertionError("record_feedback step requires seed.judge to be set")
+    await env.feedback_collector.record_explicit_feedback(
+        task_id=str(payload["task_id"]),
+        verdict=str(payload.get("verdict", "good")),
+        note=payload.get("note"),
+        actor_id=str(payload.get("actor_id", "owner-1")),
+    )
+
+
+async def _step_inject_reaction(env: HarnessEnv, payload: dict[str, Any]) -> None:
+    """M1 PR4 / M3.3 — drive implicit reaction feedback through the collector.
+
+    Mirrors the Discord on_raw_reaction_add path by calling
+    FeedbackCollector.record_reaction directly.
+    """
+    if env.feedback_collector is None:
+        raise AssertionError("inject_reaction step requires seed.judge to be set")
+    await env.feedback_collector.record_reaction(
+        message_id=str(payload["message_id"]),
+        emoji=str(payload.get("emoji", "👍")),
+        action=str(payload.get("action", "add")),
+        actor_id=str(payload.get("actor_id", "owner-1")),
+    )
 
 
 async def _step_inject_user_message(env: HarnessEnv, payload: dict[str, Any]) -> None:
@@ -531,7 +590,66 @@ async def assert_expectations(env: HarnessEnv, expect: dict[str, Any]) -> list[A
                 )
             )
 
+    # M1 PR4 — assert on judge_store self_eval entries.
+    memory_expect = expect.get("memory") or {}
+    if memory_expect:
+        _check_memory_expectations(env, memory_expect, failures)
+
     return failures
+
+
+def _check_memory_expectations(
+    env: HarnessEnv,
+    memory_expect: dict[str, Any],
+    failures: list[AssertionFailure],
+) -> None:
+    if env.judge_store is None:
+        failures.append(AssertionFailure("memory expectation requires seed.judge"))
+        return
+    active = env.judge_store.get_active()
+    self_evals = [e for e in active if e.category == "self_eval"]
+    if "self_eval_count" in memory_expect:
+        want = int(memory_expect["self_eval_count"])
+        if len(self_evals) != want:
+            failures.append(
+                AssertionFailure(
+                    f"memory.self_eval_count: want {want}, got {len(self_evals)} "
+                    f"(qualities={[e.quality for e in self_evals]})"
+                )
+            )
+    if "self_eval_quality" in memory_expect:
+        want_quality = str(memory_expect["self_eval_quality"])
+        qualities = [e.quality for e in self_evals]
+        if want_quality not in qualities:
+            failures.append(
+                AssertionFailure(
+                    f"memory.self_eval_quality: no entry with quality={want_quality!r} "
+                    f"(got {qualities})"
+                )
+            )
+    if "self_eval_feedback_source" in memory_expect:
+        want_src = str(memory_expect["self_eval_feedback_source"])
+        sources = [e.feedback_source for e in self_evals]
+        if want_src not in sources:
+            failures.append(
+                AssertionFailure(
+                    f"memory.self_eval_feedback_source: no entry with source={want_src!r} "
+                    f"(got {sources})"
+                )
+            )
+    if "self_eval_signal_sources" in memory_expect:
+        want_sources = set(memory_expect["self_eval_signal_sources"])
+        all_signal_sources: set[str] = set()
+        for e in self_evals:
+            for s in e.signals:
+                all_signal_sources.add(str(s.get("source")))
+        if not want_sources.issubset(all_signal_sources):
+            failures.append(
+                AssertionFailure(
+                    f"memory.self_eval_signal_sources: want {want_sources} ⊆ "
+                    f"{all_signal_sources}"
+                )
+            )
 
 
 def _check_event_in_order(

@@ -262,6 +262,8 @@ class RuntimeService:
         judge_store=None,
         memory_inject_limit: int = 8,
         memory_judge=None,
+        self_eval_enabled: bool = False,
+        self_eval_per_skill: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         cfg = config or {}
         self._enabled = bool(cfg.get("enabled", True))
@@ -341,6 +343,12 @@ class RuntimeService:
         self._memory_inject_limit = int(memory_inject_limit)
         self._memory_judge = memory_judge  # M0 PR3: optional task-completion judge
         self._background_judge_tasks: set[asyncio.Task] = set()
+        # M1 PR1: opt-in self_eval mode. When True, after a task completes,
+        # also fire a self_eval judge call (separate from the completion
+        # judge). per_skill is an optional override map:
+        # {skill_name: {"enabled": bool, "model": str}}.
+        self._self_eval_enabled = bool(self_eval_enabled)
+        self._self_eval_per_skill = dict(self_eval_per_skill or {})
         self._owner_user_ids = owner_user_ids or set()
         self._repo_root = (repo_root or Path.cwd()).resolve()
         self._skill_syncer = skill_syncer
@@ -3562,6 +3570,14 @@ class RuntimeService:
                     registry=registry,
                     output_text=(output_summary or response.text or ""),
                 )
+                # M1 PR1: optional self_eval fan-out. Same fire-and-forget
+                # ordering; budget gate lives inside Judge.
+                if self._should_fire_self_eval(task):
+                    self._spawn_post_self_eval_judge(
+                        task=task,
+                        registry=registry,
+                        output_text=(output_summary or response.text or ""),
+                    )
                 return
 
             prior_failure = test_summary if not test_ok else None
@@ -3770,6 +3786,118 @@ class RuntimeService:
         )
         self._background_judge_tasks.add(bg)
         bg.add_done_callback(self._background_judge_tasks.discard)
+
+    def _should_fire_self_eval(self, task: RuntimeTask) -> bool:
+        """M1 PR1 — per-task self_eval gate.
+
+        Rules (in order):
+        1. self_eval requires ``task.automation_name`` (manual tasks don't
+           write self_eval entries because they'd lack a scope binding).
+        2. ``self_eval_per_skill[task.skill_name].enabled`` overrides the
+           global flag if present.
+        3. Otherwise fall back to the global ``_self_eval_enabled``.
+        """
+        if not task.automation_name:
+            return False
+        if self._memory_judge is None:
+            return False
+        if task.skill_name and task.skill_name in self._self_eval_per_skill:
+            override = self._self_eval_per_skill[task.skill_name]
+            return bool(override.get("enabled", self._self_eval_enabled))
+        return self._self_eval_enabled
+
+    def _spawn_post_self_eval_judge(
+        self,
+        *,
+        task: RuntimeTask,
+        registry: AgentRegistry,
+        output_text: str,
+    ) -> None:
+        """M1 PR1 — fire-and-forget self_eval judge alongside completion."""
+        if self._memory_judge is None or not output_text.strip():
+            return
+        synthetic_thread = (
+            f"automation:{task.automation_name}"
+            if task.automation_name
+            else f"task:{task.id}"
+        )
+        # Per-skill model override
+        model_override: str | None = None
+        if task.skill_name and task.skill_name in self._self_eval_per_skill:
+            model_override = self._self_eval_per_skill[task.skill_name].get("model")
+        coro = self._run_self_eval_judge(
+            task=task,
+            registry=registry,
+            output_text=output_text,
+            synthetic_thread=synthetic_thread,
+            model_override=model_override,
+        )
+        bg = asyncio.create_task(
+            coro, name=f"judge_self_eval_{task.id[:8]}"
+        )
+        self._background_judge_tasks.add(bg)
+        bg.add_done_callback(self._background_judge_tasks.discard)
+
+    async def _run_self_eval_judge(
+        self,
+        *,
+        task: RuntimeTask,
+        registry: AgentRegistry,
+        output_text: str,
+        synthetic_thread: str,
+        model_override: str | None,
+    ) -> None:
+        """M1 PR1 — body of the self_eval background task."""
+        try:
+            assert self._memory_judge is not None
+            result = await self._memory_judge.run_for_task(
+                mode="self_eval",
+                registry=registry,
+                task_prompt=task.goal or task.original_request or "",
+                task_output=output_text,
+                automation_name=task.automation_name,
+                skill_name=task.skill_name,
+                source_workspace=str(self._repo_root),
+                thread_id=synthetic_thread,
+                task_id=task.id,
+                model=model_override,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Runtime task=%s self_eval_judge_failed err=%s",
+                task.id,
+                exc,
+            )
+            try:
+                await self._store.add_runtime_event(
+                    task.id,
+                    "task.judge_extracted",
+                    {
+                        "error": f"{type(exc).__name__}: {exc}",
+                        "actions_count": 0,
+                        "mode": "self_eval",
+                    },
+                )
+            except Exception:
+                pass
+            return
+        try:
+            await self._store.add_runtime_event(
+                task.id,
+                "task.judge_extracted",
+                {
+                    "actions_count": len(result.actions),
+                    "stats": result.stats,
+                    "error": result.error,
+                    "mode": "self_eval",
+                },
+            )
+        except Exception as exc:
+            logger.warning(
+                "Runtime task=%s self_eval_event_write_failed err=%s",
+                task.id,
+                exc,
+            )
 
     async def _run_post_completion_judge(
         self,
@@ -5806,6 +5934,22 @@ class RuntimeService:
                     first_message_id,
                     exc_info=True,
                 )
+            # M1 PR3: bot-emitted 👍/👎 reaction prompts on the completion
+            # message. Channels without reaction support no-op via the
+            # BaseChannel default. Fire-and-forget — never block completion.
+            channel = getattr(session, "channel", None)
+            if channel is not None and hasattr(channel, "add_reactions"):
+                try:
+                    await channel.add_reactions(
+                        notify_thread_id, first_message_id, ["👍", "👎"]
+                    )
+                except Exception:
+                    logger.debug(
+                        "add_reactions failed task=%s msg=%s",
+                        task.id,
+                        first_message_id,
+                        exc_info=True,
+                    )
 
     def _session_for_notify(
         self, task: RuntimeTask, notify_channel_id: str

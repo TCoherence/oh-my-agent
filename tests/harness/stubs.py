@@ -401,6 +401,7 @@ class FakeJudge:
         skill_name: str | None = None,
         source_workspace: str | None = None,
         thread_id: str | None = None,
+        task_id: str | None = None,
         req_id: str | None = None,
         model: str | None = None,
     ) -> Any:
@@ -414,6 +415,7 @@ class FakeJudge:
                 "automation_name": automation_name,
                 "skill_name": skill_name,
                 "thread_id": thread_id,
+                "task_id": task_id,
             }
         )
         # Only "completion" mode emits add actions in the fake; self_eval
