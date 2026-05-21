@@ -176,7 +176,12 @@ class GatewayManager:
             else None
         )
         self._recent_thread_skills: dict[tuple[str, str, str], str] = {}
+        # M2 PR4: two distinct disable sources, unioned on read. Keeping them
+        # separate prevents auto-health recovery (.discard) from erasing a
+        # manual operator disable. _auto_disabled_skills is failure-rate
+        # driven; _manual_disabled_skills is the dashboard off-switch.
         self._auto_disabled_skills: set[str] = set()
+        self._manual_disabled_skills: set[str] = set()
         # key: "platform:channel_id" → ChannelSession
         self._sessions: dict[str, ChannelSession] = {}
         self._agent_progress_log_interval_seconds = AGENT_PROGRESS_LOG_INTERVAL_SECONDS
@@ -262,11 +267,29 @@ class GatewayManager:
         store = getattr(self, "_memory_store_ref", None)
         if not store or not hasattr(store, "list_auto_disabled_skills"):
             self._auto_disabled_skills = set()
+            self._manual_disabled_skills = set()
             return
+        # M2 PR4: refresh BOTH sources, kept separate so auto-health
+        # recovery never erases a manual operator disable.
         self._auto_disabled_skills = await store.list_auto_disabled_skills()
+        if hasattr(store, "list_manual_disabled_skills"):
+            self._manual_disabled_skills = await store.list_manual_disabled_skills()
+        else:
+            self._manual_disabled_skills = set()
+
+    async def refresh_disabled_skills(self) -> None:
+        """Public M2 PR4 nudge — re-read disable state after a dashboard
+        enable/disable so the change takes effect without a restart."""
+        await self._refresh_auto_disabled_skills()
 
     def _is_skill_auto_disabled(self, skill_name: str | None) -> bool:
-        return bool(skill_name and skill_name in self._auto_disabled_skills)
+        """True if the skill is disabled by EITHER source (auto or manual)."""
+        if not skill_name:
+            return False
+        return (
+            skill_name in self._auto_disabled_skills
+            or skill_name in self._manual_disabled_skills
+        )
 
     @staticmethod
     def _skill_invocation_outcome(response) -> str:
@@ -1358,6 +1381,20 @@ class GatewayManager:
 
         explicit_skill = self._detect_explicit_skill_invocation(msg.content)
         if explicit_skill and self._runtime_service:
+            # M2 PR4: a disabled skill (manual operator off-switch or
+            # auto-health) must not run even via explicit /skill invocation.
+            if self._is_skill_auto_disabled(explicit_skill):
+                logger.info(
+                    "[%s] SKILL_INVOKE explicit skill=%s BLOCKED (disabled)",
+                    req_id,
+                    explicit_skill,
+                )
+                await session.channel.send(
+                    thread_id,
+                    f"⚠️ Skill `{explicit_skill}` is currently disabled. "
+                    f"Re-enable it from the dashboard or `/skill_enable`.",
+                )
+                return
             # Skill invocation paths unification: ``/skill_name``,
             # router-detected ``invoke_skill``, and scheduler cron-fired
             # automations all converge on ``create_artifact_task``. This
@@ -1580,6 +1617,16 @@ class GatewayManager:
             ):
                 router_skill = (router_decision.skill_name or "").strip()
                 known_skills = self._known_skill_names() if router_skill else set()
+                # M2 PR4: a disabled skill must not run via router resolution
+                # either. Treat disabled as "not known" so it falls through to
+                # inline chat instead of spawning a task.
+                if router_skill and self._is_skill_auto_disabled(router_skill):
+                    logger.info(
+                        "[%s] ROUTER artifact(skill) skill=%s BLOCKED (disabled) -> inline chat",
+                        req_id,
+                        router_skill,
+                    )
+                    known_skills = known_skills - {router_skill}
                 if router_skill and router_skill in known_skills:
                     # Resolved known-skill invocation. Default auto-approve
                     # (was the legacy ``invoke_skill`` resolved sub-branch),

@@ -1986,3 +1986,27 @@ async def test_shutdown_event_wakes_short_workspace_janitor(tmp_path):
     gm._shutdown_event.set()
     await asyncio.wait_for(task, timeout=1.0)
     assert task.done() and task.exception() is None
+
+
+# =====================================================================
+# M2 PR4 — manual disable is a hard gate (separate from auto-disable)
+# =====================================================================
+
+
+def test_manual_and_auto_disable_kept_separate():
+    """Auto-health recovery (.discard) must not erase a manual disable."""
+    from oh_my_agent.gateway.manager import GatewayManager
+
+    gm = GatewayManager.__new__(GatewayManager)  # bypass __init__
+    gm._auto_disabled_skills = set()
+    gm._manual_disabled_skills = {"paper-digest"}
+    # auto-health says skill recovered → discard from AUTO set only
+    gm._auto_disabled_skills.discard("paper-digest")
+    # union check still reports disabled (manual override persists)
+    assert gm._is_skill_auto_disabled("paper-digest") is True
+    # a skill in neither set is enabled
+    assert gm._is_skill_auto_disabled("other") is False
+    # auto-only disable also gates
+    gm._auto_disabled_skills.add("flaky")
+    assert gm._is_skill_auto_disabled("flaky") is True
+    assert gm._is_skill_auto_disabled(None) is False
