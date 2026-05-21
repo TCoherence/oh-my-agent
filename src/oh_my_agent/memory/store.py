@@ -474,6 +474,28 @@ class MemoryStore(ABC):
     async def purge_expired_automation_posts(self, ttl_days: int) -> int:
         return 0
 
+    # -- M1 PR2 feedback collector helpers --------------------------------
+
+    async def get_automation_post_by_message(
+        self, *, message_id: str
+    ) -> dict[str, Any] | None:
+        """Lookup automation post by message_id only (cross-channel).
+
+        Returns dict-shape so callers don't depend on the AutomationPost
+        dataclass. Default no-op for stores without automation_posts.
+        """
+        return None
+
+    async def list_automation_posts_older_than(
+        self, *, hours: int
+    ) -> list[dict[str, Any]]:
+        """Return posts whose ``posted_at`` is older than ``hours`` ago.
+
+        Used by the FeedbackScanWorker. Default empty for stores without
+        automation_posts.
+        """
+        return []
+
     # -- usage ledger -----------------------------------------------------
 
     async def record_usage_event(
@@ -1673,6 +1695,73 @@ class SQLiteMemoryStore(MemoryStore):
             count = cursor.rowcount or 0
             await db.commit()
         return int(count)
+
+    # -- M1 PR2 feedback collector helpers --------------------------------
+
+    async def get_automation_post_by_message(
+        self, *, message_id: str
+    ) -> dict[str, Any] | None:
+        """Lookup by message_id alone (cross-channel). FIRST match wins.
+
+        Discord's `RawReactionActionEvent` carries message_id + channel_id
+        but the feedback collector resolves against message_id only since
+        automation_posts are unique on message_id within a deployment.
+        """
+        db = await self._conn()
+        cursor = await db.execute(
+            "SELECT platform, channel_id, message_id, automation_name, "
+            " task_id, agent_name, skill_name, fired_at, "
+            " artifact_paths, follow_up_thread_id "
+            "FROM automation_posts WHERE message_id=? LIMIT 1",
+            (str(message_id),),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return {
+            "platform": row["platform"],
+            "channel_id": row["channel_id"],
+            "message_id": row["message_id"],
+            "automation_name": row["automation_name"],
+            "task_id": row["task_id"],
+            "agent_name": row["agent_name"],
+            "skill_name": row["skill_name"],
+            "posted_at": row["fired_at"],
+        }
+
+    async def list_automation_posts_older_than(
+        self, *, hours: int
+    ) -> list[dict[str, Any]]:
+        """Posts whose ``fired_at`` is older than ``hours`` ago (UTC).
+
+        Used by ``FeedbackScanWorker`` to detect "no-reply" silence.
+        Returns minimal dict shape so callers don't depend on AutomationPost.
+        """
+        if hours <= 0:
+            return []
+        db = await self._conn()
+        cursor = await db.execute(
+            "SELECT message_id, platform, channel_id, automation_name, "
+            " task_id, skill_name, fired_at, follow_up_thread_id "
+            "FROM automation_posts "
+            "WHERE fired_at < datetime('now', '-' || ? || ' hours') "
+            "ORDER BY fired_at DESC LIMIT 200",
+            (int(hours),),
+        )
+        rows = await cursor.fetchall()
+        return [
+            {
+                "message_id": row["message_id"],
+                "platform": row["platform"],
+                "channel_id": row["channel_id"],
+                "automation_name": row["automation_name"],
+                "task_id": row["task_id"],
+                "skill_name": row["skill_name"],
+                "posted_at": row["fired_at"],
+                "follow_up_thread_id": row["follow_up_thread_id"],
+            }
+            for row in rows
+        ]
 
     # -- usage ledger -----------------------------------------------------
 

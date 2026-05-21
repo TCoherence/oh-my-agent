@@ -508,6 +508,7 @@ class DiscordChannel(BaseChannel):
         self._workspace_skills_dirs = None  # list[Path] | None
         self._runtime_service = None  # RuntimeService
         self._judge_store = None  # JudgeStore
+        self._feedback_collector = None  # M1 PR2: optional FeedbackCollector for self_eval
         self._gateway_manager = None  # GatewayManager (for /memorize)
         self._scheduler = None  # Scheduler
         self._diary_reflector = None  # DiaryReflector
@@ -1179,6 +1180,10 @@ class DiscordChannel(BaseChannel):
         if gateway_manager is not None:
             self._gateway_manager = gateway_manager
         self._refresh_services()
+
+    def set_feedback_collector(self, collector) -> None:
+        """M1 PR2: inject the implicit-feedback collector (None to disable)."""
+        self._feedback_collector = collector
 
     def _refresh_services(self) -> None:
         fire_automation = self._scheduler.fire_job_now if self._scheduler is not None else None
@@ -2217,12 +2222,48 @@ class DiscordChannel(BaseChannel):
 
             await _handler(msg)
 
+        async def _sync_implicit_feedback_from_payload(
+            payload: discord.RawReactionActionEvent, *, action: str
+        ) -> None:
+            """M1 PR2: route reactions on automation posts → FeedbackCollector.
+
+            Independent of the skill-eval handler (which uses 👍/👎 to score
+            skill suggestions). Implicit-feedback routes to self_eval memory.
+            """
+            if self._feedback_collector is None:
+                return
+            # Don't react to bot's own reactions or non-owner reactions when
+            # an owner gate is configured.
+            if (
+                hasattr(client, "user")
+                and client.user
+                and payload.user_id == client.user.id
+            ):
+                return
+            if self._owner_user_ids and str(payload.user_id) not in self._owner_user_ids:
+                return
+            try:
+                await self._feedback_collector.record_reaction(
+                    message_id=str(payload.message_id),
+                    emoji=str(payload.emoji),
+                    action=action,
+                    actor_id=str(payload.user_id) if payload.user_id else None,
+                )
+            except Exception:
+                logger.debug(
+                    "FeedbackCollector record_reaction failed", exc_info=True
+                )
+
         @client.event
         async def on_raw_reaction_add(payload: discord.RawReactionActionEvent) -> None:
             try:
                 await _sync_skill_feedback_from_payload(payload)
             except Exception:
                 logger.debug("Failed to sync skill feedback from reaction add", exc_info=True)
+            try:
+                await _sync_implicit_feedback_from_payload(payload, action="add")
+            except Exception:
+                logger.debug("Failed to sync implicit feedback (add)", exc_info=True)
 
         @client.event
         async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent) -> None:
@@ -2230,6 +2271,10 @@ class DiscordChannel(BaseChannel):
                 await _sync_skill_feedback_from_payload(payload)
             except Exception:
                 logger.debug("Failed to sync skill feedback from reaction remove", exc_info=True)
+            try:
+                await _sync_implicit_feedback_from_payload(payload, action="remove")
+            except Exception:
+                logger.debug("Failed to sync implicit feedback (remove)", exc_info=True)
 
         @tree.error
         async def on_app_command_error(

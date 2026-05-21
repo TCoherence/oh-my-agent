@@ -527,6 +527,7 @@ async def _shutdown(
     diary_reflect_loop=None,
     weekly_reflect_loop=None,
     push_dispatcher=None,
+    feedback_scan_worker=None,
 ) -> None:
     logger.info("Shutdown started reason=%s", reason)
     if scheduler:
@@ -538,6 +539,12 @@ async def _shutdown(
     if weekly_reflect_loop is not None:
         with suppress(Exception):
             await weekly_reflect_loop.stop()
+    # M1 PR2: stop the feedback scan worker before the gateway so any
+    # in-flight scan iteration finishes before automation_posts becomes
+    # unreadable (memory_store.close()).
+    if feedback_scan_worker is not None:
+        with suppress(Exception):
+            await feedback_scan_worker.stop()
     if gateway_manager:
         await gateway_manager.stop()
     if runtime_service:
@@ -1053,6 +1060,27 @@ async def ignite(ctx: BootContext) -> None:
         except Exception as exc:
             logger.warning("MEMORY.md startup synthesis failed: %s", exc)
 
+    # M1 PR2 — construct the implicit-feedback collector when judge memory
+    # is on. Wraps automation_posts lookups + JudgeStore writes; reaction
+    # handlers and the daily scan worker share this single instance.
+    feedback_collector = None
+    feedback_scan_worker = None
+    if judge_store is not None and memory_store is not None:
+        from oh_my_agent.memory.feedback import FeedbackCollector, FeedbackScanWorker
+
+        feedback_cfg = memory_cfg_block.get("feedback", {}) or {}
+        no_reply_window = int(feedback_cfg.get("no_reply_window_hours", 24))
+        feedback_collector = FeedbackCollector(
+            memory_store=memory_store,
+            judge_store=judge_store,
+            no_reply_window_hours=no_reply_window,
+        )
+        scan_interval = int(feedback_cfg.get("scan_interval_seconds", 3600))
+        if scan_interval > 0:
+            feedback_scan_worker = FeedbackScanWorker(
+                feedback_collector, interval_seconds=scan_interval
+            )
+
     gateway = GatewayManager(
         channel_pairs,
         compressor=compressor,
@@ -1077,7 +1105,10 @@ async def ignite(ctx: BootContext) -> None:
         memory_inject_limit=memory_inject_limit,
         memory_keyword_patterns=memory_keyword_patterns,
         streaming_config=config.get("gateway", {}).get("streaming", {}),
+        feedback_collector=feedback_collector,
     )
+    if feedback_scan_worker is not None:
+        feedback_scan_worker.start()
     if memory_store:
         gateway.set_memory_store(memory_store)
 
@@ -1201,6 +1232,7 @@ async def ignite(ctx: BootContext) -> None:
             diary_reflect_loop=diary_reflect_loop,
             weekly_reflect_loop=weekly_reflect_loop,
             push_dispatcher=push_dispatcher,
+            feedback_scan_worker=feedback_scan_worker,
         )
 
     try:
