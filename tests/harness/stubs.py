@@ -366,6 +366,90 @@ async def seed_credential(
 
 
 # ---------------------------------------------------------------------------
+# FakeJudge — DI replacement for memory.judge.Judge that skips LLM (M0 PR3)
+# ---------------------------------------------------------------------------
+
+
+class FakeJudge:
+    """Test-only Judge that regex-extracts ``KEY_INSIGHT: <text>`` markers
+    from task output and writes them as memory add-actions.
+
+    Drop-in replacement for :class:`oh_my_agent.memory.judge.Judge` for
+    scenarios that need deterministic memory roundtrips WITHOUT an LLM. Mimics
+    only the methods :class:`oh_my_agent.runtime.service.RuntimeService` calls
+    (currently just ``run_for_task``).
+
+    Per plan: production code never sees this — it's wired only via
+    ``bootstrap_harness_env`` when ``seed.judge: fake`` is set. The real
+    ``Judge`` class has no awareness of "stub" mode (no config flag pollution).
+    """
+
+    _KEY_INSIGHT_RE = re.compile(r"KEY_INSIGHT:\s*(.+?)(?:\n|$)", re.IGNORECASE)
+
+    def __init__(self, store) -> None:
+        self._store = store
+        self.calls: list[dict[str, Any]] = []
+
+    async def run_for_task(
+        self,
+        *,
+        mode: str,
+        registry: Any,
+        task_prompt: str,
+        task_output: str,
+        automation_name: str | None = None,
+        skill_name: str | None = None,
+        source_workspace: str | None = None,
+        thread_id: str | None = None,
+        req_id: str | None = None,
+        model: str | None = None,
+    ) -> Any:
+        from oh_my_agent.memory.judge import JudgeResult
+
+        self.calls.append(
+            {
+                "mode": mode,
+                "task_prompt": task_prompt[:200],
+                "task_output": task_output[:200],
+                "automation_name": automation_name,
+                "skill_name": skill_name,
+                "thread_id": thread_id,
+            }
+        )
+        # Only "completion" mode emits add actions in the fake; self_eval
+        # would need a similar marker (not used by current scenarios).
+        if mode != "completion":
+            stats = {"add": 0, "strengthen": 0, "supersede": 0, "no_op": 1, "rejected": 0}
+            return JudgeResult(actions=[{"op": "no_op", "reason": "fake_skip"}], stats=stats)
+
+        matches = self._KEY_INSIGHT_RE.findall(task_output or "")
+        if not matches:
+            stats = {"add": 0, "strengthen": 0, "supersede": 0, "no_op": 1, "rejected": 0}
+            return JudgeResult(actions=[{"op": "no_op", "reason": "no marker"}], stats=stats)
+        actions: list[dict[str, Any]] = []
+        for insight in matches:
+            actions.append(
+                {
+                    "op": "add",
+                    "summary": insight.strip()[:280],
+                    "category": "fact",  # automation completion → fact (not self_eval)
+                    "scope": "global_user",
+                    "confidence": 0.85,
+                    "evidence": f"automation={automation_name}",
+                    "source_automation": automation_name,
+                }
+            )
+        # Persist via the store's apply_actions (same path real Judge uses).
+        stats = await self._store.apply_actions(
+            actions,
+            thread_id=thread_id,
+            skill_name=skill_name,
+            source_workspace=source_workspace,
+        )
+        return JudgeResult(actions=actions, stats=stats, raw_response="", error=None)
+
+
+# ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
 

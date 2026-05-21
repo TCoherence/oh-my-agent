@@ -261,6 +261,7 @@ class RuntimeService:
         push_dispatcher=None,
         judge_store=None,
         memory_inject_limit: int = 8,
+        memory_judge=None,
     ) -> None:
         cfg = config or {}
         self._enabled = bool(cfg.get("enabled", True))
@@ -338,6 +339,8 @@ class RuntimeService:
         self._store = store
         self._judge_store = judge_store  # M0 PR2: optional memory injection
         self._memory_inject_limit = int(memory_inject_limit)
+        self._memory_judge = memory_judge  # M0 PR3: optional task-completion judge
+        self._background_judge_tasks: set[asyncio.Task] = set()
         self._owner_user_ids = owner_user_ids or set()
         self._repo_root = (repo_root or Path.cwd()).resolve()
         self._skill_syncer = skill_syncer
@@ -830,6 +833,26 @@ class RuntimeService:
             waiters.append(self._janitor_task)
         if waiters:
             await asyncio.gather(*waiters, return_exceptions=True)
+        # M0 PR3: drain background judge tasks before returning. Boot closes
+        # the memory store right after stop(), so a pending judge whose
+        # `add_runtime_event` lands AFTER close races a closed connection.
+        # Wait briefly for graceful completion, then cancel + drain leftovers.
+        pending_judges = [t for t in self._background_judge_tasks if not t.done()]
+        if pending_judges:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*pending_judges, return_exceptions=True),
+                    timeout=5.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Runtime stop(): %d background judge task(s) did not complete in 5s, cancelling",
+                    len(pending_judges),
+                )
+                for t in pending_judges:
+                    if not t.done():
+                        t.cancel()
+                await asyncio.gather(*pending_judges, return_exceptions=True)
 
     async def maybe_handle_incoming(
         self,
@@ -3531,6 +3554,14 @@ class RuntimeService:
                     body=output_summary or "completed",
                 )
                 logger.info("Runtime task=%s COMPLETED step=%d", task.id, step)
+                # M0 PR3: fire-and-forget post-completion judge.
+                # Runs entirely after COMPLETED watermark has landed; failure
+                # logs but never blocks the task lifecycle.
+                self._spawn_post_completion_judge(
+                    task=task,
+                    registry=registry,
+                    output_text=(output_summary or response.text or ""),
+                )
                 return
 
             prior_failure = test_summary if not test_ok else None
@@ -3695,6 +3726,104 @@ class RuntimeService:
             )
             if backoff > 0:
                 await asyncio.sleep(backoff)
+
+    # ------------------------------------------------------------------
+    # M0 PR3 — post-completion judge trigger (fire-and-forget)
+    # ------------------------------------------------------------------
+
+    def _spawn_post_completion_judge(
+        self,
+        *,
+        task: RuntimeTask,
+        registry: AgentRegistry,
+        output_text: str,
+    ) -> None:
+        """Spawn a background ``asyncio.Task`` that runs ``Judge.run_for_task``.
+
+        Must be called AFTER the COMPLETED watermark is committed and the
+        user-visible message has landed (post-notify ordering, see plan).
+        Any exception is logged and absorbed — the task lifecycle never
+        depends on judge success.
+
+        The completed background task writes ``task.judge_extracted`` runtime
+        event so :class:`HarnessChannel` ``wait_for_runtime_event`` can sync
+        on it during scripted scenarios.
+        """
+        if self._memory_judge is None or not output_text.strip():
+            return
+        # Stable synthetic thread_id keeps evidence_log additive per automation.
+        # See plan "task.thread_id synthetic key" P1: chose `automation:{name}`
+        # so re-runs of the same automation accumulate evidence.
+        if task.automation_name:
+            synthetic_thread = f"automation:{task.automation_name}"
+        else:
+            synthetic_thread = f"task:{task.id}"
+        coro = self._run_post_completion_judge(
+            task=task,
+            registry=registry,
+            output_text=output_text,
+            synthetic_thread=synthetic_thread,
+        )
+        bg = asyncio.create_task(
+            coro,
+            name=f"judge_post_completion_{task.id[:8]}",
+        )
+        self._background_judge_tasks.add(bg)
+        bg.add_done_callback(self._background_judge_tasks.discard)
+
+    async def _run_post_completion_judge(
+        self,
+        *,
+        task: RuntimeTask,
+        registry: AgentRegistry,
+        output_text: str,
+        synthetic_thread: str,
+    ) -> None:
+        """Body of the post-completion judge background task."""
+        try:
+            assert self._memory_judge is not None
+            result = await self._memory_judge.run_for_task(
+                mode="completion",
+                registry=registry,
+                task_prompt=task.goal or task.original_request or "",
+                task_output=output_text,
+                automation_name=task.automation_name,
+                skill_name=task.skill_name,
+                source_workspace=str(self._repo_root),
+                thread_id=synthetic_thread,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Runtime task=%s post_completion_judge_failed err=%s",
+                task.id,
+                exc,
+            )
+            try:
+                await self._store.add_runtime_event(
+                    task.id,
+                    "task.judge_extracted",
+                    {"error": f"{type(exc).__name__}: {exc}", "actions_count": 0},
+                )
+            except Exception:
+                pass
+            return
+        try:
+            await self._store.add_runtime_event(
+                task.id,
+                "task.judge_extracted",
+                {
+                    "actions_count": len(result.actions),
+                    "stats": result.stats,
+                    "error": result.error,
+                    "mode": "completion",
+                },
+            )
+        except Exception as exc:
+            logger.warning(
+                "Runtime task=%s judge_extracted_event_write_failed err=%s",
+                task.id,
+                exc,
+            )
 
     async def _invoke_agent(
         self,

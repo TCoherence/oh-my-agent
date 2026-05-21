@@ -933,6 +933,7 @@ async def ignite(ctx: BootContext) -> None:
             push_dispatcher=push_dispatcher,
             judge_store=judge_store,  # M0 PR2: memory injection in runtime path
             memory_inject_limit=int(memory_cfg_block.get("automation_inject_limit", 8)),
+            memory_judge=memory_judge,  # M0 PR3: post-completion judge trigger
         )
         logger.info(
             "Runtime enabled (workers=%s, default_agent=%s)",
