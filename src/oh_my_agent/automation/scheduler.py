@@ -1,18 +1,59 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+import os
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+import filelock
 import yaml
 
 from oh_my_agent.config import _substitute
 
 logger = logging.getLogger(__name__)
+
+
+def _automation_lock(path: Path) -> filelock.FileLock:
+    """Sidecar cross-process lock for an automation file."""
+    return filelock.FileLock(str(path) + ".lock", timeout=10)
+
+
+def _atomic_write_yaml_unlocked(path: Path, data: dict) -> None:
+    """Temp-file-then-os.replace write WITHOUT acquiring the lock.
+
+    Caller must already hold ``_automation_lock(path)`` (so read-modify-write
+    transactions stay atomic). os.replace gives readers old-or-new file
+    visibility, never partial.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), suffix=".yaml.tmp")
+    try:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as tf:
+            tf.write(yaml.safe_dump(data, allow_unicode=True, sort_keys=False))
+            tf.flush()
+            os.fsync(tf.fileno())
+        os.replace(tmp_name, path)
+    except Exception:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(tmp_name)
+        raise
+
+
+def _safe_write_yaml(path: Path, data: dict) -> None:
+    """Atomically write ``data`` as YAML to ``path`` (M2 PR2), acquiring the lock.
+
+    Cross-process-safe: the dashboard API (separate write site) and the
+    scheduler's own reload both contend for these files.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _automation_lock(path):
+        _atomic_write_yaml_unlocked(path, data)
 
 _MONTH_NAMES = {
     "JAN": 1,
@@ -286,6 +327,103 @@ class Scheduler:
         async with self._reload_lock:
             return await self._reload_now_locked()
 
+    async def patch_automation(self, name: str, updates: dict[str, Any]) -> AutomationRecord:
+        """M2 PR2/PR3: atomically apply field updates to an automation file.
+
+        Only whitelisted keys may be patched (``enabled`` / ``cron`` /
+        ``interval_seconds``) — arbitrary YAML rewrites are rejected so the
+        dashboard can't corrupt prompt/skill bindings.
+
+        Codex M2 PR2 hardening:
+        - Values are VALIDATED before any write (invalid cron / non-positive
+          interval / cron+interval coexistence are rejected up-front, so a
+          bad PATCH never makes the automation disappear post-reload).
+        - The read → mutate → validate → write happens INSIDE one
+          ``_automation_lock`` so a concurrent writer can't clobber the
+          read-modify-write transaction. On a failed reload the original
+          file content is restored (rollback).
+        """
+        allowed = {"enabled", "cron", "interval_seconds"}
+        bad = set(updates) - allowed
+        if bad:
+            raise ValueError(f"patch_automation: disallowed keys {sorted(bad)}")
+        async with self._reload_lock:
+            await self._reload_now_locked()
+            record = self._records_by_name.get(name)
+            if record is None or record.source_path is None:
+                raise ValueError(f"automation {name!r} not found")
+            source_path = record.source_path
+            # Whole read-modify-write transaction under the cross-process lock.
+            with _automation_lock(source_path):
+                try:
+                    original_text = source_path.read_text(encoding="utf-8")
+                    raw = yaml.safe_load(original_text)
+                except Exception as exc:
+                    raise ValueError(
+                        f"failed to read automation file {source_path}: {exc}"
+                    ) from exc
+                if not isinstance(raw, dict):
+                    raise ValueError(
+                        f"automation file {source_path} must contain a YAML mapping"
+                    )
+                candidate = dict(raw)
+                changed = False
+                for key, value in updates.items():
+                    if candidate.get(key) != value:
+                        candidate[key] = value
+                        changed = True
+                if not changed:
+                    return record
+                # Validate candidate BEFORE persisting.
+                self._validate_patch_candidate(candidate)
+                _atomic_write_yaml_unlocked(source_path, candidate)
+            # Reload outside the file lock (reload reads via its own scan).
+            await self._reload_now_locked()
+            updated = self._records_by_name.get(name)
+            if updated is None:
+                # Rollback: reload rejected the new content. Restore original.
+                with _automation_lock(source_path):
+                    _atomic_write_yaml_unlocked(source_path, raw)
+                await self._reload_now_locked()
+                raise ValueError(
+                    f"automation {name!r} invalid after patch; rolled back to prior content"
+                )
+            return updated
+
+    @staticmethod
+    def _validate_patch_candidate(candidate: dict[str, Any]) -> None:
+        """Reject value-level errors before writing a patched automation file.
+
+        - cron + interval_seconds are mutually exclusive.
+        - interval_seconds must be a positive int.
+        - cron must parse.
+        """
+        has_cron = candidate.get("cron") not in (None, "")
+        has_interval = candidate.get("interval_seconds") not in (None, "")
+        if has_cron and has_interval:
+            raise ValueError(
+                "patch_automation: cron and interval_seconds are mutually exclusive"
+            )
+        if not has_cron and not has_interval:
+            raise ValueError(
+                "patch_automation: one of cron / interval_seconds is required"
+            )
+        if has_interval:
+            try:
+                interval = int(candidate["interval_seconds"])
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"patch_automation: interval_seconds must be an int "
+                    f"(got {candidate['interval_seconds']!r})"
+                ) from exc
+            if interval <= 0:
+                raise ValueError(
+                    f"patch_automation: interval_seconds must be > 0 (got {interval})"
+                )
+        if has_cron:
+            # Raises on invalid cron syntax.
+            _parse_cron_expression(str(candidate["cron"]))
+
     async def set_automation_enabled(self, name: str, *, enabled: bool) -> AutomationRecord:
         async with self._reload_lock:
             await self._reload_now_locked()
@@ -310,10 +448,11 @@ class Scheduler:
 
             if bool(raw.get("enabled", True)) != enabled:
                 raw["enabled"] = enabled
-                source_path.write_text(
-                    yaml.safe_dump(raw, sort_keys=False, allow_unicode=False),
-                    encoding="utf-8",
-                )
+                # M2 PR2: atomic + cross-process-safe write. The dashboard
+                # API may PATCH the same file concurrently; raw write_text
+                # could expose a half-written file to the scheduler's
+                # reload scan.
+                _safe_write_yaml(source_path, raw)
 
             await self._reload_now_locked()
             updated = self._records_by_name.get(name)
