@@ -609,6 +609,14 @@ class MemoryStore(ABC):
     async def list_auto_disabled_skills(self) -> set[str]:
         return set()
 
+    async def set_skill_override(self, skill_name: str, *, enabled: bool) -> None:
+        """M2 PR4: operator manual enable/disable. Default no-op."""
+        return None
+
+    async def list_manual_disabled_skills(self) -> set[str]:
+        """M2 PR4: skills manually disabled by an operator. Default empty."""
+        return set()
+
     async def add_skill_evaluation(self, **kwargs) -> None:
         return None
 
@@ -1034,6 +1042,16 @@ CREATE TABLE IF NOT EXISTS skill_evaluations (
 
 CREATE INDEX IF NOT EXISTS idx_skill_evaluations_skill_created
     ON skill_evaluations(skill_name, created_at DESC);
+
+-- M2 PR4: operator manual enable/disable overrides for skills, set from the
+-- dashboard. Distinct from skill_provenance.auto_disabled (failure-rate
+-- driven) — a manual disable is an explicit operator decision. The agent
+-- skill-gate unions both sources. ``enabled=0`` means manually disabled.
+CREATE TABLE IF NOT EXISTS skill_overrides (
+    skill_name   TEXT PRIMARY KEY,
+    enabled      INTEGER NOT NULL DEFAULT 1,
+    updated_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 
 CREATE TABLE IF NOT EXISTS usage_events (
     id                           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2997,6 +3015,26 @@ ORDER BY recent_invocations DESC, s.skill_name ASC
         db = await self._conn()
         cursor = await db.execute(
             "SELECT skill_name FROM skill_provenance WHERE auto_disabled=1"
+        )
+        rows = await cursor.fetchall()
+        return {str(row["skill_name"]) for row in rows}
+
+    async def set_skill_override(self, skill_name: str, *, enabled: bool) -> None:
+        async with self._write_lock:
+            db = await self._conn()
+            await db.execute(
+                "INSERT INTO skill_overrides (skill_name, enabled, updated_at) "
+                "VALUES (?, ?, CURRENT_TIMESTAMP) "
+                "ON CONFLICT(skill_name) DO UPDATE SET "
+                " enabled=excluded.enabled, updated_at=CURRENT_TIMESTAMP",
+                (skill_name, 1 if enabled else 0),
+            )
+            await db.commit()
+
+    async def list_manual_disabled_skills(self) -> set[str]:
+        db = await self._conn()
+        cursor = await db.execute(
+            "SELECT skill_name FROM skill_overrides WHERE enabled=0"
         )
         rows = await cursor.fetchall()
         return {str(row["skill_name"]) for row in rows}

@@ -23,7 +23,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Body, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
 from oh_my_agent import paths
@@ -198,5 +198,172 @@ def build_router(config: dict) -> APIRouter:
             raise HTTPException(status_code=503, detail=msg)
         result["enabled"] = True
         return result
+
+    # ------------------------------------------------------------------
+    # M2 PR3 — Automation control (write surface, colocated mode only)
+    # ------------------------------------------------------------------
+
+    def _require_colocated(request: Request):
+        """Pull the live DashboardContext; 503 unless co-located."""
+        ctx = getattr(request.app.state, "oma", None)
+        if ctx is None or ctx.mode != "colocated":
+            raise HTTPException(
+                status_code=503,
+                detail="automation control requires the co-located dashboard "
+                "(runs inside the bot process)",
+            )
+        return ctx
+
+    def _require_write(request: Request):
+        """Colocated + bearer-header auth for mutating routes (M2 PR1 deps)."""
+        from oh_my_agent.dashboard.app import require_write_auth
+
+        return require_write_auth(request)
+
+    # ------------------------------------------------------------------
+    # M2 PR4 — Skill health + manual enable/disable
+    # ------------------------------------------------------------------
+
+    @router.get("/skills/health")
+    async def skills_health(request: Request) -> dict[str, Any]:
+        # Read route: works in both modes. In colocated mode we union the
+        # live disabled set; in readonly we fall back to the persisted
+        # store (auto + manual) via a fresh read-only query is not trivial,
+        # so readonly reports disabled=False (operator should use colocated
+        # for accurate disable state).
+        disabled: set[str] = set()
+        ctx = getattr(request.app.state, "oma", None)
+        if ctx is not None and ctx.mode == "colocated" and ctx.store is not None:
+            try:
+                auto = await ctx.store.list_auto_disabled_skills()
+                manual = await ctx.store.list_manual_disabled_skills()
+                disabled = auto | manual
+            except Exception:
+                disabled = set()
+        items = data.fetch_skill_health(
+            _runtime_db_path(),
+            memories_yaml=paths.judge_memories_yaml_path(config),
+            disabled_skills=disabled,
+        )
+        return {"items": items}
+
+    @router.get("/skills/{name}/recent_tasks")
+    def skill_recent_tasks(
+        name: str,
+        limit: int = Query(default=20, ge=1, le=100),
+    ) -> dict[str, Any]:
+        rows = data.fetch_skill_recent_tasks(_runtime_db_path(), skill=name, limit=limit)
+        return {"skill": name, "items": rows}
+
+    @router.post("/skills/{name}/enable")
+    async def skill_enable(name: str, request: Request) -> dict[str, Any]:
+        return await _set_skill_enabled(request, name, enabled=True)
+
+    @router.post("/skills/{name}/disable")
+    async def skill_disable(name: str, request: Request) -> dict[str, Any]:
+        return await _set_skill_enabled(request, name, enabled=False)
+
+    async def _set_skill_enabled(request: Request, name: str, *, enabled: bool) -> dict[str, Any]:
+        _require_write(request)
+        ctx = _require_colocated(request)
+        if ctx.store is None:
+            raise HTTPException(status_code=503, detail="store not available")
+        await ctx.store.set_skill_override(name, enabled=enabled)
+        # Best-effort: nudge the gateway to refresh its disabled-skill cache
+        # so the change takes effect without a restart.
+        gw = getattr(ctx, "gateway", None)
+        if gw is not None and hasattr(gw, "refresh_disabled_skills"):
+            try:
+                await gw.refresh_disabled_skills()
+            except Exception:
+                pass
+        return {"skill": name, "enabled": enabled}
+
+    @router.get("/automations")
+    def list_automations(request: Request) -> dict[str, Any]:
+        ctx = _require_colocated(request)
+        scheduler = ctx.scheduler
+        if scheduler is None:
+            raise HTTPException(status_code=503, detail="scheduler not available")
+        records = scheduler.list_automations()
+        next_runs = scheduler.compute_all_next_run_at()
+        items = []
+        for rec in records:
+            next_at = next_runs.get(rec.name)
+            items.append(
+                {
+                    "name": rec.name,
+                    "enabled": rec.enabled,
+                    "schedule_kind": rec.schedule_kind,
+                    "cron": rec.cron,
+                    "interval_seconds": rec.interval_seconds,
+                    "agent": rec.agent,
+                    "skill_name": rec.skill_name,
+                    "platform": rec.platform,
+                    "channel_id": rec.channel_id,
+                    "next_run_at": next_at.isoformat() if next_at else None,
+                }
+            )
+        return {"items": items}
+
+    @router.post("/automations/{name}/fire")
+    async def fire_automation(name: str, request: Request) -> dict[str, Any]:
+        _require_write(request)
+        ctx = _require_colocated(request)
+        scheduler = ctx.scheduler
+        if scheduler is None:
+            raise HTTPException(status_code=503, detail="scheduler not available")
+        result = await scheduler.fire_job_now(name)
+        if result == "not_found":
+            raise HTTPException(status_code=404, detail=f"automation {name!r} not found")
+        if result == "scheduler_down":
+            raise HTTPException(status_code=503, detail="scheduler not running")
+        if result == "already_firing":
+            # Codex M2 PR3: 409 Conflict — the job is mid-run, the manual
+            # fire was refused (not a success).
+            raise HTTPException(
+                status_code=409,
+                detail=f"automation {name!r} is already firing",
+            )
+        return {"name": name, "result": result}
+
+    @router.patch("/automations/{name}")
+    async def patch_automation(
+        name: str,
+        request: Request,
+        body: dict[str, Any] = Body(...),
+    ) -> dict[str, Any]:
+        _require_write(request)
+        ctx = _require_colocated(request)
+        scheduler = ctx.scheduler
+        if scheduler is None:
+            raise HTTPException(status_code=503, detail="scheduler not available")
+        allowed = {"enabled", "cron", "interval_seconds"}
+        # Codex M2 PR3 fix: reject ANY disallowed key explicitly. Previously
+        # disallowed keys were silently filtered out, so a body like
+        # {"enabled": false, "prompt": "x"} succeeded — bypassing the
+        # whitelist contract entirely.
+        bad = set(body) - allowed
+        if bad:
+            raise HTTPException(
+                status_code=400,
+                detail=f"disallowed keys {sorted(bad)} (allowed: {sorted(allowed)})",
+            )
+        updates = {k: v for k, v in body.items() if k in allowed}
+        if not updates:
+            raise HTTPException(
+                status_code=400,
+                detail=f"no patchable keys in body (allowed: {sorted(allowed)})",
+            )
+        try:
+            rec = await scheduler.patch_automation(name, updates)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "name": rec.name,
+            "enabled": rec.enabled,
+            "cron": rec.cron,
+            "interval_seconds": rec.interval_seconds,
+        }
 
     return router

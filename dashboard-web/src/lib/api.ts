@@ -48,6 +48,39 @@ async function apiGet<T>(path: string): Promise<T> {
   return (await r.json()) as T;
 }
 
+// Write helper (POST / PATCH). Sends the bearer token in the Authorization
+// HEADER only — the dashboard write routes reject ?token= query params
+// (M2 PR1: query tokens leak via logs/history).
+async function apiWrite<T>(
+  method: "POST" | "PATCH",
+  path: string,
+  body?: unknown,
+): Promise<T> {
+  const headers: Record<string, string> = {
+    Accept: "application/json",
+    ...authHeader(),
+  };
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+  const r = await fetch(path, {
+    method,
+    headers,
+    credentials: "same-origin",
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  if (!r.ok) {
+    let errBody: unknown = null;
+    try {
+      errBody = await r.json();
+    } catch {
+      errBody = await r.text();
+    }
+    throw new ApiError(r.status, errBody, `${path} → ${r.status}`);
+  }
+  // 204 / empty body tolerated
+  const text = await r.text();
+  return (text ? JSON.parse(text) : {}) as T;
+}
+
 // ── Types mirror the Python API shapes ─────────────────────────── //
 
 export interface SessionRow {
@@ -218,4 +251,59 @@ export function fetchSessionTrace(opts: {
   if (opts.limit) params.set("limit", String(opts.limit));
   const p = `/api/v1/sessions/${encodeURIComponent(opts.platform)}/${encodeURIComponent(opts.channelId)}/${encodeURIComponent(opts.threadId)}/trace`;
   return apiGet<TraceResponse>(`${p}?${params.toString()}`);
+}
+
+// ── M2 PR5 — Skill health + Automation control ────────────────────── //
+
+export interface SkillHealthRow {
+  skill: string;
+  runs_7d: number;
+  runs_30d: number;
+  success_rate: number | null;
+  last_run_at: string | null;
+  last_failure_reason: string | null;
+  negative_feedback_rate: number | null;
+  disabled: boolean;
+}
+
+export interface AutomationRow {
+  name: string;
+  enabled: boolean;
+  schedule_kind: string;
+  cron: string | null;
+  interval_seconds: number | null;
+  agent: string | null;
+  skill_name: string | null;
+  platform: string;
+  channel_id: string;
+  next_run_at: string | null;
+}
+
+export function fetchSkillHealth(): Promise<{ items: SkillHealthRow[] }> {
+  return apiGet<{ items: SkillHealthRow[] }>("/api/v1/skills/health");
+}
+
+export function setSkillEnabled(
+  name: string,
+  enabled: boolean,
+): Promise<{ skill: string; enabled: boolean }> {
+  const verb = enabled ? "enable" : "disable";
+  return apiWrite("POST", `/api/v1/skills/${encodeURIComponent(name)}/${verb}`);
+}
+
+export function fetchAutomations(): Promise<{ items: AutomationRow[] }> {
+  return apiGet<{ items: AutomationRow[] }>("/api/v1/automations");
+}
+
+export function fireAutomation(
+  name: string,
+): Promise<{ name: string; result: string }> {
+  return apiWrite("POST", `/api/v1/automations/${encodeURIComponent(name)}/fire`);
+}
+
+export function patchAutomation(
+  name: string,
+  updates: { enabled?: boolean; cron?: string; interval_seconds?: number },
+): Promise<AutomationRow> {
+  return apiWrite("PATCH", `/api/v1/automations/${encodeURIComponent(name)}`, updates);
 }

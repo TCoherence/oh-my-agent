@@ -682,3 +682,159 @@ async def test_run_returns_promptly_after_stop_under_long_intervals(tmp_path):
     elapsed = loop.time() - start
     assert elapsed < 1.0, f"scheduler.run() took {elapsed:.2f}s to return; expected <1s"
     assert task.exception() is None
+
+
+# =====================================================================
+# M2 PR2 — atomic YAML write + patch_automation
+# =====================================================================
+
+
+def test_safe_write_yaml_atomic_round_trip(tmp_path):
+    import yaml as _yaml
+
+    from oh_my_agent.automation.scheduler import _safe_write_yaml
+
+    target = tmp_path / "sub" / "auto.yaml"  # parent doesn't exist yet
+    _safe_write_yaml(target, {"name": "x", "enabled": True, "interval_seconds": 60})
+    assert target.exists()
+    loaded = _yaml.safe_load(target.read_text())
+    assert loaded["name"] == "x"
+    assert loaded["enabled"] is True
+    # No leftover temp / lock noise that looks like an automation file
+    siblings = list(target.parent.glob("*.yaml"))
+    assert siblings == [target]
+
+
+def test_safe_write_yaml_overwrites_existing(tmp_path):
+    import yaml as _yaml
+
+    from oh_my_agent.automation.scheduler import _safe_write_yaml
+
+    target = tmp_path / "auto.yaml"
+    _safe_write_yaml(target, {"v": 1})
+    _safe_write_yaml(target, {"v": 2})
+    assert _yaml.safe_load(target.read_text())["v"] == 2
+
+
+@pytest.mark.asyncio
+async def test_patch_automation_updates_enabled_and_interval(tmp_path):
+    storage_dir = tmp_path / "automations"
+    storage_dir.mkdir()
+    _write_yaml(
+        storage_dir / "job.yaml",
+        """
+        name: job
+        enabled: true
+        platform: discord
+        channel_id: "123"
+        thread_id: "456"
+        delivery: channel
+        prompt: do thing
+        agent: claude
+        interval_seconds: 60
+        author: scheduler
+        """,
+    )
+    scheduler = build_scheduler_from_config(
+        {"automations": {"enabled": True, "storage_dir": str(storage_dir)}},
+        project_root=tmp_path,
+    )
+    assert scheduler is not None
+    rec = await scheduler.patch_automation("job", {"enabled": False, "interval_seconds": 120})
+    assert rec.enabled is False
+    # Re-read from disk to confirm persistence
+    import yaml as _yaml
+
+    raw = _yaml.safe_load((storage_dir / "job.yaml").read_text())
+    assert raw["enabled"] is False
+    assert raw["interval_seconds"] == 120
+
+
+@pytest.mark.asyncio
+async def test_patch_automation_rejects_disallowed_keys(tmp_path):
+    storage_dir = tmp_path / "automations"
+    storage_dir.mkdir()
+    _write_yaml(
+        storage_dir / "job2.yaml",
+        """
+        name: job2
+        enabled: true
+        platform: discord
+        channel_id: "123"
+        thread_id: "456"
+        delivery: channel
+        prompt: do thing
+        agent: claude
+        interval_seconds: 60
+        author: scheduler
+        """,
+    )
+    scheduler = build_scheduler_from_config(
+        {"automations": {"enabled": True, "storage_dir": str(storage_dir)}},
+        project_root=tmp_path,
+    )
+    assert scheduler is not None
+    with pytest.raises(ValueError, match="disallowed keys"):
+        await scheduler.patch_automation("job2", {"prompt": "malicious rewrite"})
+
+
+@pytest.mark.asyncio
+async def test_patch_automation_rejects_invalid_interval(tmp_path):
+    storage_dir = tmp_path / "automations"
+    storage_dir.mkdir()
+    _write_yaml(
+        storage_dir / "job3.yaml",
+        """
+        name: job3
+        enabled: true
+        platform: discord
+        channel_id: "123"
+        thread_id: "456"
+        delivery: channel
+        prompt: do thing
+        agent: claude
+        interval_seconds: 60
+        author: scheduler
+        """,
+    )
+    scheduler = build_scheduler_from_config(
+        {"automations": {"enabled": True, "storage_dir": str(storage_dir)}},
+        project_root=tmp_path,
+    )
+    assert scheduler is not None
+    with pytest.raises(ValueError, match="interval_seconds must be > 0"):
+        await scheduler.patch_automation("job3", {"interval_seconds": 0})
+    # File unchanged (rejected before write)
+    import yaml as _yaml
+
+    raw = _yaml.safe_load((storage_dir / "job3.yaml").read_text())
+    assert raw["interval_seconds"] == 60
+
+
+@pytest.mark.asyncio
+async def test_patch_automation_rejects_cron_interval_coexist(tmp_path):
+    storage_dir = tmp_path / "automations"
+    storage_dir.mkdir()
+    _write_yaml(
+        storage_dir / "job4.yaml",
+        """
+        name: job4
+        enabled: true
+        platform: discord
+        channel_id: "123"
+        thread_id: "456"
+        delivery: channel
+        prompt: do thing
+        agent: claude
+        interval_seconds: 60
+        author: scheduler
+        """,
+    )
+    scheduler = build_scheduler_from_config(
+        {"automations": {"enabled": True, "storage_dir": str(storage_dir)}},
+        project_root=tmp_path,
+    )
+    assert scheduler is not None
+    # Adding cron while interval_seconds is still set → mutually exclusive
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        await scheduler.patch_automation("job4", {"cron": "0 9 * * *"})

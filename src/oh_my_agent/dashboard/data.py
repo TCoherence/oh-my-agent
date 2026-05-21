@@ -553,6 +553,153 @@ def fetch_skill_stats(db_path: Path) -> list[dict]:
     ]
 
 
+def fetch_skill_health(
+    db_path: Path,
+    *,
+    memories_yaml: Path | None = None,
+    disabled_skills: set[str] | None = None,
+) -> list[dict]:
+    """M2 PR4 — richer per-skill health for the dashboard ops console.
+
+    Per skill: 7d + 30d run counts, success rate (30d), last run time, last
+    failure reason, negative-feedback rate (from self_eval memory entries),
+    and whether the skill is currently disabled (manual override).
+
+    ``disabled_skills`` is the union of manual + auto disables (resolved by
+    the caller, which has the live store). ``memories_yaml`` powers the
+    negative-feedback rate; omitted → that field is None.
+    """
+    try:
+        conn = _ro_connect(db_path)
+    except sqlite3.OperationalError as exc:
+        return [_error_placeholder("skill health unavailable", exc)]
+
+    placeholders = ",".join("?" * len(SUCCESS_STATES))
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT skill_name AS skill,
+                   COUNT(*) AS total_30d,
+                   SUM(CASE WHEN created_at > datetime('now', '-7 days') THEN 1 ELSE 0 END) AS total_7d,
+                   SUM(CASE WHEN status IN ({placeholders}) THEN 1 ELSE 0 END) AS ok_30d,
+                   MAX(COALESCE(ended_at, updated_at)) AS last_at
+            FROM runtime_tasks
+            WHERE skill_name IS NOT NULL
+              AND created_at > datetime('now', '-{SKILL_STATS_LOOKBACK_DAYS} days')
+            GROUP BY skill_name
+            ORDER BY total_30d DESC
+            """,
+            SUCCESS_STATES,
+        ).fetchall()
+        # Most-recent failure reason per skill (separate query for clarity).
+        fail_rows = conn.execute(
+            """
+            SELECT skill_name AS skill, error AS reason,
+                   MAX(COALESCE(ended_at, updated_at)) AS at
+            FROM runtime_tasks
+            WHERE skill_name IS NOT NULL AND error IS NOT NULL AND error != ''
+              AND created_at > datetime('now', '-30 days')
+            GROUP BY skill_name
+            """
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        conn.close()
+        return [_error_placeholder("skill health query failed", exc)]
+    finally:
+        conn.close()
+
+    last_failure = {row["skill"]: row["reason"] for row in fail_rows}
+    neg_rates = _self_eval_negative_rates(memories_yaml) if memories_yaml else {}
+    disabled = disabled_skills or set()
+
+    out = []
+    for row in rows:
+        skill = row["skill"]
+        total = int(row["total_30d"])
+        out.append(
+            {
+                "skill": skill,
+                "runs_7d": int(row["total_7d"] or 0),
+                "runs_30d": total,
+                "success_rate": (row["ok_30d"] / total) if total else None,
+                "last_run_at": row["last_at"],
+                "last_failure_reason": last_failure.get(skill),
+                "negative_feedback_rate": neg_rates.get(skill),
+                "disabled": skill in disabled,
+            }
+        )
+    return out
+
+
+def fetch_skill_recent_tasks(db_path: Path, *, skill: str, limit: int = 20) -> list[dict]:
+    """Recent runtime_tasks for a skill (newest first) for drill-down."""
+    try:
+        conn = _ro_connect(db_path)
+    except sqlite3.OperationalError as exc:
+        return [_error_placeholder("skill recent tasks unavailable", exc)]
+    try:
+        rows = conn.execute(
+            """
+            SELECT id, status, goal, error,
+                   COALESCE(ended_at, updated_at, created_at) AS at
+            FROM runtime_tasks
+            WHERE skill_name = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (skill, int(limit)),
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        conn.close()
+        return [_error_placeholder("skill recent tasks query failed", exc)]
+    finally:
+        conn.close()
+    return [
+        {
+            "id": row["id"],
+            "status": row["status"],
+            "goal": (row["goal"] or "")[:200],
+            "error": row["error"],
+            "at": row["at"],
+        }
+        for row in rows
+    ]
+
+
+def _self_eval_negative_rates(memories_yaml: Path) -> dict[str, float]:
+    """Compute per-skill negative-feedback rate from self_eval entries.
+
+    Reads memories.yaml directly (read-only). For each active self_eval
+    entry, attributes it to every skill in ``source_skills``; the rate is
+    (fail count) / (total self_eval count) per skill.
+    """
+    try:
+        raw = yaml.safe_load(memories_yaml.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(raw, list):
+        return {}
+    totals: dict[str, int] = {}
+    fails: dict[str, int] = {}
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("category") != "self_eval" or entry.get("status") != "active":
+            continue
+        skills = entry.get("source_skills") or []
+        if not isinstance(skills, list):
+            continue
+        is_fail = entry.get("quality") == "fail"
+        for skill in skills:
+            sk = str(skill)
+            totals[sk] = totals.get(sk, 0) + 1
+            if is_fail:
+                fails[sk] = fails.get(sk, 0) + 1
+    return {
+        sk: (fails.get(sk, 0) / totals[sk]) for sk in totals if totals[sk]
+    }
+
+
 # ---------------------------------------------------------------------------
 # Section 5 — System layer
 # ---------------------------------------------------------------------------

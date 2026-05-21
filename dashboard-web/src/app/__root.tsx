@@ -29,6 +29,20 @@ function RootLayout() {
           >
             trends
           </Link>
+          <Link
+            to="/skills"
+            activeProps={{ className: "text-foreground" }}
+            className="hover:text-foreground transition-colors"
+          >
+            skills
+          </Link>
+          <Link
+            to="/automations"
+            activeProps={{ className: "text-foreground" }}
+            className="hover:text-foreground transition-colors"
+          >
+            automations
+          </Link>
           <a
             href="/"
             className="hover:text-foreground transition-colors"
