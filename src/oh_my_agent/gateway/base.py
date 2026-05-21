@@ -306,6 +306,18 @@ class BaseChannel(ABC):
     def supports_buttons(self) -> bool:
         return False
 
+    async def add_reactions(
+        self, thread_id: str, message_id: str, emojis: list[str]
+    ) -> None:
+        """M1 PR3: bot-emitted reactions on its own messages.
+
+        Default no-op for channels that don't support reactions (or for
+        tests that don't need them). Discord implements this so automation
+        completion messages can carry 👍/👎 prompts.
+        """
+        del thread_id, message_id, emojis
+        return None
+
     async def send_task_draft(
         self,
         *,

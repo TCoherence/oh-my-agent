@@ -486,6 +486,16 @@ class MemoryStore(ABC):
         """
         return None
 
+    async def get_automation_post_by_task(
+        self, *, task_id: str
+    ) -> dict[str, Any] | None:
+        """Lookup most-recent automation post by task_id.
+
+        Used by /feedback to resolve a user-typed task_id back to the
+        automation that produced it. Default no-op.
+        """
+        return None
+
     async def list_automation_posts_older_than(
         self, *, hours: int
     ) -> list[dict[str, Any]]:
@@ -1727,6 +1737,33 @@ class SQLiteMemoryStore(MemoryStore):
             "agent_name": row["agent_name"],
             "skill_name": row["skill_name"],
             "posted_at": row["fired_at"],
+        }
+
+    async def get_automation_post_by_task(
+        self, *, task_id: str
+    ) -> dict[str, Any] | None:
+        """Most-recent automation post for a given task_id."""
+        db = await self._conn()
+        cursor = await db.execute(
+            "SELECT platform, channel_id, message_id, automation_name, "
+            " task_id, agent_name, skill_name, fired_at, follow_up_thread_id "
+            "FROM automation_posts WHERE task_id=? "
+            "ORDER BY fired_at DESC LIMIT 1",
+            (str(task_id),),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return {
+            "platform": row["platform"],
+            "channel_id": row["channel_id"],
+            "message_id": row["message_id"],
+            "automation_name": row["automation_name"],
+            "task_id": row["task_id"],
+            "agent_name": row["agent_name"],
+            "skill_name": row["skill_name"],
+            "posted_at": row["fired_at"],
+            "follow_up_thread_id": row["follow_up_thread_id"],
         }
 
     async def list_automation_posts_older_than(

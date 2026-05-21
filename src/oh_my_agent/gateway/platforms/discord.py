@@ -1990,6 +1990,73 @@ class DiscordChannel(BaseChannel):
             prefix = "✅ " if result.success else "❌ "
             await interaction.followup.send(prefix + result.message[:1900], ephemeral=True)
 
+        @tree.command(
+            name="feedback",
+            description="📊 Rate an automation task's output (writes self_eval memory)",
+        )
+        @app_commands.describe(
+            task_id="Task ID (from /task_list or the completion message)",
+            verdict="Rating: 'good' if the output helped, 'bad' if it missed",
+            note="Optional: short note about what was wrong / right",
+        )
+        async def slash_feedback(
+            interaction: discord.Interaction,
+            task_id: str,
+            verdict: str,
+            note: str | None = None,
+        ):
+            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
+                await interaction.response.send_message(
+                    "This command is restricted to the configured owner.",
+                    ephemeral=True,
+                )
+                return
+            verdict_clean = verdict.strip().lower()
+            if verdict_clean not in {"good", "bad", "👍", "👎"}:
+                await interaction.response.send_message(
+                    "Verdict must be 'good' or 'bad' (or 👍 / 👎).",
+                    ephemeral=True,
+                )
+                return
+            if verdict_clean in {"👍"}:
+                verdict_clean = "good"
+            elif verdict_clean in {"👎"}:
+                verdict_clean = "bad"
+            if self._feedback_collector is None:
+                await interaction.response.send_message(
+                    "Feedback collector is not enabled (memory.judge.enabled=true required).",
+                    ephemeral=True,
+                )
+                return
+            await interaction.response.defer(ephemeral=True)
+            try:
+                from typing import cast as _cast
+
+                ok = await self._feedback_collector.record_explicit_feedback(
+                    task_id=task_id.strip(),
+                    verdict=_cast(Literal["good", "bad"], verdict_clean),
+                    note=note,
+                    actor_id=str(interaction.user.id),
+                )
+            except Exception as exc:
+                logger.warning("/feedback failed task_id=%s err=%s", task_id, exc)
+                await interaction.followup.send(
+                    f"❌ Feedback failed: {type(exc).__name__}", ephemeral=True
+                )
+                return
+            if ok:
+                await interaction.followup.send(
+                    f"✅ Recorded {verdict_clean} feedback for task `{task_id}`.",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.followup.send(
+                    f"⚠️ Could not record feedback — task `{task_id}` has no "
+                    f"automation_post (manual /task_start runs are excluded "
+                    f"from self_eval).",
+                    ephemeral=True,
+                )
+
         @tree.command(name="reflect_yesterday", description="Run a memory reflection pass over yesterday's diary")
         async def slash_reflect_yesterday(interaction: discord.Interaction):
             if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
@@ -2399,6 +2466,43 @@ class DiscordChannel(BaseChannel):
             file=discord.File(attachment.local_path, filename=attachment.filename),
         )
         return str(msg.id)
+
+    async def add_reactions(
+        self, thread_id: str, message_id: str, emojis: list[str]
+    ) -> None:
+        """M1 PR3: bot adds prompt reactions on its own messages.
+
+        Goes through the existing rate limiter so bursts of completion
+        messages don't trip Discord's 50/s HTTP cap. Each emoji is one
+        add_reaction call; errors are logged + swallowed (a missing
+        reaction prompt is non-fatal).
+        """
+        if not emojis or not message_id:
+            return
+        try:
+            thread = await self._resolve_channel(thread_id)
+        except Exception:
+            logger.debug("add_reactions: cannot resolve channel %s", thread_id)
+            return
+        # Rate-limit the fetch too (Codex M1 PR3 note) so a burst of
+        # automation completions doesn't trip Discord's HTTP cap.
+        await self._acquire_outbound_slot()
+        try:
+            message = await thread.fetch_message(int(message_id))
+        except Exception:
+            logger.debug("add_reactions: cannot fetch message %s", message_id)
+            return
+        for emoji in emojis:
+            await self._acquire_outbound_slot()
+            try:
+                await message.add_reaction(emoji)
+            except Exception as exc:
+                logger.debug(
+                    "add_reactions: failed to add %s to msg=%s err=%s",
+                    emoji,
+                    message_id,
+                    exc,
+                )
 
     async def send_attachments(
         self,

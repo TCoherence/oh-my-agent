@@ -39,6 +39,9 @@ _NEGATIVE_EMOJI = {"👎", "❌", "⚠️"}
 _CONFIDENCE_REACTION_ADD = 0.55
 _CONFIDENCE_REACTION_REMOVE = 0.50
 _CONFIDENCE_NO_REPLY = 0.40
+# M1 PR3: explicit user feedback is the highest-trust signal (user
+# deliberately rated this task) → plan says confidence 0.9.
+_CONFIDENCE_EXPLICIT = 0.9
 
 
 @dataclass
@@ -158,6 +161,41 @@ class FeedbackCollector:
                 actor_id=actor_id,
             )
 
+    async def record_explicit_feedback(
+        self,
+        *,
+        task_id: str,
+        verdict: Literal["good", "bad"],
+        note: str | None = None,
+        actor_id: str | None = None,
+    ) -> bool:
+        """M1 PR3: record an explicit /feedback rating.
+
+        Unlike reaction-based input, the user has typed task_id directly,
+        so we resolve the automation context via the task_id → recent
+        automation_post lookup (rather than message_id). On automation
+        tasks: writes a self_eval entry with feedback_source="explicit"
+        + confidence 0.9. On manual tasks (no automation): returns False
+        (the strict self_eval ↔ automation binding blocks the write).
+        """
+        lookup = await self._lookup_automation_post_by_task(task_id)
+        if lookup is None:
+            return False
+        quality: Literal["pass", "fail"] = "pass" if verdict == "good" else "fail"
+        reason_phrase = "user explicit rating"
+        if note:
+            # Cap note inline so summary stays under MemoryEntry width.
+            reason_phrase = f"user explicit rating: {note[:160]}"
+        async with self._lock_for_task(lookup.task_id):
+            return await self._write_self_eval(
+                lookup=lookup,
+                quality=quality,
+                confidence=_CONFIDENCE_EXPLICIT,
+                reason=reason_phrase,
+                feedback_source="explicit",
+                actor_id=actor_id,
+            )
+
     async def scan_no_reply_negative(self) -> int:
         """Daily worker: find automation posts older than ``window_hours``
         with NO user engagement (no reactions, no follow-up thread, no
@@ -233,6 +271,40 @@ class FeedbackCollector:
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    async def _lookup_automation_post_by_task(
+        self, task_id: str
+    ) -> _AutomationPostLookup | None:
+        """Resolve task_id → automation post via memory_store.
+
+        Used by ``record_explicit_feedback`` since /feedback typers carry
+        a task_id, not a message_id. Returns None if there's no
+        automation_post for the task (e.g. manual /task_start runs).
+        """
+        try:
+            row = await self._memory_store.get_automation_post_by_task(
+                task_id=str(task_id)
+            )
+        except AttributeError:
+            logger.debug(
+                "Memory store lacks get_automation_post_by_task(); skipping"
+            )
+            return None
+        except Exception as exc:
+            logger.warning("automation_posts task lookup failed: %s", exc)
+            return None
+        if not row:
+            return None
+        automation_name = row.get("automation_name")
+        if not automation_name:
+            return None
+        return _AutomationPostLookup(
+            task_id=str(task_id),
+            automation_name=str(automation_name),
+            posted_at=_parse_ts(row.get("posted_at")) or datetime.now(timezone.utc),
+            skill_name=row.get("skill_name"),
+            source_workspace=row.get("source_workspace"),
+        )
 
     async def _lookup_automation_post(self, message_id: str) -> _AutomationPostLookup | None:
         """Resolve message_id → (task_id, automation_name) via the
