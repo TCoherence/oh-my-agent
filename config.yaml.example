@@ -6,7 +6,8 @@ memory:
   judge:
     enabled: true
     memory_dir: ~/.oh-my-agent/memory         # holds memories.yaml + MEMORY.md
-    inject_limit: 12                          # max active memories injected into agent prompt
+    inject_limit: 12                          # max active memories injected into agent prompt (chat path)
+    automation_inject_limit: 8                # max memories injected into runtime/automation task prompts
     idle_seconds: 900                         # judge fires after this much silence on a thread
     idle_poll_seconds: 60                     # how often the idle scanner ticks
     synthesize_after_seconds: 21600           # rebuild MEMORY.md if older than this and dirty

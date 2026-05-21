@@ -259,6 +259,8 @@ class RuntimeService:
         agent_workspace: Path | None = None,
         auth_service=None,
         push_dispatcher=None,
+        judge_store=None,
+        memory_inject_limit: int = 8,
     ) -> None:
         cfg = config or {}
         self._enabled = bool(cfg.get("enabled", True))
@@ -334,6 +336,8 @@ class RuntimeService:
         self._skill_source_grounded_block_auto_merge = bool(source_cfg.get("block_auto_merge", True))
 
         self._store = store
+        self._judge_store = judge_store  # M0 PR2: optional memory injection
+        self._memory_inject_limit = int(memory_inject_limit)
         self._owner_user_ids = owner_user_ids or set()
         self._repo_root = (repo_root or Path.cwd()).resolve()
         self._skill_syncer = skill_syncer
@@ -3701,6 +3705,39 @@ class RuntimeService:
         task: RuntimeTask,
         step: int,
     ) -> AgentResponse:
+        # M0 PR2: inject [Remembered context] block before agent invocation.
+        # Mirror chat-path injection at gateway/manager.py so chat + runtime
+        # share the same memory surface. Strict scope filtering applies:
+        # scope=automation entries only inject when task.automation_name matches.
+        agent_prompt = prompt
+        if self._judge_store is not None:
+            try:
+                relevant = self._judge_store.get_relevant(
+                    skill_name=task.skill_name,
+                    automation_name=task.automation_name,
+                    workspace=str(self._repo_root),
+                    thread_id=task.thread_id,
+                    limit=self._memory_inject_limit,
+                )
+                block = self._judge_store.format_memory_block(relevant)
+                if block:
+                    agent_prompt = f"{block}\n\n{prompt}"
+                    logger.info(
+                        "Runtime task=%s step=%d memory_inject count=%d (skill=%s automation=%s)",
+                        task.id,
+                        step,
+                        len(relevant),
+                        task.skill_name or "-",
+                        task.automation_name or "-",
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "Runtime task=%s step=%d memory_inject_failed err=%s",
+                    task.id,
+                    step,
+                    exc,
+                )
+
         sig = inspect.signature(agent.run)
         kwargs: dict[str, Any] = {}
         if "thread_id" in sig.parameters:
@@ -3713,7 +3750,7 @@ class RuntimeService:
         async def _run_with_overrides() -> AgentResponse:
             with AgentRegistry._temporary_timeout(agent, task.agent_timeout_seconds):
                 with AgentRegistry._temporary_max_turns(agent, task.agent_max_turns):
-                    return await agent.run(prompt, [], **kwargs)
+                    return await agent.run(agent_prompt, [], **kwargs)
 
         run_task = asyncio.create_task(_run_with_overrides())
         self._running_tasks[task.id] = run_task

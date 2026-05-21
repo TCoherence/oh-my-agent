@@ -1834,13 +1834,11 @@ class GatewayManager:
                     len(self._judge_store.get_active()),
                 )
                 if relevant:
-                    mem_lines = [f"- {m.summary}" for m in relevant]
-                    agent_prompt = (
-                        "[Remembered context]\n"
-                        + "\n".join(mem_lines)
-                        + "\n\n"
-                        + msg.content
-                    )
+                    # M0 PR2: use shared JudgeStore.format_memory_block so chat
+                    # and runtime paths produce identical [Remembered context].
+                    from oh_my_agent.memory.judge_store import JudgeStore as _JS
+                    block = _JS.format_memory_block(relevant)
+                    agent_prompt = f"{block}\n\n{msg.content}" if block else msg.content
             except Exception as exc:
                 logger.warning("[%s] Memory injection failed: %s", req_id, exc)
 
