@@ -279,6 +279,28 @@ agents:
   #   max_tokens: 4096
 
 # ============================================================
+# Dashboard — read-only ops console (sessions / trends) + optional
+# write surface (skill health, automation control).
+# ============================================================
+dashboard:
+  colocated: false                  # true → runs inside the bot process so write routes can act on live Scheduler/RuntimeService; false → only the standalone `oma-dashboard` (read-only)
+  host: 127.0.0.1                   # loopback default; only change if you front it with a reverse proxy
+  port: 8765
+  refresh_seconds: 300
+  auth_token_env: OMA_DASHBOARD_TOKEN   # name of the env var holding the bearer token (secret never in YAML). Unset → reads open on loopback, writes 503.
+  # Rate limiting (defense-in-depth for public exposure). Generous defaults —
+  # the SPA's polling sits far under the global cap; the per-IP lockout only
+  # bites repeated auth failures (token brute-force).
+  rate_limit:
+    enabled: true
+    global_rps: 20                  # global token-bucket cap across all clients (<=0 disables)
+    burst: 40
+    auth_fail_max: 10               # this many 401s from one IP within the window...
+    auth_fail_window_seconds: 300   # ...locks the IP out...
+    auth_fail_cooldown_seconds: 900 # ...for this long
+    trusted_proxies: []             # IPs whose X-Forwarded-For is trusted (your reverse proxy). Empty → use the direct TCP peer. NEVER trust XFF from untrusted peers.
+
+# ============================================================
 # Experiment — short-term features, promoted to top-level sections
 # when they stabilize. Don't depend on these shapes long-term.
 # ============================================================

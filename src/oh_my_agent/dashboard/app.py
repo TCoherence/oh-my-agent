@@ -36,6 +36,7 @@ from starlette.types import Scope
 
 from oh_my_agent import paths
 from oh_my_agent.dashboard.api.v1 import build_router as build_api_v1_router
+from oh_my_agent.dashboard.rate_limit import build_rate_limiter
 
 from . import data as dashboard_data
 
@@ -179,6 +180,41 @@ def create_app(
                 media_type="application/json",
                 headers={"WWW-Authenticate": 'Bearer realm="oma-dashboard"'},
             )
+
+    # Rate limiting (global token bucket + per-IP auth-failure lockout).
+    # Added AFTER the auth middleware so it sits OUTERMOST: it short-circuits
+    # locked-out / over-budget IPs before auth runs, and observes the final
+    # response (including auth-middleware + write-dependency 401s) to count
+    # auth failures. Exempts /healthz so liveness probes are never throttled.
+    rate_limiter = build_rate_limiter(
+        config.get("dashboard", {}).get("rate_limit") if isinstance(config.get("dashboard"), dict) else None
+    )
+    if rate_limiter is not None:
+        app.state.rate_limiter = rate_limiter
+
+        @app.middleware("http")
+        async def rate_limit_mw(request: Request, call_next):
+            if request.url.path in _AUTH_PUBLIC_PATHS:
+                return await call_next(request)
+            ip = rate_limiter.client_ip(
+                direct_ip=request.client.host if request.client else "unknown",
+                xff_header=request.headers.get("x-forwarded-for"),
+            )
+            if rate_limiter.is_locked(ip):
+                return JSONResponse(
+                    {"error": "locked out: too many failed auth attempts"},
+                    status_code=429,
+                )
+            if not rate_limiter.allow_global():
+                return JSONResponse(
+                    {"error": "rate limit exceeded"},
+                    status_code=429,
+                    headers={"Retry-After": "1"},
+                )
+            response = await call_next(request)
+            if response.status_code == 401:
+                rate_limiter.record_auth_failure(ip)
+            return response
 
     @app.get("/healthz")
     def healthz() -> JSONResponse:
