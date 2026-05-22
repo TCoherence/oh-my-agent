@@ -3821,16 +3821,13 @@ class RuntimeService:
             if task.automation_name
             else f"task:{task.id}"
         )
-        # Per-skill model override
-        model_override: str | None = None
-        if task.skill_name and task.skill_name in self._self_eval_per_skill:
-            model_override = self._self_eval_per_skill[task.skill_name].get("model")
+        # Model is uniform (the Judge's configured self_eval_model); no
+        # per-skill model override. per_skill only gates enabled (above).
         coro = self._run_self_eval_judge(
             task=task,
             registry=registry,
             output_text=output_text,
             synthetic_thread=synthetic_thread,
-            model_override=model_override,
         )
         bg = asyncio.create_task(
             coro, name=f"judge_self_eval_{task.id[:8]}"
@@ -3845,7 +3842,6 @@ class RuntimeService:
         registry: AgentRegistry,
         output_text: str,
         synthetic_thread: str,
-        model_override: str | None,
     ) -> None:
         """M1 PR1 — body of the self_eval background task."""
         try:
@@ -3860,7 +3856,6 @@ class RuntimeService:
                 source_workspace=str(self._repo_root),
                 thread_id=synthetic_thread,
                 task_id=task.id,
-                model=model_override,
             )
         except Exception as exc:
             logger.warning(
