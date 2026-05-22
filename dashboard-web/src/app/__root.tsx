@@ -1,5 +1,7 @@
 import { Link, Outlet, createRootRoute } from "@tanstack/react-router";
 
+import { TokenBar, TokenModal } from "@/components/token-control";
+
 export const Route = createRootRoute({
   component: RootLayout,
 });
@@ -51,10 +53,14 @@ function RootLayout() {
             ops monitor ↗
           </a>
         </nav>
+        <div className="ml-auto">
+          <TokenBar />
+        </div>
       </header>
       <main className="flex-1 min-h-0">
         <Outlet />
       </main>
+      <TokenModal />
     </div>
   );
 }

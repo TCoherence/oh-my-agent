@@ -499,6 +499,30 @@ def _spa_app(tmp_path: Path):
     return TestClient(app)
 
 
+def test_app_shell_exempt_from_auth_but_api_protected(tmp_path: Path) -> None:
+    """Codex catch: with auth_token set, the SPA shell (/app/*) must be
+    reachable without a token (else you can't load the UI to enter the
+    token), while /api/v1 data stays protected.
+
+    The package web_dist isn't built in tests, so /app/* 404s — but the key
+    assertion is it's NOT 401 (the auth middleware let it through). The API
+    route still 401s without a token.
+    """
+    config = _seed_minimal_runtime_tree(tmp_path)
+    app = create_app(config, auth_token="secret")
+    client = TestClient(app)
+
+    # SPA shell: auth middleware exempts it → not 401 (404 since unmounted).
+    r = client.get("/app/skills")
+    assert r.status_code != 401
+    # API data: still requires the token.
+    r = client.get("/api/v1/sessions")
+    assert r.status_code == 401
+    # Legacy "/" Jinja page (renders data server-side) stays protected.
+    r = client.get("/")
+    assert r.status_code == 401
+
+
 def test_spa_root_serves_index(tmp_path: Path) -> None:
     client = _spa_app(tmp_path)
     r = client.get("/app/")
