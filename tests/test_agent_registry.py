@@ -115,3 +115,77 @@ async def test_registry_skips_on_tool_use_for_legacy_agents():
     # No TypeError from an unexpected kwarg; the legacy agent simply ignores it.
     assert response.error is None
     assert response.text == "legacy ok"
+
+
+class _ModelRecordingAgent(BaseAgent):
+    """Accepts a per-call ``model_override`` (like ClaudeAgent) and records
+    the effective model — WITHOUT mutating ``self._model`` (concurrency-safe).
+    """
+
+    def __init__(self, name: str = "claude", model: str = "sonnet-default") -> None:
+        self._name = name
+        self._model = model
+        self.models_seen: list[str] = []
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    async def run(
+        self,
+        prompt,
+        history=None,
+        *,
+        thread_id=None,
+        workspace_override=None,
+        log_path=None,
+        image_paths=None,
+        model_override=None,
+    ):
+        # Compute effective model locally; never reassign self._model.
+        self.models_seen.append(model_override or self._model)
+        return AgentResponse(text="ok")
+
+
+@pytest.mark.asyncio
+async def test_registry_forwards_model_override_without_mutating_agent():
+    agent = _ModelRecordingAgent(model="sonnet-default")
+    registry = AgentRegistry([agent])
+
+    # Call with override → agent's run() receives it as a kwarg
+    await registry.run("p1", model_override="haiku-cheap")
+    assert agent.models_seen == ["haiku-cheap"]
+    # self._model is NEVER mutated (non-mutating plumbing)
+    assert agent._model == "sonnet-default"
+
+    # Call without override → agent uses its configured model
+    await registry.run("p2")
+    assert agent.models_seen == ["haiku-cheap", "sonnet-default"]
+    assert agent._model == "sonnet-default"
+
+
+@pytest.mark.asyncio
+async def test_registry_model_override_skipped_for_agent_without_param():
+    # _RecordingAgent.run() has no model_override param — registry's
+    # signature dispatch skips it, no crash, agent runs on its own model.
+    agent = _RecordingAgent("codex")
+    registry = AgentRegistry([agent])
+    _agent, response = await registry.run("p", model_override="whatever")
+    assert response.error is None
+
+
+@pytest.mark.asyncio
+async def test_registry_model_override_concurrent_no_corruption():
+    """Two concurrent runs with different overrides on the SAME agent must
+    not corrupt each other — the whole point of the non-mutating fix."""
+    import asyncio
+
+    agent = _ModelRecordingAgent(model="base")
+    registry = AgentRegistry([agent])
+    await asyncio.gather(
+        registry.run("a", model_override="m-a"),
+        registry.run("b", model_override="m-b"),
+    )
+    # Both overrides observed; configured model untouched.
+    assert sorted(agent.models_seen) == ["m-a", "m-b"]
+    assert agent._model == "base"

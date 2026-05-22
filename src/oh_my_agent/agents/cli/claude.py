@@ -141,12 +141,15 @@ class ClaudeAgent(BaseCLIAgent):
     def clear_session(self, thread_id: str) -> None:
         self._session_ids.pop(thread_id, None)
 
-    def _base_command(self, prompt: str) -> list[str]:
+    def _base_command(self, prompt: str, model: str | None = None) -> list[str]:
+        # ``model`` is a per-call override (e.g. self-eval routing); falls
+        # back to the agent's configured model. Non-mutating: self._model
+        # is never reassigned, so concurrent calls are safe.
         cmd = [
             self._cli_path,
             "-p", prompt,
             "--max-turns", str(self._max_turns),
-            "--model", self._model,
+            "--model", model or self._model,
         ]
         if self._permission_mode:
             cmd.extend(["--permission-mode", self._permission_mode])
@@ -158,8 +161,8 @@ class ClaudeAgent(BaseCLIAgent):
             cmd.extend(self._extra_args)
         return cmd
 
-    def _build_command(self, prompt: str) -> list[str]:
-        cmd = self._base_command(prompt)
+    def _build_command(self, prompt: str, model: str | None = None) -> list[str]:
+        cmd = self._base_command(prompt, model)
         cmd.extend(["--output-format", "stream-json", "--verbose"])
         return cmd
 
@@ -271,7 +274,9 @@ class ClaudeAgent(BaseCLIAgent):
 
         return []
 
-    def _build_resume_command(self, prompt: str, session_id: str) -> list[str]:
+    def _build_resume_command(
+        self, prompt: str, session_id: str, model: str | None = None
+    ) -> list[str]:
         """Build a command that resumes an existing Claude session."""
         cmd = [
             self._cli_path,
@@ -280,7 +285,7 @@ class ClaudeAgent(BaseCLIAgent):
             "--output-format", "stream-json",
             "--verbose",
             "--max-turns", str(self._max_turns),
-            "--model", self._model,
+            "--model", model or self._model,
         ]
         if self._permission_mode:
             cmd.extend(["--permission-mode", self._permission_mode])
@@ -327,6 +332,7 @@ class ClaudeAgent(BaseCLIAgent):
         workspace_override: Path | None = None,
         log_path: Path | None = None,
         image_paths: list[Path] | None = None,
+        model_override: str | None = None,
         on_partial: PartialTextHook | None = None,
         on_tool_use: ToolUseHook | None = None,
     ) -> AgentResponse:
@@ -345,6 +351,10 @@ class ClaudeAgent(BaseCLIAgent):
         prompt = inject_control_protocol(prompt)
         session_id = self._session_ids.get(thread_id) if thread_id else None
         cwd = self._resolve_cwd(workspace_override)
+        # Per-call model override (e.g. self-eval routing). Falls back to the
+        # configured model. Threaded into command builders below; never
+        # mutates self._model.
+        effective_model = model_override or self._model
 
         # Augment prompt with image references
         if image_paths:
@@ -354,7 +364,7 @@ class ClaudeAgent(BaseCLIAgent):
 
         if session_id:
             # Resume existing session — send only the new prompt
-            cmd = self._build_resume_command(prompt, session_id)
+            cmd = self._build_resume_command(prompt, session_id, effective_model)
             if streaming and not image_paths:
                 logger.info("Streaming %s (resume session %s) ...", self.name, session_id[:12])
                 return await self._run_streamed(
@@ -384,7 +394,7 @@ class ClaudeAgent(BaseCLIAgent):
                     log_path=log_path,
                     thread_id=thread_id,
                 )
-            cmd = self._base_command(full_prompt)
+            cmd = self._base_command(full_prompt, effective_model)
             cmd.extend(["--output-format", "stream-json", "--verbose"])
             logger.info("Running %s (new session) ...", self.name)
 

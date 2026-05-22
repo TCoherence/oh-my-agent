@@ -25,9 +25,20 @@ class StubRegistry:
     def __init__(self, responses: list[str | tuple[str, str | None]]):
         self._responses = list(responses)
         self.calls: list[tuple[str, str | None]] = []
+        # Records model_override passed per call (None when unset) so tests
+        # can assert self_eval routed to the configured model.
+        self.model_overrides: list[str | None] = []
 
-    async def run(self, prompt: str, run_label: str | None = None):
+    async def run(
+        self,
+        prompt: str,
+        run_label: str | None = None,
+        *,
+        model_override: str | None = None,
+        **_kwargs,
+    ):
         self.calls.append((prompt, run_label))
+        self.model_overrides.append(model_override)
         if not self._responses:
             return FakeAgent(), FakeResponse(text="", error="no_response")
         nxt = self._responses.pop(0)
@@ -552,7 +563,7 @@ async def test_run_for_task_self_eval_keeps_reserve_when_usage_missing(tmp_path:
             usage = None
 
         class _NoUsageRegistry:
-            async def run(self, prompt, run_label=None):
+            async def run(self, prompt, run_label=None, **_kwargs):
                 return FakeAgent(), _NoUsageResponse()
 
         await judge.run_for_task(
@@ -594,7 +605,7 @@ async def test_run_for_task_self_eval_reconciles_with_usage(tmp_path: Path):
             usage = {"input_tokens": 100, "output_tokens": 50}
 
         class _UsageRegistry:
-            async def run(self, prompt, run_label=None):
+            async def run(self, prompt, run_label=None, **_kwargs):
                 return FakeAgent(), _UsageResponse()
 
         await judge.run_for_task(
@@ -608,5 +619,68 @@ async def test_run_for_task_self_eval_reconciles_with_usage(tmp_path: Path):
         # = 100*3/1M + 50*15/1M = 0.0003 + 0.00075 = 0.00105
         spent = await sqlite_store.get_self_eval_budget(_current_year_month())
         assert spent == pytest.approx(0.00105, abs=1e-5)
+    finally:
+        await sqlite_store.close()
+
+
+@pytest.mark.asyncio
+async def test_self_eval_routes_model_override_through_registry(tmp_path: Path):
+    """Follow-up fix: self_eval_model now actually routes the LLM call
+    (not just pricing) — verify registry.run receives model_override."""
+    from oh_my_agent.memory.store import SQLiteMemoryStore
+
+    judge_store = JudgeStore(memory_dir=tmp_path)
+    await judge_store.load()
+    sqlite_store = SQLiteMemoryStore(tmp_path / "runtime.db")
+    await sqlite_store.init()
+    try:
+        judge = Judge(
+            judge_store,
+            memory_store=sqlite_store,
+            self_eval_budget_usd=1.0,
+            self_eval_model="claude-haiku-4-5",  # configured cheap model
+        )
+        registry = StubRegistry([json.dumps({"quality": "pass", "reason": "ok"})])
+        await judge.run_for_task(
+            mode="self_eval",
+            registry=registry,
+            task_prompt="x",
+            task_output="y",
+            automation_name="auto-x",
+            task_id="t1",
+        )
+        # The self_eval LLM call routed the configured model, not the default.
+        assert registry.model_overrides == ["claude-haiku-4-5"]
+    finally:
+        await sqlite_store.close()
+
+
+@pytest.mark.asyncio
+async def test_self_eval_per_call_model_beats_configured(tmp_path: Path):
+    """Per-call ``model`` arg overrides the instance-configured self_eval_model."""
+    from oh_my_agent.memory.store import SQLiteMemoryStore
+
+    judge_store = JudgeStore(memory_dir=tmp_path)
+    await judge_store.load()
+    sqlite_store = SQLiteMemoryStore(tmp_path / "runtime.db")
+    await sqlite_store.init()
+    try:
+        judge = Judge(
+            judge_store,
+            memory_store=sqlite_store,
+            self_eval_budget_usd=1.0,
+            self_eval_model="claude-sonnet-4-6",
+        )
+        registry = StubRegistry([json.dumps({"quality": "pass", "reason": "ok"})])
+        await judge.run_for_task(
+            mode="self_eval",
+            registry=registry,
+            task_prompt="x",
+            task_output="y",
+            automation_name="auto-x",
+            task_id="t1",
+            model="claude-opus-4-7",  # per-call override
+        )
+        assert registry.model_overrides == ["claude-opus-4-7"]
     finally:
         await sqlite_store.close()

@@ -38,12 +38,13 @@ _MODEL_PRICING_USD_PER_MTOK: dict[str, tuple[float, float]] = {
     "claude-opus-4-7": (15.0, 75.0),
 }
 _DEFAULT_SELF_EVAL_MODEL = "claude-sonnet-4-6"
-# IMPORTANT (M1 PR1 known limitation, see plan + codex round-1 review):
-# The ``self_eval_model`` / per-skill ``model`` config knobs are used for
-# COST CALCULATION only; the actual LLM is selected by the AgentRegistry
-# default. Wiring real model routing through registry.run() is a follow-up
-# (touches AgentRegistry signature). For now, set this to match what the
-# registry actually picks so the budget ledger isn't misleading.
+# The ``self_eval_model`` / per-skill ``model`` config knobs drive BOTH cost
+# calculation AND actual model routing: the self_eval LLM call passes
+# ``model_override`` to ``AgentRegistry.run``, which forwards it (by run()
+# signature) to agents that accept the kwarg. ClaudeAgent honors it by
+# computing a local effective_model — self._model is never mutated, so
+# concurrent self_eval calls stay isolated. Agents whose run() lacks the
+# param (gemini/codex) are silently skipped and use their configured model.
 # Hard upper bound used by reserve step (worst-case 15k input + 800 output)
 _SELF_EVAL_MAX_INPUT_TOKENS = 15000
 _SELF_EVAL_MAX_OUTPUT_TOKENS = 800
@@ -523,9 +524,11 @@ class Judge:
         translated into a same-shape add-action via
         :meth:`_coerce_self_eval_to_action` so persist plumbing stays unified.
 
-        The ``model`` kwarg is accepted for forward-compat with per-skill /
-        per-call model overrides (M1 PR1); current implementation passes it
-        through ``registry.run`` only if the registry supports it.
+        The ``model`` kwarg (per-call override, falls back to the configured
+        ``self_eval_model``) is used BOTH for budget pricing AND to route the
+        actual LLM call: it flows to ``registry.run(model_override=...)``,
+        which forwards it to the running agent's ``run()`` (non-mutating —
+        ClaudeAgent derives a local effective_model per call).
 
         Returns a :class:`JudgeResult`. On agent / parse failure the result
         carries ``error`` non-None and persist is skipped.
@@ -588,6 +591,7 @@ class Judge:
                 registry,
                 req_id=req_id,
                 label="memory_judge_self_eval",
+                model_override=effective_model,
             )
             # Reconcile budget: refund the worst-case reservation against the
             # actual usage from the LLM response (if available). Codex round-1
@@ -754,13 +758,19 @@ class Judge:
         *,
         req_id: str | None,
         label: str,
+        model_override: str | None = None,
     ) -> tuple[list[dict[str, Any]], str, str | None, Any]:
         """Variant of :meth:`_invoke` that also returns the raw AgentResponse.
 
         Used by self_eval to extract ``response.usage`` for budget reconcile.
+        ``model_override`` routes this one call to a specific model (e.g. a
+        cheaper self-eval model) via AgentRegistry's per-call model swap.
         """
+        run_kwargs: dict[str, Any] = {"run_label": label}
+        if model_override:
+            run_kwargs["model_override"] = model_override
         try:
-            _agent, response = await registry.run(prompt, run_label=label)
+            _agent, response = await registry.run(prompt, **run_kwargs)
         except Exception as exc:
             return [], "", f"agent_exception: {exc}", None
         if response.error:
