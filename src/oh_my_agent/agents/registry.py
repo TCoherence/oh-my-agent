@@ -99,6 +99,7 @@ class AgentRegistry:
         image_paths: list[Path] | None,
         timeout_override_seconds: int | None,
         max_turns_override: int | None,
+        model_override: str | None = None,
         on_agent_run=None,
         on_partial=None,
         on_tool_use=None,
@@ -119,6 +120,14 @@ class AgentRegistry:
             kwargs["on_partial"] = on_partial
         if on_tool_use is not None and "on_tool_use" in sig.parameters:
             kwargs["on_tool_use"] = on_tool_use
+        # M1 follow-up: per-call model routing. Forwarded ONLY to agents whose
+        # run() accepts it (ClaudeAgent). Non-mutating — the agent computes a
+        # local effective_model from this kwarg, leaving self._model untouched,
+        # so concurrent fire-and-forget self_eval calls can't corrupt shared
+        # agent state (Codex round-1 catch on the earlier mutate-and-restore
+        # approach).
+        if model_override is not None and "model_override" in sig.parameters:
+            kwargs["model_override"] = model_override
         started_at = time.perf_counter()
         with self._temporary_timeout(agent, timeout_override_seconds):
             with self._temporary_max_turns(agent, max_turns_override):
@@ -147,6 +156,7 @@ class AgentRegistry:
         run_label: str | None = None,
         timeout_override_seconds: int | None = None,
         max_turns_override: int | None = None,
+        model_override: str | None = None,
         on_agent_run=None,
         on_partial=None,
         on_tool_use=None,
@@ -178,6 +188,7 @@ class AgentRegistry:
                 image_paths=image_paths,
                 timeout_override_seconds=timeout_override_seconds,
                 max_turns_override=max_turns_override,
+                model_override=model_override,
                 on_agent_run=on_agent_run,
                 on_partial=on_partial,
                 on_tool_use=on_tool_use,
@@ -199,6 +210,7 @@ class AgentRegistry:
                 image_paths=image_paths,
                 timeout_override_seconds=timeout_override_seconds,
                 max_turns_override=max_turns_override,
+                model_override=model_override,
                 on_agent_run=on_agent_run,
                 on_partial=on_partial,
                 on_tool_use=on_tool_use,
