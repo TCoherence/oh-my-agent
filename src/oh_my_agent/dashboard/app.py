@@ -172,6 +172,15 @@ def create_app(
             # adding a new public path is a single-list edit.
             if request.url.path in _AUTH_PUBLIC_PATHS:
                 return await call_next(request)
+            # The React SPA shell (/app/*) is public: it's just JS/HTML with
+            # NO data — all data flows through /api/v1/* which stays behind
+            # this token. Exempting it breaks the bootstrap chicken-and-egg
+            # where you couldn't load the UI to enter the token because
+            # loading the UI required the token (Codex catch). The legacy
+            # Jinja page at "/" renders data server-side, so it is NOT
+            # exempted.
+            if request.url.path == "/app" or request.url.path.startswith("/app/"):
+                return await call_next(request)
             if _check_auth_token(request, auth_token):
                 return await call_next(request)
             return Response(

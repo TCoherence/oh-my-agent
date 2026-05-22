@@ -31,6 +31,38 @@ function authHeader(): Record<string, string> {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
+// ── Token management (localStorage-backed, persists across refreshes) ── //
+
+export function getToken(): string {
+  if (typeof window === "undefined") return "";
+  return window.localStorage.getItem(TOKEN_KEY) ?? "";
+}
+
+export function setToken(value: string): void {
+  if (typeof window === "undefined") return;
+  const v = value.trim();
+  if (v) window.localStorage.setItem(TOKEN_KEY, v);
+  else window.localStorage.removeItem(TOKEN_KEY);
+  // Let any listeners (the nav status dot) refresh.
+  window.dispatchEvent(new CustomEvent("oma-token-changed"));
+}
+
+export function hasToken(): boolean {
+  return getToken().length > 0;
+}
+
+// Fired when an API call gets 401 (auth required / wrong token) — the
+// TokenModal listens and prompts the operator to paste a token.
+const AUTH_401_EVENT = "oma-auth-401";
+
+function emitAuthRequired(): void {
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent(AUTH_401_EVENT));
+  }
+}
+
+export { AUTH_401_EVENT };
+
 async function apiGet<T>(path: string): Promise<T> {
   const r = await fetch(path, {
     headers: { Accept: "application/json", ...authHeader() },
@@ -43,6 +75,7 @@ async function apiGet<T>(path: string): Promise<T> {
     } catch {
       body = await r.text();
     }
+    if (r.status === 401) emitAuthRequired();
     throw new ApiError(r.status, body, `${path} → ${r.status}`);
   }
   return (await r.json()) as T;
@@ -74,6 +107,7 @@ async function apiWrite<T>(
     } catch {
       errBody = await r.text();
     }
+    if (r.status === 401) emitAuthRequired();
     throw new ApiError(r.status, errBody, `${path} → ${r.status}`);
   }
   // 204 / empty body tolerated
