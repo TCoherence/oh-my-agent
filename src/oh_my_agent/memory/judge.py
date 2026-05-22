@@ -8,11 +8,9 @@ explicit actions (``add`` / ``strengthen`` / ``supersede`` / ``no_op``) that the
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Any, Literal
 
 from oh_my_agent.memory.judge_store import JudgeStore, parse_judge_actions
@@ -27,10 +25,10 @@ _MAX_WINDOW_CHARS = 8000
 _TASK_PROMPT_MAX_CHARS = 6000
 _TASK_OUTPUT_MAX_CHARS = 10000
 
-# M1 PR1 — model pricing for budget gating (USD per million tokens).
-# Updated when Anthropic changes price lists; defaults pinned to plan's
-# 2026 sonnet-4-6 quote. Unknown models fall back to a conservative
-# "treat as sonnet-4-6" so budget tracking errs on the side of caution.
+# Model pricing (USD per million tokens) — used to compute the cost we
+# RECORD into the usage ledger for each self-eval call (no budget cap; the
+# operator reads cost-by-source from the dashboard). Unknown models fall
+# back to sonnet-4-6 pricing so a recorded cost is never silently zero.
 _MODEL_PRICING_USD_PER_MTOK: dict[str, tuple[float, float]] = {
     # (input_price, output_price) per million tokens
     "claude-sonnet-4-6": (3.0, 15.0),
@@ -38,16 +36,12 @@ _MODEL_PRICING_USD_PER_MTOK: dict[str, tuple[float, float]] = {
     "claude-opus-4-7": (15.0, 75.0),
 }
 _DEFAULT_SELF_EVAL_MODEL = "claude-sonnet-4-6"
-# The ``self_eval_model`` / per-skill ``model`` config knobs drive BOTH cost
-# calculation AND actual model routing: the self_eval LLM call passes
-# ``model_override`` to ``AgentRegistry.run``, which forwards it (by run()
-# signature) to agents that accept the kwarg. ClaudeAgent honors it by
-# computing a local effective_model — self._model is never mutated, so
-# concurrent self_eval calls stay isolated. Agents whose run() lacks the
-# param (gemini/codex) are silently skipped and use their configured model.
-# Hard upper bound used by reserve step (worst-case 15k input + 800 output)
-_SELF_EVAL_MAX_INPUT_TOKENS = 15000
-_SELF_EVAL_MAX_OUTPUT_TOKENS = 800
+# ``self_eval_model`` routes the self-eval LLM call: it passes
+# ``model_override`` to ``AgentRegistry.run``, forwarded (by run() signature)
+# to agents that accept the kwarg. ClaudeAgent honors it via a local
+# effective_model — self._model is never mutated, so concurrent self_eval
+# calls stay isolated. Agents whose run() lacks the param (gemini/codex) are
+# skipped and use their configured model.
 
 _JUDGE_PROMPT = """\
 You are a long-term memory judge. Decide what (if anything) about the USER should be \
@@ -192,16 +186,11 @@ Output ONLY a JSON object like:
 """
 
 
-def _current_year_month() -> str:
-    """``YYYY-MM`` bucket for monthly budget reset (UTC)."""
-    return datetime.now(timezone.utc).strftime("%Y-%m")
-
-
 def _model_price(model: str) -> tuple[float, float]:
     """Return (input_price, output_price) USD/MTok for a given model.
 
-    Unknown models fall back to the default self-eval model price so the
-    budget always tracks something rather than silently free-running.
+    Unknown models fall back to the default self-eval model price so a
+    recorded cost is never silently zero for an unpriced model.
     """
     if model in _MODEL_PRICING_USD_PER_MTOK:
         return _MODEL_PRICING_USD_PER_MTOK[model]
@@ -217,94 +206,6 @@ def _calculate_cost_usd(model: str, input_tokens: int, output_tokens: int) -> fl
     """Convert token counts → USD using the model's price list."""
     in_price, out_price = _model_price(model)
     return (input_tokens / 1_000_000) * in_price + (output_tokens / 1_000_000) * out_price
-
-
-class SelfEvalBudget:
-    """M1 PR1 — opt-in budget gate for LLM self-eval calls.
-
-    Reads/writes the ``self_eval_budget`` SQLite table (year_month PK) so
-    budgets survive bot restarts. Uses an in-process ``asyncio.Lock`` to
-    serialize ``read → reserve → call → reconcile`` across concurrent
-    task completions; reservations cap the optimistic-spend window so a
-    burst of concurrent completions can't all sneak past the gate.
-
-    Disable by passing ``monthly_budget_usd <= 0`` — the tracker then
-    short-circuits ``check_and_reserve`` to always allow.
-    """
-
-    def __init__(
-        self,
-        store,
-        *,
-        monthly_budget_usd: float,
-        default_model: str = _DEFAULT_SELF_EVAL_MODEL,
-    ) -> None:
-        self._store = store
-        self._budget = float(monthly_budget_usd)
-        self._default_model = default_model
-        self._lock = asyncio.Lock()
-
-    @property
-    def enabled(self) -> bool:
-        return self._budget > 0
-
-    async def check_and_reserve(self, model: str | None = None) -> tuple[bool, float]:
-        """Atomically check budget + reserve worst-case spend for one call.
-
-        Returns ``(allowed, reserved_amount)``. On allow, the caller must
-        invoke :meth:`reconcile` with the actual spend after the LLM call
-        returns. Reserved amount is computed from the model's price + worst-
-        case 15k+800 tokens. If reserved + current spend exceeds budget,
-        returns ``(False, 0.0)`` without touching the ledger.
-        """
-        if not self.enabled:
-            return True, 0.0
-        async with self._lock:
-            current = await self._store.get_self_eval_budget(_current_year_month())
-            reserve = _calculate_cost_usd(
-                model or self._default_model,
-                _SELF_EVAL_MAX_INPUT_TOKENS,
-                _SELF_EVAL_MAX_OUTPUT_TOKENS,
-            )
-            if current + reserve > self._budget:
-                logger.warning(
-                    "self_eval_budget gate REJECT: spent=%.4f reserve=%.4f budget=%.4f month=%s",
-                    current,
-                    reserve,
-                    self._budget,
-                    _current_year_month(),
-                )
-                return False, 0.0
-            new_total = await self._store.add_self_eval_spend(
-                _current_year_month(), reserve
-            )
-            logger.debug(
-                "self_eval_budget gate ALLOW: reserved=%.4f new_total=%.4f budget=%.4f",
-                reserve,
-                new_total,
-                self._budget,
-            )
-            return True, reserve
-
-    async def reconcile(self, reserved: float, actual: float) -> None:
-        """Refund the over-reserved difference, or charge any shortfall.
-
-        ``reserved`` is what was added in ``check_and_reserve``. ``actual``
-        is the real cost computed from the LLM response's token counts.
-        Result: row contains the real cumulative spend, not the worst-case.
-        """
-        if not self.enabled:
-            return
-        delta = actual - reserved
-        if abs(delta) < 1e-9:
-            return
-        await self._store.add_self_eval_spend(_current_year_month(), delta)
-        logger.debug(
-            "self_eval_budget reconcile: reserved=%.4f actual=%.4f delta=%.4f",
-            reserved,
-            actual,
-            delta,
-        )
 
 
 def _extract_response_tokens(response: Any) -> tuple[int, int]:
@@ -385,19 +286,13 @@ class Judge:
         store: JudgeStore,
         *,
         memory_store: Any | None = None,
-        self_eval_budget_usd: float = 0.0,
         self_eval_model: str = _DEFAULT_SELF_EVAL_MODEL,
     ) -> None:
         self._store = store
-        # M1 PR1: budget tracker. Only created when monthly_budget_usd > 0
-        # AND a memory_store with the self_eval_budget table is wired.
-        self._budget: SelfEvalBudget | None = None
-        if memory_store is not None and self_eval_budget_usd > 0:
-            self._budget = SelfEvalBudget(
-                memory_store,
-                monthly_budget_usd=self_eval_budget_usd,
-                default_model=self_eval_model,
-            )
+        # memory_store is the usage-ledger sink: each self-eval LLM call
+        # records its cost via record_usage_event(source="self_eval") so it
+        # shows in the dashboard cost-by-source view. No budget cap.
+        self._memory_store = memory_store
         self._self_eval_model = self_eval_model
 
     async def run(
@@ -525,10 +420,11 @@ class Judge:
         :meth:`_coerce_self_eval_to_action` so persist plumbing stays unified.
 
         The ``model`` kwarg (per-call override, falls back to the configured
-        ``self_eval_model``) is used BOTH for budget pricing AND to route the
-        actual LLM call: it flows to ``registry.run(model_override=...)``,
-        which forwards it to the running agent's ``run()`` (non-mutating —
-        ClaudeAgent derives a local effective_model per call).
+        ``self_eval_model``) routes the self-eval LLM call: it flows to
+        ``registry.run(model_override=...)``, forwarded to the running agent's
+        ``run()`` (non-mutating — ClaudeAgent derives a local effective_model
+        per call). The same model is used to PRICE the cost recorded into the
+        usage ledger (source="self_eval"). No budget cap.
 
         Returns a :class:`JudgeResult`. On agent / parse failure the result
         carries ``error`` non-None and persist is skipped.
@@ -559,25 +455,7 @@ class Judge:
                 prompt, registry, req_id=req_id, label="memory_judge_task_completion"
             )
         elif mode == "self_eval":
-            # M1 PR1: budget gate. If a SelfEvalBudget is wired and over
-            # budget, skip the LLM call entirely (no action, no error).
             effective_model = model or self._self_eval_model
-            reserved = 0.0
-            if self._budget is not None:
-                allowed, reserved = await self._budget.check_and_reserve(effective_model)
-                if not allowed:
-                    stats = {"add": 0, "strengthen": 0, "supersede": 0, "no_op": 1, "rejected": 0}
-                    logger.info(
-                        "memory_judge_self_eval SKIPPED automation=%s reason=budget_exceeded",
-                        automation_name,
-                    )
-                    return JudgeResult(
-                        actions=[{"op": "no_op", "reason": "self_eval_budget_exceeded"}],
-                        stats=stats,
-                        raw_response="",
-                        error=None,
-                    )
-
             prompt = _PROMPT_SELF_EVAL.format(
                 task_prompt=prompt_trunc,
                 task_output=output_trunc,
@@ -593,29 +471,13 @@ class Judge:
                 label="memory_judge_self_eval",
                 model_override=effective_model,
             )
-            # Reconcile budget: refund the worst-case reservation against the
-            # actual usage from the LLM response (if available). Codex round-1
-            # catch: when usage is absent/malformed (e.g. provider doesn't
-            # surface token counts), DO NOT refund — fail closed and keep the
-            # worst-case reserve so the budget can't be silently bypassed.
-            if self._budget is not None and reserved > 0:
-                input_tokens, output_tokens = _extract_response_tokens(response)
-                if input_tokens == 0 and output_tokens == 0:
-                    # No usage signal — keep the reserve. Log so operators
-                    # can debug a budget that drains faster than expected.
-                    logger.info(
-                        "memory_judge_self_eval: response carried no usage; "
-                        "keeping reserved=%.4f (fail-closed budget gate)",
-                        reserved,
-                    )
-                else:
-                    actual_cost = _calculate_cost_usd(
-                        effective_model, input_tokens, output_tokens
-                    )
-                    try:
-                        await self._budget.reconcile(reserved, actual_cost)
-                    except Exception as exc:
-                        logger.warning("self_eval_budget reconcile failed: %s", exc)
+            # Record cost to the usage ledger (source="self_eval") so it shows
+            # in the dashboard cost-by-source view. No budget cap — the
+            # operator monitors spend per source. Best-effort: usage missing
+            # → no record (can't price what we can't measure).
+            await self._record_self_eval_usage(
+                effective_model, response, automation_name, task_id
+            )
             # M1 PR4: self_eval persists via upsert_self_eval_signal so the
             # LLM verdict merges with implicit/explicit signals into ONE
             # entry per task. Requires automation_name + task_id.
@@ -702,6 +564,41 @@ class Judge:
             stats,
         )
         return JudgeResult(actions=actions, stats=stats, raw_response=raw_text, error=None)
+
+    async def _record_self_eval_usage(
+        self,
+        model: str,
+        response: Any,
+        automation_name: str | None,
+        task_id: str | None,
+    ) -> None:
+        """Record one self-eval LLM call's cost into the usage ledger.
+
+        source="self_eval" so the dashboard cost-by-source view (and any
+        per-source accounting) separates self-eval spend from chat / skill /
+        automation spend. Best-effort: if no memory_store, no usage on the
+        response, or recording raises, we log + move on (self-eval verdict
+        still gets written).
+        """
+        if self._memory_store is None:
+            return
+        input_tokens, output_tokens = _extract_response_tokens(response)
+        if input_tokens == 0 and output_tokens == 0:
+            return  # nothing measurable to price
+        cost = _calculate_cost_usd(model, input_tokens, output_tokens)
+        try:
+            await self._memory_store.record_usage_event(
+                agent="judge",
+                source="self_eval",
+                model=model,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cost_usd=cost,
+                thread_id=(f"automation:{automation_name}" if automation_name else None),
+                task_id=task_id,
+            )
+        except Exception as exc:
+            logger.warning("self_eval usage record failed: %s", exc)
 
     @staticmethod
     def _coerce_self_eval_to_action(

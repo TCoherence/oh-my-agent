@@ -853,27 +853,14 @@ async def ignite(ctx: BootContext) -> None:
                 memory_dir,
                 exc,
             )
-        # M1 PR1: optional self_eval LLM judging gated by monthly budget.
-        # All keys default to off / safe — production must opt in via config.
+        # Optional LLM self-eval. Default off; opt in via config. Cost is
+        # recorded to the usage ledger (source="self_eval"), no budget cap.
         self_eval_cfg = memory_cfg_block.get("self_eval", {}) or {}
         self_eval_enabled_global = bool(self_eval_cfg.get("enabled", False))
-        self_eval_budget_usd = float(self_eval_cfg.get("monthly_budget_usd", 5.0))
         self_eval_model = str(self_eval_cfg.get("model", _DEFAULT_SELF_EVAL_MODEL))
-        # Codex M1 PR1 fix: per-skill enabled MUST also build the budget,
-        # otherwise an override that says `enabled: true` while global is
-        # `false` runs unbudgeted self-eval. Construct the budget if ANY
-        # gate is open.
-        per_skill_cfg = dict(self_eval_cfg.get("per_skill") or {})
-        per_skill_any_enabled = any(
-            bool(override.get("enabled", False))
-            for override in per_skill_cfg.values()
-            if isinstance(override, dict)
-        )
-        any_self_eval_enabled = self_eval_enabled_global or per_skill_any_enabled
         memory_judge = Judge(
             judge_store,
             memory_store=memory_store,
-            self_eval_budget_usd=self_eval_budget_usd if any_self_eval_enabled else 0.0,
             self_eval_model=self_eval_model,
         )
         idle_seconds = float(memory_cfg_block.get("idle_seconds", 15 * 60))
