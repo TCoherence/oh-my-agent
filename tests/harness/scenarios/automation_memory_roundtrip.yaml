@@ -44,15 +44,19 @@ steps:
         thread_id_as: "@thread1"
   - await:
       condition: task_status_eq
-      task_index: 0
+      task_thread: "@thread1"
       status: COMPLETED
       timeout_seconds: 30
   # Wait for the background post-completion judge to land its event.
-  # Generous timeout: background asyncio.Task may not be scheduled
-  # promptly when the suite runs under load.
+  # Select tasks by thread, NOT positional task_index: task1 and task2 are
+  # created in the same wall-clock second, so they tie on created_at and
+  # SQLite's tie-break is non-deterministic. Positional indexing once
+  # flaked here (task_index=1 intermittently resolved to the already-
+  # COMPLETED task1, so the await passed before task2 ever ran). Gating on
+  # this event also guarantees the insight is persisted before task2 runs.
   - await:
       condition: runtime_event
-      task_index: 0
+      task_thread: "@thread1"
       event_type: task.judge_extracted
       min_count: 1
       timeout_seconds: 30
@@ -65,7 +69,7 @@ steps:
         thread_id_as: "@thread2"
   - await:
       condition: task_status_eq
-      task_index: 1
+      task_thread: "@thread2"
       status: COMPLETED
       timeout_seconds: 30
 
