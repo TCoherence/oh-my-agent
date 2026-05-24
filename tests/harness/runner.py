@@ -440,6 +440,57 @@ async def _step_inject_user_message(env: HarnessEnv, payload: dict[str, Any]) ->
         env.channel.bind_alias(msg_alias, new_send_event.payload.get("message_id"))
 
 
+def _select_await_task(
+    env: HarnessEnv,
+    tasks: list[Any],
+    *,
+    task_thread: Any | None,
+    task_index: Any | None,
+) -> Any | None:
+    """Resolve a runtime task for an ``await`` condition.
+
+    Prefers ``task_thread`` (alias-resolved) over ``task_index``.
+
+    ``task_index`` sorts by ``created_at``, but SQLite's
+    ``CURRENT_TIMESTAMP`` has **1-second granularity** — two tasks created
+    in the same second tie, and the tie-break is non-deterministic. That
+    makes positional indexing unsafe whenever a scenario has more than one
+    task alive at once (it once caused the ``automation_memory_roundtrip``
+    flake: ``task_index=1`` intermittently resolved to the *first* task,
+    which was already COMPLETED, so the await passed before the real second
+    task ever ran). Multi-task scenarios MUST select by ``task_thread``;
+    ``task_index`` is retained only for single-task scenarios where no tie
+    is possible.
+    """
+    if task_thread is not None:
+        # resolve_alias passes literal ids through and raises loudly on an
+        # unbound "@alias" — a typo'd alias should fail, not silently match
+        # nothing forever.
+        resolved = env.channel.resolve_alias(str(task_thread))
+        matching = [t for t in tasks if t.thread_id == resolved]
+        if not matching:
+            return None
+        if len(matching) > 1:
+            # A thread hosting >1 task (e.g. a follow-up sibling) cannot be
+            # disambiguated by recency: created_at ties at SQLite's 1-second
+            # granularity — the very non-determinism this helper exists to
+            # avoid. Fail loud and direct the scenario to an explicit task_id
+            # rather than silently pick a possibly-stale task.
+            raise AssertionError(
+                f"task_thread={task_thread!r} resolved to {len(matching)} tasks "
+                f"({[t.id[:8] for t in matching]}); created_at ties make a "
+                f"positional choice non-deterministic — disambiguate with an "
+                f"explicit task_id."
+            )
+        return matching[0]
+    if task_index is not None:
+        tasks_sorted = sorted(tasks, key=lambda t: t.created_at or "")
+        idx = int(task_index)
+        if 0 <= idx < len(tasks_sorted):
+            return tasks_sorted[idx]
+    return None
+
+
 async def _step_await(env: HarnessEnv, payload: dict[str, Any]) -> None:
     condition = str(payload.get("condition") or "")
     timeout = float(payload.get("timeout_seconds") or 30.0)
@@ -448,21 +499,34 @@ async def _step_await(env: HarnessEnv, payload: dict[str, Any]) -> None:
 
     if condition == "task_status_eq":
         target_status = str(payload.get("status") or "COMPLETED")
-        index = int(payload.get("task_index") or 0)
+        task_thread = payload.get("task_thread")
+        task_index = payload.get("task_index")
+        if task_thread is None and task_index is None:
+            task_index = 0  # back-compat default for single-task scenarios
+        tasks: list[Any] = []
         while asyncio.get_running_loop().time() < deadline:
             tasks = await env.store.list_runtime_tasks(
                 platform=env.channel.platform,
                 channel_id=env.channel.channel_id,
                 limit=50,
             )
-            tasks_sorted = sorted(tasks, key=lambda t: t.created_at or "")
-            if index < len(tasks_sorted) and tasks_sorted[index].status == target_status:
+            task = _select_await_task(
+                env, tasks, task_thread=task_thread, task_index=task_index
+            )
+            if task is not None and task.status == target_status:
                 return
             await asyncio.sleep(interval)
-        statuses = [(t.id[:8], t.status) for t in tasks_sorted] if tasks_sorted else []
+        statuses = [
+            (t.id[:8], t.thread_id, t.status)
+            for t in sorted(tasks, key=lambda t: t.created_at or "")
+        ]
+        selector = (
+            f"task_thread={task_thread!r}" if task_thread is not None
+            else f"task[{task_index}]"
+        )
         raise AssertionError(
             f"await task_status_eq timeout after {timeout}s — "
-            f"expected task[{index}] status={target_status}; observed: {statuses}"
+            f"expected {selector} status={target_status}; observed: {statuses}"
         )
 
     if condition == "event_seen":
@@ -496,10 +560,12 @@ async def _step_await(env: HarnessEnv, payload: dict[str, Any]) -> None:
         if not event_type:
             raise ValueError("await condition=runtime_event requires event_type payload field")
         explicit_task_id = payload.get("task_id")
+        task_thread = payload.get("task_thread")
         task_index = payload.get("task_index")
-        if explicit_task_id is None and task_index is None:
+        if explicit_task_id is None and task_thread is None and task_index is None:
             raise ValueError(
-                "await condition=runtime_event requires task_id or task_index payload field"
+                "await condition=runtime_event requires task_id, task_thread, "
+                "or task_index payload field"
             )
         while asyncio.get_running_loop().time() < deadline:
             target_task_id: str | None = None
@@ -511,10 +577,11 @@ async def _step_await(env: HarnessEnv, payload: dict[str, Any]) -> None:
                     channel_id=env.channel.channel_id,
                     limit=50,
                 )
-                tasks_sorted = sorted(tasks, key=lambda t: t.created_at or "")
-                idx = int(task_index)
-                if 0 <= idx < len(tasks_sorted):
-                    target_task_id = tasks_sorted[idx].id
+                task = _select_await_task(
+                    env, tasks, task_thread=task_thread, task_index=task_index
+                )
+                if task is not None:
+                    target_task_id = task.id
             if target_task_id is not None:
                 events = await env.store.list_runtime_events(target_task_id, limit=100)
                 matches = [e for e in events if e["event_type"] == event_type]
@@ -522,9 +589,9 @@ async def _step_await(env: HarnessEnv, payload: dict[str, Any]) -> None:
                     return
             await asyncio.sleep(interval)
         raise AssertionError(
-            f"await runtime_event timeout — task_index={task_index!r} "
-            f"task_id={explicit_task_id!r} event_type={event_type!r} "
-            f"min_count={min_count} (timeout={timeout}s)"
+            f"await runtime_event timeout — task_thread={task_thread!r} "
+            f"task_index={task_index!r} task_id={explicit_task_id!r} "
+            f"event_type={event_type!r} min_count={min_count} (timeout={timeout}s)"
         )
 
     if condition == "auth_flow_event":
