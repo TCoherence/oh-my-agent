@@ -70,7 +70,7 @@ async def test_manager_routes_create_skill_from_router():
             skill_name="weather",
         )
     )
-    gm = GatewayManager([], runtime_service=runtime_service, intent_router=router, owner_user_ids={"owner-1"})
+    gm = GatewayManager([], runtime_service=runtime_service, intent_router=router, owner_user_ids={"owner-1"}, auto_task_creation=True)
 
     await gm.handle_message(session, registry, _make_msg("create a skill for weather"))
 
@@ -103,7 +103,7 @@ async def test_manager_high_confidence_reply_once_skips_skill_heuristic():
             raw_text="",
         )
     )
-    gm = GatewayManager([], runtime_service=runtime_service, intent_router=router, owner_user_ids={"owner-1"})
+    gm = GatewayManager([], runtime_service=runtime_service, intent_router=router, owner_user_ids={"owner-1"}, auto_task_creation=True)
 
     await gm.handle_message(session, registry, _make_msg("create a skill for weather"))
 
@@ -132,7 +132,7 @@ async def test_manager_low_confidence_reply_once_falls_back_to_skill_heuristic()
             raw_text="",
         )
     )
-    gm = GatewayManager([], runtime_service=runtime_service, intent_router=router, owner_user_ids={"owner-1"})
+    gm = GatewayManager([], runtime_service=runtime_service, intent_router=router, owner_user_ids={"owner-1"}, auto_task_creation=True)
 
     await gm.handle_message(session, registry, _make_msg("create a skill for weather"))
 
@@ -151,7 +151,7 @@ async def test_manager_thread_context_takes_priority_over_router():
     router = MagicMock()
     router.confidence_threshold = 0.55
     router.route = AsyncMock()
-    gm = GatewayManager([], runtime_service=runtime_service, intent_router=router, owner_user_ids={"owner-1"})
+    gm = GatewayManager([], runtime_service=runtime_service, intent_router=router, owner_user_ids={"owner-1"}, auto_task_creation=True)
 
     await gm.handle_message(session, registry, _make_msg("retry merge"))
 

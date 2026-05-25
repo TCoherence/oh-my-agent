@@ -86,6 +86,10 @@ _BLOCK_REASON_RE = re.compile(r"^\s*BLOCK_REASON:\s*(.+?)\s*$", re.MULTILINE)
 # Matches "draft:", "DRAFT:", "草稿:", "草稿：" at the start of a message.
 # Both ASCII colon (":") and CJK colon ("：") are accepted.
 _DRAFT_PREFIX_RE = re.compile(r"^\s*(?:draft|草稿)\s*[:：]\s*", re.IGNORECASE)
+# Explicit task-creation triggers (explicit-only routing). Both ASCII and CJK
+# colons accepted; case-insensitive.
+_TASK_PREFIX_RE = re.compile(r"^\s*(?:task|任务)\s*[:：]\s*", re.IGNORECASE)
+_SKILL_PREFIX_RE = re.compile(r"^\s*(?:skill|技能)\s*[:：]\s*", re.IGNORECASE)
 
 
 def is_long_task_intent(text: str) -> bool:
@@ -118,6 +122,37 @@ def strip_draft_prefix(text: str) -> tuple[str, bool]:
     if match:
         return text[match.end():], True
     return text, False
+
+
+def strip_task_prefix(text: str) -> tuple[str, bool]:
+    """Detect an explicit ``task:`` / ``任务:`` prefix.
+
+    Returns ``(stripped_text, prefix_found)``. The caller turns a matched
+    message into an artifact task (auto-execute) — the lightweight "produce
+    this for me" explicit trigger.
+    """
+    match = _TASK_PREFIX_RE.match(text)
+    if match:
+        return text[match.end():], True
+    return text, False
+
+
+def parse_skill_prefix(text: str) -> tuple[bool, str, str]:
+    """Detect an explicit ``skill: <name> <goal>`` / ``技能: <name> <goal>``.
+
+    Returns ``(matched, skill_name, goal)``. ``skill_name`` is the first token
+    after the prefix (slug-normalized); the caller validates it against the
+    registered skills and, if unknown, replies with the available names rather
+    than guessing. ``goal`` is the remainder.
+    """
+    match = _SKILL_PREFIX_RE.match(text)
+    if not match:
+        return False, "", ""
+    rest = text[match.end():].strip()
+    parts = rest.split(None, 1)
+    name = _normalize_skill_slug(parts[0]) if parts else ""
+    goal = parts[1].strip() if len(parts) > 1 else ""
+    return True, name, goal
 
 
 def extract_skill_name(text: str, existing_skills: set[str] | None = None) -> tuple[str, bool]:

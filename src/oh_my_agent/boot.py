@@ -1121,6 +1121,7 @@ async def ignite(ctx: BootContext) -> None:
         streaming_config=config.get("gateway", {}).get("streaming", {}),
         feedback_collector=feedback_collector,
         reports_dir=_paths.runtime_reports_dir(config),
+        auto_task_creation=bool(config.get("gateway", {}).get("auto_task_creation", False)),
     )
     if feedback_scan_worker is not None:
         feedback_scan_worker.start()

@@ -211,6 +211,12 @@ runtime:
       Review and merge via the GitHub UI. The bot will not auto-merge.
 
 gateway:
+  # Task creation is EXPLICIT-only by default: a plain message is always a
+  # direct chat reply. Tasks are created only via explicit triggers —
+  # `/skill_name`, `/task_start`, or a `task:` / `draft:` / `skill:` prefix.
+  # Set true to re-enable the legacy LLM-router + heuristic auto-classification
+  # that turns ordinary messages into tasks (not recommended).
+  auto_task_creation: false
   # Incremental in-place edit of the assistant's reply while the agent streams.
   # Disabled by default — when on, the gateway edits one anchor message as
   # partial text arrives (Discord rate-limit aware).

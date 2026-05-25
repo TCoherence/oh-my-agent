@@ -39,7 +39,10 @@ steps:
   - inject_user_message:
       thread_id: null
       author_id: "owner-1"
-      content: "/task_start summarize the foo report"
+      # Explicit-only routing: `/task_start` is a Discord slash command not
+      # wired in the harness channel; use the `task:` prefix (the in-message
+      # explicit trigger) to create the artifact task.
+      content: "task: summarize the foo report"
       capture:
         thread_id_as: "@thread1"
   - await:
@@ -64,7 +67,7 @@ steps:
   - inject_user_message:
       thread_id: null
       author_id: "owner-1"
-      content: "/task_start follow up on the report"
+      content: "task: follow up on the report"
       capture:
         thread_id_as: "@thread2"
   - await:

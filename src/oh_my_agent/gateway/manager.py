@@ -39,7 +39,9 @@ from oh_my_agent.runtime.policy import (
     is_artifact_intent,
     is_long_task_intent,
     is_skill_intent,
+    parse_skill_prefix,
     strip_draft_prefix,
+    strip_task_prefix,
 )
 from oh_my_agent.skills.frontmatter import (
     read_skill_frontmatter,
@@ -95,6 +97,7 @@ class GatewayManager:
         streaming_config: dict | None = None,
         feedback_collector=None,
         reports_dir: Path | None = None,
+        auto_task_creation: bool = False,
     ) -> None:
         self._channels = channels
         self._compressor = compressor
@@ -184,6 +187,11 @@ class GatewayManager:
         # Published reports tree (runtime.reports_dir); surfaced read-intended in
         # per-thread workspaces as ``reports_archive/`` for cross-session recall.
         self._reports_dir = Path(reports_dir).expanduser().resolve() if reports_dir else None
+        # Explicit-only routing by default: a plain message is a direct reply.
+        # Tasks are created only via explicit triggers (/skill_name, /task_start,
+        # task:/draft:/skill: prefixes). When true, the legacy LLM-router +
+        # heuristic auto-dispatch is re-enabled (escape hatch).
+        self._auto_task_creation = bool(auto_task_creation)
         self._recent_thread_skills: dict[tuple[str, str, str], str] = {}
         # M2 PR4: two distinct disable sources, unioned on read. Keeping them
         # separate prevents auto-health recovery (.discard) from erasing a
@@ -1513,6 +1521,63 @@ class GatewayManager:
                 thread_id,
             )
 
+        # --- Explicit task-creation prefixes (work regardless of
+        # auto_task_creation; deterministic, no LLM). `skill: <name> <goal>` →
+        # skill_change (keeps the eval gate); `task:` → artifact (auto-exec);
+        # `draft:` → artifact forced to the approval gate. ---
+        if self._runtime_service and not explicit_skill and not msg.system:
+            skill_matched, skill_pref_name, skill_pref_goal = parse_skill_prefix(msg.content)
+            if skill_matched:
+                known = self._known_skill_names()
+                if skill_pref_name and skill_pref_name in known:
+                    logger.info(
+                        "[%s] PREFIX skill: skill=%s thread=%s -> create_skill_task",
+                        req_id, skill_pref_name, thread_id,
+                    )
+                    await self._append_user_turn_if_needed(session, thread_id, msg)
+                    await self._runtime_service.create_skill_task(
+                        session=session,
+                        registry=registry,
+                        thread_id=thread_id,
+                        goal=skill_pref_goal or msg.content,
+                        raw_request=msg.content,
+                        created_by=msg.author_id or msg.author,
+                        preferred_agent=msg.preferred_agent,
+                        skill_name=skill_pref_name,
+                        source="explicit_prefix",
+                        force_draft=True,
+                    )
+                    return
+                available = ", ".join(sorted(self._known_skill_names())) or "(none registered)"
+                await session.channel.send(
+                    thread_id,
+                    f"⚠️ `skill:` must name a known skill as its first token "
+                    f"(e.g. `skill: my-skill fix X`). Available: {available}",
+                )
+                return
+            task_goal, task_matched = strip_task_prefix(msg.content)
+            draft_goal, draft_matched = strip_draft_prefix(msg.content)
+            if task_matched or draft_matched:
+                goal = (draft_goal if draft_matched else task_goal).strip() or msg.content
+                logger.info(
+                    "[%s] PREFIX %s thread=%s -> create_artifact_task(draft=%s)",
+                    req_id, "draft:" if draft_matched else "task:", thread_id, draft_matched,
+                )
+                await self._append_user_turn_if_needed(session, thread_id, msg)
+                await self._runtime_service.create_artifact_task(
+                    session=session,
+                    registry=registry,
+                    thread_id=thread_id,
+                    goal=goal,
+                    raw_request=msg.content,
+                    created_by=msg.author_id or msg.author,
+                    preferred_agent=msg.preferred_agent,
+                    source="explicit_prefix",
+                    auto_approve=not draft_matched,
+                    force_draft=draft_matched,
+                )
+                return
+
         # Runtime interception for long-running autonomous tasks.
         # Router v2 emits 3 canonical intents: reply / artifact / repo_update.
         # Old intents (chat_reply / invoke_skill / oneoff_artifact /
@@ -1524,7 +1589,8 @@ class GatewayManager:
         # and apply in the artifact branch below.
         _, draft_prefix_forced = strip_draft_prefix(msg.content)
         if (
-            (not msg.system)
+            self._auto_task_creation
+            and (not msg.system)
             and not explicit_skill
             and self._intent_router
             and self._runtime_service
@@ -1832,7 +1898,12 @@ class GatewayManager:
         else:
             should_try_heuristic = bool(self._runtime_service)
 
-        if self._runtime_service and should_try_heuristic and not explicit_skill:
+        if (
+            self._auto_task_creation
+            and self._runtime_service
+            and should_try_heuristic
+            and not explicit_skill
+        ):
             if is_skill_intent(msg.content):
                 await self._append_user_turn_if_needed(session, thread_id, msg)
                 user_turn_appended = True
