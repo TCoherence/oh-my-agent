@@ -62,6 +62,37 @@ TaskStatus = Literal[
 ]
 TaskType = Literal["artifact", "repo_change", "skill_change"]
 TaskCompletionMode = Literal["reply", "artifact", "merge"]
+
+# Terminal task statuses — no further state transitions. Canonical source for
+# the per-thread manual-task dedup index and active-task checks. NOTE:
+# DRAFT / APPLIED / MERGE_FAILED are NOT terminal (a draft awaits approval,
+# applied/merge-failed can still be retried), matching ``_active_task_for_thread``.
+TERMINAL_STATUSES = frozenset({
+    TASK_STATUS_COMPLETED,
+    TASK_STATUS_MERGED,
+    TASK_STATUS_PR_OPENED,
+    TASK_STATUS_DISCARDED,
+    TASK_STATUS_FAILED,
+    TASK_STATUS_TIMEOUT,
+    TASK_STATUS_STOPPED,
+    TASK_STATUS_REJECTED,
+})
+
+
+class DuplicateActiveTaskError(RuntimeError):
+    """Raised when creating a manual task while a non-terminal manual task
+    already exists in the same thread (enforced by a partial UNIQUE index).
+
+    Carries the existing task's id / thread so callers can surface it instead
+    of falsely reporting a new task was created.
+    """
+
+    def __init__(self, existing_task_id: str, thread_id: str) -> None:
+        super().__init__(
+            f"active task {existing_task_id} already exists in thread {thread_id}"
+        )
+        self.existing_task_id = existing_task_id
+        self.thread_id = thread_id
 SuspendedAgentRunStatus = Literal["waiting_auth", "resuming", "completed", "cancelled", "failed"]
 HitlPromptStatus = Literal["waiting", "resolving", "completed", "cancelled", "failed"]
 HitlPromptTargetKind = Literal["thread", "task"]

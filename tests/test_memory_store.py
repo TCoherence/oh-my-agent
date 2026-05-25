@@ -348,3 +348,62 @@ async def test_close_truncates_wal(tmp_path):
         "close() must truncate WAL via PRAGMA wal_checkpoint(TRUNCATE) — leaving "
         "WAL non-empty risks corruption on next boot if fsync is unreliable"
     )
+
+
+# ── Per-thread manual-task dedup (PR2) ───────────────────────────────── #
+
+
+def _task_kwargs(**over):
+    from oh_my_agent.runtime.types import TASK_STATUS_RUNNING
+    kw = dict(
+        task_id="t", platform="discord", channel_id="c", thread_id="th",
+        created_by="u", goal="g", status=TASK_STATUS_RUNNING,
+        max_steps=5, max_minutes=15, test_command="true",
+    )
+    kw.update(over)
+    return kw
+
+
+@pytest.mark.asyncio
+async def test_manual_task_dedup_raises_and_recovers(store):
+    from oh_my_agent.runtime.types import (
+        TASK_STATUS_COMPLETED,
+        DuplicateActiveTaskError,
+    )
+    await store.create_runtime_task(**_task_kwargs(task_id="m1"))
+    with pytest.raises(DuplicateActiveTaskError) as ei:
+        await store.create_runtime_task(**_task_kwargs(task_id="m2"))
+    assert ei.value.existing_task_id == "m1"
+    # Connection is usable after the rollback path (no dirty transaction).
+    assert (await store.get_runtime_task("m1")) is not None
+    # Automation tasks (automation_name set) are exempt from the manual index.
+    await store.create_runtime_task(**_task_kwargs(task_id="a1", automation_name="job"))
+    # A different thread is independent.
+    await store.create_runtime_task(**_task_kwargs(task_id="o1", thread_id="other"))
+    # Once the first goes terminal, a new manual task in the thread is allowed.
+    await store.update_runtime_task("m1", status=TASK_STATUS_COMPLETED)
+    await store.create_runtime_task(**_task_kwargs(task_id="m3"))
+
+
+@pytest.mark.asyncio
+async def test_dedup_migration_resolves_existing_duplicates(store):
+    """The v2 migration must dedup pre-existing rows before building the unique
+    index (else CREATE UNIQUE INDEX would fail on a dirty legacy DB)."""
+    from oh_my_agent.runtime.types import TASK_STATUS_RUNNING, DuplicateActiveTaskError
+    db = await store._conn()  # noqa: SLF001
+    # Simulate a pre-v2 DB: drop the index + downgrade the version, then insert
+    # two active manual tasks in one thread (now possible without the index).
+    await db.execute("DROP INDEX IF EXISTS idx_runtime_tasks_active_manual_thread")
+    await db.commit()
+    await store.set_schema_version(1)
+    await store.create_runtime_task(**_task_kwargs(task_id="dup1"))
+    await store.create_runtime_task(**_task_kwargs(task_id="dup2"))
+    # Re-run migrations → dedup (keep newest) + recreate the index.
+    await store._run_schema_migrations()  # noqa: SLF001
+    t1 = await store.get_runtime_task("dup1")
+    t2 = await store.get_runtime_task("dup2")
+    actives = [t for t in (t1, t2) if t.status == TASK_STATUS_RUNNING]
+    assert len(actives) == 1, "exactly one active manual task should remain"
+    # The rebuilt index now enforces dedup going forward.
+    with pytest.raises(DuplicateActiveTaskError):
+        await store.create_runtime_task(**_task_kwargs(task_id="dup3"))

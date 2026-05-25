@@ -70,6 +70,7 @@ from oh_my_agent.runtime.types import (
     TASK_TYPE_ARTIFACT,
     TASK_TYPE_REPO_CHANGE,
     TASK_TYPE_SKILL_CHANGE,
+    DuplicateActiveTaskError,
     HitlPrompt,
     NotificationEvent,
     RuntimeTask,
@@ -310,7 +311,7 @@ class RuntimeService:
         self._merge_auto_commit = bool(merge_cfg.get("auto_commit", True))
         self._merge_require_clean_repo = bool(merge_cfg.get("require_clean_repo", True))
         self._merge_preflight_check = bool(merge_cfg.get("preflight_check", True))
-        self._merge_target_branch_mode = str(merge_cfg.get("target_branch_mode", "current"))
+        self._merge_target_branch_mode = str(merge_cfg.get("target_branch_mode", "pr"))
         self._merge_commit_template = str(
             merge_cfg.get("commit_message_template", "runtime(task:{task_id}): {goal_short}")
         )
@@ -363,7 +364,8 @@ class RuntimeService:
         self._agent_workspace = agent_workspace.resolve() if agent_workspace else None
         worktree_root = Path(cfg.get("worktree_root", "~/.oh-my-agent/runtime/tasks")).expanduser().resolve()
         self._runtime_workspace_root = worktree_root
-        self._worktree = WorktreeManager(self._repo_root, worktree_root)
+        git_identity = merge_cfg.get("git_identity") if isinstance(merge_cfg.get("git_identity"), dict) else None
+        self._worktree = WorktreeManager(self._repo_root, worktree_root, git_identity=git_identity)
         self._logs_root = self._runtime_workspace_root.parent / "logs"
         self._thread_logs_root = self._logs_root / "threads"
         self._agent_logs_root = self._logs_root / "agents"  # Internal live spool files.
@@ -2744,11 +2746,17 @@ class RuntimeService:
                 event.source,
                 task.status,
             )
-            return await self._rerun_task_with_bumped_turns(
-                task,
-                actor_id=event.actor_id,
-                source=event.source,
-            )
+            try:
+                return await self._rerun_task_with_bumped_turns(
+                    task,
+                    actor_id=event.actor_id,
+                    source=event.source,
+                )
+            except DuplicateActiveTaskError as exc:
+                return (
+                    f"Re-run skipped: an active task (`{exc.existing_task_id}`) "
+                    f"already exists in this thread. Finish or cancel it first."
+                )
 
         if event.action == "rerun_bump_timeout":
             logger.info(
@@ -2758,11 +2766,17 @@ class RuntimeService:
                 event.source,
                 task.status,
             )
-            return await self._rerun_task_with_bumped_timeout(
-                task,
-                actor_id=event.actor_id,
-                source=event.source,
-            )
+            try:
+                return await self._rerun_task_with_bumped_timeout(
+                    task,
+                    actor_id=event.actor_id,
+                    source=event.source,
+                )
+            except DuplicateActiveTaskError as exc:
+                return (
+                    f"Re-run skipped: an active task (`{exc.existing_task_id}`) "
+                    f"already exists in this thread. Finish or cancel it first."
+                )
 
         if event.action == "discard":
             await self._store.update_runtime_task(
@@ -4372,9 +4386,51 @@ class RuntimeService:
             await self._resolve_notification("task_waiting_merge", task_id=task.id)
             return merged_note
         except WorktreeError as exc:
-            return await self._mark_merge_blocked(task, str(exc))
+            await self._rollback_current_merge(task)
+            return await self._mark_merge_blocked(task, self._humanize_git_error(str(exc)))
         except Exception as exc:
+            await self._rollback_current_merge(task)
             return await self._mark_merge_blocked(task, f"Unexpected merge error: {exc}")
+
+    async def _rollback_current_merge(self, task: RuntimeTask) -> None:
+        """Undo a half-applied current-mode patch so a failed merge can't leave
+        /repo dirty and block every later task. Safe only when the repo was
+        verified clean before apply (``require_clean_repo``); otherwise a full
+        restore could clobber pre-existing user edits, so we log and skip.
+        """
+        if not self._merge_require_clean_repo:
+            logger.warning(
+                "Runtime task=%s merge failed with require_clean_repo=false; "
+                "/repo may be left dirty (manual cleanup may be needed)",
+                task.id,
+            )
+            return
+        try:
+            await self._worktree.discard_repo_changes()
+            logger.info("Runtime task=%s rolled back half-applied patch from /repo", task.id)
+        except Exception:
+            logger.warning(
+                "Runtime task=%s rollback of /repo failed; manual cleanup may be needed",
+                task.id, exc_info=True,
+            )
+
+    @staticmethod
+    def _humanize_git_error(error: str) -> str:
+        """Map common raw git failures to a one-line actionable hint."""
+        low = error.lower()
+        if "author identity unknown" in low or "please tell me who you are" in low:
+            return (
+                "git commit failed: no author identity. Set "
+                "`runtime.merge_gate.git_identity.{name,email}` in config."
+            )
+        if "not clean" in low or "uncommitted" in low:
+            return (
+                "Main repository is not clean. Commit/stash changes before merging, "
+                "or switch to `target_branch_mode: pr` (default) which uses a worktree."
+            )
+        if "could not read from remote" in low or "no such remote" in low or "gh:" in low:
+            return f"PR push/open failed (check `gh` auth + remote): {error[:300]}"
+        return error
 
     async def _mark_merge_blocked(self, task: RuntimeTask, error: str) -> str:
         await self._store.update_runtime_task(
@@ -7150,7 +7206,13 @@ class RuntimeService:
             [
                 "",
                 "Choose one action:",
-                "- Merge: apply patch to current branch and auto commit" + (" (retry)" if task.merge_error else ""),
+                "- Merge: "
+                + (
+                    "push the task branch and open a GitHub PR"
+                    if self._merge_target_branch_mode == "pr"
+                    else "apply patch to current branch and auto commit"
+                )
+                + (" (retry)" if task.merge_error else ""),
                 "- Discard: keep audit metadata, drop this task result",
                 "- Request Changes: send task back to BLOCKED for another iteration",
                 "- Wait: keep the task pending and retry later",

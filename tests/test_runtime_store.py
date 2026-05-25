@@ -326,7 +326,9 @@ async def test_get_task_statuses_returns_subset(store):
         task_id="t-running",
         platform="discord",
         channel_id="100",
-        thread_id="100",
+        # Distinct thread: the per-thread manual-task dedup index forbids two
+        # active manual tasks in one thread; this test only needs two ids.
+        thread_id="101",
         created_by="u1",
         goal="y",
         preferred_agent="codex",

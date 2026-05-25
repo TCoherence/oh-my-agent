@@ -20,10 +20,27 @@ class GhError(RuntimeError):
 
 
 class WorktreeManager:
-    def __init__(self, repo_root: Path, worktree_root: Path) -> None:
+    def __init__(
+        self,
+        repo_root: Path,
+        worktree_root: Path,
+        git_identity: dict[str, str] | None = None,
+    ) -> None:
         self._repo_root = repo_root
         self._worktree_root = worktree_root
         self._worktree_root.mkdir(parents=True, exist_ok=True)
+        # Default identity so `git commit` never fails with "Author identity
+        # unknown" in environments (e.g. Docker) that don't configure git.
+        ident = git_identity or {}
+        self._git_name = str(ident.get("name") or "oh-my-agent")
+        self._git_email = str(ident.get("email") or "oh-my-agent@users.noreply.github.com")
+
+    def _commit_identity_args(self) -> list[str]:
+        """`git -c user.name=… -c user.email=…` flags for commit invocations."""
+        return [
+            "-c", f"user.name={self._git_name}",
+            "-c", f"user.email={self._git_email}",
+        ]
 
     async def ensure_worktree(self, task_id: str) -> Path:
         workspace = self._worktree_root / task_id
@@ -138,9 +155,20 @@ class WorktreeManager:
 
     async def commit_repo_changes(self, message: str) -> str:
         await self._run_git("-C", str(self._repo_root), "add", "-A")
-        await self._run_git("-C", str(self._repo_root), "commit", "-m", message)
+        await self._run_git(
+            "-C", str(self._repo_root), *self._commit_identity_args(), "commit", "-m", message
+        )
         commit_hash = await self._run_git("-C", str(self._repo_root), "rev-parse", "HEAD")
         return commit_hash.strip()
+
+    async def discard_repo_changes(self) -> None:
+        """Restore the main repo working tree to a clean ``HEAD`` — drops a
+        half-applied current-mode patch (tracked + untracked) so a failed merge
+        can't poison /repo. Caller must only invoke this when the repo was
+        verified clean BEFORE the patch was applied (no user edits to lose).
+        """
+        await self._run_git("-C", str(self._repo_root), "checkout", "--", ".")
+        await self._run_git("-C", str(self._repo_root), "clean", "-fd")
 
     # ── PR-based merge flow (target_branch_mode=pr) ───────────────────── #
 
@@ -155,7 +183,9 @@ class WorktreeManager:
         Returns the commit hash.
         """
         await self._run_git("-C", str(workspace), "add", "-A")
-        await self._run_git("-C", str(workspace), "commit", "-m", message)
+        await self._run_git(
+            "-C", str(workspace), *self._commit_identity_args(), "commit", "-m", message
+        )
         commit_hash = await self._run_git("-C", str(workspace), "rev-parse", "HEAD")
         return commit_hash.strip()
 

@@ -9,7 +9,11 @@ from oh_my_agent.gateway.services.types import (
     TaskListResult,
     TaskSummary,
 )
-from oh_my_agent.runtime.types import RuntimeTask, TaskDecisionEvent
+from oh_my_agent.runtime.types import (
+    DuplicateActiveTaskError,
+    RuntimeTask,
+    TaskDecisionEvent,
+)
 
 if TYPE_CHECKING:
     from oh_my_agent.agents.registry import AgentRegistry
@@ -58,18 +62,27 @@ class TaskService:
         del task_type
         if self._runtime is None:
             return TaskActionResult(success=False, message="Runtime service is not enabled.")
-        task = await self._runtime.create_repo_change_task(
-            session=session,
-            registry=registry,
-            thread_id=thread_id,
-            goal=goal,
-            created_by=actor_id,
-            preferred_agent=preferred_agent,
-            test_command=test_command,
-            max_steps=max_steps,
-            max_minutes=max_minutes,
-            source="slash",
-        )
+        try:
+            task = await self._runtime.create_repo_change_task(
+                session=session,
+                registry=registry,
+                thread_id=thread_id,
+                goal=goal,
+                created_by=actor_id,
+                preferred_agent=preferred_agent,
+                test_command=test_command,
+                max_steps=max_steps,
+                max_minutes=max_minutes,
+                source="slash",
+            )
+        except DuplicateActiveTaskError as exc:
+            return TaskActionResult(
+                success=False,
+                message=(
+                    f"An active task already exists in this thread "
+                    f"(`{exc.existing_task_id}`). Finish or cancel it first."
+                ),
+            )
         return TaskActionResult(
             success=True,
             message=f"Created task `{task.id}` with status `{task.status}`.",
