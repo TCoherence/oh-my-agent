@@ -84,6 +84,7 @@ from oh_my_agent.skills.frontmatter import (
 )
 from oh_my_agent.utils.chunker import chunk_message
 from oh_my_agent.utils.errors import user_safe_agent_error
+from oh_my_agent.utils.reports_link import ensure_reports_archive_link
 from oh_my_agent.utils.usage import append_usage_audit, record_usage_from_response
 
 logger = logging.getLogger(__name__)
@@ -4922,11 +4923,17 @@ class RuntimeService:
 
     async def _prepare_task_workspace(self, task: RuntimeTask) -> Path:
         if self._uses_merge_flow(task):
+            # Merge-flow git worktrees are intentionally NOT given a
+            # reports_archive symlink: they commit with ``git add -A``, which
+            # would stage the symlink into the PR. Repo-change tasks don't
+            # consume reports anyway.
             return await self._worktree.ensure_worktree(task.id)
 
         workspace = self._runtime_workspace_root / "_artifacts" / task.id
         workspace.mkdir(parents=True, exist_ok=True)
         self._link_agent_workspace_into(workspace)
+        # Read-intended view of published reports for cross-session discovery.
+        ensure_reports_archive_link(workspace, self._reports_dir)
         return workspace
 
     # Without these symlinks, the CLI agent starts from a bare cwd and burns

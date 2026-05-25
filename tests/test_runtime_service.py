@@ -662,6 +662,35 @@ async def runtime_env(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_prepare_task_workspace_links_reports_archive_artifact_not_merge(runtime_env):
+    """Artifact (non-merge) task workspaces get a read-intended reports_archive
+    symlink; merge-flow git worktrees do NOT (a symlink would be git-committed)."""
+    store: SQLiteMemoryStore = runtime_env["store"]
+    runtime: RuntimeService = runtime_env["runtime"]
+    reports_dir = runtime._reports_dir  # noqa: SLF001
+    assert reports_dir is not None
+
+    art = await store.create_runtime_task(
+        task_id="art-ra", platform="discord", channel_id="100", thread_id="t-art",
+        created_by="owner-1", goal="g", status=TASK_STATUS_DRAFT, max_steps=5,
+        max_minutes=15, test_command="true", completion_mode="reply", task_type="artifact",
+    )
+    art_ws = await runtime._prepare_task_workspace(art)  # noqa: SLF001
+    art_link = art_ws / "reports_archive"
+    assert art_link.is_symlink()
+    assert art_link.resolve() == reports_dir.resolve()
+
+    mrg = await store.create_runtime_task(
+        task_id="mrg-ra", platform="discord", channel_id="100", thread_id="t-mrg",
+        created_by="owner-1", goal="g", status=TASK_STATUS_DRAFT, max_steps=5,
+        max_minutes=15, test_command="true", completion_mode="merge", task_type="repo_change",
+    )
+    mrg_ws = await runtime._prepare_task_workspace(mrg)  # noqa: SLF001
+    assert not (mrg_ws / "reports_archive").exists()
+    assert not (mrg_ws / "reports_archive").is_symlink()
+
+
+@pytest.mark.asyncio
 async def test_runtime_message_intent_draft_to_merge(runtime_env):
     store: SQLiteMemoryStore = runtime_env["store"]
     runtime: RuntimeService = runtime_env["runtime"]
