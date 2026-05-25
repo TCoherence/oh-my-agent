@@ -91,6 +91,110 @@ class _ThreadAwareOKAgent(BaseAgent):
         return AgentResponse(text=self._response)
 
 
+class _WatermarkAgent(BaseAgent):
+    """Stub that records resume-vs-fresh and the history it was handed."""
+
+    def __init__(self, name: str = "claude", error: str | None = None) -> None:
+        self._name = name
+        self._error = error
+        self._sessions: dict[str, str] = {}
+        self.resumed: bool | None = None
+        self.received_history: list[dict] | None = None
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    def get_session_id(self, thread_id: str) -> str | None:
+        return self._sessions.get(thread_id)
+
+    def set_session_id(self, thread_id: str, session_id: str) -> None:
+        self._sessions[thread_id] = session_id
+
+    def clear_session(self, thread_id: str) -> None:
+        self._sessions.pop(thread_id, None)
+
+    async def run(self, prompt, history=None, *, thread_id=None, **kwargs):
+        self.resumed = self.get_session_id(thread_id) is not None
+        self.received_history = list(history or [])
+        if self._error:
+            return AgentResponse(text="", error=self._error)
+        # Establish/refresh a CLI session id (simulates a real resume handle).
+        if thread_id:
+            self._sessions[thread_id] = "sess-x"
+        return AgentResponse(text="reply-text")
+
+
+async def _wired_manager(tmp_path, agent):
+    channel = MagicMock()
+    channel.platform = "discord"
+    channel.channel_id = "100"
+    channel.create_thread = AsyncMock(return_value="thread-1")
+    channel.send = AsyncMock()
+    channel.typing = MagicMock()
+    channel.typing.return_value.__aenter__ = AsyncMock(return_value=None)
+    channel.typing.return_value.__aexit__ = AsyncMock(return_value=False)
+    channel.supports_streaming_edit = False
+    registry = AgentRegistry([agent])
+    store = SQLiteMemoryStore(tmp_path / "wm.db")
+    await store.init()
+    session = _make_session(channel=channel, registry=registry)
+    session.memory_store = store  # session + gate read/write the same store
+    gm = GatewayManager([])
+    gm.set_memory_store(store)
+    return gm, session, registry, store
+
+
+@pytest.mark.asyncio
+async def test_watermark_fresh_reseed_after_foreign_turn(tmp_path):
+    """A runtime task turn written between replies forces the next reply to run
+    fresh and flatten the full history (including the task output)."""
+    agent = _WatermarkAgent()
+    gm, session, registry, store = await _wired_manager(tmp_path, agent)
+    try:
+        await gm.handle_message(session, registry, _make_msg(thread_id="t1", content="q1"))
+        assert agent.resumed is False  # first turn: fresh
+
+        # A runtime task appends its output to the same thread (foreign to chat).
+        await store.append("discord", "100", "t1",
+                           {"role": "assistant", "content": "TASK-OUTPUT", "agent": "runtime"})
+
+        await gm.handle_message(session, registry, _make_msg(thread_id="t1", content="q2"))
+        assert agent.resumed is False, "stale session must be re-seeded fresh"
+        flattened = " ".join(t.get("content", "") for t in (agent.received_history or []))
+        assert "TASK-OUTPUT" in flattened, "fresh flatten must include the foreign task turn"
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_watermark_resumes_clean_back_to_back(tmp_path):
+    agent = _WatermarkAgent()
+    gm, session, registry, store = await _wired_manager(tmp_path, agent)
+    try:
+        await gm.handle_message(session, registry, _make_msg(thread_id="t1", content="q1"))
+        assert agent.resumed is False
+        await gm.handle_message(session, registry, _make_msg(thread_id="t1", content="q2"))
+        assert agent.resumed is True, "no foreign turn → second reply resumes"
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_watermark_error_deletes_user_turn_and_discards_session(tmp_path):
+    agent = _WatermarkAgent(error="boom")
+    gm, session, registry, store = await _wired_manager(tmp_path, agent)
+    try:
+        await gm.handle_message(session, registry, _make_msg(thread_id="t1", content="q-fail"))
+        history = await store.load_history("discord", "100", "t1")
+        contents = [h.get("content") for h in history]
+        assert "q-fail" not in contents, "failed user turn must be deleted from the DB"
+        sid, last = await store.load_session_state("discord", "100", "t1", "claude")
+        assert sid is None and last is None, "terminal failure must discard the session"
+    finally:
+        await store.close()
+
+
 def test_thread_name_truncates_at_90_chars():
     long = "a" * 200
     name = GatewayManager._thread_name(long)

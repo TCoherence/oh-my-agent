@@ -263,6 +263,73 @@ async def test_skill_evaluations_return_latest_per_type(store):
 
 
 @pytest.mark.asyncio
+async def test_session_watermark_roundtrip_and_preservation(store):
+    P = ("discord", "ch1", "t1")
+    # No row yet → (None, None)
+    assert await store.load_session_state(*P, "claude") == (None, None)
+    await store.save_session(*P, "claude", "sess-1")
+    await store.update_session_watermark(*P, "claude", 42)
+    assert await store.load_session_state(*P, "claude") == ("sess-1", 42)
+    # A later session sync must NOT wipe the watermark.
+    await store.save_session(*P, "claude", "sess-2")
+    assert await store.load_session_state(*P, "claude") == ("sess-2", 42)
+    # delete_session clears everything.
+    await store.delete_session(*P, "claude")
+    assert await store.load_session_state(*P, "claude") == (None, None)
+
+
+@pytest.mark.asyncio
+async def test_update_session_watermark_noop_without_row(store):
+    P = ("discord", "ch1", "t1")
+    # No session row → update is a no-op (stays absent), so next gate is fresh.
+    await store.update_session_watermark(*P, "claude", 7)
+    assert await store.load_session_state(*P, "claude") == (None, None)
+
+
+@pytest.mark.asyncio
+async def test_delete_turn_by_id(store):
+    P = ("discord", "ch1", "t1")
+    uid = await store.append(*P, {"role": "user", "content": "q", "author": "u"})
+    aid = await store.append(*P, {"role": "assistant", "content": "a", "agent": "claude"})
+    await store.delete_turn(*P, uid)
+    history = await store.load_history(*P)
+    ids = [h["_id"] for h in history if "_id" in h]
+    assert ids == [aid]
+
+
+@pytest.mark.asyncio
+async def test_legacy_agent_sessions_migration_adds_watermark_column(tmp_path):
+    import aiosqlite
+
+    db_path = tmp_path / "legacy.db"
+    # Simulate a pre-watermark DB: agent_sessions WITHOUT last_seen_turn_id.
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute(
+            "CREATE TABLE agent_sessions ("
+            "platform TEXT NOT NULL, channel_id TEXT NOT NULL, thread_id TEXT NOT NULL, "
+            "agent TEXT NOT NULL, session_id TEXT NOT NULL, "
+            "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, "
+            "PRIMARY KEY (platform, channel_id, thread_id, agent))"
+        )
+        await db.execute(
+            "INSERT INTO agent_sessions (platform, channel_id, thread_id, agent, session_id) "
+            "VALUES ('discord','ch1','t1','claude','old-sess')"
+        )
+        await db.commit()
+
+    s = SQLiteMemoryStore(db_path)
+    await s.init()  # runs _ensure_column migration
+    try:
+        # Legacy row readable; watermark column present and NULL.
+        assert await s.load_session_state("discord", "ch1", "t1", "claude") == ("old-sess", None)
+        # And the new column is writable post-migration.
+        await s.update_session_watermark("discord", "ch1", "t1", "claude", 99)
+        assert await s.load_session_state("discord", "ch1", "t1", "claude") == ("old-sess", 99)
+    finally:
+        await s.close()
+
+
+@pytest.mark.asyncio
 async def test_close_truncates_wal(tmp_path):
     db_path = tmp_path / "wal_close.db"
     s = SQLiteMemoryStore(db_path)

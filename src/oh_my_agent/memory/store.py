@@ -201,6 +201,22 @@ class MemoryStore(ABC):
     ) -> None:
         """Remove a persisted session (e.g. after a failed resume)."""
 
+    async def load_session_state(
+        self, platform: str, channel_id: str, thread_id: str, agent: str
+    ) -> tuple[str | None, int | None]:
+        """Return ``(session_id, last_seen_turn_id)``; ``(None, None)`` default."""
+        return (None, None)
+
+    async def update_session_watermark(
+        self, platform: str, channel_id: str, thread_id: str, agent: str, last_seen_turn_id: int
+    ) -> None:
+        """Advance the per-(thread, agent) seen-turn watermark (no-op default)."""
+
+    async def delete_turn(
+        self, platform: str, channel_id: str, thread_id: str, turn_id: int
+    ) -> None:
+        """Delete a single turn by row id (no-op default)."""
+
     # -- runtime task persistence (optional, concrete no-op defaults) -----
 
     async def create_runtime_task(self, **kwargs) -> RuntimeTask:
@@ -676,12 +692,13 @@ CREATE TABLE IF NOT EXISTS summaries (
 );
 
 CREATE TABLE IF NOT EXISTS agent_sessions (
-    platform    TEXT NOT NULL,
-    channel_id  TEXT NOT NULL,
-    thread_id   TEXT NOT NULL,
-    agent       TEXT NOT NULL,
-    session_id  TEXT NOT NULL,
-    updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    platform          TEXT NOT NULL,
+    channel_id        TEXT NOT NULL,
+    thread_id         TEXT NOT NULL,
+    agent             TEXT NOT NULL,
+    session_id        TEXT NOT NULL,
+    last_seen_turn_id INTEGER,
+    updated_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (platform, channel_id, thread_id, agent)
 );
 
@@ -1153,6 +1170,7 @@ class SQLiteMemoryStore(MemoryStore):
         # terminal status. Idempotent via _ensure_column's PRAGMA probe.
         await self._ensure_column("runtime_tasks", "pr_url", "TEXT")
         await self._ensure_column("runtime_tasks", "pr_number", "INTEGER")
+        await self._ensure_column("agent_sessions", "last_seen_turn_id", "INTEGER")
         await self._ensure_column("auth_credentials", "scope_key", "TEXT NOT NULL DEFAULT 'default'")
         await self._ensure_column("skill_provenance", "auto_disabled", "INTEGER NOT NULL DEFAULT 0")
         await self._ensure_column("skill_provenance", "auto_disabled_reason", "TEXT")
@@ -1298,6 +1316,24 @@ class SQLiteMemoryStore(MemoryStore):
             await db.commit()
         return cursor.lastrowid  # type: ignore[return-value]
 
+    async def delete_turn(
+        self, platform: str, channel_id: str, thread_id: str, turn_id: int
+    ) -> None:
+        """Delete a single turn by its row id (precise error-path cleanup).
+
+        Used when a gated invocation fails and the just-appended user turn must
+        be removed from persistence by id — never a blind ``history.pop()``,
+        which can drop a concurrently-appended foreign turn instead.
+        """
+        async with self._write_lock:
+            db = await self._conn()
+            await db.execute(
+                "DELETE FROM turns "
+                "WHERE platform=? AND channel_id=? AND thread_id=? AND id=?",
+                (platform, channel_id, thread_id, turn_id),
+            )
+            await db.commit()
+
     async def save_summary(
         self,
         platform: str,
@@ -1360,10 +1396,15 @@ class SQLiteMemoryStore(MemoryStore):
     ) -> None:
         async with self._write_lock:
             db = await self._conn()
+            # UPSERT (not INSERT OR REPLACE) so the watermark column is
+            # preserved when only the session id changes — the gateway syncs
+            # session_id at one site and advances last_seen_turn_id at another.
             await db.execute(
-                "INSERT OR REPLACE INTO agent_sessions "
+                "INSERT INTO agent_sessions "
                 "(platform, channel_id, thread_id, agent, session_id, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+                "VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP) "
+                "ON CONFLICT(platform, channel_id, thread_id, agent) DO UPDATE SET "
+                "session_id=excluded.session_id, updated_at=CURRENT_TIMESTAMP",
                 (platform, channel_id, thread_id, agent, session_id),
             )
             await db.commit()
@@ -1379,6 +1420,48 @@ class SQLiteMemoryStore(MemoryStore):
         )
         row = await cursor.fetchone()
         return row[0] if row else None
+
+    async def load_session_state(
+        self, platform: str, channel_id: str, thread_id: str, agent: str
+    ) -> tuple[str | None, int | None]:
+        """Return ``(session_id, last_seen_turn_id)`` for the watermark gate.
+
+        ``(None, None)`` when no row exists. ``last_seen_turn_id`` may be
+        ``None`` on a row predating the watermark column (lazy migration).
+        """
+        db = await self._conn()
+        cursor = await db.execute(
+            "SELECT session_id, last_seen_turn_id FROM agent_sessions "
+            "WHERE platform=? AND channel_id=? AND thread_id=? AND agent=?",
+            (platform, channel_id, thread_id, agent),
+        )
+        row = await cursor.fetchone()
+        if not row:
+            return (None, None)
+        return (row["session_id"], row["last_seen_turn_id"])
+
+    async def update_session_watermark(
+        self,
+        platform: str,
+        channel_id: str,
+        thread_id: str,
+        agent: str,
+        last_seen_turn_id: int,
+    ) -> None:
+        """Advance the per-(thread, agent) seen-turn watermark in place.
+
+        No-op when the session row does not exist — the row is created by
+        ``save_session`` before any advance, so a missing row means the
+        session was cleared (e.g. terminal failure) and must stay fresh.
+        """
+        async with self._write_lock:
+            db = await self._conn()
+            await db.execute(
+                "UPDATE agent_sessions SET last_seen_turn_id=? "
+                "WHERE platform=? AND channel_id=? AND thread_id=? AND agent=?",
+                (last_seen_turn_id, platform, channel_id, thread_id, agent),
+            )
+            await db.commit()
 
     async def delete_session(
         self, platform: str, channel_id: str, thread_id: str, agent: str
@@ -3214,6 +3297,7 @@ class SplitSQLiteMemoryStore:
     _CONVERSATION_METHODS = {
         "load_history",
         "append",
+        "delete_turn",
         "save_summary",
         "delete_thread",
         "search",
@@ -3224,6 +3308,8 @@ class SplitSQLiteMemoryStore:
     _RUNTIME_METHODS = {
         "save_session",
         "load_session",
+        "load_session_state",
+        "update_session_watermark",
         "delete_session",
         "create_runtime_task",
         "get_runtime_task",
