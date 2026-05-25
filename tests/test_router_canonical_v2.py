@@ -327,7 +327,7 @@ async def test_dispatcher_artifact_force_draft_false_auto_executes() -> None:
     )
 
     session = _make_session(channel=channel, registry=registry)
-    gm = GatewayManager([], runtime_service=runtime, intent_router=router)
+    gm = GatewayManager([], runtime_service=runtime, intent_router=router, auto_task_creation=True)
     msg = _make_msg(content="BTC 现价怎样")
     await gm.handle_message(session, registry, msg)
 
@@ -362,7 +362,7 @@ async def test_dispatcher_artifact_force_draft_true_creates_draft() -> None:
     )
 
     session = _make_session(channel=channel, registry=registry)
-    gm = GatewayManager([], runtime_service=runtime, intent_router=router)
+    gm = GatewayManager([], runtime_service=runtime, intent_router=router, auto_task_creation=True)
     msg = _make_msg(content="跑一份每日市场简报")
     await gm.handle_message(session, registry, msg)
 
@@ -397,7 +397,7 @@ async def test_dispatcher_draft_prefix_overrides_router_force_draft() -> None:
     )
 
     session = _make_session(channel=channel, registry=registry)
-    gm = GatewayManager([], runtime_service=runtime, intent_router=router)
+    gm = GatewayManager([], runtime_service=runtime, intent_router=router, auto_task_creation=True)
     msg = _make_msg(content="draft: BTC 现价怎样")
     await gm.handle_message(session, registry, msg)
 
@@ -440,7 +440,7 @@ async def test_dispatcher_known_skill_artifact_force_draft_propagates(tmp_path) 
     )
 
     session = _make_session(channel=channel, registry=registry)
-    gm = GatewayManager([], runtime_service=runtime, intent_router=router, skill_syncer=syncer)
+    gm = GatewayManager([], runtime_service=runtime, intent_router=router, skill_syncer=syncer, auto_task_creation=True)
     msg = _make_msg(content="跑下 paper-digest 看下今天 arxiv")
     await gm.handle_message(session, registry, msg)
 
@@ -485,7 +485,7 @@ async def test_dispatcher_known_skill_artifact_draft_prefix_overrides(tmp_path) 
     )
 
     session = _make_session(channel=channel, registry=registry)
-    gm = GatewayManager([], runtime_service=runtime, intent_router=router, skill_syncer=syncer)
+    gm = GatewayManager([], runtime_service=runtime, intent_router=router, skill_syncer=syncer, auto_task_creation=True)
     msg = _make_msg(content="draft: 跑下 paper-digest")
     await gm.handle_message(session, registry, msg)
 
@@ -526,7 +526,7 @@ async def test_dispatcher_known_skill_artifact_default_auto_approves(tmp_path) -
     )
 
     session = _make_session(channel=channel, registry=registry)
-    gm = GatewayManager([], runtime_service=runtime, intent_router=router, skill_syncer=syncer)
+    gm = GatewayManager([], runtime_service=runtime, intent_router=router, skill_syncer=syncer, auto_task_creation=True)
     msg = _make_msg(content="跑下 paper-digest")
     await gm.handle_message(session, registry, msg)
 
@@ -569,7 +569,7 @@ async def test_dispatcher_repo_update_with_skill_always_drafts(tmp_path) -> None
     )
 
     session = _make_session(channel=channel, registry=registry)
-    gm = GatewayManager([], runtime_service=runtime, intent_router=router, skill_syncer=syncer)
+    gm = GatewayManager([], runtime_service=runtime, intent_router=router, skill_syncer=syncer, auto_task_creation=True)
     msg = _make_msg(content="paper-digest 的 summary 太短了")
     await gm.handle_message(session, registry, msg)
 
@@ -602,7 +602,7 @@ async def test_dispatcher_repo_update_always_drafts_regardless_of_force_draft() 
     )
 
     session = _make_session(channel=channel, registry=registry)
-    gm = GatewayManager([], runtime_service=runtime, intent_router=router)
+    gm = GatewayManager([], runtime_service=runtime, intent_router=router, auto_task_creation=True)
     msg = _make_msg(content="把 README 里的 typo 修一下")
     await gm.handle_message(session, registry, msg)
 

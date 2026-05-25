@@ -36,7 +36,9 @@ steps:
   - inject_user_message:
       thread_id: null
       author_id: "owner-1"
-      content: "https://www.bilibili.com/video/BV1ekoqBBEDF 帮我总结"
+      # Explicit-only routing: a bare message is a chat reply; the `task:`
+      # prefix is the explicit trigger that creates the artifact task.
+      content: "task: https://www.bilibili.com/video/BV1ekoqBBEDF 帮我总结"
       capture:
         thread_id_as: "@thread1"
         message_id_as: "@user_msg1"

@@ -40,7 +40,8 @@ steps:
   - inject_user_message:
       thread_id: null
       author_id: "owner-1"
-      content: "https://www.bilibili.com/video/BV1ekoqBBEDF 帮我总结"
+      # Explicit-only routing: `task:` prefix is the explicit task trigger.
+      content: "task: https://www.bilibili.com/video/BV1ekoqBBEDF 帮我总结"
       capture:
         thread_id_as: "@thread1"
   - await:

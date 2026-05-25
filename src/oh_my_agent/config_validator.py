@@ -87,6 +87,11 @@ def _check_gateway(config: dict, result: ValidationResult) -> None:
         result.errors.append(ConfigError("gateway", "must be a mapping", "error"))
         return
 
+    if "auto_task_creation" in gateway and not isinstance(gateway["auto_task_creation"], bool):
+        result.errors.append(ConfigError(
+            "gateway.auto_task_creation", "must be a boolean", "error",
+        ))
+
     channels = gateway.get("channels")
     if channels is None:
         result.errors.append(ConfigError("gateway.channels", "is required", "error"))

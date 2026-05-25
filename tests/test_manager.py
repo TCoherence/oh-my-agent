@@ -1294,7 +1294,7 @@ async def test_router_propose_task_creates_runtime_draft_and_skips_reply():
     )
 
     session = _make_session(channel=channel, registry=registry)
-    gm = GatewayManager([], runtime_service=runtime, intent_router=router)
+    gm = GatewayManager([], runtime_service=runtime, intent_router=router, auto_task_creation=True)
     msg = _make_msg(thread_id="t1", content="帮我创建一个skill并验证")
     await gm.handle_message(session, registry, msg)
 
@@ -1347,7 +1347,7 @@ async def test_router_propose_artifact_task_creates_artifact_runtime_draft():
     )
 
     session = _make_session(channel=channel, registry=registry)
-    gm = GatewayManager([], runtime_service=runtime, intent_router=router)
+    gm = GatewayManager([], runtime_service=runtime, intent_router=router, auto_task_creation=True)
     msg = _make_msg(thread_id="t1", content="帮我生成一份今日新闻速读 markdown")
     await gm.handle_message(session, registry, msg)
 
@@ -1543,7 +1543,7 @@ async def test_router_repair_skill_creates_skill_task_with_thread_context(tmp_pa
     await session.append_user("thread-1", "/top-5-daily-news", "alice")
     await session.append_assistant("thread-1", "some result", "claude")
 
-    gm = GatewayManager([], runtime_service=runtime, intent_router=router, skill_syncer=syncer)
+    gm = GatewayManager([], runtime_service=runtime, intent_router=router, skill_syncer=syncer, auto_task_creation=True)
     msg = _make_msg(thread_id="thread-1", content="这个 skill 不太对，帮我修一下")
     await gm.handle_message(session, registry, msg)
 
@@ -1609,7 +1609,7 @@ async def test_router_invoke_skill_creates_artifact_task_when_skill_name_resolve
     syncer._skills_path = skills_root  # noqa: SLF001
 
     session = _make_session(channel=channel, registry=registry)
-    gm = GatewayManager([], runtime_service=runtime, intent_router=router, skill_syncer=syncer)
+    gm = GatewayManager([], runtime_service=runtime, intent_router=router, skill_syncer=syncer, auto_task_creation=True)
     msg = _make_msg(thread_id="thread-1", content="今天 arxiv 有什么新的？")
     await gm.handle_message(session, registry, msg)
 
@@ -1680,6 +1680,7 @@ async def test_router_invoke_existing_skill_uses_recent_merged_skill_context(tmp
         [],
         runtime_service=runtime,
         intent_router=router,
+        auto_task_creation=True,
         skill_syncer=syncer,
         router_context_turns=4,
     )
@@ -1961,6 +1962,7 @@ async def test_router_create_skill_borderline_forces_draft_and_confirm_text():
         [],
         runtime_service=runtime,
         intent_router=router,
+        auto_task_creation=True,
         router_require_user_confirm=True,
         router_autonomy_threshold=0.90,
     )
@@ -1994,6 +1996,7 @@ async def test_router_create_skill_high_confidence_drafts_in_v2():
         [],
         runtime_service=runtime,
         intent_router=router,
+        auto_task_creation=True,
         router_require_user_confirm=True,
         router_autonomy_threshold=0.90,
     )
@@ -2031,6 +2034,7 @@ async def test_router_repair_skill_borderline_forces_draft_and_confirm_text(tmp_
         [],
         runtime_service=runtime,
         intent_router=router,
+        auto_task_creation=True,
         skill_syncer=syncer,
         router_require_user_confirm=True,
         router_autonomy_threshold=0.90,
@@ -2071,6 +2075,7 @@ async def test_router_repair_skill_high_confidence_drafts_in_v2(tmp_path):
         [],
         runtime_service=runtime,
         intent_router=router,
+        auto_task_creation=True,
         skill_syncer=syncer,
         router_require_user_confirm=True,
         router_autonomy_threshold=0.90,
@@ -2131,3 +2136,111 @@ def test_manual_and_auto_disable_kept_separate():
     gm._auto_disabled_skills.add("flaky")
     assert gm._is_skill_auto_disabled("flaky") is True
     assert gm._is_skill_auto_disabled(None) is False
+
+
+# ── Explicit-only routing (PR1) ──────────────────────────────────────── #
+
+
+def _explicit_manager(tmp_path, *, known_skill=None):
+    channel = MagicMock()
+    channel.platform = "discord"
+    channel.channel_id = "100"
+    channel.create_thread = AsyncMock(return_value="t1")
+    channel.send = AsyncMock()
+    channel.typing = MagicMock()
+    channel.typing.return_value.__aenter__ = AsyncMock(return_value=None)
+    channel.typing.return_value.__aexit__ = AsyncMock(return_value=False)
+    channel.supports_streaming_edit = False
+
+    mock_agent = MagicMock()
+    mock_agent.name = "claude"
+    registry = MagicMock(spec=AgentRegistry)
+    registry.agents = [mock_agent]
+    registry.run = AsyncMock(return_value=(mock_agent, AgentResponse(text="reply")))
+
+    session = _make_session(channel=channel, registry=registry)
+
+    runtime = MagicMock()
+    runtime.create_artifact_task = AsyncMock()
+    runtime.create_skill_task = AsyncMock()
+    runtime.create_repo_change_task = AsyncMock()
+    runtime.maybe_handle_thread_context = AsyncMock(return_value=False)
+    runtime.maybe_handle_incoming = AsyncMock(return_value=False)
+    runtime.record_thread_agent_run = AsyncMock()
+    runtime.collect_provider_credential_hints = AsyncMock(return_value=[])
+
+    syncer = None
+    if known_skill:
+        skills_root = tmp_path / "skills"
+        sd = skills_root / known_skill
+        sd.mkdir(parents=True)
+        (sd / "SKILL.md").write_text(f"name: {known_skill}\n", encoding="utf-8")
+        syncer = MagicMock()
+        syncer._skills_path = skills_root  # noqa: SLF001
+
+    # auto_task_creation defaults False → explicit-only.
+    gm = GatewayManager([], runtime_service=runtime, skill_syncer=syncer, repo_root=tmp_path)
+    return gm, session, registry, runtime, channel
+
+
+@pytest.mark.asyncio
+async def test_explicit_only_plain_message_is_direct_reply(tmp_path):
+    """A heuristic/router-looking message with no explicit trigger → chat reply,
+    NOT a task (the core explicit-only behavior + the WAITING_MERGE-reply regression)."""
+    gm, session, registry, runtime, _ = _explicit_manager(tmp_path)
+    for content in (
+        "fix the seattle-metro-housing-watch skill to handle 403s",
+        "可以用 git config user.email tcoherence@gmail.com",
+        "write me a market report",
+    ):
+        registry.run.reset_mock()
+        await gm.handle_message(session, registry, _make_msg(thread_id="t1", content=content))
+        registry.run.assert_awaited()  # ran the chat path, no UnboundLocalError
+    runtime.create_artifact_task.assert_not_called()
+    runtime.create_skill_task.assert_not_called()
+    runtime.create_repo_change_task.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_task_prefix_creates_artifact_auto_execute(tmp_path):
+    gm, session, registry, runtime, _ = _explicit_manager(tmp_path)
+    await gm.handle_message(session, registry, _make_msg(thread_id="t1", content="task: summarize the news"))
+    runtime.create_artifact_task.assert_awaited_once()
+    kwargs = runtime.create_artifact_task.await_args.kwargs
+    assert kwargs["auto_approve"] is True
+    assert kwargs["force_draft"] is False
+    assert kwargs["goal"] == "summarize the news"
+    registry.run.assert_not_called()  # short-circuited to the task
+
+
+@pytest.mark.asyncio
+async def test_draft_prefix_creates_drafted_artifact(tmp_path):
+    gm, session, registry, runtime, _ = _explicit_manager(tmp_path)
+    await gm.handle_message(session, registry, _make_msg(thread_id="t1", content="draft: do a big thing"))
+    runtime.create_artifact_task.assert_awaited_once()
+    kwargs = runtime.create_artifact_task.await_args.kwargs
+    assert kwargs["force_draft"] is True
+    assert kwargs["auto_approve"] is False
+
+
+@pytest.mark.asyncio
+async def test_skill_prefix_known_creates_skill_task(tmp_path):
+    gm, session, registry, runtime, _ = _explicit_manager(tmp_path, known_skill="seattle-metro-housing-watch")
+    await gm.handle_message(
+        session, registry,
+        _make_msg(thread_id="t1", content="skill: seattle-metro-housing-watch fix 403 handling"),
+    )
+    runtime.create_skill_task.assert_awaited_once()
+    kwargs = runtime.create_skill_task.await_args.kwargs
+    assert kwargs["skill_name"] == "seattle-metro-housing-watch"
+    assert kwargs["goal"] == "fix 403 handling"
+    assert kwargs["force_draft"] is True
+
+
+@pytest.mark.asyncio
+async def test_skill_prefix_unknown_replies_without_task(tmp_path):
+    gm, session, registry, runtime, channel = _explicit_manager(tmp_path, known_skill="real-skill")
+    await gm.handle_message(session, registry, _make_msg(thread_id="t1", content="skill: nonexistent do thing"))
+    runtime.create_skill_task.assert_not_called()
+    channel.send.assert_awaited()  # helpful "must name a known skill" reply
+    assert "known skill" in channel.send.await_args.args[1]
