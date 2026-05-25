@@ -58,7 +58,8 @@ class ChannelSession:
         content: str,
         author: str,
         attachments: list | None = None,
-    ) -> None:
+    ) -> int | None:
+        """Append a user turn. Returns the persisted row id (None if no store)."""
         turn: dict = {"role": "user", "content": content, "author": author}
         if attachments:
             turn["attachments"] = [
@@ -67,6 +68,7 @@ class ChannelSession:
             ]
         history = await self.get_history(thread_id)
         history.append(turn)
+        row_id: int | None = None
         if self.memory_store:
             row_id = await self.memory_store.append(
                 self.platform, self.channel_id, thread_id, turn,
@@ -84,11 +86,14 @@ class ChannelSession:
                 )
             except Exception:
                 logger.debug("diary_writer.append(user) failed", exc_info=True)
+        return row_id
 
-    async def append_assistant(self, thread_id: str, content: str, agent_name: str) -> None:
+    async def append_assistant(self, thread_id: str, content: str, agent_name: str) -> int | None:
+        """Append an assistant turn. Returns the persisted row id (None if no store)."""
         turn: dict[str, Any] = {"role": "assistant", "content": content, "agent": agent_name}
         history = await self.get_history(thread_id)
         history.append(turn)
+        row_id: int | None = None
         if self.memory_store:
             row_id = await self.memory_store.append(
                 self.platform, self.channel_id, thread_id, turn,
@@ -106,6 +111,7 @@ class ChannelSession:
                 )
             except Exception:
                 logger.debug("diary_writer.append(assistant) failed", exc_info=True)
+        return row_id
 
     async def append_diary_only(
         self,
@@ -133,6 +139,20 @@ class ChannelSession:
             )
         except Exception:
             logger.debug("diary_writer.append_diary_only failed", exc_info=True)
+
+    async def delete_turn(self, thread_id: str, turn_id: int) -> None:
+        """Remove a single turn by row id from both the cache and the store.
+
+        Precise error-path cleanup: never a blind ``history.pop()`` (which can
+        drop a concurrently-appended foreign turn instead of the intended one).
+        """
+        cached = self._cache.get(thread_id)
+        if cached is not None:
+            cached[:] = [t for t in cached if t.get("_id") != turn_id]
+        if self.memory_store:
+            await self.memory_store.delete_turn(
+                self.platform, self.channel_id, thread_id, turn_id,
+            )
 
     async def clear_history(self, thread_id: str) -> None:
         """Delete all history for a thread (cache + store)."""

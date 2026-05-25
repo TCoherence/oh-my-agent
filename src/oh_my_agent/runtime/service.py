@@ -31,6 +31,11 @@ from oh_my_agent.control.protocol import (
 )
 from oh_my_agent.gateway.base import BaseChannel, IncomingMessage, OutgoingAttachment
 from oh_my_agent.gateway.session import ChannelSession
+from oh_my_agent.memory.session_watermark import (
+    advance_watermark_if_clean,
+    persisted_turn_ids,
+    should_resume,
+)
 from oh_my_agent.runtime.notifications import NotificationManager
 from oh_my_agent.runtime.policy import (
     build_runtime_prompt,
@@ -2206,6 +2211,14 @@ class RuntimeService:
             agent=agent,
             fallback_session_id=run.session_id_snapshot,
         )
+        # Watermark gate: clear the thread session if a turn it never saw landed
+        # since it last ran (auth resume has no new user row → owned is empty).
+        resume_baseline = await self._gate_thread_resume_watermark(
+            session=session,
+            thread_id=run.thread_id,
+            agent=agent,
+            owned_turn_ids=set(),
+        )
         current_session_id = agent.get_session_id(run.thread_id) if hasattr(agent, "get_session_id") else None
         logger.info(
             "SUSPENDED_RESUME_SESSION run=%s thread=%s session_id=%s",
@@ -2277,6 +2290,11 @@ class RuntimeService:
         )
         if response.error:
             await self._store.update_suspended_agent_run(run.id, status="failed", completed_at_now=True)
+            # Terminal failure (incl. max_turns, which doesn't self-clear): drop
+            # the possibly-poisoned session so the next invocation re-seeds fresh.
+            await self._discard_thread_session(
+                session=session, thread_id=run.thread_id, agent=agent
+            )
             await session.channel.send(
                 run.thread_id,
                 self._format_agent_failure_text(
@@ -2330,7 +2348,15 @@ class RuntimeService:
                 session_id_snapshot=agent.get_session_id(run.thread_id) if hasattr(agent, "get_session_id") else run.session_id_snapshot,
             )
 
-        await session.append_assistant(run.thread_id, response.text, run.agent_name)
+        _out_id = await session.append_assistant(run.thread_id, response.text, run.agent_name)
+        if _out_id is not None:
+            await self._advance_thread_watermark(
+                session=session,
+                thread_id=run.thread_id,
+                agent=agent,
+                baseline=resume_baseline,
+                owned_turn_ids={_out_id},
+            )
         await self._send_thread_agent_response(
             session=session,
             thread_id=run.thread_id,
@@ -6049,6 +6075,81 @@ class RuntimeService:
         if hasattr(agent, "clear_session"):
             agent.clear_session(thread_id)
 
+    async def _gate_thread_resume_watermark(
+        self,
+        *,
+        session: ChannelSession,
+        thread_id: str,
+        agent,
+        owned_turn_ids: set[int],
+    ) -> int | None:
+        """Clear ``agent``'s thread session when it is stale (a turn it never
+        saw exists above its watermark); return the snapshot-max baseline for a
+        later advance. Mirrors the gateway reply-path gate for resume sites."""
+        if not hasattr(agent, "get_session_id"):
+            return None
+        ids = await persisted_turn_ids(
+            self._store, session.platform, session.channel_id, thread_id
+        )
+        baseline = max(ids) if ids else None
+        if agent.get_session_id(thread_id) is not None:
+            _sid, last_seen = await self._store.load_session_state(
+                session.platform, session.channel_id, thread_id, agent.name
+            )
+            if not should_resume(
+                session_exists=True,
+                last_seen_turn_id=last_seen,
+                existing_turn_ids=ids,
+                owned_turn_ids=owned_turn_ids,
+            ):
+                self._clear_thread_agent_session(agent, thread_id)
+        return baseline
+
+    async def _advance_thread_watermark(
+        self,
+        *,
+        session: ChannelSession,
+        thread_id: str,
+        agent,
+        baseline: int | None,
+        owned_turn_ids: set[int],
+    ) -> None:
+        """Advance the seen-turn watermark after a successful resume (no-op when
+        a foreign turn interleaved → next invocation re-seeds fresh)."""
+        if not owned_turn_ids or not hasattr(agent, "get_session_id"):
+            return
+        try:
+            await advance_watermark_if_clean(
+                store=self._store,
+                platform=session.platform,
+                channel_id=session.channel_id,
+                thread_id=thread_id,
+                agent=agent.name,
+                baseline_id=baseline,
+                owned_turn_ids=owned_turn_ids,
+            )
+        except Exception as exc:
+            logger.warning(
+                "watermark advance failed thread=%s agent=%s err=%s",
+                thread_id, agent.name, exc,
+            )
+
+    async def _discard_thread_session(
+        self, *, session: ChannelSession, thread_id: str, agent
+    ) -> None:
+        """Clear in-memory + persisted CLI session on terminal resume failure so
+        a poisoned session (timeout / max_turns don't self-clear) is not resumed."""
+        self._clear_thread_agent_session(agent, thread_id)
+        try:
+            await self._store.delete_session(
+                session.platform, session.channel_id, thread_id, agent.name
+            )
+        except Exception as exc:
+            logger.warning(
+                "discard session failed thread=%s agent=%s err=%s",
+                thread_id, agent.name, exc,
+            )
+
     async def _invoke_thread_agent(
         self,
         *,
@@ -6472,7 +6573,7 @@ class RuntimeService:
         await self._send_hitl_answer_record(prompt)
         answer_block = self._build_hitl_answer_block(prompt)
         answer_payload = self._build_hitl_answer_payload(prompt)
-        await session.append_user(prompt.thread_id, answer_block, "HITL")
+        hitl_answer_turn_id = await session.append_user(prompt.thread_id, answer_block, "HITL")
 
         agent = registry.get_agent(prompt.agent_name)
         if agent is None:
@@ -6484,6 +6585,16 @@ class RuntimeService:
             thread_id=prompt.thread_id,
             agent=agent,
             fallback_session_id=prompt.session_id_snapshot,
+        )
+        # Watermark gate: the HITL answer just appended is *owned* by this
+        # invocation (sent as the resume prompt), so it must not be judged a
+        # foreign turn; any other unseen turn clears the session for a fresh seed.
+        hitl_owned_gate = {hitl_answer_turn_id} if hitl_answer_turn_id is not None else set()
+        resume_baseline = await self._gate_thread_resume_watermark(
+            session=session,
+            thread_id=prompt.thread_id,
+            agent=agent,
+            owned_turn_ids=hitl_owned_gate,
         )
         skill_timeout_override = self._skill_timeout_seconds_by_name(
             str(prompt.resume_context.get("skill_name") or "") or None
@@ -6529,6 +6640,11 @@ class RuntimeService:
         await self._sync_thread_agent_session(session=session, thread_id=prompt.thread_id, agent=agent)
         if response.error:
             await self._store.update_hitl_prompt(prompt.id, status="failed", completed_at_now=True)
+            # Terminal failure (incl. max_turns): drop the possibly-poisoned
+            # session so the next invocation re-seeds fresh.
+            await self._discard_thread_session(
+                session=session, thread_id=prompt.thread_id, agent=agent
+            )
             await session.channel.send(
                 prompt.thread_id,
                 self._format_agent_failure_text(
@@ -6617,7 +6733,15 @@ class RuntimeService:
             )
             return f"Interactive prompt `{prompt.id}` resumed into an unsupported challenge."
 
-        await session.append_assistant(prompt.thread_id, response.text, prompt.agent_name)
+        _out_id = await session.append_assistant(prompt.thread_id, response.text, prompt.agent_name)
+        if _out_id is not None:
+            await self._advance_thread_watermark(
+                session=session,
+                thread_id=prompt.thread_id,
+                agent=agent,
+                baseline=resume_baseline,
+                owned_turn_ids={_out_id},
+            )
         await self._send_thread_agent_response(
             session=session,
             thread_id=prompt.thread_id,

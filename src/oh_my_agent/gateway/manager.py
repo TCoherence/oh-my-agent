@@ -31,6 +31,10 @@ from oh_my_agent.control.protocol import (
 from oh_my_agent.gateway.base import BaseChannel, IncomingMessage
 from oh_my_agent.gateway.session import ChannelSession
 from oh_my_agent.gateway.stream_relay import StreamingRelay
+from oh_my_agent.memory.session_watermark import (
+    advance_watermark_if_clean,
+    should_resume,
+)
 from oh_my_agent.runtime.policy import (
     is_artifact_intent,
     is_long_task_intent,
@@ -396,6 +400,62 @@ class GatewayManager:
         for agent in registry.agents:
             await self._sync_session(session, thread_id, agent)
 
+    async def _advance_thread_watermark(
+        self,
+        session,
+        thread_id: str,
+        agent,
+        baseline: int | None,
+        owned_turn_ids: set[int],
+    ) -> None:
+        """Advance the per-(thread, agent) seen-turn watermark after a reply.
+
+        No-op when a foreign turn interleaved during execution (the next reply
+        then re-seeds fresh). Best-effort: a watermark failure must not break
+        the user-visible reply that already landed.
+        """
+        store = getattr(self, "_memory_store_ref", None)
+        if store is None or not owned_turn_ids or not hasattr(agent, "get_session_id"):
+            return
+        try:
+            await advance_watermark_if_clean(
+                store=store,
+                platform=session.platform,
+                channel_id=session.channel_id,
+                thread_id=thread_id,
+                agent=agent.name,
+                baseline_id=baseline,
+                owned_turn_ids=owned_turn_ids,
+            )
+        except Exception as exc:
+            logger.warning(
+                "watermark advance failed thread=%s agent=%s err=%s",
+                thread_id, agent.name, exc,
+            )
+
+    async def _discard_thread_sessions(
+        self, session, thread_id: str, registry: AgentRegistry
+    ) -> None:
+        """Clear in-memory + persisted CLI sessions for every resume-capable agent.
+
+        Used on terminal failure so a poisoned/abandoned session is never
+        resumed by the next invocation (which then re-seeds fresh).
+        """
+        store = getattr(self, "_memory_store_ref", None)
+        for agent in registry.agents:
+            if hasattr(agent, "clear_session"):
+                agent.clear_session(thread_id)
+            if store is not None:
+                try:
+                    await store.delete_session(
+                        session.platform, session.channel_id, thread_id, agent.name
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "discard session failed thread=%s agent=%s err=%s",
+                        thread_id, agent.name, exc,
+                    )
+
     def _chat_agent_log_base_path(
         self,
         *,
@@ -484,6 +544,7 @@ class GatewayManager:
         agent_prompt: str,
         explicit_skill: str | None,
         routed_skill: str | None,
+        owned_turn_ids: set[int] | None = None,
     ) -> bool:
         if extract_control_frame(response.text) is None:
             return False
@@ -509,7 +570,9 @@ class GatewayManager:
                 return True
             visible_text = strip_control_frame_text(response.text)
             if visible_text:
-                await session.append_assistant(thread_id, visible_text, agent_used.name)
+                _vid = await session.append_assistant(thread_id, visible_text, agent_used.name)
+                if owned_turn_ids is not None and _vid is not None:
+                    owned_turn_ids.add(_vid)
                 await self._send_agent_response(
                     session.channel,
                     thread_id,
@@ -566,7 +629,9 @@ class GatewayManager:
             original_user_content=msg.content,
         )
         if visible_text:
-            await session.append_assistant(thread_id, visible_text, agent_used.name)
+            _vid = await session.append_assistant(thread_id, visible_text, agent_used.name)
+            if owned_turn_ids is not None and _vid is not None:
+                owned_turn_ids.add(_vid)
             await self._send_agent_response(
                 session.channel,
                 thread_id,
@@ -1828,11 +1893,20 @@ class GatewayManager:
             )
 
         # Append user turn to history
+        user_turn_id: int | None = None
         if not user_turn_appended:
-            await session.append_user(
+            user_turn_id = await session.append_user(
                 thread_id, msg.content, msg.author,
                 attachments=msg.attachments or None,
             )
+        else:
+            # Already appended upstream (artifact/heuristic fall-through). Recover
+            # its row id from the cache tail for the watermark protocol.
+            _hist = await session.get_history(thread_id)
+            for _t in reversed(_hist):
+                if _t.get("role") == "user" and isinstance(_t.get("_id"), int):
+                    user_turn_id = _t["_id"]
+                    break
         prior_history = history[:-1] if len(history) > 1 else []
         routed_skill = self._routed_skill_name(
             router_decision=router_decision,
@@ -1946,6 +2020,53 @@ class GatewayManager:
                 on_partial_hook = None
                 on_tool_use_hook = None
 
+        # --- Watermark gate (resume vs fresh) + fresh-flatten snapshot ---
+        # Resume a CLI session only when it has seen every persisted turn that
+        # predates this user turn; otherwise clear it so the agent re-seeds
+        # fresh. Read history authoritatively *here* (close to the run) so a
+        # turn a runtime task wrote after the earlier ``prior_history`` slice is
+        # both detected (gate) and included (fresh flatten). ``owned_turn_ids``
+        # are the rows this invocation produces — never treated as foreign.
+        owned_turn_ids: set[int] = set()
+        if user_turn_id is not None:
+            owned_turn_ids.add(user_turn_id)
+        watermark_baseline: int | None = None
+        store_ref = getattr(self, "_memory_store_ref", None)
+        if store_ref is not None:
+            fresh_full = await store_ref.load_history(
+                session.platform, session.channel_id, thread_id
+            )
+            fresh_turn_ids = [
+                t["_id"] for t in fresh_full if isinstance(t.get("_id"), int)
+            ]
+            watermark_baseline = max(fresh_turn_ids) if fresh_turn_ids else None
+            if user_turn_id is not None:
+                prior_history = [
+                    t for t in fresh_full if t.get("_id") != user_turn_id
+                ]
+            for agent in registry.agents:
+                if not hasattr(agent, "get_session_id"):
+                    continue
+                if agent.get_session_id(thread_id) is None:
+                    continue
+                _sid, last_seen = await store_ref.load_session_state(
+                    session.platform, session.channel_id, thread_id, agent.name
+                )
+                if not should_resume(
+                    session_exists=True,
+                    last_seen_turn_id=last_seen,
+                    existing_turn_ids=fresh_turn_ids,
+                    owned_turn_ids=owned_turn_ids,
+                ) and hasattr(agent, "clear_session"):
+                    agent.clear_session(thread_id)
+                    logger.info(
+                        "[%s] watermark_gate fresh-reseed agent=%s last_seen=%s latest=%s",
+                        req_id,
+                        agent.name,
+                        last_seen,
+                        watermark_baseline,
+                    )
+
         t_agent = time.perf_counter()
         async with channel.typing(thread_id):
             async def _record_agent_run(*, agent, response, log_path, duration_s):
@@ -2028,10 +2149,21 @@ class GatewayManager:
                     )
             else:
                 await channel.send(thread_id, failure_text)
-            # Remove the failed user turn so history stays clean
-            history = await session.get_history(thread_id)
-            if history:
-                history.pop()
+            # Precise cleanup: drop *this* invocation's user turn by id from
+            # cache + DB (never a blind pop, which can remove a concurrently
+            # appended foreign turn). Fall back to the legacy pop only when the
+            # row id is unknown.
+            if user_turn_id is not None:
+                await session.delete_turn(thread_id, user_turn_id)
+            else:
+                history = await session.get_history(thread_id)
+                if history:
+                    history.pop()
+            # Terminal failure: a resumed run may have poisoned its CLI session
+            # (timeout / max_turns don't clear it) while we just deleted the
+            # only evidence above the watermark. Discard every resume-capable
+            # session for the thread so the next reply re-seeds fresh.
+            await self._discard_thread_sessions(session, thread_id, registry)
             return
 
         logger.info(
@@ -2062,7 +2194,13 @@ class GatewayManager:
             agent_prompt=agent_prompt,
             explicit_skill=explicit_skill,
             routed_skill=routed_skill,
+            owned_turn_ids=owned_turn_ids,
         ):
+            # Control-frame is a successful (gated) invocation: its owned turns
+            # are the user turn + any visible output appended by the handler.
+            await self._advance_thread_watermark(
+                session, thread_id, agent_used, watermark_baseline, owned_turn_ids
+            )
             if relay is not None:
                 with suppress(Exception):
                     await relay.finalize(
@@ -2072,7 +2210,16 @@ class GatewayManager:
             return
 
         # Record assistant response in history
-        await session.append_assistant(thread_id, response.text, agent_used.name)
+        assistant_turn_id = await session.append_assistant(
+            thread_id, response.text, agent_used.name
+        )
+        if assistant_turn_id is not None:
+            owned_turn_ids.add(assistant_turn_id)
+        # Advance the watermark for the agent that produced this reply (no-op
+        # when a foreign turn interleaved during execution → next reply fresh).
+        await self._advance_thread_watermark(
+            session, thread_id, agent_used, watermark_baseline, owned_turn_ids
+        )
 
         # Send with attribution header + chunked content.
         if relay is not None:

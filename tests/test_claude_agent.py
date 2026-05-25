@@ -6,6 +6,44 @@ import pytest
 from oh_my_agent.agents.cli.claude import ClaudeAgent, _parse_claude_stream_json
 
 
+@pytest.mark.asyncio
+async def test_claude_fresh_flattens_history_resume_drops_it(monkeypatch):
+    """Root cause of the context-scatter bug: resume sends only the new prompt
+    (no history), while a fresh run flattens prior turns in. The watermark gate
+    relies on this — clearing the session forces the history-bearing fresh path."""
+    captured: dict[str, list] = {}
+
+    async def _capture(*args, **kwargs):
+        captured["argv"] = list(args)
+        ndjson = json.dumps({
+            "type": "result", "subtype": "success", "result": "ok",
+            "session_id": "sess-1",
+        })
+        return 0, ndjson.encode(), b""
+
+    monkeypatch.setattr("oh_my_agent.agents.cli.claude._stream_cli_process", _capture)
+
+    history = [
+        {"role": "user", "content": "EARLIER-QUESTION"},
+        {"role": "assistant", "content": "earlier-answer", "agent": "claude"},
+    ]
+
+    def _prompt_arg(argv: list) -> str:
+        return argv[argv.index("-p") + 1]
+
+    # Fresh (no session): history is flattened into the prompt.
+    agent = ClaudeAgent(cli_path="claude")
+    await agent.run("new-question", history=history, thread_id="t1")
+    assert "--resume" not in captured["argv"]
+    assert "EARLIER-QUESTION" in _prompt_arg(captured["argv"])
+
+    # Resume (session set): only the new prompt is sent — history is dropped.
+    agent.set_session_id("t1", "sess-1")
+    await agent.run("another-question", history=history, thread_id="t1")
+    assert "--resume" in captured["argv"]
+    assert "EARLIER-QUESTION" not in _prompt_arg(captured["argv"])
+
+
 def test_claude_command_includes_permission_bypass_by_default():
     agent = ClaudeAgent(cli_path="claude", model="sonnet-test")
     cmd = agent._build_command("hello")
