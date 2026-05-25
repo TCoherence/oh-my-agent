@@ -195,6 +195,23 @@ async def test_watermark_error_deletes_user_turn_and_discards_session(tmp_path):
         await store.close()
 
 
+def test_prepare_workspace_compat_files_links_reports_archive(tmp_path):
+    """The default chat path (short per-thread workspace) gets a reports_archive
+    symlink so replies can browse prior reports."""
+    base = tmp_path / "base"
+    base.mkdir()
+    reports = tmp_path / "reports"
+    gm = GatewayManager(
+        [], short_workspace={"base_workspace": str(base)}, reports_dir=reports
+    )
+    short_ws = tmp_path / "short"
+    short_ws.mkdir()
+    gm._prepare_workspace_compat_files(short_ws)
+    link = short_ws / "reports_archive"
+    assert link.is_symlink()
+    assert link.resolve() == reports.resolve()
+
+
 def test_thread_name_truncates_at_90_chars():
     long = "a" * 200
     name = GatewayManager._thread_name(long)

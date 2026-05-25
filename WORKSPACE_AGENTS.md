@@ -15,6 +15,7 @@ them as-is — do not search the filesystem.**
 | `./.claude/skills/<name>/`    | Skill bundle for the `claude` agent           |
 | `./.gemini/skills/<name>/`    | Same skill, for the `gemini` agent            |
 | `./.agents/skills/<name>/`    | Same skill, for the `codex` agent             |
+| `./reports_archive/`          | Past published reports — **treat as read-only** |
 
 You will only ever read from your own agent's skill dir. The runtime exposes
 this dir as the `OMA_AGENT_HOME` environment variable so SKILL.md instructions
@@ -40,6 +41,10 @@ Where reports persist (so they survive task workspace cleanup):
 
 Use the skill's own `report_store.py persist` / `deal_store.py persist` to
 write there — do not hand-roll absolute paths.
+
+To reference **prior** runs (yours or other skills'), browse `./reports_archive/`
+— it's a read-only view of that same published tree. Read from it freely; **treat
+it as read-only** (write new reports via the persist helpers above, not here).
 
 ## What NOT to do
 

@@ -27,6 +27,7 @@ from datetime import datetime
 from pathlib import Path
 
 from oh_my_agent import paths as _paths
+from oh_my_agent.utils.reports_link import ensure_reports_archive_link
 
 
 @dataclass
@@ -49,10 +50,15 @@ def _setup_workspace(
     workspace_path: str,
     project_root: Path,
     skills_path: Path | None = None,
+    reports_dir: Path | None = None,
 ) -> Path:
     """Create and populate the agent workspace directory."""
     ws = Path(workspace_path).expanduser().resolve()
     ws.mkdir(parents=True, exist_ok=True)
+
+    # Read-intended view of published reports (the base workspace is used for
+    # chat replies when short_workspace is disabled).
+    ensure_reports_archive_link(ws, reports_dir)
 
     has_workspace_hint = (project_root / "WORKSPACE_AGENTS.md").is_file()
 
@@ -737,7 +743,12 @@ async def ignite(ctx: BootContext) -> None:
             if skills_cfg_for_ws.get("enabled")
             else None
         )
-        workspace = _setup_workspace(str(config["workspace"]), project_root, skills_path_for_ws)
+        workspace = _setup_workspace(
+            str(config["workspace"]),
+            project_root,
+            skills_path_for_ws,
+            reports_dir=_paths.runtime_reports_dir(config),
+        )
         logger.info("Workspace: %s", workspace)
 
     # Experiment: opt-in tool-trace JSONL writer (quarantined under the
@@ -1109,6 +1120,7 @@ async def ignite(ctx: BootContext) -> None:
         memory_keyword_patterns=memory_keyword_patterns,
         streaming_config=config.get("gateway", {}).get("streaming", {}),
         feedback_collector=feedback_collector,
+        reports_dir=_paths.runtime_reports_dir(config),
     )
     if feedback_scan_worker is not None:
         feedback_scan_worker.start()

@@ -48,6 +48,7 @@ from oh_my_agent.skills.frontmatter import (
 )
 from oh_my_agent.utils.chunker import chunk_message
 from oh_my_agent.utils.errors import user_safe_agent_error, user_safe_message
+from oh_my_agent.utils.reports_link import ensure_reports_archive_link
 from oh_my_agent.utils.usage import (
     append_usage_audit,
     format_usage_audit,
@@ -93,6 +94,7 @@ class GatewayManager:
         memory_keyword_patterns: list[str] | None = None,
         streaming_config: dict | None = None,
         feedback_collector=None,
+        reports_dir: Path | None = None,
     ) -> None:
         self._channels = channels
         self._compressor = compressor
@@ -179,6 +181,9 @@ class GatewayManager:
             if short_cfg.get("base_workspace")
             else None
         )
+        # Published reports tree (runtime.reports_dir); surfaced read-intended in
+        # per-thread workspaces as ``reports_archive/`` for cross-session recall.
+        self._reports_dir = Path(reports_dir).expanduser().resolve() if reports_dir else None
         self._recent_thread_skills: dict[tuple[str, str, str], str] = {}
         # M2 PR4: two distinct disable sources, unioned on read. Keeping them
         # separate prevents auto-health recovery (.discard) from erasing a
@@ -2630,6 +2635,8 @@ class GatewayManager:
                 shutil.rmtree(legacy_codex, ignore_errors=True)
             else:
                 legacy_codex.unlink(missing_ok=True)
+        # Read-intended view of published reports for cross-session discovery.
+        ensure_reports_archive_link(workspace, self._reports_dir)
 
     @staticmethod
     def _short_workspace_key(platform: str, channel_id: str, thread_id: str) -> str:
