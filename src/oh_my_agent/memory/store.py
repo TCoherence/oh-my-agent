@@ -16,8 +16,10 @@ import aiosqlite
 
 from oh_my_agent.auth.types import AUTH_SCOPE_DEFAULT, AuthFlow, CredentialHandle
 from oh_my_agent.runtime.types import (
+    TERMINAL_STATUSES,
     AutomationPost,
     AutomationRuntimeState,
+    DuplicateActiveTaskError,
     HitlPrompt,
     NotificationRecord,
     RuntimeTask,
@@ -1088,7 +1090,8 @@ INSERT OR IGNORE INTO schema_version (id, version) VALUES (1, 1);
 """
 
 # Current schema version.  Bump this when adding migration steps.
-CURRENT_SCHEMA_VERSION = 1
+# v2: partial UNIQUE index for per-thread manual-task dedup.
+CURRENT_SCHEMA_VERSION = 2
 
 
 class SQLiteMemoryStore(MemoryStore):
@@ -1188,12 +1191,35 @@ class SQLiteMemoryStore(MemoryStore):
         Each block must call ``set_schema_version(N)`` on success.
         """
         current = await self.get_schema_version()
-        # -- future migration example --
-        # if current < 2:
-        #     db = await self._conn()
-        #     await db.execute("ALTER TABLE ... ADD COLUMN ...")
-        #     await self.set_schema_version(2)
-        #     current = 2
+        # v2: per-thread manual-task dedup. A partial UNIQUE index can't go in
+        # SCHEMA_SQL (executescript would fail on existing DBs that already have
+        # duplicate active manual tasks), so dedup-then-create here. Runs on the
+        # runtime-state store (others skip via the table-exists guard) for both
+        # fresh (no-op dedup) and existing DBs.
+        if current < 2:
+            if await self._table_exists("runtime_tasks"):
+                db = await self._conn()
+                terminal = ", ".join(f"'{s}'" for s in sorted(TERMINAL_STATUSES))
+                # Keep the newest non-terminal manual task per thread; mark older
+                # duplicates STOPPED so the unique index builds without conflict.
+                await db.execute(
+                    "UPDATE runtime_tasks SET status='STOPPED' WHERE id IN ("
+                    "  SELECT id FROM ("
+                    "    SELECT id, ROW_NUMBER() OVER ("
+                    "      PARTITION BY platform, channel_id, thread_id "
+                    "      ORDER BY created_at DESC, rowid DESC) AS rn "
+                    "    FROM runtime_tasks "
+                    f"    WHERE automation_name IS NULL AND status NOT IN ({terminal})"
+                    "  ) WHERE rn > 1)"
+                )
+                await db.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_runtime_tasks_active_manual_thread "
+                    "ON runtime_tasks(platform, channel_id, thread_id) "
+                    f"WHERE automation_name IS NULL AND status NOT IN ({terminal})"
+                )
+                await db.commit()
+            await self.set_schema_version(2)
+            current = 2
         if current < CURRENT_SCHEMA_VERSION:
             await self.set_schema_version(CURRENT_SCHEMA_VERSION)
 
@@ -1480,44 +1506,77 @@ class SQLiteMemoryStore(MemoryStore):
     async def create_runtime_task(self, **kwargs) -> RuntimeTask:
         async with self._write_lock:
             db = await self._conn()
-            await db.execute(
-                "INSERT INTO runtime_tasks "
-                "(id, platform, channel_id, thread_id, created_by, goal, original_request, preferred_agent, "
-                " status, max_steps, max_minutes, agent_timeout_seconds, agent_max_turns, test_command, "
-                " completion_mode, output_summary, artifact_manifest, automation_name, task_type, skill_name, "
-                " notify_channel_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    kwargs["task_id"],
-                    kwargs["platform"],
-                    kwargs["channel_id"],
-                    kwargs["thread_id"],
-                    kwargs["created_by"],
-                    kwargs["goal"],
-                    kwargs.get("original_request"),
-                    kwargs.get("preferred_agent"),
-                    kwargs["status"],
-                    int(kwargs["max_steps"]),
-                    int(kwargs["max_minutes"]),
-                    kwargs.get("agent_timeout_seconds"),
-                    kwargs.get("agent_max_turns"),
-                    kwargs["test_command"],
-                    kwargs.get("completion_mode", "merge"),
-                    kwargs.get("output_summary"),
-                    json.dumps(kwargs.get("artifact_manifest"), ensure_ascii=False)
-                    if kwargs.get("artifact_manifest") is not None
-                    else None,
-                    kwargs.get("automation_name"),
-                    kwargs.get("task_type", "repo_change"),
-                    kwargs.get("skill_name"),
-                    kwargs.get("notify_channel_id"),
-                ),
-            )
-            await db.commit()
+            try:
+                await db.execute(
+                    "INSERT INTO runtime_tasks "
+                    "(id, platform, channel_id, thread_id, created_by, goal, original_request, preferred_agent, "
+                    " status, max_steps, max_minutes, agent_timeout_seconds, agent_max_turns, test_command, "
+                    " completion_mode, output_summary, artifact_manifest, automation_name, task_type, skill_name, "
+                    " notify_channel_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        kwargs["task_id"],
+                        kwargs["platform"],
+                        kwargs["channel_id"],
+                        kwargs["thread_id"],
+                        kwargs["created_by"],
+                        kwargs["goal"],
+                        kwargs.get("original_request"),
+                        kwargs.get("preferred_agent"),
+                        kwargs["status"],
+                        int(kwargs["max_steps"]),
+                        int(kwargs["max_minutes"]),
+                        kwargs.get("agent_timeout_seconds"),
+                        kwargs.get("agent_max_turns"),
+                        kwargs["test_command"],
+                        kwargs.get("completion_mode", "merge"),
+                        kwargs.get("output_summary"),
+                        json.dumps(kwargs.get("artifact_manifest"), ensure_ascii=False)
+                        if kwargs.get("artifact_manifest") is not None
+                        else None,
+                        kwargs.get("automation_name"),
+                        kwargs.get("task_type", "repo_change"),
+                        kwargs.get("skill_name"),
+                        kwargs.get("notify_channel_id"),
+                    ),
+                )
+                await db.commit()
+            except aiosqlite.IntegrityError:
+                # The partial UNIQUE index (one non-terminal MANUAL task per
+                # thread) rejected this insert. Roll back the failed INSERT
+                # FIRST — otherwise SQLite leaves an open transaction and the
+                # lookup below (and the shared connection) stay dirty.
+                await db.rollback()
+                existing = await self._find_active_manual_task(
+                    kwargs["platform"], kwargs["channel_id"], kwargs["thread_id"]
+                )
+                if existing is not None:
+                    raise DuplicateActiveTaskError(existing.id, existing.thread_id) from None
+                raise  # some other integrity violation — surface it
         task = await self.get_runtime_task(kwargs["task_id"])
         if task is None:
             raise RuntimeError("Failed to create runtime task")
         return task
+
+    async def _find_active_manual_task(
+        self, platform: str, channel_id: str, thread_id: str
+    ) -> RuntimeTask | None:
+        """Newest non-terminal MANUAL (automation_name IS NULL) task for a thread.
+
+        Backs the dedup conflict path: the partial UNIQUE index guarantees at
+        most one exists, so this returns it (or None).
+        """
+        placeholders = ", ".join("?" for _ in TERMINAL_STATUSES)
+        db = await self._conn()
+        cursor = await db.execute(
+            "SELECT * FROM runtime_tasks "
+            "WHERE platform=? AND channel_id=? AND thread_id=? AND automation_name IS NULL "
+            f"AND status NOT IN ({placeholders}) "
+            "ORDER BY created_at DESC LIMIT 1",
+            (platform, channel_id, thread_id, *sorted(TERMINAL_STATUSES)),
+        )
+        row = await cursor.fetchone()
+        return RuntimeTask.from_row(self._normalize_runtime_task_row(dict(row))) if row else None
 
     async def get_runtime_task(self, task_id: str) -> RuntimeTask | None:
         db = await self._conn()
@@ -3256,6 +3315,7 @@ class SQLiteScopedStore(SQLiteMemoryStore):
             await db.executescript(self.SCHEMA_SQL)
             await self._migrate_runtime_schema()
             await self._drop_unkept_tables()
+            await self._run_schema_migrations()
             await db.commit()
         else:
             allowed = self._allowed_tables()
@@ -3274,6 +3334,7 @@ class SQLiteScopedStore(SQLiteMemoryStore):
             await db.executescript(self.SCHEMA_SQL)
             await self._drop_unkept_tables()
             await self._migrate_runtime_schema()
+            await self._run_schema_migrations()
             await db.commit()
         logger.info("%s store initialised at %s", self._label, self._db_path)
 

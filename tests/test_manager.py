@@ -2244,3 +2244,18 @@ async def test_skill_prefix_unknown_replies_without_task(tmp_path):
     runtime.create_skill_task.assert_not_called()
     channel.send.assert_awaited()  # helpful "must name a known skill" reply
     assert "known skill" in channel.send.await_args.args[1]
+
+
+@pytest.mark.asyncio
+async def test_duplicate_active_task_is_caught_and_reported(tmp_path):
+    """The single enclosing handle_message catch turns DuplicateActiveTaskError
+    into a user notice — it must not crash or print a generic error."""
+    from oh_my_agent.runtime.types import DuplicateActiveTaskError
+
+    gm, session, registry, runtime, channel = _explicit_manager(tmp_path)
+    runtime.create_artifact_task = AsyncMock(
+        side_effect=DuplicateActiveTaskError("existing-123", "t1")
+    )
+    await gm.handle_message(session, registry, _make_msg(thread_id="t1", content="task: do it"))
+    sent = " ".join(str(c.args[1]) for c in channel.send.await_args_list)
+    assert "existing-123" in sent and "already exists" in sent

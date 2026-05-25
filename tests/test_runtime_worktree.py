@@ -87,6 +87,48 @@ async def test_run_shell_returns_stdout_and_exit_zero(manager):
     assert timed_out is False
 
 
+def _commit_author(repo: Path) -> str:
+    out = subprocess.run(
+        ["git", "-C", str(repo), "log", "-1", "--format=%an|%ae"],
+        capture_output=True, text=True, check=True,
+    )
+    return out.stdout.strip()
+
+
+@pytest.mark.asyncio
+async def test_commit_injects_configured_git_identity(git_repo, tmp_path):
+    # `-c user.*` flags override any ambient/global git config, so the author
+    # assertion holds regardless of the test machine's git settings.
+    mgr = WorktreeManager(
+        repo_root=git_repo,
+        worktree_root=tmp_path / "wt",
+        git_identity={"name": "Custom Bot", "email": "custom@bot.test"},
+    )
+    (git_repo / "new.txt").write_text("x\n")
+    commit = await mgr.commit_repo_changes("test commit")
+    assert commit
+    assert _commit_author(git_repo) == "Custom Bot|custom@bot.test"
+
+
+@pytest.mark.asyncio
+async def test_commit_uses_default_identity_when_unset(git_repo, tmp_path):
+    mgr = WorktreeManager(repo_root=git_repo, worktree_root=tmp_path / "wt")
+    (git_repo / "new.txt").write_text("x\n")
+    await mgr.commit_repo_changes("c")
+    assert _commit_author(git_repo) == "oh-my-agent|oh-my-agent@users.noreply.github.com"
+
+
+@pytest.mark.asyncio
+async def test_discard_repo_changes_restores_clean_tree(manager, git_repo):
+    (git_repo / "README.md").write_text("modified\n")  # tracked change
+    (git_repo / "untracked.txt").write_text("new\n")    # untracked file
+    assert await manager.repo_is_clean() is False
+    await manager.discard_repo_changes()
+    assert await manager.repo_is_clean() is True
+    assert (git_repo / "README.md").read_text() == "hello\n"  # tracked restored
+    assert not (git_repo / "untracked.txt").exists()          # untracked removed
+
+
 @pytest.mark.asyncio
 async def test_run_shell_surfaces_nonzero_exit(manager):
     workspace = await manager.ensure_worktree("task-fail")

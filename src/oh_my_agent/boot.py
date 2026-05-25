@@ -396,7 +396,7 @@ def _apply_v052_defaults(config: dict) -> None:
     merge_cfg.setdefault("auto_commit", True)
     merge_cfg.setdefault("require_clean_repo", True)
     merge_cfg.setdefault("preflight_check", True)
-    merge_cfg.setdefault("target_branch_mode", "current")
+    merge_cfg.setdefault("target_branch_mode", "pr")
     merge_cfg.setdefault("commit_message_template", "runtime(task:{task_id}): {goal_short}")
 
 

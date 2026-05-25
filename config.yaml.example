@@ -187,8 +187,14 @@ runtime:
     auto_commit: true                              # only current mode (PR mode always commits workspace)
     require_clean_repo: true                       # only current mode
     preflight_check: true                          # both modes
-    target_branch_mode: current                    # "current" | "pr" (WS B; see below)
+    target_branch_mode: pr                          # "pr" (default) | "current"
     commit_message_template: "runtime(task:{task_id}): {goal_short}"
+    # Identity for runtime commits (PR-mode worktree commits + current-mode
+    # commits). Prevents "Author identity unknown" where git isn't configured
+    # (e.g. Docker). Defaults to oh-my-agent <oh-my-agent@users.noreply.github.com>.
+    git_identity:
+      name: "oh-my-agent"
+      email: "tcoherence@gmail.com"
     # PR-mode config (target_branch_mode: pr). Bot pushes the task
     # worktree branch to ``pr_remote`` and opens a GitHub PR against
     # ``pr_base_branch`` via the ``gh`` CLI. The terminal state is

@@ -43,6 +43,7 @@ from oh_my_agent.runtime.policy import (
     strip_draft_prefix,
     strip_task_prefix,
 )
+from oh_my_agent.runtime.types import DuplicateActiveTaskError
 from oh_my_agent.skills.frontmatter import (
     read_skill_frontmatter,
     resolve_skill_frontmatter,
@@ -1278,6 +1279,20 @@ class GatewayManager:
             self._inflight_messages.add(current_task)
         try:
             await self._handle_message_impl(session, registry, msg)
+        except DuplicateActiveTaskError as exc:
+            # Single enclosing catch for every task-creation path in
+            # _handle_message_impl (/skill_name, task:/draft:/skill: prefixes,
+            # gated auto-dispatch, and the maybe_handle_incoming delegate).
+            logger.info(
+                "[dedup] suppressed duplicate task creation thread=%s existing=%s",
+                exc.thread_id, exc.existing_task_id,
+            )
+            with suppress(Exception):
+                await session.channel.send(
+                    exc.thread_id,
+                    f"⚠️ An active task already exists in this thread "
+                    f"(`{exc.existing_task_id}`). Finish or cancel it before starting another.",
+                )
         except Exception as exc:
             logger.exception(
                 "handle_message failed platform=%s channel=%s thread=%s author=%r",

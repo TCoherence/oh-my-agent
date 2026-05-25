@@ -557,6 +557,24 @@ def _check_runtime_cleanup(config: dict, result: ValidationResult) -> None:
             "enabled", "auto_commit", "require_clean_repo", "preflight_check",
         ):
             _check_bool_field(merge_gate, bool_key, path="runtime.merge_gate", result=result)
+        mode = merge_gate.get("target_branch_mode")
+        if mode is not None and mode not in ("pr", "current"):
+            result.errors.append(ConfigError(
+                "runtime.merge_gate.target_branch_mode",
+                'must be "pr" or "current"', "error",
+            ))
+        identity = merge_gate.get("git_identity")
+        if identity is not None:
+            if not isinstance(identity, dict):
+                result.errors.append(ConfigError(
+                    "runtime.merge_gate.git_identity", "must be a mapping if present", "error",
+                ))
+            else:
+                for key in ("name", "email"):
+                    if key in identity and not isinstance(identity[key], str):
+                        result.errors.append(ConfigError(
+                            f"runtime.merge_gate.git_identity.{key}", "must be a string", "error",
+                        ))
 
     cleanup = runtime.get("cleanup")
     if cleanup is None:

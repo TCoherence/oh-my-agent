@@ -140,6 +140,52 @@ def test_valid_router_config_has_no_router_errors():
     assert errs == [], f"unexpected router validation errors: {errs}"
 
 
+# ── runtime.merge_gate (PR2: target_branch_mode + git_identity) ──────── #
+
+
+def _config_with_merge_gate(merge_gate: dict) -> dict:
+    cfg = _base_config()
+    cfg["runtime"] = {"merge_gate": merge_gate}
+    return cfg
+
+
+def _merge_errors(result) -> list:
+    return [e for e in result.errors if e.path.startswith("runtime.merge_gate")]
+
+
+def test_target_branch_mode_invalid_is_error():
+    result = validate_config(_config_with_merge_gate({"target_branch_mode": "weird"}))
+    assert any(
+        e.path == "runtime.merge_gate.target_branch_mode" and e.severity == "error"
+        for e in _merge_errors(result)
+    )
+
+
+@pytest.mark.parametrize("mode", ["pr", "current"])
+def test_target_branch_mode_valid_ok(mode):
+    result = validate_config(_config_with_merge_gate({"target_branch_mode": mode}))
+    assert _merge_errors(result) == []
+
+
+def test_git_identity_non_dict_is_error():
+    result = validate_config(_config_with_merge_gate({"git_identity": "nope"}))
+    assert any(e.path == "runtime.merge_gate.git_identity" for e in _merge_errors(result))
+
+
+def test_git_identity_non_string_field_is_error():
+    result = validate_config(_config_with_merge_gate({"git_identity": {"email": 123}}))
+    assert any(
+        e.path == "runtime.merge_gate.git_identity.email" for e in _merge_errors(result)
+    )
+
+
+def test_git_identity_valid_ok():
+    result = validate_config(
+        _config_with_merge_gate({"git_identity": {"name": "bot", "email": "bot@x.test"}})
+    )
+    assert _merge_errors(result) == []
+
+
 def test_validate_absent_router_section_is_fine():
     config = {
         "gateway": {
