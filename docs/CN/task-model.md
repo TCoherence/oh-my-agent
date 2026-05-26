@@ -22,7 +22,7 @@ Discord 消息 → runtime 任务的分类、类型与产物去向的统一说�
 
 | 模式 | 常量 | 行为 |
 |---|---|---|
-| `reply` | `TASK_COMPLETION_REPLY` | Artifact 文件作为 Discord 附件发送到线程；完成消息把 `Published to:`（绝对路径）放在主位，`Delivered via:` / scratch 目录等 transport 细节作为次级信息 |
+| `reply` | `TASK_COMPLETION_REPLY` | 手动任务：Artifact 文件作为 Discord 附件发送到线程；完成消息把 `Published to:`（绝对路径）放在主位，`Delivered via:` / scratch 目录等 transport 细节作为次级信息。**Automation 任务跳过附件上传**（见 §6 step 4），完全依赖 `Published to:` 行。 |
 | `artifact` | `TASK_COMPLETION_ARTIFACT` | 内部变体，直接外露较少 |
 | `merge` | `TASK_COMPLETION_MERGE` | 任务进入 `WAITING_MERGE`，owner 在 Discord 点按钮或 `/task_merge` 触发合并 gate |
 
@@ -127,8 +127,8 @@ GatewayManager.handle_message()
 1. Agent 把文件写在隔离 workspace（reply 模式任务落到 `_artifacts/<task_id>/…`；skill 类任务可能直接写在 worktree 内的 `reports/<skill>/…` 子树下）。
 2. `_artifact_paths_for_task()` 按 `task.artifact_manifest` 或 `changed_files` 解析。
 3. `_publish_artifact_files()` 按上面 §2 的四条 publish 规则发布：已在 `reports_dir` 下的原地复用；规范路径 `reports/<sub-tree>/…` 镜像到 `reports_dir/<sub-tree>/…`（覆盖，不加后缀）；其它 workspace 文件与外部绝对路径落到 `reports_dir/artifacts/<basename>`，basename 碰撞时加 `-<task_id[:8]>` 后缀。失败只打 warning，不影响任务。
-4. `deliver_files()` 用 Discord attachment 上传原始文件（`artifact_attachment_max_count` / `_max_bytes` / `_max_total_bytes` 作大小防线）。
-5. 完成消息把 `Published to: <绝对路径>` 作为主行，`Delivered via: <mode>`（以及可选的 `Scratch (ephemeral): _artifacts/<task_id>/` 标签）作为次级细节。上传失败时降级为 `mode="path"`，但 `Published to:` 仍指向 `reports_dir/` 下稳定绝对路径。
+4. `deliver_files()` 用 Discord attachment 上传原始文件（`artifact_attachment_max_count` / `_max_bytes` / `_max_total_bytes` 作大小防线）。**Automation 任务（`task.automation_name` 非空）整步跳过** —— 聚合型 skill 一次写多个文件常超过 count 上限，按文件类型 filter（`.md` vs 其他）又不通用；dump channel 订阅者依赖下一步的 `Published to:` 行去拿完整报告。手动任务仍保留"上传，失败降级到 path"的行为。
+5. 完成消息把 `Published to: <绝对路径>` 作为主行，`Delivered via: <mode>`（以及可选的 `Scratch (ephemeral): _artifacts/<task_id>/` 标签）作为次级细节。上传失败时降级为 `mode="path"`，但 `Published to:` 仍指向 `reports_dir/` 下稳定绝对路径。Automation 任务不渲染 `Delivered via:` 行（跳过是故意的，不是 fallback）。
 6. Janitor（`runtime.cleanup.retention_hours`，默认 168 h）最终会把 task workspace 删掉，但 `reports_dir/` 下的 published 文件**不会**被自动清理。
 
 ---
@@ -211,7 +211,7 @@ _Button expires in ~24h._
 1. **Router 阈值 0.55 偏低。** 一句「帮我研究一下 X / let me research X」就能越线。如果想走聊天，要么临时关路由要么改措辞；或者把 `router.confidence_threshold` 调高，用 precision 换 recall。
 2. **Artifact workspace 拿不到 bundled skills。** 隔离目录 `_artifacts/<id>/` 不会被 sync 进 `.claude/skills/` / `.gemini/skills/`，所以 artifact 任务跑的 agent 不能调用 `web-scraper` 这类本地 skill，只能在单轮内 inline 全部工作。（`repo_change` 任务会通过 `_setup_workspace()` 拿到 skills。）
 3. **默认预算 `max_steps=8 / max_minutes=20`。** 单轮出报告够用，多源调研类任务会紧。可以在 automation 或 skill frontmatter 里 override，或者自定义代码传 `create_artifact_task(max_steps=…)`。
-4. **静默降级为 `mode="path"`。** 附件上传失败（网络 / 超大）时 transport label 会变成 `Delivered via: path`，在消息多的线程里容易被忽略。不过 `Published to:` 主行仍指向 `reports_dir/` 下稳定绝对路径。
+4. **静默降级为 `mode="path"`（仅手动任务）。** 手动 artifact 任务附件上传失败（网络 / 超大）时 transport label 会变成 `Delivered via: path`，在消息多的线程里容易被忽略。不过 `Published to:` 主行仍指向 `reports_dir/` 下稳定绝对路径。Automation 任务默认就不走上传（也不渲染 `Delivered via:` 行），所以这条 sharp edge 不适用。
 5. **Publish 目录不自动清理。** `reports_dir` 没有 retention，积累太多要手动扫（`find ~/.oh-my-agent/reports -mtime +90 -delete` 之类）。
 6. **Docker 卷挂载路径。** 容器里发布的产物落在 `/home/.oh-my-agent/reports/<sub-tree>/…`（或平铺 fallback 的 `artifacts/`）；宿主机上一般是 `${OMA_DOCKER_MOUNT:-~/oh-my-agent-docker-mount}/.oh-my-agent/reports/…`。
 
