@@ -104,10 +104,21 @@ def test_list_automations_colocated(tmp_path: Path):
     assert weekly["next_run_at"] is None
 
 
-def test_list_automations_readonly_503(tmp_path: Path):
+def test_list_automations_readonly_falls_back_to_yaml(tmp_path: Path):
+    """The readonly GET used to 503 because the route hard-required a
+    scheduler handle. After the static-fallback change (PR follow-up to
+    #92), it instead reads automations.storage_dir YAMLs and reports
+    mode='static'. Operator can see what's scheduled without a bot. The
+    write endpoints (/fire, PATCH) still 503 — see test_fire_readonly_503
+    and test_patch_readonly_503 below."""
     client = _readonly_client(tmp_path)
     r = client.get("/api/v1/automations")
-    assert r.status_code == 503
+    assert r.status_code == 200
+    payload = r.json()
+    assert payload["mode"] == "static"
+    # _readonly_client doesn't seed the automations dir → empty + warn.
+    assert payload["items"] == []
+    assert any("automations directory" in w for w in payload.get("warnings", []))
 
 
 def test_fire_requires_auth_when_token_set(tmp_path: Path):

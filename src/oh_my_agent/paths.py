@@ -43,6 +43,7 @@ _DEFAULT_REPORTS_DIR = "~/.oh-my-agent/reports"
 _DEFAULT_MEMORY_DB = "~/.oh-my-agent/runtime/memory.db"
 _DEFAULT_SKILLS_TELEMETRY = "~/.oh-my-agent/runtime/skills.db"
 _DEFAULT_JUDGE_MEMORY_DIR = "~/.oh-my-agent/memory"
+_DEFAULT_AUTOMATIONS_STORAGE_DIR = "~/.oh-my-agent/automations"
 
 
 def _abs(path: str | Path) -> Path:
@@ -157,6 +158,31 @@ def skills_dir(config: dict, project_root: Path | None = None) -> Path:
 
     skills_cfg = config.get("skills", {}) or {}
     raw = Path(str(skills_cfg.get("path", "skills/"))).expanduser()
+    if raw.is_absolute():
+        return raw.resolve()
+    root = project_root or Path.cwd()
+    return (root / raw).resolve()
+
+
+def automations_storage_dir(
+    config: dict, project_root: Path | None = None
+) -> Path:
+    """``automations.storage_dir`` (default ``~/.oh-my-agent/automations``).
+
+    Mirrors ``automation/scheduler.build_scheduler_from_config`` exactly:
+    absolute paths stay as-is, relative paths resolve against
+    ``project_root`` (typically the config file's parent dir) — NOT CWD.
+    Without that, the standalone dashboard could scan a different
+    directory than the scheduler is reading from, silently showing a
+    stale or empty list while the live bot has a totally different
+    catalog (Codex review #5a).
+
+    ``project_root`` falls back to ``Path.cwd()`` so this helper stays
+    callable from places that don't track config provenance (tests, REPL).
+    """
+
+    auto_cfg = config.get("automations", {}) or {}
+    raw = Path(str(auto_cfg.get("storage_dir", _DEFAULT_AUTOMATIONS_STORAGE_DIR))).expanduser()
     if raw.is_absolute():
         return raw.resolve()
     root = project_root or Path.cwd()

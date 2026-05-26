@@ -16,9 +16,9 @@ function describeError(err: unknown): { title: string; body?: string } {
       return { title: 'auth required — set localStorage["oma-dashboard-token"]' };
     if (err.status === 503)
       return {
-        title: "Automation control unavailable in this dashboard",
+        title: "Automations unavailable",
         body:
-          "You're viewing the read-only standalone dashboard. Automation control (list, fire, pause) only works when the dashboard is co-located inside the bot process. Set `dashboard.colocated: true` in config.yaml (default port :8765) to manage automations.",
+          "The dashboard returned 503. This usually means the YAML directory itself is unreachable — check `automations.storage_dir` in config.yaml.",
       };
   }
   return { title: (err as Error)?.message ?? "unknown error" };
@@ -52,16 +52,38 @@ function AutomationsPage() {
   const patch = usePatchAutomation();
 
   const mutating = fire.isPending || patch.isPending;
-  // Skeleton only on the first-ever load (no data, no error). Once either
-  // settles, we keep the error/data view stable so background polls (every
-  // 5s) don't repaint the skeleton — the bug that made the page look like
-  // it was constantly reloading.
   const showSkeleton = data === undefined && !isError;
   const errInfo = isError ? describeError(error) : null;
+  // Treat the absence of `mode` as "live" — older backends only ever
+  // answered when the colocated scheduler was up, so any pre-fallback
+  // success was a live answer.
+  const mode = data?.mode ?? "live";
+  const isStatic = mode === "static";
 
   return (
     <div className="mx-auto max-w-4xl px-6 py-6">
-      <h1 className="text-lg font-semibold mb-4">Automations</h1>
+      <h1 className="text-lg font-semibold mb-2">Automations</h1>
+
+      {/* Static-mode banner — placed BEFORE the table so the operator
+          sees the read-only caveat before reasoning about disabled
+          buttons. Don't render under skeleton / error states. */}
+      {!showSkeleton && !errInfo && isStatic ? (
+        <div className="mb-3 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
+          <span className="font-medium">Read-only view.</span> This
+          standalone dashboard reads schedules straight from{" "}
+          <code>automations.storage_dir</code>. <span className="font-medium">Next-run times and
+          fire/pause controls require the colocated dashboard</span>{" "}
+          (set <code>dashboard.colocated: true</code>, default port :8765).
+        </div>
+      ) : null}
+
+      {!showSkeleton && !errInfo && data?.warnings && data.warnings.length > 0 ? (
+        <div className="mb-3 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
+          {data.warnings.map((w, i) => (
+            <div key={i}>⚠ {w}</div>
+          ))}
+        </div>
+      ) : null}
 
       {showSkeleton ? (
         <div className="space-y-2">
@@ -109,30 +131,53 @@ function AutomationsPage() {
                   </td>
                   <td className="px-3 py-2 text-xs">{fmtSchedule(row)}</td>
                   <td className="px-3 py-2 text-xs text-muted-foreground">
-                    {row.enabled ? fmtNext(row.next_run_at) : "paused"}
+                    {isStatic
+                      ? "—"
+                      : row.enabled
+                      ? fmtNext(row.next_run_at)
+                      : "paused"}
                   </td>
                   <td className="px-3 py-2 text-xs">{row.agent ?? "—"}</td>
                   <td className="px-3 py-2 text-right space-x-2 whitespace-nowrap">
                     <button
                       type="button"
-                      disabled={mutating}
+                      disabled={mutating || isStatic}
                       onClick={() => fire.mutate(row.name)}
-                      className="px-2 py-1 rounded text-xs bg-primary/10 text-primary hover:bg-primary/20 transition-colors"
+                      title={
+                        isStatic
+                          ? "Requires colocated dashboard"
+                          : "Run this automation immediately"
+                      }
+                      className={cn(
+                        "px-2 py-1 rounded text-xs transition-colors",
+                        isStatic
+                          ? "bg-muted text-muted-foreground cursor-not-allowed"
+                          : "bg-primary/10 text-primary hover:bg-primary/20",
+                      )}
                     >
                       fire now
                     </button>
                     <button
                       type="button"
-                      disabled={mutating}
+                      disabled={mutating || isStatic}
                       onClick={() =>
                         patch.mutate({
                           name: row.name,
                           updates: { enabled: !row.enabled },
                         })
                       }
+                      title={
+                        isStatic
+                          ? "Requires colocated dashboard"
+                          : row.enabled
+                          ? "Pause scheduling"
+                          : "Resume scheduling"
+                      }
                       className={cn(
                         "px-2 py-1 rounded text-xs transition-colors",
-                        row.enabled
+                        isStatic
+                          ? "bg-muted text-muted-foreground cursor-not-allowed"
+                          : row.enabled
                           ? "bg-destructive/15 text-destructive hover:bg-destructive/25"
                           : "bg-primary/10 text-primary hover:bg-primary/20",
                       )}

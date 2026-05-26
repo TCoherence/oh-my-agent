@@ -339,10 +339,25 @@ def build_router(config: dict) -> APIRouter:
 
     @router.get("/automations")
     def list_automations(request: Request) -> dict[str, Any]:
-        ctx = _require_colocated(request)
-        scheduler = ctx.scheduler
+        """Two modes:
+
+        - **live**: colocated dashboard with a running scheduler. Returns
+          records *and* computed ``next_run_at`` per job.
+        - **static**: standalone dashboard (no scheduler handle). Reads
+          ``automations.storage_dir`` YAMLs directly so the operator can
+          still see what's scheduled. ``next_run_at`` is null because
+          firing-state lives only in the scheduler. Write surfaces
+          (``/fire``, PATCH) still 503 in this mode — that's enforced by
+          ``_require_colocated`` on those routes.
+        """
+        ctx = getattr(request.app.state, "oma", None)
+        scheduler = getattr(ctx, "scheduler", None) if ctx is not None else None
         if scheduler is None:
-            raise HTTPException(status_code=503, detail="scheduler not available")
+            project_root = getattr(ctx, "project_root", None) if ctx is not None else None
+            return data.fetch_automations_static(
+                paths.automations_storage_dir(config, project_root=project_root)
+            )
+
         records = scheduler.list_automations()
         next_runs = scheduler.compute_all_next_run_at()
         items = []
@@ -362,7 +377,7 @@ def build_router(config: dict) -> APIRouter:
                     "next_run_at": next_at.isoformat() if next_at else None,
                 }
             )
-        return {"items": items}
+        return {"items": items, "warnings": [], "mode": "live"}
 
     @router.post("/automations/{name}/fire")
     async def fire_automation(name: str, request: Request) -> dict[str, Any]:

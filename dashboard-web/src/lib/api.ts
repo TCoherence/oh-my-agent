@@ -373,8 +373,19 @@ export function setSkillEnabled(
   return apiWrite("POST", `/api/v1/skills/${encodeURIComponent(name)}/${verb}`);
 }
 
-export function fetchAutomations(): Promise<{ items: AutomationRow[] }> {
-  return apiGet<{ items: AutomationRow[] }>("/api/v1/automations");
+export interface AutomationsResponse {
+  items: AutomationRow[];
+  /** Soft-fail signals (per-file parse errors etc.). Empty in happy path.
+   *  Older backends may omit — treat absent as []. */
+  warnings?: string[];
+  /** "live" = colocated scheduler answered (fire/pause usable).
+   *  "static" = standalone dashboard fallback (read-only YAML). Older
+   *  backends omit — treat absent as "live" for back-compat. */
+  mode?: "live" | "static";
+}
+
+export function fetchAutomations(): Promise<AutomationsResponse> {
+  return apiGet<AutomationsResponse>("/api/v1/automations");
 }
 
 export function fireAutomation(
