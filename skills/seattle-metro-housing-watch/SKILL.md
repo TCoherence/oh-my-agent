@@ -111,7 +111,7 @@ Use sources in this order:
 
 1. primary market context
    - NWMLS monthly market snapshot
-   - **Rate block — multi-source spread, not single source**: Freddie Mac PMMS 30Y / 15Y baseline **plus** MBA Weekly Applications Survey **plus** Mortgage News Daily index **plus** ≥2 big-lender rack rates (Chase / BofA / Wells Fargo / U.S. Bank with a Seattle ZIP like 98004 or 98052) **plus** ≥1 local credit union (BECU / WSECU / Sound CU). Always render a "source | 30Y | 15Y | snapshot date" table for the current week. See `references/source_policy.md` §Mortgage comparison defaults for the full tiering and minimum-coverage rules.
+   - **Rate block — multi-source spread, not single source**: Freddie Mac PMMS 30Y / 15Y national baseline **plus** MBA Weekly + Mortgage News Daily (national texture) **plus** WA-state aggregate (Bankrate WA + NerdWallet WA, server-rendered) **plus** ≥1 local credit union (BECU static PDF rate sheet preferred / WSECU `/loans/mortgage-purchase` HTML table / SoundCU optional). Big-lender rack rates (Chase / BofA / Wells Fargo / U.S. Bank) are **best-effort only** — their pages are auth-gated SPAs, so absence is not a coverage gap. Always render a "source | 30Y | 15Y | snapshot date" table for the current week. See `references/source_policy.md` §Mortgage comparison defaults for the full tiering and minimum-coverage rules.
 2. area trend layer
    - Beyond RE 7-city + King + Snohomish pages (current production primary)
    - Redfin city / neighborhood housing market pages when publicly readable

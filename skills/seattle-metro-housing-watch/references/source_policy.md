@@ -10,7 +10,7 @@ Use sources in this order:
 
 1. `primary market context`
    - NWMLS monthly market snapshot
-   - Freddie Mac PMMS / FRED mortgage-rate baseline (plus MBA Weekly / MND / big-lender / local CU spread — see **Mortgage comparison defaults** below)
+   - Freddie Mac PMMS / FRED mortgage-rate baseline (plus MBA Weekly / MND national texture, WA-state aggregate + local CU spread — see **Mortgage comparison defaults** below)
 2. `area trend layer`
    - Redfin city / neighborhood housing market pages when publicly readable
    - Zillow city / local market pages when publicly readable
@@ -49,23 +49,31 @@ If a source is stale relative to report date, say so plainly.
 
 A single weekly aggregate (Freddie Mac PMMS) is the structural baseline, but **one source is not enough**. The rate block must show a multi-source spread so readers can see where the actual quote distribution sits, not just the headline national average.
 
-Tiered sourcing — all four tiers are required when publicly fetchable:
+Tiered sourcing. **Tiers 1, 2 are national reference; Tiers 3, 4 are the Seattle-local read** (the report's priority). Tier 5 is best-effort only.
 
-1. **Headline weekly index** (baseline, always include)
+> **Root-cause note (2026-05-25).** Lender / CU mortgage-rate **pages are client-side-rendered SPAs** — the numbers are injected by a JSON/XHR call, so a plain web-fetch of the HTML returns the shell with zero rate cells. Big-lender APIs are additionally **auth-gated** (e.g. Chase's `apix.chase.com/.../v1/rates` returns `Missing authorization header`). Several previously-listed CU URLs were also just **stale (404)**. Retrieval priority is therefore: **static PDF rate sheet > server-rendered WA-state aggregate page > HTML page with an inline rate table > SPA shell**. Do not reverse-engineer auth-gated widget tokens.
+
+1. **Headline weekly index** (Tier 1 — national baseline, always include)
    - `MORTGAGE30US` (Freddie Mac PMMS, weekly Thursday)
    - `MORTGAGE15US` (Freddie Mac PMMS, weekly Thursday)
-2. **Industry survey + daily index** (texture layer)
+2. **Industry survey + daily index** (Tier 2 — national texture)
    - MBA Weekly Applications Survey 30Y conforming + jumbo + FHA / 15Y conforming (weekly Wednesday)
    - Mortgage News Daily 30Y / 15Y daily rate index (most recent close before report date)
-3. **Big-lender rack rates** (national, ≥2 of)
-   - Chase, Bank of America, Wells Fargo, U.S. Bank — published 30Y / 15Y / 5/6 ARM rack rate pages (usually require ZIP — use a Seattle metro ZIP such as 98004 or 98052)
-4. **Local credit union rack rates** (Seattle-specific, ≥1 of)
-   - BECU, WSECU, Sound Credit Union — published mortgage rate pages
+3. **WA-state aggregate** (Tier 3 — the stable "Seattle-local" reference band; both server-rendered, verified 2026-05-25)
+   - Bankrate WA — `https://www.bankrate.com/mortgages/mortgage-rates/washington/` (30Y/15Y note rate in raw HTML)
+   - NerdWallet WA — `https://www.nerdwallet.com/mortgages/mortgage-rates/washington` (30Y APR in raw HTML)
+4. **Local credit-union rack rates** (Tier 4 — Seattle-specific actual quotes, ≥1 of; corrected URLs + retrieval)
+   - **BECU** (preferred local anchor) — static PDF rate sheet `https://www.becu.org/-/media/Files/PDF/MortgageExternalRateSheet.pdf` → parse the PDF (note rate + APR + discount points + effective datetime; no JS, no auth — most stable source available)
+   - **WSECU** — `https://wsecu.org/loans/mortgage-purchase` (rate table is in the raw HTML; the old `/rates*` URLs 404)
+   - **SoundCU** (optional) — `https://www.soundcu.com/rates/personal/home-loans/` rates come from an Optimal Blue auth-gated widget (`quickquote-consumer.optimalblue.com`); best-effort only
+5. **Big-lender national rack rates** (Tier 5 — best-effort, optional)
+   - Chase, Bank of America, Wells Fargo, U.S. Bank (Seattle ZIP 98004 / 98052). These are **auth-gated SPAs**; if unreachable, mark `n/a` and **do NOT count as a coverage gap** (it is a structural API barrier, not a fetch miss). Freddie Mac PMMS already covers the national headline.
 
 Minimum coverage for the rate block:
 
 - Always: PMMS 30Y + 15Y + at least one Tier 2 source (MBA OR MND)
-- Strongly preferred: ≥1 big-lender quote + ≥1 local CU quote, so the report shows national-vs-local spread
+- Local read (required when fetchable): ≥1 Tier 3 (WA aggregate) + ≥1 Tier 4 (local CU) — BECU PDF is the preferred local anchor. This pair supplies the national-vs-local spread that the (now best-effort) big-lender tier used to be relied on for.
+- Big-lender Tier 5: best-effort; absence is **not** a coverage gap.
 
 The rate block should explicitly say:
 
@@ -75,13 +83,14 @@ The rate block should explicitly say:
   - source | 30Y | 15Y | snapshot date | notes
 - short direction-of-travel note (uses PMMS WoW + MND daily delta for sub-weekly texture)
 - what the 30Y vs 15Y spread implies for buyers who can afford shorter duration financing
-- a one-line "local vs national" read when CU + big-bank quotes are both present
+- a one-line **national-vs-local** read whenever a Tier 1 (PMMS) row and ≥1 Tier 3/4 (WA aggregate or local CU) row are both present; distinguish **note rate vs APR** when comparing across sources
 
 If a Tier 2/3/4 source is unreachable (paywall, 403, page restructured):
 
 - record the gap in `coverage_gaps` (e.g. `mba_weekly_unavailable_W20`)
 - do not silently drop it — the table should still list the source row with `n/a`
 - never invent a rate to fill the cell
+- **exception**: Tier 5 big-lender auth-gated SPAs are best-effort and do NOT generate a coverage gap when unreachable
 
 ## Listing samples
 
