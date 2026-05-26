@@ -6226,7 +6226,6 @@ class RuntimeService:
         log_path: Path | None,
         purpose: str,
         skill_name: str | None = None,
-        automation_name: str | None = None,
         timeout_override_seconds: int | None = None,
         max_turns_override: int | None = None,
     ) -> AgentResponse:
@@ -6256,31 +6255,20 @@ class RuntimeService:
         # rather than whatever was active when the run paused. Stripped from the
         # stored resume prompt — delivered out-of-band per agent.
         #
-        # Scope parity with _invoke_agent:
-        # - ``automation_name`` is forwarded so scope=automation entries inject for
-        #   the matching automation (and stay strict-excluded otherwise per
-        #   JudgeStore.get_relevant).
-        # - ``workspace`` uses the resolved ``workspace_override`` when present so
-        #   scope=workspace entries pinned to the thread's actual workspace are
-        #   visible — not filtered by a self._repo_root mismatch.
+        # NOTE: passes ``workspace=str(self._repo_root)`` for symmetry with all
+        # production WRITES of ``source_workspace`` (gateway/manager.py:2387/
+        # 2536/2577/2602, runtime/service.py:3897/3956). Reading with
+        # ``workspace_override.resolve()`` would mismatch entries that were
+        # written with repo_root and silently exclude them when short_workspace
+        # is enabled. ``automation_name`` is intentionally NOT plumbed here —
+        # ``resume_context`` does not currently carry it, so any value would be
+        # dead. Tracking as a separate follow-up if needed.
         ambient_context: str | None = None
         if self._judge_store is not None:
             try:
-                # Resolve workspace_override so the scope filter compares against
-                # the canonical path JudgeStore stores in ``source_workspace``;
-                # otherwise a symlink mismatch (e.g. macOS /var/folders vs
-                # /private/var/folders) silently excludes valid entries.
-                if workspace_override is not None:
-                    try:
-                        workspace_for_memory = str(workspace_override.resolve())
-                    except OSError:
-                        workspace_for_memory = str(workspace_override)
-                else:
-                    workspace_for_memory = str(self._repo_root)
                 relevant = self._judge_store.get_relevant(
                     skill_name=skill_name,
-                    automation_name=automation_name,
-                    workspace=workspace_for_memory,
+                    workspace=str(self._repo_root),
                     thread_id=thread_id,
                     limit=self._memory_inject_limit,
                 )

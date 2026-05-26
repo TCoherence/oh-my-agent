@@ -60,8 +60,6 @@ class BaseAgent(ABC):
         self,
         prompt: str,
         history: list[dict] | None = None,
-        *,
-        ambient_context: str | None = None,
     ) -> AgentResponse:
         """Execute the agent.
 
@@ -70,14 +68,14 @@ class BaseAgent(ABC):
             history: Prior turns in the conversation.
                      Each entry: {"role": "user"|"assistant", "content": str,
                                   "author"?: str, "agent"?: str}
-            ambient_context: Caller-owned ambient context (e.g. the
-                ``[Remembered context]`` memory block) that should be delivered
-                to the model out-of-band — separate from the user prompt — so
-                it does not accumulate in resumed CLI sessions. Concrete agents
-                that have a system-prompt channel (claude
-                ``--append-system-prompt``) route it there; agents without one
-                (codex / gemini) fold it into the user prompt every turn.
-                Custom subclasses that omit this parameter will be warned about
-                at dispatch time (memory will be silently dropped for them).
+
+        Concrete subclasses MAY also accept an ``ambient_context: str | None``
+        keyword (the ``[Remembered context]`` memory block delivered out-of-band
+        — e.g. claude routes it via ``--append-system-prompt``; codex / gemini
+        fold it into the user prompt every turn). The registry forwards it only
+        to subclasses whose ``run`` signature declares it, and logs a one-time
+        WARNING when memory is dropped because the param is missing. Declared on
+        concretes (not the abstract) so subclasses that ``del`` it can't pass the
+        sig-presence check while silently dropping memory.
         """
         ...

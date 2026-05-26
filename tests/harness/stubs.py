@@ -23,7 +23,6 @@ from pathlib import Path
 from typing import Any
 
 from oh_my_agent.agents.base import AgentResponse, BaseAgent
-from oh_my_agent.agents.control_prompt import CONTROL_PROMPT
 from oh_my_agent.auth.types import (
     AUTH_CREDENTIAL_STATUS_VALID,
     AUTH_POLL_STATUS_APPROVED,
@@ -162,18 +161,14 @@ class StubAgent(BaseAgent):
         ambient_context: str | None = None,
     ) -> AgentResponse:
         del history, log_path, image_paths
-        # Fold both the control protocol AND ambient context (memory) into the
-        # text predicates match against, so the stub mirrors what real agents
-        # semantically "see":
-        # - claude delivers control + memory via --append-system-prompt (system).
-        # - codex / gemini fold both into the user prompt every turn.
-        # Either way the model has access to both — and so should harness
-        # predicates like ``content_contains: '[Control Protocol]'``.
-        ambient_block = ambient_context.strip() if ambient_context else ""
-        if ambient_block:
-            match_text = f"{CONTROL_PROMPT}\n{ambient_block}\n\n{prompt}"
-        else:
-            match_text = f"{CONTROL_PROMPT}\n{prompt}"
+        # Ambient context (memory + control protocol) is delivered out-of-band by
+        # the real agents; fold it back in here so response-selection predicates
+        # still see the injected memory the same way they did pre-relocation.
+        # Deliberately does NOT fold CONTROL_PROMPT in — it contains literal
+        # provider names (``bilibili`` / ``youtube`` / ``xiaohongshu`` /
+        # ``xianyu``) plus ``auth_required`` and ``ask_user``, which would make
+        # predicates like ``content_contains: 'bilibili'`` match every prompt.
+        match_text = f"{ambient_context}\n\n{prompt}" if ambient_context else prompt
         if self._cwd_keyed and thread_id:
             cwd_key = str(workspace_override.resolve()) if workspace_override else "<base>"
             stored_cwd = self._last_cwd.get(thread_id)

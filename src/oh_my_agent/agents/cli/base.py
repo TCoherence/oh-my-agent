@@ -489,13 +489,13 @@ class BaseCLIAgent(BaseAgent):
         log_path: Path | None = None,
         on_partial: PartialTextHook | None = None,
         on_tool_use: ToolUseHook | None = None,
-        ambient_context: str | None = None,
     ) -> AgentResponse:
-        # Generic CLI fallback ignores ambient_context — concrete agents
-        # (ClaudeAgent / CodexCLIAgent / GeminiCLIAgent) override run() with
-        # their own ambient delivery. Declared here only to satisfy the
-        # BaseAgent.run abstract signature so mypy stays clean.
-        del ambient_context
+        # Deliberately does NOT declare ``ambient_context``: if it did, the
+        # registry's `'ambient_context' in sig.parameters` check would pass for
+        # any subclass inheriting this run() unchanged, the kwarg would be
+        # forwarded, and we'd silently drop memory with no warning. Concrete
+        # agents (ClaudeAgent / CodexCLIAgent / GeminiCLIAgent) override run()
+        # and add the kwarg themselves.
         if on_partial is not None or on_tool_use is not None:
             return await self._run_streamed(
                 prompt=prompt,
