@@ -22,7 +22,7 @@ Legacy aliases `TASK_TYPE_CODE` and `TASK_TYPE_SKILL` exist for backward compati
 
 | Mode | Constant | Behaviour |
 |---|---|---|
-| `reply` | `TASK_COMPLETION_REPLY` | Artifact files uploaded to the thread as Discord attachments; completion text prioritises a `Published to:` line (absolute path) and demotes transport detail (`Delivered via:` / scratch dir) to subordinate labels |
+| `reply` | `TASK_COMPLETION_REPLY` | Artifact files uploaded to the thread as Discord attachments for manual tasks; completion text prioritises a `Published to:` line (absolute path) and demotes transport detail (`Delivered via:` / scratch dir) to subordinate labels. **Automation tasks skip the attachment upload** (see §6 step 4) and rely on `Published to:` only. |
 | `artifact` | `TASK_COMPLETION_ARTIFACT` | Internal variant; rarely surfaced directly |
 | `merge` | `TASK_COMPLETION_MERGE` | Task transitions to `WAITING_MERGE`; owner approves via Discord button or `/task_merge`, which triggers the merge-gate pipeline |
 
@@ -127,8 +127,8 @@ For `artifact` tasks only:
 1. Agent writes files under its isolated workspace (`_artifacts/<task_id>/…` for reply-mode tasks, or under the worktree's `reports/<skill>/…` sub-tree for skills that publish to a stable path).
 2. `_artifact_paths_for_task()` resolves them against `task.artifact_manifest` or fallback `changed_files`.
 3. `_publish_artifact_files()` applies the four publish rules (see §2 above): reuse in place when already under `reports_dir`, mirror canonical `reports/<sub-tree>/…` paths (overwrite, no suffix), or fall back to flat `reports_dir/artifacts/<basename>` with a `-<task_id[:8]>` suffix on basename collisions. Failures are logged and non-fatal.
-4. `deliver_files()` uploads the originals as Discord attachments (file-size guards: `artifact_attachment_max_count`, `artifact_attachment_max_bytes`, `artifact_attachment_max_total_bytes`).
-5. Completion message renders `Published to: <absolute path>` as the primary line, with `Delivered via: <mode>` (and an optional `Scratch (ephemeral): _artifacts/<task_id>/` label) as subordinate detail. If upload fails, delivery degrades to `mode="path"` — the published path is still rendered as primary.
+4. `deliver_files()` uploads the originals as Discord attachments (file-size guards: `artifact_attachment_max_count`, `artifact_attachment_max_bytes`, `artifact_attachment_max_total_bytes`). **Automation tasks (`task.automation_name` set) skip this step entirely** — multi-file aggregation skills routinely exceed the count cap and a markdown-vs-other-types filter doesn't generalize, so dump-channel subscribers rely on the `Published to:` line below to navigate to the full report. Manual tasks keep the upload-with-path-fallback behavior.
+5. Completion message renders `Published to: <absolute path>` as the primary line, with `Delivered via: <mode>` (and an optional `Scratch (ephemeral): _artifacts/<task_id>/` label) as subordinate detail. If upload fails, delivery degrades to `mode="path"` — the published path is still rendered as primary. The `Delivered via:` line is suppressed for automation tasks (the skip is intentional, not a fallback).
 6. Janitor (`runtime.cleanup.retention_hours`, default 168 h) eventually deletes the task workspace. The published tree under `reports_dir/` is **not** auto-cleaned.
 
 ---
@@ -211,7 +211,7 @@ When overrides are present, `handle_decision_event` writes them onto the task ro
 1. **Router threshold is 0.55.** A casual phrase like "帮我研究一下 X / let me research X" clears the bar. If you want chat, either disable the router for that thread or rephrase. Raise `router.confidence_threshold` to trade recall for precision.
 2. **Artifact workspace has no bundled skills.** The isolated `_artifacts/<id>/` directory does not get `.claude/skills/` or `.gemini/skills/` populated, so a `research` artifact task cannot invoke, say, a `web-scraper` skill — the agent must inline all work. (Repo-change tasks *do* get skills via `_setup_workspace()`.)
 3. **Default budget `max_steps=8 / max_minutes=20`.** Fine for a single-turn report but tight for multi-source research. Override per automation or per skill frontmatter, or call `create_artifact_task(max_steps=…)` from custom code.
-4. **Silent fallback to `mode="path"`.** When attachment upload fails (network, size), delivery degrades to `mode="path"` and the transport label reads `Delivered via: path` — easy to miss in a busy thread. The `Published to:` line still points to the durable absolute path under `reports_dir/`.
+4. **Silent fallback to `mode="path"` (manual tasks only).** When attachment upload fails (network, size) on a manual artifact task, delivery degrades to `mode="path"` and the transport label reads `Delivered via: path` — easy to miss in a busy thread. The `Published to:` line still points to the durable absolute path under `reports_dir/`. Automation tasks always skip upload by design (no `Delivered via:` label), so this sharp edge does not apply to them.
 5. **Publish retention is manual.** `reports_dir` never auto-prunes. Plan for periodic sweeps (`find ~/.oh-my-agent/reports -mtime +90 -delete`) if disk usage matters.
 6. **Docker volume mapping.** Inside the container published artifacts land under `/home/.oh-my-agent/reports/<sub-tree>/…` (or `artifacts/` for flat-fallback cases); from the host they surface at `${OMA_DOCKER_MOUNT:-~/oh-my-agent-docker-mount}/.oh-my-agent/reports/…`.
 

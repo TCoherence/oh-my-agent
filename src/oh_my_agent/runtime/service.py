@@ -5164,10 +5164,12 @@ class RuntimeService:
         - ``merge`` (repo / skill changes) — ``Task <id> completed`` header
           followed by validation and delivery lines.
 
-        The ``automation_name`` flag only changes the cosmetic completion
-        marker (``automation run complete`` vs ``run complete``); rendering
-        is otherwise unified so both manual artifact runs and scheduler-
-        triggered runs share the same output discipline.
+        The ``automation_name`` flag changes rendering in two places: the
+        completion marker (``automation run complete`` vs ``run complete``),
+        and the subordinate ``Delivered via:`` line is suppressed (automation
+        tasks intentionally skip attachment upload — see ``_deliver_artifacts``
+        — so the transport-mode label would be misleading). The body /
+        ``Published to:`` notes / scratch dir lines render identically.
         """
         if task.completion_mode == TASK_COMPLETION_REPLY:
             return self._artifact_reply_text(task, changed_files, delivery)
@@ -5262,7 +5264,10 @@ class RuntimeService:
         lines.append("")
         marker = "automation run complete" if task.automation_name else "run complete"
         lines.append(f"-# ✅ {marker}")
-        if delivery:
+        # Automation tasks don't render ``Delivered via:`` — attachment upload
+        # is intentionally bypassed for them (see ``_deliver_artifacts``), so
+        # exposing the implementation-detail ``path`` mode would be misleading.
+        if delivery and not task.automation_name:
             lines.append(f"-# Delivered via: `{delivery.mode}`")
         if task.workspace_path:
             run_dir = Path(task.workspace_path).name
@@ -5542,6 +5547,22 @@ class RuntimeService:
         # point of the refactor is to keep exactly one path per artifact.
         archived_paths = published_paths
         summary_text = task.output_summary or f"{len(artifact_paths)} artifact(s) ready."
+        # Automation tasks: publish to ``reports_dir`` but skip Discord
+        # attachment upload. The summary text already carries the published
+        # paths via the ``Published to:`` notes block in ``_artifact_reply_text``
+        # — that's the canonical navigation for dump-channel subscribers, and
+        # filtering by file type (markdown vs json vs whatever the next skill
+        # writes) does not generalize. Manual artifact tasks still go through
+        # ``deliver_files`` where small file sets (<= max_count) get uploaded.
+        if task.automation_name:
+            return ArtifactDeliveryResult(
+                mode="path",
+                delivered_paths=[str(path.resolve()) for path in artifact_paths],
+                message_ids=[],
+                summary_text=summary_text,
+                attachment_names=[],
+                archived_paths=archived_paths,
+            )
         return await self.deliver_files(
             session=session,
             thread_id=task.thread_id,

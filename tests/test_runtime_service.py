@@ -1295,6 +1295,87 @@ async def test_publish_rule_4_end_to_end_via_task_flow(runtime_env, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_automation_skips_attachment_upload_but_publishes(
+    runtime_env, tmp_path
+):
+    """Automation artifact tasks must publish to ``reports_dir`` but NOT
+    upload Discord attachments.
+
+    Background: dump-channel subscribers navigate via the ``Published to:``
+    notes line, so re-shipping the same files as Discord attachments adds
+    noise (and a markdown-vs-json filter doesn't generalize to future skill
+    output types). Manual artifact tasks still go through the regular
+    ``deliver_files`` attachment path — only the ``automation_name``
+    branch short-circuits.
+    """
+    store: SQLiteMemoryStore = runtime_env["store"]
+    runtime: RuntimeService = runtime_env["runtime"]
+    channel: _FakeChannel = runtime_env["channel"]
+    reports_dir = runtime._reports_dir  # noqa: SLF001
+    assert reports_dir is not None
+    registry = AgentRegistry([_DoneAgent()])
+    session = ChannelSession(
+        platform="discord",
+        channel_id="100",
+        channel=channel,
+        registry=registry,
+    )
+    runtime.register_session(session, registry)
+
+    workspace = tmp_path / "ws-automation-skip"
+    workspace.mkdir(parents=True)
+    (workspace / "report.md").write_text("# automation report\n", encoding="utf-8")
+
+    task = await store.create_runtime_task(
+        task_id="task-automation-skip",
+        platform="discord",
+        channel_id="100",
+        thread_id="thread-automation-skip",
+        created_by="scheduler",
+        goal="daily automation report",
+        preferred_agent="done-agent",
+        status=TASK_STATUS_COMPLETED,
+        max_steps=5,
+        max_minutes=15,
+        test_command="true",
+        completion_mode="reply",
+        task_type="artifact",
+        automation_name="daily-news",
+        artifact_manifest=["report.md"],
+    )
+    await store.update_runtime_task(task.id, workspace_path=str(workspace))
+    task = await store.get_runtime_task(task.id)
+    assert task is not None
+
+    delivery = await runtime._deliver_artifacts(  # noqa: SLF001
+        task=task, changed_files=["report.md"]
+    )
+    assert delivery is not None
+    # (a) ``mode == "path"`` — short-circuit decision, not a deliver_files fallback.
+    assert delivery.mode == "path"
+    # (b) No attachments were enumerated, regardless of file count.
+    assert delivery.attachment_names == []
+    # (c) Channel never saw send_attachments — bypass is upstream of deliver_files.
+    assert channel.attachments == []
+    # (d) Publish step still ran: report.md is at the published location and
+    # ``archived_paths`` carries it for the ``Published to:`` summary line.
+    expected_published = reports_dir / "artifacts" / "report.md"
+    assert delivery.archived_paths == [str(expected_published.resolve())]
+    assert expected_published.is_file()
+    # (e) Completion text still includes the published path for dump-channel
+    # subscribers to navigate to the full markdown.
+    completion_text = runtime._completed_text(  # noqa: SLF001
+        task=task, changed_files=["report.md"], test_summary="", delivery=delivery
+    )
+    assert "Published to:" in completion_text
+    assert str(expected_published.resolve()) in completion_text
+    # (f) The implementation-detail ``Delivered via: \`path\``` line is
+    # suppressed for automation tasks (it would mislead users into thinking
+    # path mode was a fallback rather than the intentional skip).
+    assert "Delivered via:" not in completion_text
+
+
+@pytest.mark.asyncio
 async def test_publish_collision_suffixes_task_id_only_for_flat_fallback(
     runtime_env, tmp_path
 ):
