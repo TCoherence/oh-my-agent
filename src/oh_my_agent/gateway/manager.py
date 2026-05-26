@@ -505,6 +505,7 @@ class GatewayManager:
         image_paths: list[Path] | None,
         timeout_override_seconds: int | None,
         max_turns_override: int | None,
+        ambient_context: str | None = None,
         on_agent_run=None,
         on_partial=None,
         on_tool_use=None,
@@ -520,6 +521,7 @@ class GatewayManager:
                 image_paths=image_paths,
                 timeout_override_seconds=timeout_override_seconds,
                 max_turns_override=max_turns_override,
+                ambient_context=ambient_context,
                 on_agent_run=on_agent_run,
                 on_partial=on_partial,
                 on_tool_use=on_tool_use,
@@ -2038,6 +2040,10 @@ class GatewayManager:
         agent_prompt = msg.content
         if routed_skill and not explicit_skill:
             agent_prompt = f"/{routed_skill}\n\n{agent_prompt}".strip()
+        # Memory is delivered as ambient_context (see registry/agent dispatch),
+        # not baked into the user prompt — so claude can route it through
+        # --append-system-prompt and it never accumulates across resume turns.
+        ambient_context: str | None = None
         if self._judge_store is not None:
             try:
                 relevant = self._judge_store.get_relevant(
@@ -2057,7 +2063,7 @@ class GatewayManager:
                     # and runtime paths produce identical [Remembered context].
                     from oh_my_agent.memory.judge_store import JudgeStore as _JS
                     block = _JS.format_memory_block(relevant)
-                    agent_prompt = f"{block}\n\n{msg.content}" if block else msg.content
+                    ambient_context = block or None
             except Exception as exc:
                 logger.warning("[%s] Memory injection failed: %s", req_id, exc)
 
@@ -2192,6 +2198,7 @@ class GatewayManager:
                 image_paths=image_paths,
                 timeout_override_seconds=skill_timeout_override,
                 max_turns_override=self._skill_max_turns_by_name(tracked_skill),
+                ambient_context=ambient_context,
                 on_agent_run=_record_agent_run,
                 on_partial=on_partial_hook,
                 on_tool_use=on_tool_use_hook,

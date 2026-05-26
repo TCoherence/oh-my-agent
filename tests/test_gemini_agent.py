@@ -113,6 +113,58 @@ def test_gemini_parse_output_falls_back_when_no_response_field():
     assert "session_id" in resp.text or resp.text != ""
 
 
+def _joined(argv) -> str:
+    return " ".join(str(a) for a in argv)
+
+
+_GEMINI_OK = b'{"response": "ok", "session_id": "s1"}'
+
+
+@pytest.mark.asyncio
+async def test_gemini_folds_ambient_into_prompt_fresh_and_resume(monkeypatch):
+    """Gemini has no system channel: memory + control protocol stay folded into
+    the prompt on every turn (behavior-preserving relocation)."""
+    captured: dict = {}
+
+    async def _capture(*args, **kwargs):
+        captured["argv"] = list(args)
+        return 0, _GEMINI_OK, b""
+
+    monkeypatch.setattr("oh_my_agent.agents.cli.gemini._stream_cli_process", _capture)
+    mem = "[Remembered context]\n- user likes terse"
+    agent = _agent()
+
+    await agent.run("do X", thread_id="t1", ambient_context=mem)
+    joined = _joined(captured["argv"])
+    assert "[Control Protocol]" in joined
+    assert "[Remembered context]" in joined
+    assert "do X" in joined
+
+    agent.set_session_id("t1", "sess-1")
+    await agent.run("do Y", thread_id="t1", ambient_context=mem)
+    joined = _joined(captured["argv"])
+    assert "[Control Protocol]" in joined
+    assert "user likes terse" in joined
+    assert "do Y" in joined
+
+
+@pytest.mark.asyncio
+async def test_gemini_ambient_none_keeps_control_no_memory(monkeypatch):
+    captured: dict = {}
+
+    async def _capture(*args, **kwargs):
+        captured["argv"] = list(args)
+        return 0, _GEMINI_OK, b""
+
+    monkeypatch.setattr("oh_my_agent.agents.cli.gemini._stream_cli_process", _capture)
+    agent = _agent()
+    await agent.run("just ask", thread_id="t1", ambient_context=None)
+    joined = _joined(captured["argv"])
+    assert "[Control Protocol]" in joined
+    assert "[Remembered context]" not in joined
+    assert "just ask" in joined
+
+
 @pytest.mark.asyncio
 async def test_gemini_generic_resume_error_keeps_session_id():
     agent = _agent()

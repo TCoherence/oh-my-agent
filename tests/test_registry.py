@@ -92,9 +92,59 @@ class _TurnLimitedAgent(BaseAgent):
         return AgentResponse(text="ok")
 
 
+class _AmbientAgent(BaseAgent):
+    def __init__(self, name: str):
+        self._name = name
+        self.seen: list[str | None] = []
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    async def run(self, prompt, history=None, *, ambient_context=None):
+        import asyncio
+
+        await asyncio.sleep(0.01)  # force interleave under concurrency
+        self.seen.append(ambient_context)
+        return AgentResponse(text="ok")
+
+
 def test_registry_requires_at_least_one_agent():
     with pytest.raises(ValueError):
         AgentRegistry([])
+
+
+@pytest.mark.asyncio
+async def test_ambient_context_not_forwarded_to_agent_without_param():
+    """_OKAgent.run() has no ambient_context param — forwarding must be guarded
+    by inspect.signature so it doesn't raise TypeError."""
+    a = _OKAgent("a", "ok")
+    registry = AgentRegistry([a])
+    _agent, resp = await registry.run("q", ambient_context="[Remembered context]\n- M")
+    assert resp.text == "ok"
+
+
+@pytest.mark.asyncio
+async def test_ambient_context_forwarded_to_supporting_agent():
+    a = _AmbientAgent("a")
+    registry = AgentRegistry([a])
+    await registry.run("q", ambient_context="MEM-1")
+    assert a.seen == ["MEM-1"]
+
+
+@pytest.mark.asyncio
+async def test_ambient_context_per_call_isolation_under_concurrency():
+    """ambient_context is a per-call kwarg, never self state — two concurrent
+    runs through the same agent must each see their own value."""
+    import asyncio
+
+    a = _AmbientAgent("a")
+    registry = AgentRegistry([a])
+    await asyncio.gather(
+        registry.run("q1", ambient_context="MEM-A"),
+        registry.run("q2", ambient_context="MEM-B"),
+    )
+    assert sorted(x for x in a.seen if x) == ["MEM-A", "MEM-B"]
 
 
 @pytest.mark.asyncio

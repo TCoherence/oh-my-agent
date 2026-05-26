@@ -100,6 +100,7 @@ class AgentRegistry:
         timeout_override_seconds: int | None,
         max_turns_override: int | None,
         model_override: str | None = None,
+        ambient_context: str | None = None,
         on_agent_run=None,
         on_partial=None,
         on_tool_use=None,
@@ -128,6 +129,8 @@ class AgentRegistry:
         # approach).
         if model_override is not None and "model_override" in sig.parameters:
             kwargs["model_override"] = model_override
+        if ambient_context is not None and "ambient_context" in sig.parameters:
+            kwargs["ambient_context"] = ambient_context
         started_at = time.perf_counter()
         with self._temporary_timeout(agent, timeout_override_seconds):
             with self._temporary_max_turns(agent, max_turns_override):
@@ -157,6 +160,7 @@ class AgentRegistry:
         timeout_override_seconds: int | None = None,
         max_turns_override: int | None = None,
         model_override: str | None = None,
+        ambient_context: str | None = None,
         on_agent_run=None,
         on_partial=None,
         on_tool_use=None,
@@ -189,6 +193,7 @@ class AgentRegistry:
                 timeout_override_seconds=timeout_override_seconds,
                 max_turns_override=max_turns_override,
                 model_override=model_override,
+                ambient_context=ambient_context,
                 on_agent_run=on_agent_run,
                 on_partial=on_partial,
                 on_tool_use=on_tool_use,
@@ -211,6 +216,7 @@ class AgentRegistry:
                 timeout_override_seconds=timeout_override_seconds,
                 max_turns_override=max_turns_override,
                 model_override=model_override,
+                ambient_context=ambient_context,
                 on_agent_run=on_agent_run,
                 on_partial=on_partial,
                 on_tool_use=on_tool_use,

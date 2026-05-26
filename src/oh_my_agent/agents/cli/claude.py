@@ -16,7 +16,7 @@ from oh_my_agent.agents.cli.base import (
     _stream_cli_process,
     classify_cli_error_kind,
 )
-from oh_my_agent.agents.control_prompt import inject_control_protocol
+from oh_my_agent.agents.control_prompt import build_system_preamble
 from oh_my_agent.agents.events import (
     AgentEvent,
     SystemInitEvent,
@@ -141,16 +141,26 @@ class ClaudeAgent(BaseCLIAgent):
     def clear_session(self, thread_id: str) -> None:
         self._session_ids.pop(thread_id, None)
 
-    def _base_command(self, prompt: str, model: str | None = None) -> list[str]:
+    def _base_command(
+        self,
+        prompt: str,
+        model: str | None = None,
+        *,
+        system_append: str | None = None,
+    ) -> list[str]:
         # ``model`` is a per-call override (e.g. self-eval routing); falls
-        # back to the agent's configured model. Non-mutating: self._model
-        # is never reassigned, so concurrent calls are safe.
+        # back to the agent's configured model. ``system_append`` carries the
+        # per-call ambient context (control protocol + memory) delivered via
+        # ``--append-system-prompt`` so it never accumulates in the session.
+        # Both are parameters (not self state), so concurrent calls are safe.
         cmd = [
             self._cli_path,
             "-p", prompt,
             "--max-turns", str(self._max_turns),
             "--model", model or self._model,
         ]
+        if system_append:
+            cmd.extend(["--append-system-prompt", system_append])
         if self._permission_mode:
             cmd.extend(["--permission-mode", self._permission_mode])
         elif self._dangerously_skip_permissions:
@@ -161,8 +171,14 @@ class ClaudeAgent(BaseCLIAgent):
             cmd.extend(self._extra_args)
         return cmd
 
-    def _build_command(self, prompt: str, model: str | None = None) -> list[str]:
-        cmd = self._base_command(prompt, model)
+    def _build_command(
+        self,
+        prompt: str,
+        model: str | None = None,
+        *,
+        system_append: str | None = None,
+    ) -> list[str]:
+        cmd = self._base_command(prompt, model, system_append=system_append)
         cmd.extend(["--output-format", "stream-json", "--verbose"])
         return cmd
 
@@ -275,7 +291,12 @@ class ClaudeAgent(BaseCLIAgent):
         return []
 
     def _build_resume_command(
-        self, prompt: str, session_id: str, model: str | None = None
+        self,
+        prompt: str,
+        session_id: str,
+        model: str | None = None,
+        *,
+        system_append: str | None = None,
     ) -> list[str]:
         """Build a command that resumes an existing Claude session."""
         cmd = [
@@ -287,6 +308,8 @@ class ClaudeAgent(BaseCLIAgent):
             "--max-turns", str(self._max_turns),
             "--model", model or self._model,
         ]
+        if system_append:
+            cmd.extend(["--append-system-prompt", system_append])
         if self._permission_mode:
             cmd.extend(["--permission-mode", self._permission_mode])
         elif self._dangerously_skip_permissions:
@@ -333,6 +356,7 @@ class ClaudeAgent(BaseCLIAgent):
         log_path: Path | None = None,
         image_paths: list[Path] | None = None,
         model_override: str | None = None,
+        ambient_context: str | None = None,
         on_partial: PartialTextHook | None = None,
         on_tool_use: ToolUseHook | None = None,
     ) -> AgentResponse:
@@ -348,7 +372,10 @@ class ClaudeAgent(BaseCLIAgent):
         turns still use the block-mode path because ``_augment_prompt_with_images``
         is not compatible with the streaming argv today.
         """
-        prompt = inject_control_protocol(prompt)
+        # Ambient context (control protocol + remembered memory) is delivered
+        # via --append-system-prompt: re-supplied per call but never persisted
+        # into the session transcript, so it cannot accumulate across resumes.
+        system_append = build_system_preamble(ambient_context)
         session_id = self._session_ids.get(thread_id) if thread_id else None
         cwd = self._resolve_cwd(workspace_override)
         # Per-call model override (e.g. self-eval routing). Falls back to the
@@ -364,7 +391,9 @@ class ClaudeAgent(BaseCLIAgent):
 
         if session_id:
             # Resume existing session — send only the new prompt
-            cmd = self._build_resume_command(prompt, session_id, effective_model)
+            cmd = self._build_resume_command(
+                prompt, session_id, effective_model, system_append=system_append
+            )
             if streaming and not image_paths:
                 logger.info("Streaming %s (resume session %s) ...", self.name, session_id[:12])
                 return await self._run_streamed(
@@ -381,8 +410,13 @@ class ClaudeAgent(BaseCLIAgent):
         else:
             # Fresh session — flatten history into prompt
             full_prompt = _build_prompt_with_history(prompt, history)
+            cmd = self._build_command(
+                full_prompt, effective_model, system_append=system_append
+            )
             # When streaming is requested, delegate to the base streaming driver
             # which consumes self.stream() via `--output-format stream-json`.
+            # Pass the pre-built command so --append-system-prompt is included
+            # (mirrors the resume-streaming path; base stream() honors command).
             if streaming:
                 logger.info("Streaming %s (new session) ...", self.name)
                 return await self._run_streamed(
@@ -393,9 +427,8 @@ class ClaudeAgent(BaseCLIAgent):
                     workspace_override=workspace_override,
                     log_path=log_path,
                     thread_id=thread_id,
+                    command=cmd,
                 )
-            cmd = self._base_command(full_prompt, effective_model)
-            cmd.extend(["--output-format", "stream-json", "--verbose"])
             logger.info("Running %s (new session) ...", self.name)
 
         try:

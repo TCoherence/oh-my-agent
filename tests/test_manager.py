@@ -417,6 +417,72 @@ async def test_handle_message_injects_judge_store_relevant(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_handle_message_memory_rides_ambient_not_prompt(tmp_path):
+    """Chat path end-to-end: memory is forwarded as ambient_context through the
+    progress-logging wrapper + registry to the agent, never baked into the user
+    prompt (so claude can route it to --append-system-prompt)."""
+    from oh_my_agent.memory.judge_store import JudgeStore
+
+    class _AmbientCaptureAgent(BaseAgent):
+        def __init__(self) -> None:
+            self.prompt: str | None = None
+            self.ambient: str | None = None
+
+        @property
+        def name(self) -> str:
+            return "claude"
+
+        async def run(self, prompt, history=None, *, thread_id=None,
+                      workspace_override=None, log_path=None, ambient_context=None):
+            self.prompt = prompt
+            self.ambient = ambient_context
+            return AgentResponse(text="reply")
+
+    agent = _AmbientCaptureAgent()
+    channel = MagicMock()
+    channel.platform = "discord"
+    channel.channel_id = "100"
+    channel.create_thread = AsyncMock(return_value="thread-1")
+    channel.send = AsyncMock()
+    channel.typing = MagicMock()
+    channel.typing.return_value.__aenter__ = AsyncMock(return_value=None)
+    channel.typing.return_value.__aexit__ = AsyncMock(return_value=False)
+    channel.supports_streaming_edit = False
+
+    registry = AgentRegistry([agent])
+    store = SQLiteMemoryStore(tmp_path / "amb.db")
+    await store.init()
+    session = _make_session(channel=channel, registry=registry)
+    session.memory_store = store
+
+    judge_store = JudgeStore(memory_dir=tmp_path / "memory")
+    await judge_store.load()
+    await judge_store.apply_actions([
+        {
+            "op": "add",
+            "summary": "user prefers terse",
+            "category": "preference",
+            "scope": "global_user",
+            "confidence": 0.9,
+        },
+    ])
+
+    gm = GatewayManager([], judge_store=judge_store, repo_root=tmp_path)
+    gm.set_memory_store(store)
+    try:
+        await gm.handle_message(
+            session, registry, _make_msg(thread_id="thread-1", content="how are you")
+        )
+    finally:
+        await store.close()
+
+    assert agent.ambient is not None
+    assert "user prefers terse" in agent.ambient
+    assert "[Remembered context]" not in (agent.prompt or "")
+    assert agent.prompt == "how are you"
+
+
+@pytest.mark.asyncio
 async def test_handle_message_passes_log_path_for_chat_runs(tmp_path):
     channel = MagicMock()
     channel.platform = "discord"

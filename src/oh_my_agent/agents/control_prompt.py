@@ -25,3 +25,30 @@ def inject_control_protocol(prompt: str) -> str:
     if CONTROL_PROMPT in prompt:
         return prompt
     return f"{CONTROL_PROMPT}\n{prompt}"
+
+
+def prepend_ambient(prompt: str, ambient_context: str | None) -> str:
+    """Prepend caller-owned ambient context (the memory block) to *prompt*.
+
+    Used by agents that have no system-prompt channel (codex, gemini), so the
+    ambient context is folded into the user prompt. Returns *prompt* unchanged
+    when there is no ambient context.
+    """
+    ambient = (ambient_context or "").strip()
+    if not ambient:
+        return prompt
+    return f"{ambient}\n\n{prompt}"
+
+
+def build_system_preamble(ambient_context: str | None) -> str:
+    """Compose the system-level preamble: control protocol first, ambient second.
+
+    Used by agents that deliver this out-of-band (claude via
+    ``--append-system-prompt``) so it is re-supplied per call without
+    accumulating in the session transcript. Returns the control protocol alone
+    when there is no ambient context.
+    """
+    ambient = (ambient_context or "").strip()
+    if not ambient:
+        return CONTROL_PROMPT
+    return f"{CONTROL_PROMPT}\n{ambient}"
