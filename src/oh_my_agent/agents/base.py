@@ -60,6 +60,8 @@ class BaseAgent(ABC):
         self,
         prompt: str,
         history: list[dict] | None = None,
+        *,
+        ambient_context: str | None = None,
     ) -> AgentResponse:
         """Execute the agent.
 
@@ -68,5 +70,14 @@ class BaseAgent(ABC):
             history: Prior turns in the conversation.
                      Each entry: {"role": "user"|"assistant", "content": str,
                                   "author"?: str, "agent"?: str}
+            ambient_context: Caller-owned ambient context (e.g. the
+                ``[Remembered context]`` memory block) that should be delivered
+                to the model out-of-band — separate from the user prompt — so
+                it does not accumulate in resumed CLI sessions. Concrete agents
+                that have a system-prompt channel (claude
+                ``--append-system-prompt``) route it there; agents without one
+                (codex / gemini) fold it into the user prompt every turn.
+                Custom subclasses that omit this parameter will be warned about
+                at dispatch time (memory will be silently dropped for them).
         """
         ...

@@ -326,6 +326,156 @@ async def test_invoke_thread_agent_recomputes_ambient_on_continuation(
     assert agent1.captured_prompt == "continue now"
 
 
+@pytest.mark.asyncio
+async def test_invoke_thread_agent_forwards_automation_name_for_scope_match(
+    tmp_path: Path, monkeypatch
+):
+    """Regression for codex review on PR #88: _invoke_thread_agent must pass
+    `automation_name` to JudgeStore.get_relevant so scope=automation entries
+    inject on auth/HITL resume of an automation-context thread — matching
+    _invoke_agent's behavior on the original turn."""
+    judge_store = JudgeStore(memory_dir=tmp_path / "memory")
+    await judge_store.load()
+    await judge_store.apply_actions([
+        {
+            "op": "add",
+            "summary": "auto-foo learned: cap at 500 words",
+            "category": "self_eval",
+            "scope": "automation",
+            "source_automation": "auto-foo",
+            "quality": "fail",
+        },
+    ])
+    runtime, store = await _make_runtime(tmp_path, judge_store)
+
+    async def _noop_record(**_kwargs):
+        return None
+
+    monkeypatch.setattr(runtime, "_record_thread_agent_run", _noop_record)
+
+    class _Sess:
+        platform = "discord"
+        channel_id = "1"
+
+        async def get_history(self, _tid):
+            return []
+
+    from oh_my_agent.agents.registry import AgentRegistry
+
+    try:
+        # Matching automation_name → entry should inject.
+        agent_match = _CapturingAgent()
+        await runtime._invoke_thread_agent(
+            registry=AgentRegistry([agent_match]),
+            session=_Sess(),
+            prompt="resume",
+            thread_id="t-auto-1",
+            force_agent="capture-agent",
+            log_path=None,
+            purpose="auth_resume",
+            automation_name="auto-foo",
+        )
+
+        # Mismatching automation_name → entry strictly excluded.
+        agent_mismatch = _CapturingAgent()
+        await runtime._invoke_thread_agent(
+            registry=AgentRegistry([agent_mismatch]),
+            session=_Sess(),
+            prompt="resume",
+            thread_id="t-auto-2",
+            force_agent="capture-agent",
+            log_path=None,
+            purpose="auth_resume",
+            automation_name="auto-bar",
+        )
+
+        # No automation_name (default) → also strictly excluded.
+        agent_none = _CapturingAgent()
+        await runtime._invoke_thread_agent(
+            registry=AgentRegistry([agent_none]),
+            session=_Sess(),
+            prompt="resume",
+            thread_id="t-chat",
+            force_agent="capture-agent",
+            log_path=None,
+            purpose="auth_resume",
+        )
+    finally:
+        await runtime.stop()
+        await store.close()
+
+    assert "cap at 500 words" in (agent_match.captured_ambient or "")
+    assert agent_mismatch.captured_ambient is None
+    assert agent_none.captured_ambient is None
+
+
+@pytest.mark.asyncio
+async def test_invoke_thread_agent_uses_workspace_override_for_memory_scope(
+    tmp_path: Path, monkeypatch
+):
+    """Regression for codex review on PR #88: _invoke_thread_agent must use the
+    resolved workspace_override (not self._repo_root) for the get_relevant
+    workspace filter — otherwise scope=workspace entries pinned to the thread's
+    actual workspace are excluded."""
+    judge_store = JudgeStore(memory_dir=tmp_path / "memory")
+    await judge_store.load()
+    thread_ws = tmp_path / "thread-workspace"
+    thread_ws.mkdir()
+    thread_ws_path = str(thread_ws.resolve())
+    # `source_workspace` on the action dict is ignored by JudgeStore.apply_actions;
+    # it's set from the function-level kwarg. Pass it there.
+    await judge_store.apply_actions(
+        [
+            {
+                "op": "add",
+                "summary": "ws-specific fact",
+                "category": "preference",
+                "scope": "workspace",
+                "confidence": 0.9,
+            },
+        ],
+        source_workspace=thread_ws_path,
+    )
+    runtime, store = await _make_runtime(tmp_path, judge_store)
+
+    async def _noop_record(**_kwargs):
+        return None
+
+    monkeypatch.setattr(runtime, "_record_thread_agent_run", _noop_record)
+
+    async def _resolver(_sess, _tid):
+        return thread_ws
+
+    runtime.set_workspace_resolver(_resolver)
+
+    class _Sess:
+        platform = "discord"
+        channel_id = "1"
+
+        async def get_history(self, _tid):
+            return []
+
+    from oh_my_agent.agents.registry import AgentRegistry
+
+    agent = _CapturingAgent()
+    try:
+        await runtime._invoke_thread_agent(
+            registry=AgentRegistry([agent]),
+            session=_Sess(),
+            prompt="resume",
+            thread_id="t-ws-1",
+            force_agent="capture-agent",
+            log_path=None,
+            purpose="auth_resume",
+        )
+    finally:
+        await runtime.stop()
+        await store.close()
+
+    assert agent.captured_ambient is not None
+    assert "ws-specific fact" in agent.captured_ambient
+
+
 # =====================================================================
 # M0 PR3 — _spawn_post_completion_judge + task.judge_extracted event
 # =====================================================================

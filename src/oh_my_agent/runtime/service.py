@@ -6226,6 +6226,7 @@ class RuntimeService:
         log_path: Path | None,
         purpose: str,
         skill_name: str | None = None,
+        automation_name: str | None = None,
         timeout_override_seconds: int | None = None,
         max_turns_override: int | None = None,
     ) -> AgentResponse:
@@ -6254,12 +6255,32 @@ class RuntimeService:
         # auth / HITL continuation resumes with up-to-date remembered context
         # rather than whatever was active when the run paused. Stripped from the
         # stored resume prompt — delivered out-of-band per agent.
+        #
+        # Scope parity with _invoke_agent:
+        # - ``automation_name`` is forwarded so scope=automation entries inject for
+        #   the matching automation (and stay strict-excluded otherwise per
+        #   JudgeStore.get_relevant).
+        # - ``workspace`` uses the resolved ``workspace_override`` when present so
+        #   scope=workspace entries pinned to the thread's actual workspace are
+        #   visible — not filtered by a self._repo_root mismatch.
         ambient_context: str | None = None
         if self._judge_store is not None:
             try:
+                # Resolve workspace_override so the scope filter compares against
+                # the canonical path JudgeStore stores in ``source_workspace``;
+                # otherwise a symlink mismatch (e.g. macOS /var/folders vs
+                # /private/var/folders) silently excludes valid entries.
+                if workspace_override is not None:
+                    try:
+                        workspace_for_memory = str(workspace_override.resolve())
+                    except OSError:
+                        workspace_for_memory = str(workspace_override)
+                else:
+                    workspace_for_memory = str(self._repo_root)
                 relevant = self._judge_store.get_relevant(
                     skill_name=skill_name,
-                    workspace=str(self._repo_root),
+                    automation_name=automation_name,
+                    workspace=workspace_for_memory,
                     thread_id=thread_id,
                     limit=self._memory_inject_limit,
                 )
