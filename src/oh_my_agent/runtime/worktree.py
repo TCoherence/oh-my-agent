@@ -465,7 +465,49 @@ class WorktreeManager:
             shutil.rmtree(workspace, ignore_errors=True)
 
     async def prune_worktrees(self) -> None:
-        await self._run_git("worktree", "prune")
+        """Remove orphaned worktree admin entries — but ONLY for worktrees under
+        our own ``worktree_root``.
+
+        ``git worktree prune`` is deliberately avoided: it is global and deletes
+        the admin entry of EVERY registered worktree whose working tree is
+        missing *from this process's filesystem view*. When the bot runs in
+        Docker with the repo bind-mounted, host-side worktrees (e.g. Claude Code
+        sessions under ``/Users/...``) are invisible inside the container and get
+        silently pruned, dangling the host's ``.git`` pointer. We instead walk
+        ``<git-common-dir>/worktrees`` ourselves and prune only entries whose
+        working tree lives under ``worktree_root`` and no longer exists; anything
+        we cannot positively classify as ours is left untouched.
+        """
+        try:
+            common_raw = (await self._run_git("rev-parse", "--git-common-dir")).strip()
+        except WorktreeError:
+            return
+        if not common_raw:
+            return
+        common_dir = Path(common_raw)
+        if not common_dir.is_absolute():
+            common_dir = (self._repo_root / common_dir).resolve()
+        admin_root = common_dir / "worktrees"
+        if not admin_root.is_dir():
+            return
+        try:
+            own_root = self._worktree_root.resolve()
+        except OSError:
+            own_root = self._worktree_root
+        for admin in admin_root.iterdir():
+            gitdir_file = admin / "gitdir"
+            try:
+                # ``gitdir`` points at the worktree's ``.git`` file; its parent
+                # is the working tree directory.
+                worktree_dir = Path(gitdir_file.read_text(encoding="utf-8").strip()).parent
+            except OSError:
+                continue
+            try:
+                is_ours = worktree_dir.resolve().is_relative_to(own_root)
+            except (OSError, ValueError):
+                is_ours = False
+            if is_ours and not worktree_dir.exists():
+                shutil.rmtree(admin, ignore_errors=True)
 
     async def _run_git(self, *args: str) -> str:
         proc = await asyncio.create_subprocess_exec(
