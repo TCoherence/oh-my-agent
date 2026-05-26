@@ -858,13 +858,23 @@ def fetch_automations_static(automations_dir: Path | None) -> dict[str, Any]:
         )
         return {"items": items, "warnings": warnings, "mode": "static"}
 
-    for entry in sorted(automations_dir.iterdir()):
-        if not entry.is_file() or entry.suffix != ".yaml":
+    # Scheduler accepts BOTH .yaml and .yml (scheduler.py:807). Glob both
+    # so the static view stays faithful to what's live (Codex review #2).
+    # `.yaml.tmp` files (atomic write temporaries, scheduler.py:35) are
+    # excluded by the suffix check below since their suffix is ".tmp".
+    candidates = sorted(
+        list(automations_dir.glob("*.yaml")) + list(automations_dir.glob("*.yml"))
+    )
+    for entry in candidates:
+        if not entry.is_file():
             continue
-        # Scheduler writes `.bak` siblings on in-place edits; they aren't
-        # active schedules and would show up as ghost duplicates if we
-        # included them.
-        if entry.name.endswith(".bak.yaml") or ".bak" in entry.stem:
+        # `.bak` siblings the scheduler leaves on in-place edits. They
+        # aren't active schedules — including them surfaces ghost
+        # duplicates. Forms observed in the wild:
+        #   foo.yaml.bak  — glob misses (not .yaml), but defensive
+        #   foo.bak.yaml  — glob matches, must filter
+        #   foo.bak.yml   — glob matches, must filter
+        if ".bak" in entry.name:
             continue
         try:
             raw = yaml.safe_load(entry.read_text(encoding="utf-8"))
@@ -875,14 +885,27 @@ def fetch_automations_static(automations_dir: Path | None) -> dict[str, Any]:
             warnings.append(f"{entry.name}: root is not a mapping")
             continue
         cron = raw.get("cron")
-        interval = raw.get("interval_seconds")
+        interval_raw = raw.get("interval_seconds")
+        # Codex review #5b: scheduler silently soft-skips non-int values;
+        # mirror that here instead of throwing a 500 on operator typos.
+        interval: int | None
+        if interval_raw is None:
+            interval = None
+        else:
+            try:
+                interval = int(interval_raw)
+            except (TypeError, ValueError):
+                warnings.append(
+                    f"{entry.name}: interval_seconds={interval_raw!r} is not an integer"
+                )
+                interval = None
         items.append(
             {
                 "name": str(raw.get("name") or entry.stem),
                 "enabled": bool(raw.get("enabled", True)),
                 "schedule_kind": "cron" if cron else "interval",
                 "cron": str(cron) if cron else None,
-                "interval_seconds": int(interval) if interval is not None else None,
+                "interval_seconds": interval,
                 "agent": (str(raw["agent"]) if raw.get("agent") else None),
                 "skill_name": (str(raw["skill_name"]) if raw.get("skill_name") else None),
                 "platform": str(raw.get("platform", "")),

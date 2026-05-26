@@ -164,18 +164,29 @@ def skills_dir(config: dict, project_root: Path | None = None) -> Path:
     return (root / raw).resolve()
 
 
-def automations_storage_dir(config: dict) -> Path:
+def automations_storage_dir(
+    config: dict, project_root: Path | None = None
+) -> Path:
     """``automations.storage_dir`` (default ``~/.oh-my-agent/automations``).
 
-    Mirrors ``automation/scheduler.py`` boot wiring: ``automations.storage_dir``
-    is resolved with ``Path(...).expanduser()`` (no project_root rebase —
-    automation YAMLs live in the user's home, not in the repo). The standalone
-    dashboard reads from this same directory to render a static-mode list of
-    automations when the live scheduler isn't reachable.
+    Mirrors ``automation/scheduler.build_scheduler_from_config`` exactly:
+    absolute paths stay as-is, relative paths resolve against
+    ``project_root`` (typically the config file's parent dir) — NOT CWD.
+    Without that, the standalone dashboard could scan a different
+    directory than the scheduler is reading from, silently showing a
+    stale or empty list while the live bot has a totally different
+    catalog (Codex review #5a).
+
+    ``project_root`` falls back to ``Path.cwd()`` so this helper stays
+    callable from places that don't track config provenance (tests, REPL).
     """
 
     auto_cfg = config.get("automations", {}) or {}
-    return _abs(auto_cfg.get("storage_dir", _DEFAULT_AUTOMATIONS_STORAGE_DIR))
+    raw = Path(str(auto_cfg.get("storage_dir", _DEFAULT_AUTOMATIONS_STORAGE_DIR))).expanduser()
+    if raw.is_absolute():
+        return raw.resolve()
+    root = project_root or Path.cwd()
+    return (root / raw).resolve()
 
 
 def judge_memory_dir(config: dict) -> Path:

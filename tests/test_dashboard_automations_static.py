@@ -169,6 +169,86 @@ class _FakeScheduler:
         return {"live-job": datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)}
 
 
+def test_standalone_accepts_yml_extension(tmp_path: Path):
+    """Codex review #2: scheduler globs both *.yaml AND *.yml. Static
+    mode must too, otherwise standalone silently hides .yml jobs that
+    the live bot is actually running."""
+    automations_dir = tmp_path / "automations"
+    automations_dir.mkdir(parents=True)
+    (automations_dir / "yml-form.yml").write_text(
+        textwrap.dedent(
+            """\
+            name: yml-form
+            enabled: true
+            platform: discord
+            channel_id: "1"
+            agent: claude
+            cron: "*/15 * * * *"
+            prompt: ping
+            """
+        ),
+        encoding="utf-8",
+    )
+    app = create_app(_config(tmp_path, automations_dir))
+    client = TestClient(app)
+    names = {item["name"] for item in client.get("/api/v1/automations").json()["items"]}
+    assert "yml-form" in names
+
+
+def test_standalone_invalid_interval_warns_not_500(tmp_path: Path):
+    """Codex review #5b: scheduler silently soft-skips non-int interval
+    values; static mode must match (no 500)."""
+    automations_dir = tmp_path / "automations"
+    automations_dir.mkdir(parents=True)
+    (automations_dir / "bad-interval.yaml").write_text(
+        textwrap.dedent(
+            """\
+            name: bad-interval
+            enabled: true
+            platform: discord
+            channel_id: "1"
+            agent: claude
+            interval_seconds: never
+            prompt: x
+            """
+        ),
+        encoding="utf-8",
+    )
+    app = create_app(_config(tmp_path, automations_dir))
+    client = TestClient(app)
+    r = client.get("/api/v1/automations")
+    assert r.status_code == 200
+    payload = r.json()
+    by_name = {item["name"]: item for item in payload["items"]}
+    assert by_name["bad-interval"]["interval_seconds"] is None
+    assert any("interval_seconds=" in w for w in payload["warnings"])
+
+
+def test_standalone_relative_storage_dir_uses_project_root(tmp_path: Path):
+    """Codex review #5a: relative ``automations.storage_dir`` must resolve
+    against project_root (config.yaml's parent), matching the scheduler.
+    Without this, standalone scans a different directory than the bot."""
+    # Pretend project_root = tmp_path / "project"; relative config value
+    # "automations" should resolve to tmp_path / "project" / "automations".
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    automations_dir = project_root / "automations"
+    _seed_automations_dir(automations_dir)
+    cfg = {
+        "automations": {"storage_dir": "automations"},  # relative!
+        "runtime": {"state_path": str(tmp_path / "runtime.db")},
+        "memory": {"path": str(tmp_path / "memory.db")},
+    }
+    app = create_app(cfg, project_root=project_root)
+    client = TestClient(app)
+    payload = client.get("/api/v1/automations").json()
+    names = {item["name"] for item in payload["items"]}
+    # Both seeded jobs must be visible — proves the resolution found
+    # the right directory.
+    assert "daily-finance" in names
+    assert "interval-job" in names
+
+
 def test_live_mode_still_works(tmp_path: Path):
     """Colocated path must keep its existing live shape: items with
     next_run_at + mode='live'."""

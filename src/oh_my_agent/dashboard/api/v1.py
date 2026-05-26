@@ -353,8 +353,9 @@ def build_router(config: dict) -> APIRouter:
         ctx = getattr(request.app.state, "oma", None)
         scheduler = getattr(ctx, "scheduler", None) if ctx is not None else None
         if scheduler is None:
+            project_root = getattr(ctx, "project_root", None) if ctx is not None else None
             return data.fetch_automations_static(
-                paths.automations_storage_dir(config)
+                paths.automations_storage_dir(config, project_root=project_root)
             )
 
         records = scheduler.list_automations()
