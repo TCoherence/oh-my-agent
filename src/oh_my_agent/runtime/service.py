@@ -4002,7 +4002,7 @@ class RuntimeService:
         # Mirror chat-path injection at gateway/manager.py so chat + runtime
         # share the same memory surface. Strict scope filtering applies:
         # scope=automation entries only inject when task.automation_name matches.
-        agent_prompt = prompt
+        ambient_context: str | None = None
         if self._judge_store is not None:
             try:
                 relevant = self._judge_store.get_relevant(
@@ -4014,7 +4014,7 @@ class RuntimeService:
                 )
                 block = self._judge_store.format_memory_block(relevant)
                 if block:
-                    agent_prompt = f"{block}\n\n{prompt}"
+                    ambient_context = block
                     logger.info(
                         "Runtime task=%s step=%d memory_inject count=%d (skill=%s automation=%s)",
                         task.id,
@@ -4040,10 +4040,12 @@ class RuntimeService:
         log_path = self._agent_log_path(task, step, agent.name)
         if "log_path" in sig.parameters:
             kwargs["log_path"] = log_path
+        if ambient_context is not None and "ambient_context" in sig.parameters:
+            kwargs["ambient_context"] = ambient_context
         async def _run_with_overrides() -> AgentResponse:
             with AgentRegistry._temporary_timeout(agent, task.agent_timeout_seconds):
                 with AgentRegistry._temporary_max_turns(agent, task.agent_max_turns):
-                    return await agent.run(agent_prompt, [], **kwargs)
+                    return await agent.run(prompt, [], **kwargs)
 
         run_task = asyncio.create_task(_run_with_overrides())
         self._running_tasks[task.id] = run_task
@@ -6248,6 +6250,28 @@ class RuntimeService:
             len(history),
             workspace_override,
         )
+        # Re-supply current memory as ambient_context (mirrors _invoke_agent), so
+        # auth / HITL continuation resumes with up-to-date remembered context
+        # rather than whatever was active when the run paused. Stripped from the
+        # stored resume prompt — delivered out-of-band per agent.
+        ambient_context: str | None = None
+        if self._judge_store is not None:
+            try:
+                relevant = self._judge_store.get_relevant(
+                    skill_name=skill_name,
+                    workspace=str(self._repo_root),
+                    thread_id=thread_id,
+                    limit=self._memory_inject_limit,
+                )
+                block = self._judge_store.format_memory_block(relevant)
+                if block:
+                    ambient_context = block
+            except Exception as exc:
+                logger.warning(
+                    "THREAD_AGENT memory_inject_failed thread=%s err=%s",
+                    thread_id,
+                    exc,
+                )
         run_task = asyncio.create_task(
             registry.run(
                 prompt,
@@ -6259,6 +6283,7 @@ class RuntimeService:
                 run_label=f"{purpose} thread={thread_id}",
                 timeout_override_seconds=timeout_override_seconds,
                 max_turns_override=max_turns_override,
+                ambient_context=ambient_context,
             )
         )
         started_at = time.perf_counter()

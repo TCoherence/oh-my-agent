@@ -92,6 +92,154 @@ def test_claude_resume_command_uses_stream_json_verbose():
     assert "--verbose" in cmd
 
 
+def _arg_after(argv: list, flag: str) -> str | None:
+    if flag not in argv:
+        return None
+    return argv[argv.index(flag) + 1]
+
+
+def test_claude_command_builders_accept_system_append():
+    """Ambient context rides --append-system-prompt on both fresh and resume."""
+    agent = ClaudeAgent(cli_path="claude", model="sonnet-test")
+    fresh = agent._build_command("hello", system_append="SYS-X")
+    assert "--append-system-prompt" in fresh
+    assert _arg_after(fresh, "--append-system-prompt") == "SYS-X"
+    resume = agent._build_resume_command("hello", "sess-1", system_append="SYS-Y")
+    assert "--append-system-prompt" in resume
+    assert _arg_after(resume, "--append-system-prompt") == "SYS-Y"
+    # No system_append → flag absent.
+    assert "--append-system-prompt" not in agent._build_command("hi")
+
+
+@pytest.mark.asyncio
+async def test_claude_ambient_goes_to_append_system_prompt_fresh_and_resume(monkeypatch):
+    """The fix: control protocol + memory ride --append-system-prompt (re-supplied
+    per call, never persisted), NOT the -p user prompt — on fresh AND resume."""
+    captured: dict[str, list] = {}
+
+    async def _capture(*args, **kwargs):
+        captured["argv"] = list(args)
+        return 0, json.dumps({"type": "result", "result": "ok", "session_id": "s1"}).encode(), b""
+
+    monkeypatch.setattr("oh_my_agent.agents.cli.claude._stream_cli_process", _capture)
+    mem = "[Remembered context]\n- user likes terse replies"
+    agent = ClaudeAgent(cli_path="claude")
+
+    # Fresh
+    await agent.run("hello there", thread_id="t1", ambient_context=mem)
+    argv = captured["argv"]
+    assert "--resume" not in argv
+    append = _arg_after(argv, "--append-system-prompt")
+    prompt = _arg_after(argv, "-p")
+    assert append is not None
+    assert "[Control Protocol]" in append
+    assert "[Remembered context]" in append and "user likes terse replies" in append
+    assert "[Control Protocol]" not in prompt
+    assert "[Remembered context]" not in prompt
+    assert "hello there" in prompt
+
+    # Resume
+    agent.set_session_id("t1", "s1")
+    await agent.run("next question", thread_id="t1", ambient_context=mem)
+    argv = captured["argv"]
+    assert "--resume" in argv
+    append = _arg_after(argv, "--append-system-prompt")
+    prompt = _arg_after(argv, "-p")
+    assert "[Control Protocol]" in append
+    assert "user likes terse replies" in append
+    assert "[Control Protocol]" not in prompt
+    assert "[Remembered context]" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_claude_ambient_none_keeps_control_in_append_not_prompt(monkeypatch):
+    """With no memory, the control protocol still rides --append-system-prompt
+    (never the user prompt), and no memory block leaks anywhere."""
+    captured: dict[str, list] = {}
+
+    async def _capture(*args, **kwargs):
+        captured["argv"] = list(args)
+        return 0, json.dumps({"type": "result", "result": "ok", "session_id": "s1"}).encode(), b""
+
+    monkeypatch.setattr("oh_my_agent.agents.cli.claude._stream_cli_process", _capture)
+    agent = ClaudeAgent(cli_path="claude")
+    await agent.run("just a question", thread_id="t1", ambient_context=None)
+    argv = captured["argv"]
+    append = _arg_after(argv, "--append-system-prompt")
+    prompt = _arg_after(argv, "-p")
+    assert append is not None and "[Control Protocol]" in append
+    assert "[Remembered context]" not in append
+    assert "[Control Protocol]" not in prompt
+    assert prompt == "just a question"
+
+
+@pytest.mark.asyncio
+async def test_claude_fresh_streaming_builds_command_with_append(monkeypatch):
+    """Fresh-streaming must build its command explicitly (command=) so the
+    --append-system-prompt survives the shared base stream() path."""
+    from oh_my_agent.agents.base import AgentResponse
+
+    captured: dict = {}
+
+    async def _fake_run_streamed(self, *, prompt, history, on_partial, workspace_override,
+                                 log_path, thread_id=None, command=None, on_tool_use=None):
+        captured["command"] = command
+        return AgentResponse(text="ok")
+
+    monkeypatch.setattr(ClaudeAgent, "_run_streamed", _fake_run_streamed)
+
+    async def _noop(_):
+        return None
+
+    agent = ClaudeAgent(cli_path="claude")
+    await agent.run("hi", thread_id="t1", ambient_context="[Remembered context]\n- M", on_partial=_noop)
+    cmd = captured["command"]
+    assert cmd is not None and "--resume" not in cmd
+    append = _arg_after(cmd, "--append-system-prompt")
+    assert append is not None and "[Control Protocol]" in append and "[Remembered context]" in append
+
+
+@pytest.mark.asyncio
+async def test_claude_resume_with_image_keeps_append_and_clean_prompt(tmp_path, monkeypatch):
+    """Resume + image uses block mode; ambient still rides --append-system-prompt
+    and the user -p carries the image reference, not the control protocol."""
+    captured: dict[str, list] = {}
+
+    async def _capture(*args, **kwargs):
+        captured["argv"] = list(args)
+        return 0, json.dumps({"type": "result", "result": "ok", "session_id": "s1"}).encode(), b""
+
+    monkeypatch.setattr("oh_my_agent.agents.cli.claude._stream_cli_process", _capture)
+    img = tmp_path / "pic.png"
+    img.write_bytes(b"\x89PNG\r\n")
+    agent = ClaudeAgent(cli_path="claude", workspace=tmp_path)
+    agent.set_session_id("t1", "s1")
+    await agent.run("look", thread_id="t1", ambient_context="[Remembered context]\n- M",
+                    image_paths=[img])
+    argv = captured["argv"]
+    assert "--resume" in argv
+    append = _arg_after(argv, "--append-system-prompt")
+    prompt = _arg_after(argv, "-p")
+    assert append is not None and "[Control Protocol]" in append and "[Remembered context]" in append
+    assert "[Control Protocol]" not in prompt
+    assert "pic.png" in prompt
+
+
+@pytest.mark.asyncio
+async def test_claude_invalid_session_clears_even_with_ambient(monkeypatch):
+    """A stale resume that the CLI rejects clears the session id even when
+    ambient_context is supplied (the append must not mask the clear path)."""
+    async def _fail(*args, **kwargs):
+        return 1, b"", b"Error: conversation not found for session s1"
+
+    monkeypatch.setattr("oh_my_agent.agents.cli.claude._stream_cli_process", _fail)
+    agent = ClaudeAgent(cli_path="claude")
+    agent.set_session_id("t1", "s1")
+    resp = await agent.run("hi", thread_id="t1", ambient_context="[Remembered context]\n- M")
+    assert resp.error is not None
+    assert agent.get_session_id("t1") is None
+
+
 def test_parse_stream_json_extracts_session_and_result():
     raw = "\n".join([
         json.dumps({"type": "system", "subtype": "init", "session_id": "sess-1"}),

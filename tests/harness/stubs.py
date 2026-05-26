@@ -158,8 +158,13 @@ class StubAgent(BaseAgent):
         workspace_override: Path | None = None,
         log_path: Path | None = None,
         image_paths: list[Path] | None = None,
+        ambient_context: str | None = None,
     ) -> AgentResponse:
         del history, log_path, image_paths
+        # Ambient context (memory + control protocol) is delivered out-of-band by
+        # the real agents; fold it back in here so response-selection predicates
+        # still see the injected memory the same way they did pre-relocation.
+        match_text = f"{ambient_context}\n\n{prompt}" if ambient_context else prompt
         if self._cwd_keyed and thread_id:
             cwd_key = str(workspace_override.resolve()) if workspace_override else "<base>"
             stored_cwd = self._last_cwd.get(thread_id)
@@ -175,7 +180,7 @@ class StubAgent(BaseAgent):
                 )
             self._sessions.setdefault((thread_id, cwd_key), uuid.uuid4().hex[:36])
             self._last_cwd[thread_id] = cwd_key
-        return self._select_response(prompt, thread_id)
+        return self._select_response(match_text, thread_id)
 
     def _select_response(self, prompt: str, thread_id: str | None) -> AgentResponse:
         step_no = self._step_counter.get(thread_id or "<global>", 0) + 1

@@ -14,7 +14,7 @@ from oh_my_agent.agents.cli.base import (
     _stream_cli_process,
     classify_cli_error_kind,
 )
-from oh_my_agent.agents.control_prompt import inject_control_protocol
+from oh_my_agent.agents.control_prompt import inject_control_protocol, prepend_ambient
 from oh_my_agent.agents.events import (
     AgentEvent,
     SystemInitEvent,
@@ -191,6 +191,7 @@ class CodexCLIAgent(BaseCLIAgent):
         workspace_override: Path | None = None,
         log_path: Path | None = None,
         image_paths: list[Path] | None = None,
+        ambient_context: str | None = None,
         on_partial: PartialTextHook | None = None,
         on_tool_use: ToolUseHook | None = None,
     ) -> AgentResponse:
@@ -204,7 +205,9 @@ class CodexCLIAgent(BaseCLIAgent):
         image-bearing turns stay in block mode today (``--image`` argv +
         streaming fold together but we keep the simple path until we need it).
         """
-        prompt = inject_control_protocol(prompt)
+        # Codex has no system-prompt channel: fold ambient context (memory)
+        # into the prompt, then the control protocol, preserving prior ordering.
+        prompt = inject_control_protocol(prepend_ambient(prompt, ambient_context))
         session_id = self._session_ids.get(thread_id) if thread_id else None
 
         streaming = (on_partial is not None or on_tool_use is not None)

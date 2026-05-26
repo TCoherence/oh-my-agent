@@ -1,6 +1,7 @@
 """Covers WorktreeManager create/success/error paths with a real-but-isolated git repo."""
 from __future__ import annotations
 
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -200,3 +201,38 @@ async def test_remove_worktree_missing_is_noop(manager, tmp_path):
 async def test_run_git_raises_worktree_error_on_failure(manager, git_repo):
     with pytest.raises(WorktreeError):
         await manager._run_git("-C", str(git_repo), "rev-parse", "does-not-exist")
+
+
+@pytest.mark.asyncio
+async def test_prune_worktrees_scoped_to_own_root(manager, git_repo, tmp_path):
+    """Regression: a global `git worktree prune` deletes the admin entry of any
+    worktree whose working tree is invisible to this process — which nukes
+    host-side worktrees when the bot runs in Docker with the repo bind-mounted.
+    prune_worktrees() must only remove orphans under its own worktree_root and
+    leave foreign worktrees alone."""
+    admin_root = git_repo / ".git" / "worktrees"
+
+    # Live own worktree — must survive.
+    live = await manager.ensure_worktree("task-live")
+    assert live.exists()
+    assert (admin_root / "task-live").is_dir()
+
+    # Orphaned own worktree (working tree removed) — must be pruned.
+    orphan = await manager.ensure_worktree("task-orphan")
+    orphan_admin = admin_root / "task-orphan"
+    assert orphan_admin.is_dir()
+    shutil.rmtree(orphan)
+
+    # Foreign worktree: admin entry pointing OUTSIDE worktree_root, working tree
+    # absent (mimics a host worktree git can't see from inside a container).
+    foreign_admin = admin_root / "foreign-host"
+    foreign_admin.mkdir()
+    (foreign_admin / "gitdir").write_text(
+        str(tmp_path / "elsewhere" / "host-wt" / ".git") + "\n", encoding="utf-8"
+    )
+
+    await manager.prune_worktrees()
+
+    assert (admin_root / "task-live").is_dir()   # live own worktree kept
+    assert not orphan_admin.exists()             # orphaned own worktree pruned
+    assert foreign_admin.is_dir()                # foreign worktree preserved

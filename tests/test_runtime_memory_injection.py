@@ -25,10 +25,11 @@ from oh_my_agent.runtime.types import RuntimeTask
 
 
 class _CapturingAgent(BaseAgent):
-    """Stub agent that records the prompt it was invoked with."""
+    """Stub agent that records the prompt + ambient_context it was invoked with."""
 
     def __init__(self) -> None:
         self.captured_prompt: str | None = None
+        self.captured_ambient: str | None = None
 
     @property
     def name(self) -> str:
@@ -41,9 +42,11 @@ class _CapturingAgent(BaseAgent):
         *,
         thread_id: str | None = None,
         workspace_override: Path | None = None,
+        ambient_context: str | None = None,
     ) -> AgentResponse:
         del history, thread_id, workspace_override
         self.captured_prompt = prompt
+        self.captured_ambient = ambient_context
         return AgentResponse(text="ok\nTASK_STATE: DONE")
 
 
@@ -125,11 +128,13 @@ async def test_invoke_agent_injects_remembered_context(tmp_path: Path):
         await runtime.stop()
         await store.close()
 
-    assert agent.captured_prompt is not None
-    assert agent.captured_prompt.startswith("[Remembered context]\n")
-    assert "- user prefers terse" in agent.captured_prompt
-    # Original prompt preserved after the block
-    assert agent.captured_prompt.endswith("please do X")
+    # Memory now rides ambient_context (delivered out-of-band per agent), NOT
+    # baked into the user prompt — so claude can route it to a system channel.
+    assert agent.captured_ambient is not None
+    assert agent.captured_ambient.startswith("[Remembered context]\n")
+    assert "- user prefers terse" in agent.captured_ambient
+    # User prompt stays clean.
+    assert agent.captured_prompt == "please do X"
 
 
 @pytest.mark.asyncio
@@ -231,12 +236,94 @@ async def test_invoke_agent_automation_scope_strict_filter(tmp_path: Path):
         await runtime.stop()
         await store.close()
 
-    assert "cap at 500 words" in (agent_match.captured_prompt or "")
-    assert "cap at 500 words" not in (agent_mismatch.captured_prompt or "")
+    assert "cap at 500 words" in (agent_match.captured_ambient or "")
+    assert "cap at 500 words" not in (agent_mismatch.captured_ambient or "")
+    assert agent_mismatch.captured_ambient is None
     assert agent_mismatch.captured_prompt == "p2"
     # Manual task (no automation_name) does NOT see automation-scope entries
-    assert "cap at 500 words" not in (agent_no_auto.captured_prompt or "")
+    assert "cap at 500 words" not in (agent_no_auto.captured_ambient or "")
+    assert agent_no_auto.captured_ambient is None
     assert agent_no_auto.captured_prompt == "p3"
+
+
+@pytest.mark.asyncio
+async def test_invoke_thread_agent_recomputes_ambient_on_continuation(
+    tmp_path: Path, monkeypatch
+):
+    """Auth/HITL continuation re-supplies CURRENT memory via ambient_context
+    (recomputed at resume time), not whatever was active when the run paused.
+    The stored resume prompt itself stays clean (memory delivered out-of-band)."""
+    judge_store = JudgeStore(memory_dir=tmp_path / "memory")
+    await judge_store.load()
+    await judge_store.apply_actions([
+        {
+            "op": "add",
+            "summary": "likes bullet points",
+            "category": "preference",
+            "scope": "global_user",
+            "confidence": 0.9,
+        },
+    ])
+    runtime, store = await _make_runtime(tmp_path, judge_store)
+
+    async def _noop_record(**_kwargs):
+        return None
+
+    monkeypatch.setattr(runtime, "_record_thread_agent_run", _noop_record)
+
+    class _Sess:
+        platform = "discord"
+        channel_id = "1"
+
+        async def get_history(self, _tid):
+            return []
+
+    from oh_my_agent.agents.registry import AgentRegistry
+
+    try:
+        agent1 = _CapturingAgent()
+        await runtime._invoke_thread_agent(
+            registry=AgentRegistry([agent1]),
+            session=_Sess(),
+            prompt="continue now",
+            thread_id="thread-1",
+            force_agent="capture-agent",
+            log_path=None,
+            purpose="auth_resume",
+        )
+        first = agent1.captured_ambient
+
+        # Memory changes between pause and continuation.
+        await judge_store.apply_actions([
+            {
+                "op": "add",
+                "summary": "prefers Chinese replies",
+                "category": "preference",
+                "scope": "global_user",
+                "confidence": 0.9,
+            },
+        ])
+        agent2 = _CapturingAgent()
+        await runtime._invoke_thread_agent(
+            registry=AgentRegistry([agent2]),
+            session=_Sess(),
+            prompt="continue again",
+            thread_id="thread-1",
+            force_agent="capture-agent",
+            log_path=None,
+            purpose="auth_resume",
+        )
+        second = agent2.captured_ambient
+    finally:
+        await runtime.stop()
+        await store.close()
+
+    assert first is not None and "likes bullet points" in first
+    assert "prefers Chinese replies" not in first
+    # Recomputed at continuation → reflects the newer memory.
+    assert second is not None and "prefers Chinese replies" in second
+    # Stored resume prompt stays clean (memory delivered out-of-band).
+    assert agent1.captured_prompt == "continue now"
 
 
 # =====================================================================
