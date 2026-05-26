@@ -68,5 +68,14 @@ class BaseAgent(ABC):
             history: Prior turns in the conversation.
                      Each entry: {"role": "user"|"assistant", "content": str,
                                   "author"?: str, "agent"?: str}
+
+        Concrete subclasses MAY also accept an ``ambient_context: str | None``
+        keyword (the ``[Remembered context]`` memory block delivered out-of-band
+        — e.g. claude routes it via ``--append-system-prompt``; codex / gemini
+        fold it into the user prompt every turn). The registry forwards it only
+        to subclasses whose ``run`` signature declares it, and logs a one-time
+        WARNING when memory is dropped because the param is missing. Declared on
+        concretes (not the abstract) so subclasses that ``del`` it can't pass the
+        sig-presence check while silently dropping memory.
         """
         ...

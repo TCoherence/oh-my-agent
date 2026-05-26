@@ -159,8 +159,6 @@ class ClaudeAgent(BaseCLIAgent):
             "--max-turns", str(self._max_turns),
             "--model", model or self._model,
         ]
-        if system_append:
-            cmd.extend(["--append-system-prompt", system_append])
         if self._permission_mode:
             cmd.extend(["--permission-mode", self._permission_mode])
         elif self._dangerously_skip_permissions:
@@ -169,6 +167,13 @@ class ClaudeAgent(BaseCLIAgent):
             cmd.extend(["--allowedTools", ",".join(self._allowed_tools)])
         if self._extra_args:
             cmd.extend(self._extra_args)
+        # Append ``--append-system-prompt`` LAST so an operator-supplied flag in
+        # ``extra_args`` cannot last-wins-override the per-call ambient (the
+        # claude CLI takes the final occurrence). Ambient delivery is the load-
+        # bearing piece of the resume-accumulation fix; user extras should
+        # augment, not silence, it.
+        if system_append:
+            cmd.extend(["--append-system-prompt", system_append])
         return cmd
 
     def _build_command(
@@ -308,8 +313,6 @@ class ClaudeAgent(BaseCLIAgent):
             "--max-turns", str(self._max_turns),
             "--model", model or self._model,
         ]
-        if system_append:
-            cmd.extend(["--append-system-prompt", system_append])
         if self._permission_mode:
             cmd.extend(["--permission-mode", self._permission_mode])
         elif self._dangerously_skip_permissions:
@@ -318,6 +321,9 @@ class ClaudeAgent(BaseCLIAgent):
             cmd.extend(["--allowedTools", ",".join(self._allowed_tools)])
         if self._extra_args:
             cmd.extend(self._extra_args)
+        # Append ``--append-system-prompt`` LAST — see _base_command for rationale.
+        if system_append:
+            cmd.extend(["--append-system-prompt", system_append])
         return cmd
 
     def _augment_prompt_with_images(

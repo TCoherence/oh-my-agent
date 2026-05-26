@@ -12,6 +12,10 @@ from oh_my_agent.agents.base import AgentResponse, BaseAgent
 
 logger = logging.getLogger(__name__)
 
+# Track agents we've already warned about for missing ``ambient_context`` so
+# the message lands once per agent name rather than once per dispatch.
+_AGENTS_WARNED_NO_AMBIENT: set[str] = set()
+
 
 class AgentRegistry:
     """Ordered list of agents with automatic fallback on error."""
@@ -129,8 +133,22 @@ class AgentRegistry:
         # approach).
         if model_override is not None and "model_override" in sig.parameters:
             kwargs["model_override"] = model_override
-        if ambient_context is not None and "ambient_context" in sig.parameters:
-            kwargs["ambient_context"] = ambient_context
+        if ambient_context is not None:
+            if "ambient_context" in sig.parameters:
+                kwargs["ambient_context"] = ambient_context
+            elif agent.name not in _AGENTS_WARNED_NO_AMBIENT:
+                # Surface silent memory loss: pre-PR-88 these agents received
+                # memory baked into the user prompt; post-PR-88 they get it via
+                # this kwarg only. Warn once per agent so custom BaseAgent
+                # subclasses can update their signature.
+                _AGENTS_WARNED_NO_AMBIENT.add(agent.name)
+                logger.warning(
+                    "Agent '%s' run() does not accept ambient_context — "
+                    "memory context is being dropped silently. Add "
+                    "`ambient_context: str | None = None` to its run() "
+                    "signature to receive the [Remembered context] block.",
+                    agent.name,
+                )
         started_at = time.perf_counter()
         with self._temporary_timeout(agent, timeout_override_seconds):
             with self._temporary_max_turns(agent, max_turns_override):

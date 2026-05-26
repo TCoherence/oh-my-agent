@@ -495,13 +495,30 @@ class WorktreeManager:
         except OSError:
             own_root = self._worktree_root
         for admin in admin_root.iterdir():
+            # Respect `git worktree lock`: an admin with a ``locked`` marker file
+            # is deliberately protected by the operator (or a future code path),
+            # and `git worktree prune` itself honors it. Skip silently.
+            if (admin / "locked").exists():
+                continue
             gitdir_file = admin / "gitdir"
             try:
                 # ``gitdir`` points at the worktree's ``.git`` file; its parent
-                # is the working tree directory.
-                worktree_dir = Path(gitdir_file.read_text(encoding="utf-8").strip()).parent
-            except OSError:
+                # is the working tree directory. Also catch ValueError /
+                # UnicodeDecodeError so a single corrupt file (non-UTF-8 bytes,
+                # partial write) doesn't abort the whole sweep.
+                gitdir_text = gitdir_file.read_text(encoding="utf-8").strip()
+            except (OSError, ValueError):
                 continue
+            if not gitdir_text:
+                continue
+            gitdir_path = Path(gitdir_text)
+            # Git ≥2.40 with ``worktree.useRelativePaths=true`` writes ``gitdir``
+            # as a path relative to the admin directory, not the process CWD.
+            # Resolve it against ``admin`` to avoid mis-classifying foreign or own
+            # worktrees when the bot happens to run from a different CWD.
+            if not gitdir_path.is_absolute():
+                gitdir_path = admin / gitdir_path
+            worktree_dir = gitdir_path.parent
             try:
                 is_ours = worktree_dir.resolve().is_relative_to(own_root)
             except (OSError, ValueError):

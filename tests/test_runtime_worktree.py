@@ -236,3 +236,103 @@ async def test_prune_worktrees_scoped_to_own_root(manager, git_repo, tmp_path):
     assert (admin_root / "task-live").is_dir()   # live own worktree kept
     assert not orphan_admin.exists()             # orphaned own worktree pruned
     assert foreign_admin.is_dir()                # foreign worktree preserved
+
+
+@pytest.mark.asyncio
+async def test_prune_skips_corrupt_gitdir_and_continues_sweep(manager, git_repo):
+    """A corrupt (non-UTF-8) `gitdir` file used to raise UnicodeDecodeError which
+    is not OSError, aborting the whole sweep mid-iteration. Catch it and keep
+    going so other orphans still get pruned that cycle."""
+    import os as _os
+
+    admin_root = git_repo / ".git" / "worktrees"
+
+    # Pre-existing live + orphan we want to prune normally.
+    live = await manager.ensure_worktree("task-live")
+    assert live.exists()
+    orphan = await manager.ensure_worktree("task-orphan")
+    shutil.rmtree(orphan)
+
+    # Plant a corrupt admin entry whose `gitdir` is non-UTF-8. Use a sortable
+    # name that lands BEFORE "task-orphan" so the sweep visits it first; that's
+    # the worst case for an aborted iteration.
+    corrupt = admin_root / "a-corrupt-entry"
+    corrupt.mkdir()
+    (corrupt / "gitdir").write_bytes(b"\xff\xfe\x00\xff\n")
+
+    # Should not raise. Force a deterministic walk order if possible by sorting
+    # via _os.listdir → adminroot.iterdir() ordering is FS-dependent; this test
+    # asserts on the END state regardless of order.
+    del _os  # only imported to document intent
+    await manager.prune_worktrees()
+
+    assert (admin_root / "task-live").is_dir()         # live preserved
+    assert corrupt.is_dir()                             # corrupt skipped, not removed
+    assert not (admin_root / "task-orphan").exists()    # sweep continued past corrupt
+
+
+@pytest.mark.asyncio
+async def test_prune_respects_git_worktree_lock_marker(manager, git_repo):
+    """`git worktree lock` writes a ``locked`` file under the admin dir; the
+    real ``git worktree prune`` honors it. Scoped prune must too — operators
+    may lock a runtime worktree mid-debug to stop the janitor from wiping it
+    when the working tree disappears."""
+    admin_root = git_repo / ".git" / "worktrees"
+    ws = await manager.ensure_worktree("task-locked")
+    locked_admin = admin_root / "task-locked"
+    (locked_admin / "locked").write_text("user-locked\n", encoding="utf-8")
+    shutil.rmtree(ws)  # working tree gone → would normally be pruned
+
+    await manager.prune_worktrees()
+
+    assert locked_admin.is_dir()                    # locked admin preserved
+    assert (locked_admin / "locked").exists()
+
+
+@pytest.mark.asyncio
+async def test_prune_handles_relative_gitdir_against_admin_dir(manager, git_repo, tmp_path):
+    """Git ≥2.40 with ``worktree.useRelativePaths=true`` writes ``gitdir`` as a
+    path relative to the admin directory. Resolve against ``admin`` (not the
+    process CWD), or scope detection mis-classifies."""
+    import os as _os
+
+    admin_root = git_repo / ".git" / "worktrees"
+    ws = await manager.ensure_worktree("task-rel")
+    rel_admin = admin_root / "task-rel"
+
+    # Rewrite gitdir as relative path (admin → <ws>/.git).
+    rel_target = _os.path.relpath(str(ws / ".git"), str(rel_admin))
+    (rel_admin / "gitdir").write_text(rel_target + "\n", encoding="utf-8")
+
+    # Working tree still exists → must NOT be pruned even though path is relative.
+    await manager.prune_worktrees()
+    assert rel_admin.is_dir()
+
+    # Now orphan it → relative-path resolution must still classify it as ours
+    # and prune.
+    shutil.rmtree(ws)
+    await manager.prune_worktrees()
+    assert not rel_admin.exists()
+
+
+@pytest.mark.asyncio
+async def test_prune_skips_empty_or_missing_gitdir(manager, git_repo):
+    """Admin entries with empty or missing gitdir (partial-write recovery,
+    half-initialised git worktree add) must not crash and must not be deleted."""
+    admin_root = git_repo / ".git" / "worktrees"
+    live = await manager.ensure_worktree("task-live2")
+    assert live.exists()
+
+    empty_admin = admin_root / "no-gitdir"
+    empty_admin.mkdir()
+    # No gitdir file at all.
+
+    blank_admin = admin_root / "blank-gitdir"
+    blank_admin.mkdir()
+    (blank_admin / "gitdir").write_text("\n", encoding="utf-8")
+
+    await manager.prune_worktrees()
+
+    assert (admin_root / "task-live2").is_dir()
+    assert empty_admin.is_dir()
+    assert blank_admin.is_dir()

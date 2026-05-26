@@ -6254,6 +6254,15 @@ class RuntimeService:
         # auth / HITL continuation resumes with up-to-date remembered context
         # rather than whatever was active when the run paused. Stripped from the
         # stored resume prompt — delivered out-of-band per agent.
+        #
+        # NOTE: passes ``workspace=str(self._repo_root)`` for symmetry with all
+        # production WRITES of ``source_workspace`` (gateway/manager.py:2387/
+        # 2536/2577/2602, runtime/service.py:3897/3956). Reading with
+        # ``workspace_override.resolve()`` would mismatch entries that were
+        # written with repo_root and silently exclude them when short_workspace
+        # is enabled. ``automation_name`` is intentionally NOT plumbed here —
+        # ``resume_context`` does not currently carry it, so any value would be
+        # dead. Tracking as a separate follow-up if needed.
         ambient_context: str | None = None
         if self._judge_store is not None:
             try:

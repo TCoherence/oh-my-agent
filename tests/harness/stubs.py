@@ -164,6 +164,10 @@ class StubAgent(BaseAgent):
         # Ambient context (memory + control protocol) is delivered out-of-band by
         # the real agents; fold it back in here so response-selection predicates
         # still see the injected memory the same way they did pre-relocation.
+        # Deliberately does NOT fold CONTROL_PROMPT in — it contains literal
+        # provider names (``bilibili`` / ``youtube`` / ``xiaohongshu`` /
+        # ``xianyu``) plus ``auth_required`` and ``ask_user``, which would make
+        # predicates like ``content_contains: 'bilibili'`` match every prompt.
         match_text = f"{ambient_context}\n\n{prompt}" if ambient_context else prompt
         if self._cwd_keyed and thread_id:
             cwd_key = str(workspace_override.resolve()) if workspace_override else "<base>"

@@ -125,6 +125,36 @@ async def test_ambient_context_not_forwarded_to_agent_without_param():
 
 
 @pytest.mark.asyncio
+async def test_registry_warns_once_when_ambient_dropped_for_non_conforming_agent(caplog):
+    """A custom BaseAgent whose run() doesn't accept ambient_context silently
+    loses memory — surface that loss with a one-time WARNING per agent name."""
+    from oh_my_agent.agents import registry as _reg
+
+    _reg._AGENTS_WARNED_NO_AMBIENT.clear()  # isolate from other tests
+    a = _OKAgent("legacy-agent", "ok")
+    registry = AgentRegistry([a])
+    with caplog.at_level("WARNING", logger="oh_my_agent.agents.registry"):
+        await registry.run("q1", ambient_context="[Remembered context]\n- M")
+        await registry.run("q2", ambient_context="[Remembered context]\n- M")
+    warns = [r for r in caplog.records if "legacy-agent" in r.message and "ambient_context" in r.message]
+    # One-time per agent name, not once per dispatch.
+    assert len(warns) == 1
+
+
+@pytest.mark.asyncio
+async def test_registry_no_warning_when_ambient_is_none():
+    """Don't pester operators about agents that legitimately don't need ambient
+    when the caller passed None anyway."""
+    from oh_my_agent.agents import registry as _reg
+
+    _reg._AGENTS_WARNED_NO_AMBIENT.clear()
+    a = _OKAgent("quiet-agent", "ok")
+    registry = AgentRegistry([a])
+    await registry.run("q", ambient_context=None)
+    assert "quiet-agent" not in _reg._AGENTS_WARNED_NO_AMBIENT
+
+
+@pytest.mark.asyncio
 async def test_ambient_context_forwarded_to_supporting_agent():
     a = _AmbientAgent("a")
     registry = AgentRegistry([a])

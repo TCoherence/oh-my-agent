@@ -37,7 +37,7 @@ class ClaudeAgent(BaseAgent):
         prompt: str,
         history: list[dict] | None = None,
     ) -> AgentResponse:
-        del history  # unused — this legacy SDK shim ignores conversation history
+        del history  # legacy SDK shim ignores conversation history
         cmd = self._build_command(prompt)
         logger.info("Running: %s", " ".join(cmd[:6]) + " ...")
 

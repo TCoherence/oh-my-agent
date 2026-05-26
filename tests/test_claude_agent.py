@@ -98,6 +98,29 @@ def _arg_after(argv: list, flag: str) -> str | None:
     return argv[argv.index(flag) + 1]
 
 
+def test_claude_extra_args_cannot_last_wins_override_ambient_append():
+    """If an operator adds ``--append-system-prompt`` to ``extra_args`` (e.g. to
+    force a tone/persona), per-call ambient must still be the LAST occurrence in
+    argv so the claude CLI's last-wins parser keeps ambient. Otherwise the
+    entire memory + control-protocol delivery would be silently overridden by
+    static config."""
+    agent = ClaudeAgent(
+        cli_path="claude",
+        model="sonnet-test",
+        extra_args=["--append-system-prompt", "USER_OVERRIDE_PERSONA"],
+    )
+    cmd = agent._build_command("hi", system_append="AMBIENT_WITH_MEMORY")
+    flag_positions = [i for i, x in enumerate(cmd) if x == "--append-system-prompt"]
+    assert len(flag_positions) == 2  # both present
+    # Last-wins: ambient must be at the LAST occurrence.
+    assert cmd[flag_positions[-1] + 1] == "AMBIENT_WITH_MEMORY"
+
+    rcmd = agent._build_resume_command("hi", "sess-x", system_append="AMBIENT_WITH_MEMORY")
+    flag_positions = [i for i, x in enumerate(rcmd) if x == "--append-system-prompt"]
+    assert len(flag_positions) == 2
+    assert rcmd[flag_positions[-1] + 1] == "AMBIENT_WITH_MEMORY"
+
+
 def test_claude_command_builders_accept_system_append():
     """Ambient context rides --append-system-prompt on both fresh and resume."""
     agent = ClaudeAgent(cli_path="claude", model="sonnet-test")
