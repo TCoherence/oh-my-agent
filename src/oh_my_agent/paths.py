@@ -43,6 +43,7 @@ _DEFAULT_REPORTS_DIR = "~/.oh-my-agent/reports"
 _DEFAULT_MEMORY_DB = "~/.oh-my-agent/runtime/memory.db"
 _DEFAULT_SKILLS_TELEMETRY = "~/.oh-my-agent/runtime/skills.db"
 _DEFAULT_JUDGE_MEMORY_DIR = "~/.oh-my-agent/memory"
+_DEFAULT_AUTOMATIONS_STORAGE_DIR = "~/.oh-my-agent/automations"
 
 
 def _abs(path: str | Path) -> Path:
@@ -161,6 +162,20 @@ def skills_dir(config: dict, project_root: Path | None = None) -> Path:
         return raw.resolve()
     root = project_root or Path.cwd()
     return (root / raw).resolve()
+
+
+def automations_storage_dir(config: dict) -> Path:
+    """``automations.storage_dir`` (default ``~/.oh-my-agent/automations``).
+
+    Mirrors ``automation/scheduler.py`` boot wiring: ``automations.storage_dir``
+    is resolved with ``Path(...).expanduser()`` (no project_root rebase —
+    automation YAMLs live in the user's home, not in the repo). The standalone
+    dashboard reads from this same directory to render a static-mode list of
+    automations when the live scheduler isn't reachable.
+    """
+
+    auto_cfg = config.get("automations", {}) or {}
+    return _abs(auto_cfg.get("storage_dir", _DEFAULT_AUTOMATIONS_STORAGE_DIR))
 
 
 def judge_memory_dir(config: dict) -> Path:

@@ -827,6 +827,74 @@ def fetch_skills_overview(
     return {"items": out, "warnings": warnings}
 
 
+def fetch_automations_static(automations_dir: Path | None) -> dict[str, Any]:
+    """Read-only automations list straight from YAML, no scheduler needed.
+
+    The standalone dashboard (``oma-dashboard`` CLI, not the colocated boot
+    path) has no handle on the live scheduler so it can't compute live
+    ``next_run_at`` or fire jobs. But the operator still wants to *see*
+    what's scheduled — name, schedule (cron / interval), agent, target
+    skill, enabled flag — without spinning up the bot.
+
+    This reader scans ``automations_dir`` for ``*.yaml`` and parses the
+    same fields the scheduler does. ``.bak`` siblings (left behind by
+    in-place edits) are skipped — they aren't live schedules. Failed
+    parses become per-file warnings, not 500s.
+
+    Returns ``{"items": [...], "warnings": [...], "mode": "static"}``.
+    The ``mode`` key is the contract that lets the frontend disable
+    fire/pause buttons and show a "control unavailable" banner without
+    having to second-guess via 503 sniffing.
+    """
+
+    warnings: list[str] = []
+    items: list[dict[str, Any]] = []
+
+    if automations_dir is None or not automations_dir.exists():
+        warnings.append(
+            f"automations directory not found at {automations_dir}"
+            if automations_dir
+            else "automations.storage_dir not configured"
+        )
+        return {"items": items, "warnings": warnings, "mode": "static"}
+
+    for entry in sorted(automations_dir.iterdir()):
+        if not entry.is_file() or entry.suffix != ".yaml":
+            continue
+        # Scheduler writes `.bak` siblings on in-place edits; they aren't
+        # active schedules and would show up as ghost duplicates if we
+        # included them.
+        if entry.name.endswith(".bak.yaml") or ".bak" in entry.stem:
+            continue
+        try:
+            raw = yaml.safe_load(entry.read_text(encoding="utf-8"))
+        except Exception as exc:  # noqa: BLE001 — soft-fail per file
+            warnings.append(f"failed to parse {entry.name}: {exc}")
+            continue
+        if not isinstance(raw, dict):
+            warnings.append(f"{entry.name}: root is not a mapping")
+            continue
+        cron = raw.get("cron")
+        interval = raw.get("interval_seconds")
+        items.append(
+            {
+                "name": str(raw.get("name") or entry.stem),
+                "enabled": bool(raw.get("enabled", True)),
+                "schedule_kind": "cron" if cron else "interval",
+                "cron": str(cron) if cron else None,
+                "interval_seconds": int(interval) if interval is not None else None,
+                "agent": (str(raw["agent"]) if raw.get("agent") else None),
+                "skill_name": (str(raw["skill_name"]) if raw.get("skill_name") else None),
+                "platform": str(raw.get("platform", "")),
+                "channel_id": str(raw.get("channel_id", "")),
+                # No scheduler state here — static mode cannot compute when
+                # the next firing is due. Frontend renders "—".
+                "next_run_at": None,
+            }
+        )
+    return {"items": items, "warnings": warnings, "mode": "static"}
+
+
 def _coerce_positive_int(value: Any) -> int | None:
     if value is None:
         return None
