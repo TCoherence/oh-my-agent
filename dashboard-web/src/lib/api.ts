@@ -300,6 +300,38 @@ export interface SkillHealthRow {
   disabled: boolean;
 }
 
+/** /api/v1/skills row — installed catalog merged with runtime stats. */
+export interface SkillOverviewRow {
+  skill: string;
+  installed: boolean;
+  description: string;
+  allowed_tool_count: number;
+  timeout_seconds: number | null;
+  max_turns: number | null;
+  runs_7d: number;
+  runs_30d: number;
+  success_rate: number | null;
+  last_run_at: string | null;
+  last_failure_reason: string | null;
+  negative_feedback_rate: number | null;
+  /** null = active; "manual" = operator-disabled; "auto" = auto-disabled
+   *  by repeated failures. The split lets the UI explain *why*. */
+  disabled_kind: "manual" | "auto" | null;
+}
+
+export interface SkillOverviewResponse {
+  items: SkillOverviewRow[];
+  warnings: string[];
+}
+
+export interface SkillRecentTaskRow {
+  id: string;
+  status: string;
+  goal: string;
+  error: string | null;
+  at: string;
+}
+
 export interface AutomationRow {
   name: string;
   enabled: boolean;
@@ -315,6 +347,22 @@ export interface AutomationRow {
 
 export function fetchSkillHealth(): Promise<{ items: SkillHealthRow[] }> {
   return apiGet<{ items: SkillHealthRow[] }>("/api/v1/skills/health");
+}
+
+export function fetchSkillsOverview(): Promise<SkillOverviewResponse> {
+  return apiGet<SkillOverviewResponse>("/api/v1/skills");
+}
+
+export function fetchSkillRecentTasks(
+  name: string,
+  opts?: { limit?: number },
+): Promise<{ skill: string; items: SkillRecentTaskRow[] }> {
+  const params = new URLSearchParams();
+  if (opts?.limit) params.set("limit", String(opts.limit));
+  const qs = params.toString();
+  return apiGet<{ skill: string; items: SkillRecentTaskRow[] }>(
+    `/api/v1/skills/${encodeURIComponent(name)}/recent_tasks${qs ? `?${qs}` : ""}`,
+  );
 }
 
 export function setSkillEnabled(

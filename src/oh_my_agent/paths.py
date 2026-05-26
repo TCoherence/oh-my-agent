@@ -143,6 +143,26 @@ def skills_telemetry_path(config: dict) -> Path:
     return _abs(skills_cfg.get("telemetry_path", _DEFAULT_SKILLS_TELEMETRY))
 
 
+def skills_dir(config: dict, project_root: Path | None = None) -> Path:
+    """``skills.path`` resolved to an absolute directory.
+
+    Mirrors ``boot.py:_resolve_project_path`` — absolute paths stay as-is,
+    relative paths resolve against ``project_root`` (typically the config
+    file's parent dir). The default ``skills/`` is a relative path that
+    expects to live next to ``config.yaml``.
+
+    ``project_root`` falls back to ``Path.cwd()`` so this helper is still
+    callable from places that don't track config provenance (tests, REPL).
+    """
+
+    skills_cfg = config.get("skills", {}) or {}
+    raw = Path(str(skills_cfg.get("path", "skills/"))).expanduser()
+    if raw.is_absolute():
+        return raw.resolve()
+    root = project_root or Path.cwd()
+    return (root / raw).resolve()
+
+
 def judge_memory_dir(config: dict) -> Path:
     """Directory holding ``memories.yaml`` + ``MEMORY.md``.
 

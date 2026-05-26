@@ -226,11 +226,10 @@ def build_router(config: dict) -> APIRouter:
 
     @router.get("/skills/health")
     async def skills_health(request: Request) -> dict[str, Any]:
-        # Read route: works in both modes. In colocated mode we union the
-        # live disabled set; in readonly we fall back to the persisted
-        # store (auto + manual) via a fresh read-only query is not trivial,
-        # so readonly reports disabled=False (operator should use colocated
-        # for accurate disable state).
+        # Legacy: only lists skills that have actually run as tasks. New
+        # frontend code should use ``/skills`` (below) which also surfaces
+        # installed-but-never-run skills. Kept for back-compat with any
+        # external callers or tests.
         disabled: set[str] = set()
         ctx = getattr(request.app.state, "oma", None)
         if ctx is not None and ctx.mode == "colocated" and ctx.store is not None:
@@ -246,6 +245,49 @@ def build_router(config: dict) -> APIRouter:
             disabled_skills=disabled,
         )
         return {"items": items}
+
+    @router.get("/skills")
+    async def skills_overview(request: Request) -> dict[str, Any]:
+        """All-skills overview: installed skills (read from disk) merged
+        with runtime stats, disabled-kind split, and frontmatter snippets.
+
+        Works in both readonly and colocated mode — readonly skips the
+        live disabled-skill set (no store handle), so the manual/auto
+        labels only appear in colocated mode.
+        """
+        ctx = getattr(request.app.state, "oma", None)
+        disabled_manual: set[str] = set()
+        disabled_auto: set[str] = set()
+        disabled_lookup_error: str | None = None
+        if ctx is not None and ctx.mode == "colocated" and ctx.store is not None:
+            try:
+                disabled_manual = await ctx.store.list_manual_disabled_skills()
+                disabled_auto = await ctx.store.list_auto_disabled_skills()
+            except Exception as exc:  # noqa: BLE001 — surface as a warning
+                # Don't silently lie about operational state — render every
+                # row as if it were active when we couldn't actually check
+                # would make the UI claim health it doesn't have (Codex
+                # review #3). Empty the sets so we don't half-attribute,
+                # and bubble up a banner so the operator knows the labels
+                # are unreliable until the store recovers.
+                disabled_manual = set()
+                disabled_auto = set()
+                disabled_lookup_error = (
+                    f"disabled-skill state unavailable: {exc}; "
+                    "manual/auto labels in this view may be stale"
+                )
+        project_root = getattr(ctx, "project_root", None) if ctx is not None else None
+        sdir = paths.skills_dir(config, project_root=project_root)
+        result = data.fetch_skills_overview(
+            _runtime_db_path(),
+            skills_dir=sdir,
+            memories_yaml=paths.judge_memories_yaml_path(config),
+            disabled_manual=disabled_manual,
+            disabled_auto=disabled_auto,
+        )
+        if disabled_lookup_error:
+            result.setdefault("warnings", []).append(disabled_lookup_error)
+        return result
 
     @router.get("/skills/{name}/recent_tasks")
     def skill_recent_tasks(
@@ -268,7 +310,23 @@ def build_router(config: dict) -> APIRouter:
         ctx = _require_colocated(request)
         if ctx.store is None:
             raise HTTPException(status_code=503, detail="store not available")
+        # The gateway treats a skill as blocked if it appears in EITHER the
+        # manual override set OR the auto-disabled set (manager.py
+        # _is_skill_auto_disabled uses OR). So when the operator asks to
+        # "enable", clearing the manual override alone leaves the gateway
+        # still blocking on the auto-disable bit — the dashboard would lie
+        # ("enabled") while routing keeps refusing. Match /skill_enable's
+        # semantics: enable = clear BOTH; disable = manual override only
+        # (don't fight auto-disable, that's the bot's call).
         await ctx.store.set_skill_override(name, enabled=enabled)
+        if enabled and hasattr(ctx.store, "set_skill_auto_disabled"):
+            try:
+                await ctx.store.set_skill_auto_disabled(name, disabled=False)
+            except Exception:
+                # Best-effort: if auto-disable clear fails the manual
+                # override still landed; the gateway refresh below will
+                # surface the residual auto-disable on the next poll.
+                pass
         # Best-effort: nudge the gateway to refresh its disabled-skill cache
         # so the change takes effect without a restart.
         gw = getattr(ctx, "gateway", None)
