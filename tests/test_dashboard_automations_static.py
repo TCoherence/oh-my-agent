@@ -29,7 +29,7 @@ def _seed_automations_dir(automations_dir: Path) -> None:
             platform: discord
             channel_id: "123"
             agent: claude
-            skill_name: market-briefing
+            skill_name: market-briefing-finance
             cron: "0 9 * * *"
             prompt: Run the daily finance brief.
             """
@@ -96,7 +96,7 @@ def test_standalone_automations_lists_from_yaml(tmp_path: Path):
     assert finance["schedule_kind"] == "cron"
     assert finance["cron"] == "0 9 * * *"
     assert finance["agent"] == "claude"
-    assert finance["skill_name"] == "market-briefing"
+    assert finance["skill_name"] == "market-briefing-finance"
     assert finance["next_run_at"] is None  # static cannot compute
 
     interval = by_name["interval-job"]
