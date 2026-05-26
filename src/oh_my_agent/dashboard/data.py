@@ -666,6 +666,200 @@ def fetch_skill_recent_tasks(db_path: Path, *, skill: str, limit: int = 20) -> l
     ]
 
 
+def fetch_skills_overview(
+    runtime_db: Path,
+    *,
+    skills_dir: Path | None,
+    memories_yaml: Path | None = None,
+    disabled_manual: set[str] | None = None,
+    disabled_auto: set[str] | None = None,
+) -> dict[str, Any]:
+    """All-skills overview merging on-disk installs with runtime stats.
+
+    Unlike :func:`fetch_skill_health` (which lists only skills that have
+    actually run as tasks), this surfaces every installed skill — even
+    ones that have never been invoked — so the dashboard can show "what
+    do I have" alongside "what's running well". The data sources:
+
+    - ``skills_dir/<name>/SKILL.md`` frontmatter (description, metadata,
+      allowed-tools) — the install catalog.
+    - ``runtime_tasks`` table (last 30d) — runs / success rate / errors.
+    - ``memories.yaml`` self_eval entries — negative-feedback rate.
+    - ``disabled_manual`` + ``disabled_auto`` (caller-supplied, since the
+      live store handles live in the colocated bot process) — split so
+      the UI can label *why* a skill is off.
+
+    Returns ``{"items": [...], "warnings": [...]}``. Warnings are
+    soft-fail signals (missing skills dir, malformed SKILL.md) the UI
+    can render as a yellow banner without blocking the table.
+    """
+
+    disabled_manual = disabled_manual or set()
+    disabled_auto = disabled_auto or set()
+    warnings: list[str] = []
+    installed: dict[str, dict[str, Any]] = {}
+
+    if skills_dir is None or not skills_dir.exists():
+        warnings.append(
+            f"skills directory not found at {skills_dir}" if skills_dir
+            else "skills.path not configured"
+        )
+    else:
+        from oh_my_agent.skills.frontmatter import read_skill_frontmatter
+
+        for entry in sorted(skills_dir.iterdir()):
+            if not entry.is_dir():
+                continue
+            skill_md = entry / "SKILL.md"
+            if not skill_md.exists():
+                continue
+            # Whole-row soft-fail: parse + coerce + collect into the dict
+            # inside one try block. The previous code put `.strip()` and
+            # other field-shape work OUTSIDE the try, so a non-string
+            # ``description`` (or any malformed frontmatter that passes
+            # YAML parse but fails coerce) would 500 the whole endpoint
+            # instead of yielding a per-skill warning (Codex review #2).
+            try:
+                meta = read_skill_frontmatter(skill_md)
+                name = str(meta.get("name") or entry.name)
+                description = meta.get("description")
+                description_str = str(description).strip() if description else ""
+                metadata = meta.get("metadata") if isinstance(meta.get("metadata"), dict) else {}
+                timeout = metadata.get("timeout_seconds") if isinstance(metadata, dict) else None
+                if timeout is None:
+                    timeout = meta.get("timeout_seconds")
+                max_turns = metadata.get("max_turns") if isinstance(metadata, dict) else None
+                if max_turns is None:
+                    max_turns = meta.get("max_turns")
+                installed[name] = {
+                    "skill": name,
+                    "installed": True,
+                    "description": description_str,
+                    "allowed_tool_count": _count_allowed_tools(
+                        meta.get("allowed-tools") or meta.get("allowed_tools")
+                    ),
+                    "timeout_seconds": _coerce_positive_int(timeout),
+                    "max_turns": _coerce_positive_int(max_turns),
+                }
+            except Exception as exc:  # noqa: BLE001 — soft-fail per skill
+                warnings.append(f"failed to parse {entry.name}/SKILL.md: {exc}")
+
+    # Reuse fetch_skill_health for stats (last 30d). It returns a list of
+    # dicts keyed by skill — convert to a dict for the merge.
+    health_list = fetch_skill_health(
+        runtime_db,
+        memories_yaml=memories_yaml,
+        disabled_skills=set(),  # we attach manual/auto kind below, not the merged flag
+    )
+    stats_by_skill: dict[str, dict[str, Any]] = {}
+    for row in health_list:
+        # Skip the error placeholder rows fetch_skill_health emits when the
+        # DB itself is unreachable. They have a "skill"==None sentinel.
+        if "error" in row:
+            warnings.append(str(row.get("error", "skill stats unavailable")))
+            continue
+        if isinstance(row.get("skill"), str):
+            stats_by_skill[row["skill"]] = row
+
+    # Union of installed + skills-with-history (the latter may include
+    # renamed / deleted skills the user wants to see in audit context).
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for name, info in installed.items():
+        merged = dict(info)
+        stats = stats_by_skill.get(name)
+        if stats:
+            merged.update(
+                {
+                    "runs_7d": stats.get("runs_7d", 0),
+                    "runs_30d": stats.get("runs_30d", 0),
+                    "success_rate": stats.get("success_rate"),
+                    "last_run_at": stats.get("last_run_at"),
+                    "last_failure_reason": stats.get("last_failure_reason"),
+                    "negative_feedback_rate": stats.get("negative_feedback_rate"),
+                }
+            )
+        else:
+            merged.update(
+                {
+                    "runs_7d": 0,
+                    "runs_30d": 0,
+                    "success_rate": None,
+                    "last_run_at": None,
+                    "last_failure_reason": None,
+                    "negative_feedback_rate": None,
+                }
+            )
+        merged["disabled_kind"] = (
+            "manual"
+            if name in disabled_manual
+            else ("auto" if name in disabled_auto else None)
+        )
+        out.append(merged)
+        seen.add(name)
+
+    # Trailing: skills that exist only in history (uninstalled / renamed).
+    for name, stats in stats_by_skill.items():
+        if name in seen:
+            continue
+        out.append(
+            {
+                "skill": name,
+                "installed": False,
+                "description": "",
+                "allowed_tool_count": 0,
+                "timeout_seconds": None,
+                "max_turns": None,
+                "runs_7d": stats.get("runs_7d", 0),
+                "runs_30d": stats.get("runs_30d", 0),
+                "success_rate": stats.get("success_rate"),
+                "last_run_at": stats.get("last_run_at"),
+                "last_failure_reason": stats.get("last_failure_reason"),
+                "negative_feedback_rate": stats.get("negative_feedback_rate"),
+                "disabled_kind": (
+                    "manual"
+                    if name in disabled_manual
+                    else ("auto" if name in disabled_auto else None)
+                ),
+            }
+        )
+
+    return {"items": out, "warnings": warnings}
+
+
+def _coerce_positive_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return None
+    return n if n > 0 else None
+
+
+def _count_allowed_tools(value: Any) -> int:
+    """Best-effort tool counter for SKILL.md ``allowed-tools`` frontmatter.
+
+    The spec is a YAML list, but real-world skills sometimes use comma /
+    whitespace separated strings (e.g. ``allowed-tools: "Read, Write"``).
+    A naive ``len(value) if isinstance(list)`` undercounts those as 1
+    (Codex review #4). We accept list, comma-string, whitespace-string,
+    and degrade quietly to 0 on anything else.
+    """
+
+    if value is None:
+        return 0
+    if isinstance(value, list):
+        return sum(1 for item in value if str(item).strip())
+    if isinstance(value, str):
+        # Comma is the canonical separator in the few skills that use a
+        # string form; fall back to whitespace if no commas.
+        sep = "," if "," in value else None
+        parts = value.split(sep) if sep else value.split()
+        return sum(1 for p in parts if p.strip())
+    return 0
+
+
 def _self_eval_negative_rates(memories_yaml: Path) -> dict[str, float]:
     """Compute per-skill negative-feedback rate from self_eval entries.
 

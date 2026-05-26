@@ -145,7 +145,16 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     refresh_seconds = _resolve_refresh_seconds(args.refresh_seconds)
     auth_token = _resolve_auth_token(args.auth_token)
-    app = create_app(config, refresh_seconds=refresh_seconds, auth_token=auth_token)
+    # Mirror boot.py's project_root convention (config.yaml.parent). The new
+    # /api/v1/skills endpoint resolves relative ``skills.path`` against it
+    # so the standalone dashboard can find skills/ when launched from any cwd.
+    project_root = config_path.parent.resolve()
+    app = create_app(
+        config,
+        refresh_seconds=refresh_seconds,
+        auth_token=auth_token,
+        project_root=project_root,
+    )
     refresh_label = f"every {refresh_seconds}s" if refresh_seconds > 0 else "disabled"
     auth_label = "required (token)" if auth_token else "DISABLED (loopback only)"
     print(

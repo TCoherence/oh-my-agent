@@ -61,6 +61,11 @@ class DashboardContext:
     gateway: Any | None = None  # M2 PR4: for live skill-disable cache refresh
     auth_token: str | None = None
     config: dict = field(default_factory=dict)
+    # Resolve relative ``skills.path`` (default ``skills/``) against this
+    # root. Set by ``oma-dashboard`` CLI to ``config.yaml.parent`` and by
+    # boot.py colocated wiring to its project_root. ``None`` falls back to
+    # ``Path.cwd()`` in :func:`oh_my_agent.paths.skills_dir`.
+    project_root: Any | None = None
 
 # Auth-middleware path whitelist. Both /healthz endpoints are public so
 # liveness probes don't need to know the bearer token.
@@ -106,6 +111,7 @@ def create_app(
     runtime_service: Any | None = None,
     store: Any | None = None,
     gateway: Any | None = None,
+    project_root: Path | None = None,
 ) -> FastAPI:
     """Build a FastAPI app bound to the given top-level oh-my-agent config.
 
@@ -147,6 +153,7 @@ def create_app(
         gateway=gateway,
         auth_token=auth_token,
         config=config,
+        project_root=project_root,
     )
     env = Environment(
         loader=PackageLoader("oh_my_agent.dashboard", "templates"),

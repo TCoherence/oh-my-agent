@@ -6,17 +6,22 @@ import {
   useFireAutomation,
   usePatchAutomation,
 } from "@/hooks/use-automations";
-import { ApiError, type AutomationRow } from "@/lib/api";
+import type { AutomationRow } from "@/lib/api";
+import { ApiError } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
-function describeError(err: unknown): string {
+function describeError(err: unknown): { title: string; body?: string } {
   if (err instanceof ApiError) {
     if (err.status === 401)
-      return 'auth required — set localStorage["oma-dashboard-token"]';
+      return { title: 'auth required — set localStorage["oma-dashboard-token"]' };
     if (err.status === 503)
-      return "automation control requires the co-located dashboard (runs in the bot process)";
+      return {
+        title: "Automation control unavailable in this dashboard",
+        body:
+          "You're viewing the read-only standalone dashboard. Automation control (list, fire, pause) only works when the dashboard is co-located inside the bot process. Set `dashboard.colocated: true` in config.yaml (default port :8765) to manage automations.",
+      };
   }
-  return (err as Error)?.message ?? "unknown error";
+  return { title: (err as Error)?.message ?? "unknown error" };
 }
 
 export const Route = createFileRoute("/automations/")({
@@ -42,26 +47,35 @@ function fmtNext(iso: string | null): string {
 }
 
 function AutomationsPage() {
-  const { data, isLoading, isError, error } = useAutomations();
+  const { data, isError, error } = useAutomations();
   const fire = useFireAutomation();
   const patch = usePatchAutomation();
 
   const mutating = fire.isPending || patch.isPending;
+  // Skeleton only on the first-ever load (no data, no error). Once either
+  // settles, we keep the error/data view stable so background polls (every
+  // 5s) don't repaint the skeleton — the bug that made the page look like
+  // it was constantly reloading.
+  const showSkeleton = data === undefined && !isError;
+  const errInfo = isError ? describeError(error) : null;
 
   return (
     <div className="mx-auto max-w-4xl px-6 py-6">
       <h1 className="text-lg font-semibold mb-4">Automations</h1>
 
-      {isLoading ? (
+      {showSkeleton ? (
         <div className="space-y-2">
           {Array.from({ length: 3 }).map((_, i) => (
             <Skeleton key={i} className="h-12 w-full" />
           ))}
         </div>
-      ) : isError ? (
-        <p className="text-sm text-destructive">
-          Failed to load automations: {describeError(error)}
-        </p>
+      ) : errInfo ? (
+        <div className="rounded-md border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm">
+          <p className="font-medium text-destructive">{errInfo.title}</p>
+          {errInfo.body ? (
+            <p className="mt-1 text-xs text-muted-foreground">{errInfo.body}</p>
+          ) : null}
+        </div>
       ) : !data || data.items.length === 0 ? (
         <p className="text-sm text-muted-foreground">No automations defined.</p>
       ) : (
