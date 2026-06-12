@@ -5,7 +5,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
 
 @dataclass
@@ -87,22 +87,6 @@ class InteractivePrompt:
     idempotency_key: str | None = None
     entity_kind: str | None = None
     entity_id: str | None = None    # task_id, prompt_id, etc.
-
-
-class TaskDecisionSurface(Protocol):
-    def supports_buttons(self) -> bool: ...
-
-    async def send_task_draft(
-        self,
-        *,
-        thread_id: str,
-        draft_text: str,
-        task_id: str,
-        nonce: str,
-        actions: list[str],
-    ) -> str | None: ...
-
-    def parse_decision_event(self, raw: Any) -> Any | None: ...
 
 
 class BaseChannel(ABC):

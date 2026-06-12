@@ -183,8 +183,3 @@ def parse_ask_user_challenge(envelope: ControlEnvelope) -> AskUserChallenge | No
         details=details,
         choices=tuple(parsed_choices),
     )
-
-
-def try_parse_auth_challenge(text: str) -> AuthRequiredChallenge | None:
-    envelope = parse_control_envelope(text)
-    return parse_auth_challenge(envelope)

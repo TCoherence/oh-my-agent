@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import signal
 from abc import abstractmethod
 from collections import deque
@@ -522,6 +523,14 @@ class BaseCLIAgent(BaseAgent):
     # across the three agents (default agent → fallback agent both work).
     _oma_agent_home: str | None = None
 
+    # Per-image instruction line prepended by ``_augment_prompt_with_images``.
+    # ``{ref}`` is the workspace-relative (or absolute) image path. Subclasses
+    # override to match their CLI's tool vocabulary (e.g. Claude's Read tool);
+    # agents with native image flags (Codex ``--image``) never call it.
+    _image_reference_instruction = (
+        "An image file is available at `{ref}`. Please read and analyze it."
+    )
+
     def __init__(
         self,
         cli_path: str,
@@ -585,6 +594,36 @@ class BaseCLIAgent(BaseAgent):
         if timeout_override is not None and timeout_override > 0:
             return timeout_override
         return self._timeout
+
+    def _augment_prompt_with_images(
+        self, prompt: str, image_paths: list[Path], cwd: str | Path | None
+    ) -> str:
+        """Copy images into the workspace and prepend file-reference instructions.
+
+        With a ``cwd``, each image is copied to ``<cwd>/_attachments/`` and
+        referenced relatively (CLI sandboxes are cwd-scoped); without one,
+        the absolute path is referenced in place. The per-image instruction
+        text comes from ``_image_reference_instruction``.
+        """
+        if not image_paths:
+            return prompt
+        lines: list[str] = []
+        cwd_path = Path(cwd) if cwd else None
+        for img in image_paths:
+            if not img.is_file():
+                continue
+            if cwd_path:
+                dest_dir = cwd_path / "_attachments"
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                dest = dest_dir / img.name
+                shutil.copy2(img, dest)
+                ref = f"_attachments/{img.name}"
+            else:
+                ref = str(img)
+            lines.append(self._image_reference_instruction.format(ref=ref))
+        if not lines:
+            return prompt
+        return "\n".join(lines) + "\n\n" + prompt
 
     @abstractmethod
     def _build_command(self, prompt: str) -> list[str]:

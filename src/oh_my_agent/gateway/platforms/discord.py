@@ -459,12 +459,91 @@ class _TaskSuggestModal(discord.ui.Modal):
         )
 
 
+# ---------------------------------------------------------------------------
+# Centralized owner gate for slash commands
+# ---------------------------------------------------------------------------
+
+_RESTRICTED_COMMAND_MESSAGE = "This command is restricted to the configured owner."
+_PUBLIC_COMMAND_EXTRA = "oma_public_command"
+
+
+def public_command(
+    command: app_commands.Command[Any, ..., Any],
+) -> app_commands.Command[Any, ..., Any]:
+    """Mark an app command as intentionally exempt from the owner gate.
+
+    The owner gate (:class:`_OwnerGatedCommandTree`) is default-deny: every
+    app command — including any registered in the future — is owner-only
+    unless explicitly opted out with this marker. Apply it ABOVE the
+    ``@tree.command(...)`` decorator so it receives the bound
+    :class:`app_commands.Command`::
+
+        @public_command
+        @tree.command(name="ping", description="Public liveness check")
+        async def slash_ping(interaction: discord.Interaction): ...
+
+    No bundled command is currently public: an audit of all slash handlers
+    found every one owner-gated, so this exists purely as the explicit,
+    documented escape hatch for deliberate future exemptions.
+    """
+    command.extras[_PUBLIC_COMMAND_EXTRA] = True
+    return command
+
+
+class _OwnerGateFailure(app_commands.CheckFailure):
+    """Owner-gate rejection; ``str(exc)`` is the user-facing ephemeral text."""
+
+
+class _OwnerGatedCommandTree(app_commands.CommandTree):
+    """CommandTree that owner-gates every app command by default.
+
+    Replaces the per-handler copies of the 6-line owner check, which were
+    opt-in: a future command added without the block silently bypassed the
+    restriction. ``interaction_check`` runs before ANY command callback
+    (discord.py calls it at the top of ``CommandTree._call``), so the gate
+    holds even for commands that do not exist yet.
+
+    Component (button/modal) interactions never reach the command tree —
+    those handlers keep their own gate via
+    ``DiscordChannel._component_owner_gate``.
+
+    Rejections RAISE :class:`_OwnerGateFailure` instead of returning
+    ``False``: a ``False`` return is swallowed silently by discord.py,
+    while a raised ``CheckFailure`` is routed to the tree error handler
+    (``DiscordChannel._on_app_command_error``), which replies with the
+    friendly ephemeral "restricted" message.
+    """
+
+    def __init__(self, client: discord.Client, *, owner_user_ids: set[str]) -> None:
+        super().__init__(client)
+        self._owner_user_ids = owner_user_ids
+
+    async def interaction_check(self, interaction: discord.Interaction, /) -> bool:
+        if not self._owner_user_ids:
+            return True
+        if str(interaction.user.id) in self._owner_user_ids:
+            return True
+        command = interaction.command
+        if command is not None and command.extras.get(_PUBLIC_COMMAND_EXTRA):
+            return True
+        if interaction.type is discord.InteractionType.autocomplete:
+            # Autocomplete interactions cannot receive a message reply;
+            # deny silently rather than routing through the error handler.
+            return False
+        raise _OwnerGateFailure(_RESTRICTED_COMMAND_MESSAGE)
+
+
 class DiscordChannel(BaseChannel):
     """Discord platform adapter implementing BaseChannel.
 
     Supports both regular messages and slash commands
     (``/reset``, ``/history``, ``/agent``, ``/search``, and the runtime /
     skills / memory / automation command families).
+
+    Access control: all slash commands are owner-gated by default via
+    :class:`_OwnerGatedCommandTree`; exemptions require the explicit
+    :func:`public_command` marker. Button/modal interactions are gated
+    separately in their handlers (``_component_owner_gate``).
     """
 
     supports_streaming_edit: bool = True
@@ -501,18 +580,20 @@ class DiscordChannel(BaseChannel):
         # instances in the same process each hold their own refcount; the
         # filter only comes off the logger when the last one releases.
         self._holds_reconnect_annotator: bool = False
-        # Injected by GatewayManager after construction
-        self._session = None  # ChannelSession
-        self._registry = None  # AgentRegistry
-        self._memory_store = None  # MemoryStore
+        # Injected by GatewayManager after construction. Annotated ``Any``
+        # because the concrete types live in modules this adapter must not
+        # import at module level; the comments name the intended type.
+        self._session: Any = None  # ChannelSession
+        self._registry: Any = None  # AgentRegistry
+        self._memory_store: Any = None  # MemoryStore
         self._skill_syncer = None  # SkillSync
         self._workspace_skills_dirs = None  # list[Path] | None
-        self._runtime_service = None  # RuntimeService
+        self._runtime_service: Any = None  # RuntimeService
         self._judge_store = None  # JudgeStore
-        self._feedback_collector = None  # M1 PR2: optional FeedbackCollector for self_eval
+        self._feedback_collector: Any = None  # M1 PR2: optional FeedbackCollector for self_eval
         self._gateway_manager = None  # GatewayManager (for /memorize)
         self._scheduler = None  # Scheduler
-        self._diary_reflector = None  # DiaryReflector
+        self._diary_reflector: Any = None  # DiaryReflector
         self._ask_service = AskService()
         self._skill_eval_enabled = True
         self._skill_stats_recent_days = 7
@@ -990,17 +1071,11 @@ class DiscordChannel(BaseChannel):
         choice_id: str | None,
         cancel: bool,
     ) -> None:
-        if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
-            await interaction.response.send_message(
-                "This interactive prompt is restricted to the configured owner.",
-                ephemeral=True,
-            )
+        if not await self._component_owner_gate(interaction):
             return
-        if not self._runtime_service:
-            await interaction.response.send_message(
-                "Runtime service is not enabled.",
-                ephemeral=True,
-            )
+        if not await self._interaction_guard(
+            interaction, self._runtime_service, "Runtime service is not enabled."
+        ):
             return
 
         await interaction.response.defer(ephemeral=True)
@@ -1050,17 +1125,11 @@ class DiscordChannel(BaseChannel):
         prompt: InteractivePrompt,
         decision: InteractiveDecision,
     ) -> None:
-        if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
-            await interaction.response.send_message(
-                "This interactive prompt is restricted to the configured owner.",
-                ephemeral=True,
-            )
+        if not await self._component_owner_gate(interaction):
             return
-        if self._task_service is None:
-            await interaction.response.send_message(
-                "Runtime service is not enabled.",
-                ephemeral=True,
-            )
+        if not await self._interaction_guard(
+            interaction, self._task_service is not None, "Runtime service is not enabled."
+        ):
             return
         # Capture the original prompt message id up-front: after a modal submit,
         # ``interaction.message`` is None, so we must fall back to the decision
@@ -1229,13 +1298,75 @@ class DiscordChannel(BaseChannel):
         except Exception:
             logger.warning("Failed to deliver app-command error response", exc_info=True)
 
+    async def _interaction_guard(
+        self, interaction: discord.Interaction, ok: object, error: str
+    ) -> bool:
+        """Send-ephemeral-error-and-return-False guard for dependency checks.
+
+        Returns ``True`` when *ok* is truthy; otherwise replies with *error*
+        ephemerally and returns ``False`` so handlers can early-return on a
+        single line instead of repeating the four-line reject block.
+        """
+        if ok:
+            return True
+        await interaction.response.send_message(error, ephemeral=True)
+        return False
+
+    async def _component_owner_gate(self, interaction: discord.Interaction) -> bool:
+        """Owner gate for component (button/modal) interactions.
+
+        The command tree's ``interaction_check`` only covers app commands;
+        button clicks and modal submits arrive as component interactions
+        and need this explicit gate.
+        """
+        return await self._interaction_guard(
+            interaction,
+            not self._owner_user_ids or str(interaction.user.id) in self._owner_user_ids,
+            "This interactive prompt is restricted to the configured owner.",
+        )
+
+    async def _on_app_command_error(
+        self,
+        interaction: discord.Interaction,
+        error: app_commands.AppCommandError,
+    ) -> None:
+        """Tree-level error handler (registered via ``tree.error`` in ``start``).
+
+        ``_OwnerGateFailure`` raised by ``interaction_check`` lands here and
+        becomes the friendly ephemeral "restricted" reply; anything else is
+        logged with traceback and surfaced via ``user_safe_message``.
+        """
+        command_name = getattr(getattr(interaction, "command", None), "qualified_name", "unknown")
+        if isinstance(error, _OwnerGateFailure):
+            logger.info(
+                "[discord] Blocked non-owner app command command=%s user_id=%s channel_id=%s",
+                command_name,
+                getattr(getattr(interaction, "user", None), "id", None),
+                getattr(interaction, "channel_id", None),
+            )
+            await self._send_interaction_error(
+                interaction, str(error) or _RESTRICTED_COMMAND_MESSAGE
+            )
+            return
+        exc = getattr(error, "original", error)
+        logger.exception(
+            "Discord app command failed command=%s user_id=%s channel_id=%s",
+            command_name,
+            getattr(getattr(interaction, "user", None), "id", None),
+            getattr(interaction, "channel_id", None),
+        )
+        await self._send_interaction_error(interaction, user_safe_message(exc))
+
     async def start(self, handler: MessageHandler) -> None:
         _handler = handler
 
         intents = discord.Intents.default()
         intents.message_content = True
         client = discord.Client(intents=intents)
-        tree = app_commands.CommandTree(client)
+        # Default-deny owner gate for every slash command (see
+        # _OwnerGatedCommandTree). Individual handlers no longer repeat the
+        # check; opt a command out with the @public_command marker.
+        tree = _OwnerGatedCommandTree(client, owner_user_ids=self._owner_user_ids)
         self._client = client
 
         # Annotate discord.py's reconnect-backoff ERROR with a human-friendly
@@ -1261,13 +1392,6 @@ class DiscordChannel(BaseChannel):
 
         @tree.command(name="reset", description="Clear conversation history for this thread")
         async def slash_reset(interaction: discord.Interaction):
-            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
-                await interaction.response.send_message(
-                    "This bot is currently restricted to the configured owner.",
-                    ephemeral=True,
-                )
-                return
-
             ch = interaction.channel
             if not isinstance(ch, discord.Thread) or ch.parent_id != target_id:
                 await interaction.response.send_message(
@@ -1283,13 +1407,6 @@ class DiscordChannel(BaseChannel):
 
         @tree.command(name="history", description="Show conversation history for this thread (for debugging)")
         async def slash_history(interaction: discord.Interaction):
-            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
-                await interaction.response.send_message(
-                    "This bot is currently restricted to the configured owner.",
-                    ephemeral=True,
-                )
-                return
-
             ch = interaction.channel
             if not isinstance(ch, discord.Thread) or ch.parent_id != target_id:
                 await interaction.response.send_message(
@@ -1303,13 +1420,6 @@ class DiscordChannel(BaseChannel):
 
         @tree.command(name="agent", description="Show available agents and their status")
         async def slash_agent(interaction: discord.Interaction):
-            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
-                await interaction.response.send_message(
-                    "This bot is currently restricted to the configured owner.",
-                    ephemeral=True,
-                )
-                return
-
             result = await self._ask_service.list_agents(self._registry)
             await interaction.response.send_message(result.message[:2000], ephemeral=not result.success)
 
@@ -1323,17 +1433,9 @@ class DiscordChannel(BaseChannel):
             query: str,
             limit: int = 5,
         ):
-            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
-                await interaction.response.send_message(
-                    "This bot is currently restricted to the configured owner.",
-                    ephemeral=True,
-                )
-                return
-
-            if not self._memory_store:
-                await interaction.response.send_message(
-                    "Memory store not configured.", ephemeral=True,
-                )
+            if not await self._interaction_guard(
+                interaction, self._memory_store, "Memory store not configured."
+            ):
                 return
 
             await interaction.response.defer()
@@ -1367,18 +1469,11 @@ class DiscordChannel(BaseChannel):
 
         @tree.command(name="reload-skills", description="Manually trigger skill sync and validation")
         async def slash_reload_skills(interaction: discord.Interaction):
-            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
-                await interaction.response.send_message(
-                    "This command is restricted to the configured owner.",
-                    ephemeral=True,
-                )
-                return
-
-            if not self._skill_syncer:
-                await interaction.response.send_message(
-                    "Skill syncer not configured (enable skills in config.yaml).",
-                    ephemeral=True,
-                )
+            if not await self._interaction_guard(
+                interaction,
+                self._skill_syncer,
+                "Skill syncer not configured (enable skills in config.yaml).",
+            ):
                 return
 
             await interaction.response.defer()
@@ -1395,12 +1490,6 @@ class DiscordChannel(BaseChannel):
             interaction: discord.Interaction,
             name: str | None = None,
         ):
-            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
-                await interaction.response.send_message(
-                    "This command is restricted to the configured owner.",
-                    ephemeral=True,
-                )
-                return
             result = await self._automation_service.get_status(name=name)
             await interaction.response.send_message(
                 self._render_automation_status_result(result, name=name)[:1900],
@@ -1409,23 +1498,11 @@ class DiscordChannel(BaseChannel):
 
         @tree.command(name="automation_reload", description="Force an automation directory reload")
         async def slash_automation_reload(interaction: discord.Interaction):
-            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
-                await interaction.response.send_message(
-                    "This command is restricted to the configured owner.",
-                    ephemeral=True,
-                )
-                return
             await interaction.response.defer(ephemeral=True)
             result = await self._automation_service.reload()
             await interaction.followup.send(result.message[:1900], ephemeral=True)
 
         async def _set_automation_enabled(interaction: discord.Interaction, *, name: str, enabled: bool):
-            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
-                await interaction.response.send_message(
-                    "This command is restricted to the configured owner.",
-                    ephemeral=True,
-                )
-                return
             await interaction.response.defer(ephemeral=True)
             result = await self._automation_service.set_enabled(name.strip(), enabled=enabled)
             if not result.success:
@@ -1449,12 +1526,6 @@ class DiscordChannel(BaseChannel):
         @tree.command(name="automation_run", description="Manually fire an automation job now")
         @app_commands.describe(name="Automation name to fire")
         async def slash_automation_run(interaction: discord.Interaction, name: str):
-            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
-                await interaction.response.send_message(
-                    "This command is restricted to the configured owner.",
-                    ephemeral=True,
-                )
-                return
             await interaction.response.defer()
             result = await self._automation_service.fire(name)
             await interaction.followup.send(result.message[:1900])
@@ -1465,17 +1536,11 @@ class DiscordChannel(BaseChannel):
             interaction: discord.Interaction,
             skill: str | None = None,
         ):
-            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
-                await interaction.response.send_message(
-                    "This command is restricted to the configured owner.",
-                    ephemeral=True,
-                )
-                return
-            if self._skill_eval_service is None:
-                await interaction.response.send_message(
-                    "Skill evaluation store is not configured.",
-                    ephemeral=True,
-                )
+            if not await self._interaction_guard(
+                interaction,
+                self._skill_eval_service is not None,
+                "Skill evaluation store is not configured.",
+            ):
                 return
             await interaction.response.defer(ephemeral=True)
             result = await self._skill_eval_service.get_stats(skill)
@@ -1486,17 +1551,11 @@ class DiscordChannel(BaseChannel):
         @tree.command(name="skill_enable", description="Re-enable an auto-disabled skill")
         @app_commands.describe(skill="Skill name")
         async def slash_skill_enable(interaction: discord.Interaction, skill: str):
-            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
-                await interaction.response.send_message(
-                    "This command is restricted to the configured owner.",
-                    ephemeral=True,
-                )
-                return
-            if self._skill_eval_service is None:
-                await interaction.response.send_message(
-                    "Skill evaluation store is not configured.",
-                    ephemeral=True,
-                )
+            if not await self._interaction_guard(
+                interaction,
+                self._skill_eval_service is not None,
+                "Skill evaluation store is not configured.",
+            ):
                 return
             result = await self._skill_eval_service.enable(skill)
             await interaction.response.send_message(result.message[:1900], ephemeral=True)
@@ -1517,17 +1576,9 @@ class DiscordChannel(BaseChannel):
             max_steps: int | None = None,
             max_minutes: int | None = None,
         ):
-            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
-                await interaction.response.send_message(
-                    "This command is restricted to the configured owner.",
-                    ephemeral=True,
-                )
-                return
-            if not self._session or not self._registry:
-                await interaction.response.send_message(
-                    "Session/registry not ready.",
-                    ephemeral=True,
-                )
+            if not await self._interaction_guard(
+                interaction, self._session and self._registry, "Session/registry not ready."
+            ):
                 return
 
             ch = interaction.channel
@@ -1568,12 +1619,6 @@ class DiscordChannel(BaseChannel):
         @tree.command(name="task_status", description="Show runtime task status")
         @app_commands.describe(task_id="Task ID")
         async def slash_task_status(interaction: discord.Interaction, task_id: str):
-            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
-                await interaction.response.send_message(
-                    "This command is restricted to the configured owner.",
-                    ephemeral=True,
-                )
-                return
             result = await self._task_service.get_status(task_id)
             await interaction.response.send_message(
                 self._render_task_action_result(result)[:1900],
@@ -1583,17 +1628,9 @@ class DiscordChannel(BaseChannel):
         @tree.command(name="auth_login", description="Start a QR login flow for a provider")
         @app_commands.describe(provider="Auth provider name")
         async def slash_auth_login(interaction: discord.Interaction, provider: str = "bilibili"):
-            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
-                await interaction.response.send_message(
-                    "This command is restricted to the configured owner.",
-                    ephemeral=True,
-                )
-                return
-            if not self._runtime_service:
-                await interaction.response.send_message(
-                    "Runtime service is not enabled.",
-                    ephemeral=True,
-                )
+            if not await self._interaction_guard(
+                interaction, self._runtime_service, "Runtime service is not enabled."
+            ):
                 return
             thread_id = _interaction_thread_id(interaction)
             if thread_id is None:
@@ -1615,17 +1652,9 @@ class DiscordChannel(BaseChannel):
         @tree.command(name="auth_status", description="Show auth credential and flow state")
         @app_commands.describe(provider="Auth provider name")
         async def slash_auth_status(interaction: discord.Interaction, provider: str | None = None):
-            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
-                await interaction.response.send_message(
-                    "This command is restricted to the configured owner.",
-                    ephemeral=True,
-                )
-                return
-            if not self._runtime_service:
-                await interaction.response.send_message(
-                    "Runtime service is not enabled.",
-                    ephemeral=True,
-                )
+            if not await self._interaction_guard(
+                interaction, self._runtime_service, "Runtime service is not enabled."
+            ):
                 return
             text = await self._runtime_service.get_auth_status(
                 provider=(provider or "bilibili").strip().lower(),
@@ -1636,17 +1665,9 @@ class DiscordChannel(BaseChannel):
         @tree.command(name="auth_clear", description="Clear auth credential and cancel active login flow")
         @app_commands.describe(provider="Auth provider name")
         async def slash_auth_clear(interaction: discord.Interaction, provider: str = "bilibili"):
-            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
-                await interaction.response.send_message(
-                    "This command is restricted to the configured owner.",
-                    ephemeral=True,
-                )
-                return
-            if not self._runtime_service:
-                await interaction.response.send_message(
-                    "Runtime service is not enabled.",
-                    ephemeral=True,
-                )
+            if not await self._interaction_guard(
+                interaction, self._runtime_service, "Runtime service is not enabled."
+            ):
                 return
             await interaction.response.defer(ephemeral=True)
             text = await self._runtime_service.clear_auth(
@@ -1662,12 +1683,6 @@ class DiscordChannel(BaseChannel):
             status: str | None = None,
             limit: int = 10,
         ):
-            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
-                await interaction.response.send_message(
-                    "This command is restricted to the configured owner.",
-                    ephemeral=True,
-                )
-                return
             result = await self._task_service.list_tasks(
                 platform=self.platform,
                 channel_id=self._channel_id,
@@ -1688,12 +1703,6 @@ class DiscordChannel(BaseChannel):
             max_turns: int | None = None,
             timeout_seconds: int | None = None,
         ):
-            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
-                await interaction.response.send_message(
-                    "This command is restricted to the configured owner.",
-                    ephemeral=True,
-                )
-                return
             await interaction.response.defer(ephemeral=True)
             result = await self._task_service.decide(
                 platform=self.platform,
@@ -1759,12 +1768,6 @@ class DiscordChannel(BaseChannel):
         @tree.command(name="task_changes", description="Show file changes for a runtime task")
         @app_commands.describe(task_id="Task ID")
         async def slash_task_changes(interaction: discord.Interaction, task_id: str):
-            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
-                await interaction.response.send_message(
-                    "This command is restricted to the configured owner.",
-                    ephemeral=True,
-                )
-                return
             await interaction.response.defer(ephemeral=True)
             result = await self._task_service.get_changes(task_id)
             await interaction.followup.send(result.message[:1900], ephemeral=True)
@@ -1772,12 +1775,6 @@ class DiscordChannel(BaseChannel):
         @tree.command(name="task_logs", description="Show recent logs/events for a runtime task")
         @app_commands.describe(task_id="Task ID")
         async def slash_task_logs(interaction: discord.Interaction, task_id: str):
-            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
-                await interaction.response.send_message(
-                    "This command is restricted to the configured owner.",
-                    ephemeral=True,
-                )
-                return
             await interaction.response.defer(ephemeral=True)
             result = await self._task_service.get_logs(task_id)
             await interaction.followup.send(result.message[:1900], ephemeral=True)
@@ -1788,12 +1785,6 @@ class DiscordChannel(BaseChannel):
             interaction: discord.Interaction,
             task_id: str | None = None,
         ):
-            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
-                await interaction.response.send_message(
-                    "This command is restricted to the configured owner.",
-                    ephemeral=True,
-                )
-                return
             await interaction.response.defer(ephemeral=True)
             result = await self._task_service.cleanup(
                 actor_id=str(interaction.user.id),
@@ -1808,12 +1799,6 @@ class DiscordChannel(BaseChannel):
             task_id: str,
             instruction: str,
         ):
-            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
-                await interaction.response.send_message(
-                    "This command is restricted to the configured owner.",
-                    ephemeral=True,
-                )
-                return
             await interaction.response.defer(ephemeral=True)
             result = await self._task_service.resume(task_id, instruction, actor_id=str(interaction.user.id))
             await interaction.followup.send(result.message[:1900], ephemeral=True)
@@ -1821,24 +1806,12 @@ class DiscordChannel(BaseChannel):
         @tree.command(name="task_stop", description="Stop a runtime task")
         @app_commands.describe(task_id="Task ID")
         async def slash_task_stop(interaction: discord.Interaction, task_id: str):
-            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
-                await interaction.response.send_message(
-                    "This command is restricted to the configured owner.",
-                    ephemeral=True,
-                )
-                return
             await interaction.response.defer(ephemeral=True)
             result = await self._task_service.stop(task_id, actor_id=str(interaction.user.id))
             await interaction.followup.send(result.message[:1900], ephemeral=True)
 
         @tree.command(name="doctor", description="Show a runtime/operator health snapshot")
         async def slash_doctor(interaction: discord.Interaction):
-            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
-                await interaction.response.send_message(
-                    "This command is restricted to the configured owner.",
-                    ephemeral=True,
-                )
-                return
             await interaction.response.defer(ephemeral=True)
             result = await self._doctor_service.build_report(
                 platform=self.platform,
@@ -1856,16 +1829,9 @@ class DiscordChannel(BaseChannel):
         @tree.command(name="memories", description="Show learned user memories")
         @app_commands.describe(category="Filter by category (preference, project_knowledge, workflow, fact)")
         async def slash_memories(interaction: discord.Interaction, category: str | None = None):
-            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
-                await interaction.response.send_message(
-                    "This command is restricted to the configured owner.",
-                    ephemeral=True,
-                )
-                return
-            if self._memory_service is None:
-                await interaction.response.send_message(
-                    "Memory subsystem is not enabled.", ephemeral=True,
-                )
+            if not await self._interaction_guard(
+                interaction, self._memory_service is not None, "Memory subsystem is not enabled."
+            ):
                 return
             await interaction.response.defer()
             result = self._memory_service.list_entries(category=category)
@@ -1874,16 +1840,9 @@ class DiscordChannel(BaseChannel):
         @tree.command(name="forget", description="Delete a specific memory by ID (marks superseded)")
         @app_commands.describe(memory_id="The memory ID to forget (shown in /memories)")
         async def slash_forget(interaction: discord.Interaction, memory_id: str):
-            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
-                await interaction.response.send_message(
-                    "This command is restricted to the configured owner.",
-                    ephemeral=True,
-                )
-                return
-            if self._memory_service is None:
-                await interaction.response.send_message(
-                    "Memory subsystem is not enabled.", ephemeral=True,
-                )
+            if not await self._interaction_guard(
+                interaction, self._memory_service is not None, "Memory subsystem is not enabled."
+            ):
                 return
             result = await self._memory_service.forget(memory_id)
             await interaction.response.send_message(result.message[:1900], ephemeral=True)
@@ -1898,16 +1857,9 @@ class DiscordChannel(BaseChannel):
             summary: str | None = None,
             scope: str | None = None,
         ):
-            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
-                await interaction.response.send_message(
-                    "This command is restricted to the configured owner.",
-                    ephemeral=True,
-                )
-                return
-            if self._memory_service is None:
-                await interaction.response.send_message(
-                    "Memory subsystem is not enabled.", ephemeral=True,
-                )
+            if not await self._interaction_guard(
+                interaction, self._memory_service is not None, "Memory subsystem is not enabled."
+            ):
                 return
             channel = interaction.channel
             if channel is None:
@@ -1941,12 +1893,6 @@ class DiscordChannel(BaseChannel):
             verdict: str,
             note: str | None = None,
         ):
-            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
-                await interaction.response.send_message(
-                    "This command is restricted to the configured owner.",
-                    ephemeral=True,
-                )
-                return
             verdict_clean = verdict.strip().lower()
             if verdict_clean not in {"good", "bad", "👍", "👎"}:
                 await interaction.response.send_message(
@@ -1958,11 +1904,11 @@ class DiscordChannel(BaseChannel):
                 verdict_clean = "good"
             elif verdict_clean in {"👎"}:
                 verdict_clean = "bad"
-            if self._feedback_collector is None:
-                await interaction.response.send_message(
-                    "Feedback collector is not enabled (memory.judge.enabled=true required).",
-                    ephemeral=True,
-                )
+            if not await self._interaction_guard(
+                interaction,
+                self._feedback_collector is not None,
+                "Feedback collector is not enabled (memory.judge.enabled=true required).",
+            ):
                 return
             await interaction.response.defer(ephemeral=True)
             try:
@@ -1995,16 +1941,11 @@ class DiscordChannel(BaseChannel):
 
         @tree.command(name="reflect_yesterday", description="Run a memory reflection pass over yesterday's diary")
         async def slash_reflect_yesterday(interaction: discord.Interaction):
-            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
-                await interaction.response.send_message(
-                    "This command is restricted to the configured owner.",
-                    ephemeral=True,
-                )
-                return
-            if self._diary_reflector is None or self._registry is None:
-                await interaction.response.send_message(
-                    "Diary reflector is not enabled.", ephemeral=True,
-                )
+            if not await self._interaction_guard(
+                interaction,
+                self._diary_reflector is not None and self._registry is not None,
+                "Diary reflector is not enabled.",
+            ):
                 return
             await interaction.response.defer(ephemeral=True)
             result = await self._diary_reflector.reflect_yesterday(registry=self._registry)
@@ -2014,16 +1955,11 @@ class DiscordChannel(BaseChannel):
 
         @tree.command(name="usage_today", description="Show today's token usage totals for this channel")
         async def slash_usage_today(interaction: discord.Interaction):
-            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
-                await interaction.response.send_message(
-                    "This command is restricted to the configured owner.",
-                    ephemeral=True,
-                )
-                return
-            if not self._memory_store or not hasattr(self._memory_store, "get_usage_summary"):
-                await interaction.response.send_message(
-                    "Usage ledger is not available.", ephemeral=True,
-                )
+            if not await self._interaction_guard(
+                interaction,
+                self._memory_store and hasattr(self._memory_store, "get_usage_summary"),
+                "Usage ledger is not available.",
+            ):
                 return
             await interaction.response.defer(ephemeral=True)
             since = _start_of_today_utc()
@@ -2039,16 +1975,11 @@ class DiscordChannel(BaseChannel):
 
         @tree.command(name="usage_thread", description="Show token usage for this thread (last 24h)")
         async def slash_usage_thread(interaction: discord.Interaction, hours: int = 24):
-            if self._owner_user_ids and str(interaction.user.id) not in self._owner_user_ids:
-                await interaction.response.send_message(
-                    "This command is restricted to the configured owner.",
-                    ephemeral=True,
-                )
-                return
-            if not self._memory_store or not hasattr(self._memory_store, "get_usage_summary"):
-                await interaction.response.send_message(
-                    "Usage ledger is not available.", ephemeral=True,
-                )
+            if not await self._interaction_guard(
+                interaction,
+                self._memory_store and hasattr(self._memory_store, "get_usage_summary"),
+                "Usage ledger is not available.",
+            ):
                 return
             channel = interaction.channel
             if channel is None:
@@ -2279,20 +2210,7 @@ class DiscordChannel(BaseChannel):
             except Exception:
                 logger.debug("Failed to sync implicit feedback (remove)", exc_info=True)
 
-        @tree.error
-        async def on_app_command_error(
-            interaction: discord.Interaction,
-            error: app_commands.AppCommandError,
-        ) -> None:
-            exc = getattr(error, "original", error)
-            command_name = getattr(getattr(interaction, "command", None), "qualified_name", "unknown")
-            logger.exception(
-                "Discord app command failed command=%s user_id=%s channel_id=%s",
-                command_name,
-                getattr(getattr(interaction, "user", None), "id", None),
-                getattr(interaction, "channel_id", None),
-            )
-            await self._send_interaction_error(interaction, user_safe_message(exc))
+        tree.error(self._on_app_command_error)
 
         await client.start(self._token)
 

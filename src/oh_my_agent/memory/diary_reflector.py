@@ -27,7 +27,20 @@ from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Callable
 
-from oh_my_agent.memory.judge_store import JudgeStore, parse_judge_actions
+from oh_my_agent.memory.judge import (
+    JUDGE_RULE_ONE_SENTENCE,
+    JUDGE_RULE_USER_EVIDENCE_DIARY,
+    JUDGE_RULES_DEDUP,
+    build_judge_blocklist_rule,
+    build_judge_ops_contract,
+    build_judge_output_shape,
+)
+from oh_my_agent.memory.judge_store import (
+    JudgeStore,
+    dump_judge_context,
+    run_judge_actions,
+    zero_stats,
+)
 from oh_my_agent.memory.session_diary import strip_system_blocks
 
 logger = logging.getLogger(__name__)
@@ -36,7 +49,11 @@ logger = logging.getLogger(__name__)
 _MAX_DIARY_CHARS = 24_000  # stay comfortably within typical context budgets
 
 
-_DIARY_REFLECT_PROMPT = """\
+# Shared rule blocks (allowed ops, categories/scopes, blocklist, dedup rules,
+# output shape) come from oh_my_agent.memory.judge — the single source of
+# truth for the judge prompt contract. Only daily-specific wording lives here.
+_DIARY_REFLECT_PROMPT = (
+    """\
 You are a long-horizon memory judge. You will be given a full day's worth of \
 conversation diary between the user and the assistant(s) across all threads.
 
@@ -45,29 +62,27 @@ LONG-TERM based on patterns visible across the whole day. Prefer cross-thread \
 signals and repeated behaviours over one-off task detail.
 
 Allowed ops:
-- "add": brand new memory not yet in the store.
-  Required: summary, category, scope, confidence, evidence (a short user-side snippet).
-- "strengthen": an existing memory was reinforced by today's evidence.
-  Required: id, evidence. Optional: confidence_bump (0.0-0.20).
-- "supersede": an existing memory was replaced by a contradictory statement today.
-  Required: old_id, new_summary, category, scope, confidence, evidence.
-- "no_op": nothing in today's diary deserves long-term memory.
-  Required: reason.
-
-You MUST always output something — at minimum a single no_op action.
-
-Categories: preference | workflow | project_knowledge | fact
-Scopes:     global_user | workspace | skill | thread
+"""
+    + build_judge_ops_contract(
+        strengthen_source="today's evidence",
+        supersede_event="was replaced by a contradictory statement today",
+        no_op_subject="in today's diary",
+    )
+    + """
 
 Strict rules:
-- Use ONLY evidence from user turns (quoted ``> ...`` lines or ``user:`` headers).
-- Each memory must be ONE concise sentence about the user.
-- Do NOT memorize: one-off task details, today's plans, slash command usage, \
-file paths, implementation choices, debugging steps, or speculation.
+"""
+    + JUDGE_RULE_USER_EVIDENCE_DIARY
+    + "\n"
+    + JUDGE_RULE_ONE_SENTENCE
+    + "\n"
+    + build_judge_blocklist_rule(plans="today's")
+    + """
 - Confidence: 0.85+ for explicit stable preferences observed more than once today. \
 0.5-0.7 for single-day inferences.
-- If a new observation paraphrases an existing memory → emit "strengthen", do NOT "add" a duplicate.
-- If a new observation contradicts an existing memory → emit "supersede".
+"""
+    + JUDGE_RULES_DEDUP
+    + """
 - Prefer strengthen/supersede over add when uncertain.
 - If the day shows no real cross-thread signal → emit a single no_op.
 
@@ -77,14 +92,10 @@ Current active memories ({active_count} entries):
 Diary (date: {diary_date}):
 {diary_text}
 
-Output ONLY a JSON object with this exact shape (no markdown, no preamble):
-{{"actions": [
-  {{"op": "add", "summary": "...", "category": "preference", "scope": "global_user", "confidence": 0.9, "evidence": "..."}},
-  {{"op": "strengthen", "id": "abc123", "evidence": "..."}},
-  {{"op": "supersede", "old_id": "def456", "new_summary": "...", "category": "...", "scope": "...", "confidence": 0.9, "evidence": "..."}},
-  {{"op": "no_op", "reason": "..."}}
-]}}
 """
+    + build_judge_output_shape(confidence="0.9", add_evidence="...")
+    + "\n"
+)
 
 
 @dataclass
@@ -121,6 +132,16 @@ class DiaryReflector:
     def _path_for(self, day: date) -> Path:
         return self._diary_dir / f"{day.isoformat()}.md"
 
+    @staticmethod
+    def _skipped(diary_date: date, path: Path, reason: str) -> ReflectionResult:
+        return ReflectionResult(
+            diary_date=diary_date,
+            diary_path=path,
+            actions=[],
+            stats=zero_stats(),
+            skipped_reason=reason,
+        )
+
     async def reflect(
         self,
         *,
@@ -136,34 +157,16 @@ class DiaryReflector:
         """
         path = self._path_for(diary_date)
         if not path.exists():
-            return ReflectionResult(
-                diary_date=diary_date,
-                diary_path=path,
-                actions=[],
-                stats={"add": 0, "strengthen": 0, "supersede": 0, "no_op": 0, "rejected": 0},
-                skipped_reason="diary_missing",
-            )
+            return self._skipped(diary_date, path, "diary_missing")
         diary_text = path.read_text(encoding="utf-8").strip()
         if not diary_text:
-            return ReflectionResult(
-                diary_date=diary_date,
-                diary_path=path,
-                actions=[],
-                stats={"add": 0, "strengthen": 0, "supersede": 0, "no_op": 0, "rejected": 0},
-                skipped_reason="diary_empty",
-            )
+            return self._skipped(diary_date, path, "diary_empty")
         # Drop ``system:`` blocks (automation status pings) before reflection
         # so task metadata cannot leak back into long-term memory via the
         # apply_actions path.
         diary_text = strip_system_blocks(diary_text).strip()
         if not diary_text:
-            return ReflectionResult(
-                diary_date=diary_date,
-                diary_path=path,
-                actions=[],
-                stats={"add": 0, "strengthen": 0, "supersede": 0, "no_op": 0, "rejected": 0},
-                skipped_reason="diary_empty",
-            )
+            return self._skipped(diary_date, path, "diary_empty")
         # Truncation policy: keep the head of the day (first N chars). Intra-day
         # patterns usually form in the morning/early-afternoon block; the tail
         # tends to be follow-ups.
@@ -171,44 +174,26 @@ class DiaryReflector:
             diary_text = diary_text[: self._max_diary_chars] + "\n...[diary truncated]"
 
         active_context = self._store.to_judge_context()
-        import json as _json  # local import — avoids top-level dependency on JSON everywhere.
-        active_text = (
-            _json.dumps(active_context, ensure_ascii=False, indent=2) if active_context else "[]"
-        )
         prompt = _DIARY_REFLECT_PROMPT.format(
             active_count=len(active_context),
-            active_memories=active_text,
+            active_memories=dump_judge_context(active_context),
             diary_date=diary_date.isoformat(),
             diary_text=diary_text,
         )
 
-        try:
-            _agent, response = await registry.run(prompt, run_label=run_label)
-        except Exception as exc:
-            logger.warning("diary_reflect agent_exception date=%s err=%s", diary_date, exc)
-            return ReflectionResult(
-                diary_date=diary_date,
-                diary_path=path,
-                actions=[],
-                stats={"add": 0, "strengthen": 0, "supersede": 0, "no_op": 0, "rejected": 0},
-                error=f"agent_exception: {exc}",
-            )
-        if getattr(response, "error", None):
-            return ReflectionResult(
-                diary_date=diary_date,
-                diary_path=path,
-                actions=[],
-                stats={"add": 0, "strengthen": 0, "supersede": 0, "no_op": 0, "rejected": 0},
-                raw_response=response.text or "",
-                error=response.error,
-            )
-        actions = parse_judge_actions(response.text or "")
-        stats = await self._store.apply_actions(
-            actions,
-            thread_id=None,
-            skill_name=None,
-            source_workspace=None,
+        actions, stats, raw_text, error = await run_judge_actions(
+            prompt, registry, self._store, run_label=run_label
         )
+        if error is not None:
+            logger.warning("diary_reflect error date=%s err=%s", diary_date, error)
+            return ReflectionResult(
+                diary_date=diary_date,
+                diary_path=path,
+                actions=[],
+                stats=stats,
+                raw_response=raw_text,
+                error=error,
+            )
         logger.info(
             "diary_reflect applied date=%s actions=%d stats=%s",
             diary_date,
@@ -220,7 +205,7 @@ class DiaryReflector:
             diary_path=path,
             actions=actions,
             stats=stats,
-            raw_response=response.text or "",
+            raw_response=raw_text,
         )
 
     async def reflect_yesterday(

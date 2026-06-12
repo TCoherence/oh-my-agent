@@ -1291,3 +1291,151 @@ async def test_run_skill_reload_offloads_and_summarizes(tmp_path, monkeypatch):
     assert "**Skill reload complete** — 3 synced, 1 reverse-imported" in summary
     assert "✅ **demo**" in summary
     assert [c[0] for c in syncer.calls] == ["full_sync", "refresh_workspace_dirs"]
+
+
+# ---------------------------------------------------------------------------
+# Centralized owner gate: CommandTree.interaction_check is default-deny for
+# every app command (including ones registered in the future); the explicit
+# @public_command marker is the only exemption; component (button/modal)
+# handlers keep their own gate because they never reach the command tree.
+# ---------------------------------------------------------------------------
+
+
+from oh_my_agent.gateway.platforms.discord import (  # noqa: E402
+    _RESTRICTED_COMMAND_MESSAGE,
+    _OwnerGatedCommandTree,
+    _OwnerGateFailure,
+    public_command,
+)
+
+
+def _gated_tree(owner_ids: set[str]) -> _OwnerGatedCommandTree:
+    # A fresh Client per tree: discord.py allows exactly one tree per client.
+    client = discord.Client(intents=discord.Intents.default())
+    return _OwnerGatedCommandTree(client, owner_user_ids=owner_ids)
+
+
+def _register_dummy_command(tree: _OwnerGatedCommandTree, name: str = "dummy_future_cmd"):
+    """Register a bare command WITHOUT any gate code or marker — stands in
+    for a future command added by someone who forgot about access control."""
+
+    @tree.command(name=name, description="registered without any gate marker")
+    async def _dummy(interaction: discord.Interaction):  # pragma: no cover
+        del interaction
+
+    return tree.get_command(name)
+
+
+def _app_interaction(user_id: int, command):
+    return SimpleNamespace(
+        user=SimpleNamespace(id=user_id),
+        command=command,
+        type=discord.InteractionType.application_command,
+    )
+
+
+@pytest.mark.asyncio
+async def test_owner_gate_new_unmarked_command_denied_by_default():
+    """Default-deny: a command registered with no marker and no per-handler
+    gate must still reject non-owners at the tree level."""
+    tree = _gated_tree({"42"})
+    cmd = _register_dummy_command(tree)
+
+    with pytest.raises(_OwnerGateFailure) as excinfo:
+        await tree.interaction_check(_app_interaction(99, cmd))
+
+    assert str(excinfo.value) == _RESTRICTED_COMMAND_MESSAGE
+
+
+@pytest.mark.asyncio
+async def test_owner_gate_allows_owner():
+    tree = _gated_tree({"42"})
+    cmd = _register_dummy_command(tree)
+
+    assert await tree.interaction_check(_app_interaction(42, cmd)) is True
+
+
+@pytest.mark.asyncio
+async def test_owner_gate_open_when_no_owner_configured():
+    """No access.owner_user_ids configured → bot is open; gate is a no-op."""
+    tree = _gated_tree(set())
+    cmd = _register_dummy_command(tree)
+
+    assert await tree.interaction_check(_app_interaction(99, cmd)) is True
+
+
+@pytest.mark.asyncio
+async def test_public_command_marker_exempts_non_owner():
+    """A command explicitly marked @public_command stays accessible to
+    non-owners even with the owner gate configured."""
+    tree = _gated_tree({"42"})
+    cmd = public_command(_register_dummy_command(tree, name="dummy_public_cmd"))
+
+    assert await tree.interaction_check(_app_interaction(99, cmd)) is True
+
+
+@pytest.mark.asyncio
+async def test_owner_gate_autocomplete_denied_silently():
+    """Autocomplete interactions cannot receive a message reply, so the gate
+    returns False (silent deny) instead of raising into the error handler."""
+    tree = _gated_tree({"42"})
+    cmd = _register_dummy_command(tree)
+    interaction = SimpleNamespace(
+        user=SimpleNamespace(id=99),
+        command=cmd,
+        type=discord.InteractionType.autocomplete,
+    )
+
+    assert await tree.interaction_check(interaction) is False
+
+
+@pytest.mark.asyncio
+async def test_owner_gate_failure_sends_friendly_ephemeral_message():
+    """_OwnerGateFailure raised by interaction_check routes through the tree
+    error handler and becomes the friendly ephemeral restricted reply (no
+    'Internal server error')."""
+    channel = DiscordChannel(token="x", channel_id="100", owner_user_ids={"42"})
+    response = _FakeModalSender()
+    interaction = SimpleNamespace(
+        user=SimpleNamespace(id=99),
+        response=response,
+        followup=_FakeFollowup(),
+        command=None,
+        channel_id=200,
+    )
+
+    await channel._on_app_command_error(
+        interaction,  # type: ignore[arg-type]
+        _OwnerGateFailure(_RESTRICTED_COMMAND_MESSAGE),
+    )
+
+    assert response.messages == [(_RESTRICTED_COMMAND_MESSAGE, True)]
+
+
+@pytest.mark.asyncio
+async def test_component_owner_gate_rejects_non_owner_button_click():
+    """Button/modal interactions bypass the command tree, so the component
+    handlers must keep their own owner gate."""
+    channel = DiscordChannel(token="x", channel_id="100", owner_user_ids={"42"})
+    task_service = _FakeTaskService()
+    channel._task_service = task_service  # type: ignore[assignment]
+    response = _FakeModalSender()
+    interaction = SimpleNamespace(
+        user=SimpleNamespace(id=99),
+        response=response,
+        followup=_FakeFollowup(),
+        message=SimpleNamespace(id=555),
+        channel_id=200,
+    )
+
+    await channel._handle_task_interaction(  # type: ignore[arg-type]
+        interaction,
+        prompt=_task_prompt(),
+        decision=_suggest_decision(),
+    )
+
+    assert task_service.decide_calls == []
+    assert response.modals == []
+    assert response.messages == [
+        ("This interactive prompt is restricted to the configured owner.", True)
+    ]

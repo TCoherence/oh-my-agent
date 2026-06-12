@@ -797,7 +797,7 @@ class JudgeStore:
         skill_name: str | None = None,
         source_workspace: str | None = None,
     ) -> dict[str, int]:
-        stats = {"add": 0, "strengthen": 0, "supersede": 0, "no_op": 0, "rejected": 0}
+        stats = zero_stats()
         if not actions:
             return stats
         payload: list[dict[str, Any]] | None = None
@@ -1179,6 +1179,52 @@ class JudgeStore:
             "active": len(active),
             "superseded": len(self._memories) - len(active),
         }
+
+
+def zero_stats() -> dict[str, int]:
+    """Fresh all-zero action-stats dict (the shared judge-pipeline stats shape)."""
+    return {"add": 0, "strengthen": 0, "supersede": 0, "no_op": 0, "rejected": 0}
+
+
+def dump_judge_context(context: list[dict[str, Any]]) -> str:
+    """Render :meth:`JudgeStore.to_judge_context` output for prompt injection."""
+    return json.dumps(context, ensure_ascii=False, indent=2) if context else "[]"
+
+
+async def run_judge_actions(
+    prompt: str,
+    registry: Any,
+    store: "JudgeStore",
+    *,
+    run_label: str,
+    thread_id: str | None = None,
+    skill_name: str | None = None,
+    source_workspace: str | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, int], str, str | None]:
+    """Shared judge pipeline: invoke registry → error check → parse → apply.
+
+    Used by :class:`oh_my_agent.memory.judge.Judge` and the daily / weekly
+    diary reflectors so the run → parse → ``apply_actions`` sequence lives in
+    one place. Returns ``(actions, stats, raw_text, error)``. On agent
+    exception or response error, ``actions`` is empty, ``stats`` is all-zero,
+    ``error`` is set, and the store is left untouched.
+    """
+    try:
+        _agent, response = await registry.run(prompt, run_label=run_label)
+    except Exception as exc:
+        return [], zero_stats(), "", f"agent_exception: {exc}"
+    raw_text = response.text or ""
+    error = getattr(response, "error", None)
+    if error:
+        return [], zero_stats(), raw_text, error
+    actions = parse_judge_actions(raw_text)
+    stats = await store.apply_actions(
+        actions,
+        thread_id=thread_id,
+        skill_name=skill_name,
+        source_workspace=source_workspace,
+    )
+    return actions, stats, raw_text, None
 
 
 def parse_judge_actions(raw_text: str) -> list[dict[str, Any]]:

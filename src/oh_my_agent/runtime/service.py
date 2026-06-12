@@ -230,6 +230,239 @@ _RERUN_FALLBACK_BASE_TURNS = 25
 _RERUN_BUMP_TIMEOUT_SECONDS_DEFAULT = 1800
 _RERUN_FALLBACK_BASE_TIMEOUT_SECONDS = 600
 
+
+@dataclass(frozen=True)
+class _RerunBumpSpec:
+    """Parametrizes the two "re-run with a bigger budget" flavors (bumped
+    ``max_turns`` after a max_turns failure / bumped ``timeout_seconds``
+    after a wall-clock timeout). The flavors are byte-identical except for
+    which budget field gets bumped, the bump constant, and message strings —
+    captured here so :func:`_rerun_task_with_bump` and
+    :func:`_surface_rerun_bump_button` can serve both."""
+
+    # Decision-surface action id, also the source-tag prefix in
+    # ``task.created`` events ("rerun_bump_turns" / "rerun_bump_timeout").
+    # Must stay stable: button callbacks dispatch on this string in
+    # ``handle_decision_event``.
+    action: str
+    # RuntimeTask attribute / ``create_runtime_task`` kwarg / event payload
+    # key for the bumped budget ("agent_max_turns" / "agent_timeout_seconds").
+    field: str
+    # Payload key for the parent's base value in ``task.rerun_sibling_created``.
+    base_event_key: str
+    # Human label used in notify / result / log strings.
+    label: str
+    fallback_base: int
+    bump: int
+    # Builds the "hit <budget>. Re-run with <new>?" question for the
+    # decision surface; (base, new) -> text.
+    build_question: Callable[[int, int], str]
+    # Unit suffix rendered after base/new in the "Surfacing ... button" log
+    # line ("" for turns, "s" for seconds).
+    log_unit: str = ""
+
+
+def _turns_bump_question(base: int, new: int) -> str:
+    return f"hit `max_turns` ({base}). Re-run with `max_turns={new}`?"
+
+
+def _timeout_bump_question(base: int, new: int) -> str:
+    bump_min = _RERUN_BUMP_TIMEOUT_SECONDS_DEFAULT // 60
+    return (
+        f"hit wall-clock `timeout` ({base}s). "
+        f"Re-run with `timeout_seconds={new}` (+{bump_min} min)?"
+    )
+
+
+_TURNS_BUMP_SPEC = _RerunBumpSpec(
+    action="rerun_bump_turns",
+    field="agent_max_turns",
+    base_event_key="base_turns",
+    label="max_turns",
+    fallback_base=_RERUN_FALLBACK_BASE_TURNS,
+    bump=_RERUN_BUMP_TURNS_DEFAULT,
+    build_question=_turns_bump_question,
+)
+
+_TIMEOUT_BUMP_SPEC = _RerunBumpSpec(
+    action="rerun_bump_timeout",
+    field="agent_timeout_seconds",
+    base_event_key="base_timeout_seconds",
+    label="timeout_seconds",
+    fallback_base=_RERUN_FALLBACK_BASE_TIMEOUT_SECONDS,
+    bump=_RERUN_BUMP_TIMEOUT_SECONDS_DEFAULT,
+    build_question=_timeout_bump_question,
+    log_unit="s",
+)
+
+
+# The two functions below are module-level (taking the service explicitly)
+# rather than RuntimeService methods on purpose: the public wrapper methods
+# are bound onto bare test stubs via ``MethodType``, so they must not depend
+# on any *other* method existing on ``self`` — only on the collaborator
+# surface the original implementations used (``_store``, ``_notify``, ...).
+
+
+async def _rerun_task_with_bump(
+    service: RuntimeService,
+    parent: RuntimeTask,
+    *,
+    spec: _RerunBumpSpec,
+    actor_id: str,
+    source: str,
+) -> str:
+    """Mint a sibling runtime task identical to *parent* except for the one
+    budget field described by *spec*, bumped by ``spec.bump``. Shared
+    implementation behind ``_rerun_task_with_bumped_turns`` /
+    ``_rerun_task_with_bumped_timeout``."""
+    base_value = getattr(parent, spec.field) or spec.fallback_base
+    new_value = base_value + spec.bump
+
+    budget_kwargs: dict[str, Any] = {
+        "agent_timeout_seconds": parent.agent_timeout_seconds,
+        "agent_max_turns": parent.agent_max_turns,
+    }
+    budget_kwargs[spec.field] = new_value
+
+    sibling_id = uuid.uuid4().hex[:12]
+    sibling = await service._store.create_runtime_task(
+        task_id=sibling_id,
+        platform=parent.platform,
+        channel_id=parent.channel_id,
+        thread_id=parent.thread_id,
+        created_by=actor_id,
+        goal=parent.goal,
+        original_request=parent.original_request or parent.goal,
+        preferred_agent=parent.preferred_agent,
+        status=TASK_STATUS_PENDING,
+        max_steps=parent.max_steps,
+        max_minutes=parent.max_minutes,
+        test_command=parent.test_command,
+        completion_mode=parent.completion_mode,
+        output_summary=None,
+        artifact_manifest=None,
+        automation_name=parent.automation_name,
+        task_type=parent.task_type,
+        skill_name=parent.skill_name,
+        **budget_kwargs,
+    )
+    await service._store.add_runtime_event(
+        sibling.id,
+        "task.created",
+        {
+            "source": f"{spec.action}:{source}",
+            "status": TASK_STATUS_PENDING,
+            "parent_task_id": parent.id,
+            spec.field: new_value,
+        },
+    )
+    await service._store.add_runtime_event(
+        parent.id,
+        "task.rerun_sibling_created",
+        {
+            "actor_id": actor_id,
+            "source": source,
+            "sibling_task_id": sibling.id,
+            spec.field: new_value,
+            spec.base_event_key: base_value,
+        },
+    )
+    service._task_sources[sibling.id] = f"{spec.action}:{source}"
+    logger.info(
+        "Runtime task=%s rerun as task=%s %s=%d (parent=%d bump=+%d)",
+        parent.id,
+        sibling.id,
+        spec.label,
+        new_value,
+        base_value,
+        spec.bump,
+    )
+
+    await service._notify(
+        sibling,
+        (
+            f"Task `{sibling.id}` queued (re-run of `{parent.id}` with "
+            f"`{spec.label}={new_value}`, was {base_value})."
+        ),
+        record_history=True,
+    )
+    await service._signal_status_by_id(sibling, TASK_STATUS_PENDING)
+    return (
+        f"Task `{parent.id}` queued for re-run as `{sibling.id}` "
+        f"with {spec.label}={new_value}."
+    )
+
+
+async def _surface_rerun_bump_button(
+    service: RuntimeService,
+    task: RuntimeTask,
+    *,
+    spec: _RerunBumpSpec,
+) -> None:
+    """Post a decision surface offering to re-run the failed *task* with the
+    bumped budget described by *spec*. Fire-and-forget — any failure is
+    logged but does not propagate (the task is already terminal). Shared
+    implementation behind ``_surface_rerun_bump_turns_button`` /
+    ``_surface_rerun_bump_timeout_button``."""
+    session = service._session_for(task)
+    if session is None:
+        logger.warning(
+            "Cannot surface %s button for task=%s: no session for %s:%s",
+            spec.action,
+            task.id,
+            task.platform,
+            task.channel_id,
+        )
+        return
+    base_value = getattr(task, spec.field) or spec.fallback_base
+    new_value = base_value + spec.bump
+    try:
+        nonce = await service._store.create_runtime_decision_nonce(
+            task.id,
+            ttl_minutes=service._decision_ttl_minutes,
+        )
+    except Exception as exc:
+        logger.warning("Failed to mint %s nonce for task=%s: %s", spec.action, task.id, exc)
+        return
+
+    mentions = ""
+    if service._owner_user_ids:
+        render_user_mention = getattr(session.channel, "render_user_mention", None)
+        if callable(render_user_mention):
+            mentions = " ".join(
+                render_user_mention(uid) for uid in sorted(service._owner_user_ids)
+            )
+            if mentions:
+                mentions += " "
+
+    ttl_hours = max(1, service._decision_ttl_minutes // 60)
+    text = (
+        f"{mentions}Task `{task.id}` {spec.build_question(base_value, new_value)}\n"
+        f"_Button expires in ~{ttl_hours}h._"
+    )
+    logger.info(
+        "Surfacing %s button task=%s thread=%s base=%d%s new=%d%s ttl_minutes=%d",
+        spec.action,
+        task.id,
+        task.thread_id,
+        base_value,
+        spec.log_unit,
+        new_value,
+        spec.log_unit,
+        service._decision_ttl_minutes,
+    )
+    try:
+        await service._send_decision_surface(
+            session,
+            task.thread_id,
+            text,
+            task.id,
+            nonce,
+            [spec.action],
+        )
+    except Exception as exc:
+        logger.warning("Failed to post %s surface for task=%s: %s", spec.action, task.id, exc)
+
 # After this many days, automation_posts rows are dropped by the janitor —
 # replies older than this stop promoting to follow-up threads. MVP: fixed
 # constant; move to config if users ever complain.
@@ -4706,75 +4939,12 @@ class RuntimeService:
         after a ``max_turns`` failure — user acknowledges the overshoot and
         wants another attempt with more budget.
         """
-        base_turns = parent.agent_max_turns or _RERUN_FALLBACK_BASE_TURNS
-        new_turns = base_turns + _RERUN_BUMP_TURNS_DEFAULT
-
-        sibling_id = uuid.uuid4().hex[:12]
-        sibling = await self._store.create_runtime_task(
-            task_id=sibling_id,
-            platform=parent.platform,
-            channel_id=parent.channel_id,
-            thread_id=parent.thread_id,
-            created_by=actor_id,
-            goal=parent.goal,
-            original_request=parent.original_request or parent.goal,
-            preferred_agent=parent.preferred_agent,
-            status=TASK_STATUS_PENDING,
-            max_steps=parent.max_steps,
-            max_minutes=parent.max_minutes,
-            test_command=parent.test_command,
-            completion_mode=parent.completion_mode,
-            output_summary=None,
-            artifact_manifest=None,
-            automation_name=parent.automation_name,
-            task_type=parent.task_type,
-            skill_name=parent.skill_name,
-            agent_timeout_seconds=parent.agent_timeout_seconds,
-            agent_max_turns=new_turns,
-        )
-        await self._store.add_runtime_event(
-            sibling.id,
-            "task.created",
-            {
-                "source": f"rerun_bump_turns:{source}",
-                "status": TASK_STATUS_PENDING,
-                "parent_task_id": parent.id,
-                "agent_max_turns": new_turns,
-            },
-        )
-        await self._store.add_runtime_event(
-            parent.id,
-            "task.rerun_sibling_created",
-            {
-                "actor_id": actor_id,
-                "source": source,
-                "sibling_task_id": sibling.id,
-                "agent_max_turns": new_turns,
-                "base_turns": base_turns,
-            },
-        )
-        self._task_sources[sibling.id] = f"rerun_bump_turns:{source}"
-        logger.info(
-            "Runtime task=%s rerun as task=%s max_turns=%d (parent=%d bump=+%d)",
-            parent.id,
-            sibling.id,
-            new_turns,
-            base_turns,
-            _RERUN_BUMP_TURNS_DEFAULT,
-        )
-
-        await self._notify(
-            sibling,
-            (
-                f"Task `{sibling.id}` queued (re-run of `{parent.id}` with "
-                f"`max_turns={new_turns}`, was {base_turns})."
-            ),
-            record_history=True,
-        )
-        await self._signal_status_by_id(sibling, TASK_STATUS_PENDING)
-        return (
-            f"Task `{parent.id}` queued for re-run as `{sibling.id}` "
-            f"with max_turns={new_turns}."
+        return await _rerun_task_with_bump(
+            self,
+            parent,
+            spec=_TURNS_BUMP_SPEC,
+            actor_id=actor_id,
+            source=source,
         )
 
     async def _rerun_task_with_bumped_timeout(
@@ -4787,75 +4957,12 @@ class RuntimeService:
         """Mint a sibling runtime task with ``agent_timeout_seconds`` bumped
         by ``_RERUN_BUMP_TIMEOUT_SECONDS_DEFAULT``. Mirrors
         :meth:`_rerun_task_with_bumped_turns` for the timeout-failure mode."""
-        base_timeout = parent.agent_timeout_seconds or _RERUN_FALLBACK_BASE_TIMEOUT_SECONDS
-        new_timeout = base_timeout + _RERUN_BUMP_TIMEOUT_SECONDS_DEFAULT
-
-        sibling_id = uuid.uuid4().hex[:12]
-        sibling = await self._store.create_runtime_task(
-            task_id=sibling_id,
-            platform=parent.platform,
-            channel_id=parent.channel_id,
-            thread_id=parent.thread_id,
-            created_by=actor_id,
-            goal=parent.goal,
-            original_request=parent.original_request or parent.goal,
-            preferred_agent=parent.preferred_agent,
-            status=TASK_STATUS_PENDING,
-            max_steps=parent.max_steps,
-            max_minutes=parent.max_minutes,
-            test_command=parent.test_command,
-            completion_mode=parent.completion_mode,
-            output_summary=None,
-            artifact_manifest=None,
-            automation_name=parent.automation_name,
-            task_type=parent.task_type,
-            skill_name=parent.skill_name,
-            agent_timeout_seconds=new_timeout,
-            agent_max_turns=parent.agent_max_turns,
-        )
-        await self._store.add_runtime_event(
-            sibling.id,
-            "task.created",
-            {
-                "source": f"rerun_bump_timeout:{source}",
-                "status": TASK_STATUS_PENDING,
-                "parent_task_id": parent.id,
-                "agent_timeout_seconds": new_timeout,
-            },
-        )
-        await self._store.add_runtime_event(
-            parent.id,
-            "task.rerun_sibling_created",
-            {
-                "actor_id": actor_id,
-                "source": source,
-                "sibling_task_id": sibling.id,
-                "agent_timeout_seconds": new_timeout,
-                "base_timeout_seconds": base_timeout,
-            },
-        )
-        self._task_sources[sibling.id] = f"rerun_bump_timeout:{source}"
-        logger.info(
-            "Runtime task=%s rerun as task=%s timeout_seconds=%d (parent=%d bump=+%d)",
-            parent.id,
-            sibling.id,
-            new_timeout,
-            base_timeout,
-            _RERUN_BUMP_TIMEOUT_SECONDS_DEFAULT,
-        )
-
-        await self._notify(
-            sibling,
-            (
-                f"Task `{sibling.id}` queued (re-run of `{parent.id}` with "
-                f"`timeout_seconds={new_timeout}`, was {base_timeout})."
-            ),
-            record_history=True,
-        )
-        await self._signal_status_by_id(sibling, TASK_STATUS_PENDING)
-        return (
-            f"Task `{parent.id}` queued for re-run as `{sibling.id}` "
-            f"with timeout_seconds={new_timeout}."
+        return await _rerun_task_with_bump(
+            self,
+            parent,
+            spec=_TIMEOUT_BUMP_SPEC,
+            actor_id=actor_id,
+            source=source,
         )
 
     async def _stop_requested(self, task: RuntimeTask) -> str | None:
@@ -4980,61 +5087,7 @@ class RuntimeService:
         """Post a decision surface offering to re-run the failed task with a
         bumped ``max_turns`` budget. Fire-and-forget — any failure is logged
         but does not propagate (the task is already terminal)."""
-        session = self._session_for(task)
-        if session is None:
-            logger.warning(
-                "Cannot surface rerun_bump_turns button for task=%s: no session for %s:%s",
-                task.id,
-                task.platform,
-                task.channel_id,
-            )
-            return
-        base_turns = task.agent_max_turns or _RERUN_FALLBACK_BASE_TURNS
-        new_turns = base_turns + _RERUN_BUMP_TURNS_DEFAULT
-        try:
-            nonce = await self._store.create_runtime_decision_nonce(
-                task.id,
-                ttl_minutes=self._decision_ttl_minutes,
-            )
-        except Exception as exc:
-            logger.warning("Failed to mint rerun_bump_turns nonce for task=%s: %s", task.id, exc)
-            return
-
-        mentions = ""
-        if self._owner_user_ids:
-            render_user_mention = getattr(session.channel, "render_user_mention", None)
-            if callable(render_user_mention):
-                mentions = " ".join(
-                    render_user_mention(uid) for uid in sorted(self._owner_user_ids)
-                )
-                if mentions:
-                    mentions += " "
-
-        ttl_hours = max(1, self._decision_ttl_minutes // 60)
-        text = (
-            f"{mentions}Task `{task.id}` hit `max_turns` ({base_turns}). "
-            f"Re-run with `max_turns={new_turns}`?\n"
-            f"_Button expires in ~{ttl_hours}h._"
-        )
-        logger.info(
-            "Surfacing rerun_bump_turns button task=%s thread=%s base=%d new=%d ttl_minutes=%d",
-            task.id,
-            task.thread_id,
-            base_turns,
-            new_turns,
-            self._decision_ttl_minutes,
-        )
-        try:
-            await self._send_decision_surface(
-                session,
-                task.thread_id,
-                text,
-                task.id,
-                nonce,
-                ["rerun_bump_turns"],
-            )
-        except Exception as exc:
-            logger.warning("Failed to post rerun_bump_turns surface for task=%s: %s", task.id, exc)
+        await _surface_rerun_bump_button(self, task, spec=_TURNS_BUMP_SPEC)
 
     async def _surface_rerun_bump_timeout_button(self, task: RuntimeTask) -> None:
         """Post a decision surface offering to re-run the failed task with a
@@ -5047,62 +5100,7 @@ class RuntimeService:
         wall-clock kill mid-tool-use almost always fails the same way on
         re-run with the same budget. This button gives the operator a
         one-click escape hatch with an actually-larger budget."""
-        session = self._session_for(task)
-        if session is None:
-            logger.warning(
-                "Cannot surface rerun_bump_timeout button for task=%s: no session for %s:%s",
-                task.id,
-                task.platform,
-                task.channel_id,
-            )
-            return
-        base_timeout = task.agent_timeout_seconds or _RERUN_FALLBACK_BASE_TIMEOUT_SECONDS
-        new_timeout = base_timeout + _RERUN_BUMP_TIMEOUT_SECONDS_DEFAULT
-        try:
-            nonce = await self._store.create_runtime_decision_nonce(
-                task.id,
-                ttl_minutes=self._decision_ttl_minutes,
-            )
-        except Exception as exc:
-            logger.warning("Failed to mint rerun_bump_timeout nonce for task=%s: %s", task.id, exc)
-            return
-
-        mentions = ""
-        if self._owner_user_ids:
-            render_user_mention = getattr(session.channel, "render_user_mention", None)
-            if callable(render_user_mention):
-                mentions = " ".join(
-                    render_user_mention(uid) for uid in sorted(self._owner_user_ids)
-                )
-                if mentions:
-                    mentions += " "
-
-        ttl_hours = max(1, self._decision_ttl_minutes // 60)
-        bump_min = _RERUN_BUMP_TIMEOUT_SECONDS_DEFAULT // 60
-        text = (
-            f"{mentions}Task `{task.id}` hit wall-clock `timeout` ({base_timeout}s). "
-            f"Re-run with `timeout_seconds={new_timeout}` (+{bump_min} min)?\n"
-            f"_Button expires in ~{ttl_hours}h._"
-        )
-        logger.info(
-            "Surfacing rerun_bump_timeout button task=%s thread=%s base=%ds new=%ds ttl_minutes=%d",
-            task.id,
-            task.thread_id,
-            base_timeout,
-            new_timeout,
-            self._decision_ttl_minutes,
-        )
-        try:
-            await self._send_decision_surface(
-                session,
-                task.thread_id,
-                text,
-                task.id,
-                nonce,
-                ["rerun_bump_timeout"],
-            )
-        except Exception as exc:
-            logger.warning("Failed to post rerun_bump_timeout surface for task=%s: %s", task.id, exc)
+        await _surface_rerun_bump_button(self, task, spec=_TIMEOUT_BUMP_SPEC)
 
     async def _on_skill_task_merged(
         self,

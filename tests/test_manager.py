@@ -349,7 +349,7 @@ async def test_handle_message_logs_explicit_skill_dispatch_to_task(caplog, tmp_p
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text("name: top-5-daily-news\n", encoding="utf-8")
     syncer = MagicMock()
-    syncer._skills_path = skills_root  # noqa: SLF001
+    syncer.skills_path = skills_root
 
     session = _make_session(channel=channel, registry=registry)
     gm = GatewayManager(
@@ -399,7 +399,7 @@ async def test_handle_message_injects_judge_store_relevant(tmp_path):
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text("name: top-5-daily-news\n", encoding="utf-8")
     syncer = MagicMock()
-    syncer._skills_path = skills_root  # noqa: SLF001
+    syncer.skills_path = skills_root
 
     gm = GatewayManager(
         [],
@@ -724,7 +724,7 @@ async def test_skill_invocation_is_recorded_and_binds_first_response_message(tmp
             encoding="utf-8",
         )
         syncer = MagicMock(spec=SkillSync)
-        syncer._skills_path = skills_root  # noqa: SLF001
+        syncer.skills_path = skills_root
 
         session = ChannelSession(
             platform="discord",
@@ -781,7 +781,7 @@ async def test_auto_disabled_skills_are_hidden_from_router_entries_but_explicit_
             encoding="utf-8",
         )
         syncer = MagicMock(spec=SkillSync)
-        syncer._skills_path = skills_root  # noqa: SLF001
+        syncer.skills_path = skills_root
 
         session = ChannelSession(
             platform="discord",
@@ -1464,7 +1464,7 @@ async def test_explicit_skill_invocation_creates_artifact_task(tmp_path):
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text("name: top-5-daily-news\n", encoding="utf-8")
     syncer = MagicMock()
-    syncer._skills_path = skills_root  # noqa: SLF001
+    syncer.skills_path = skills_root
 
     session = _make_session(channel=channel, registry=registry)
     gm = GatewayManager(
@@ -1534,7 +1534,7 @@ async def test_explicit_skill_invocation_forwards_skill_timeout_to_task(tmp_path
         encoding="utf-8",
     )
     syncer = MagicMock()
-    syncer._skills_path = skills_root  # noqa: SLF001
+    syncer.skills_path = skills_root
 
     session = _make_session(channel=channel, registry=registry)
     gm = GatewayManager(
@@ -1604,7 +1604,7 @@ async def test_router_repair_skill_creates_skill_task_with_thread_context(tmp_pa
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text("name: top-5-daily-news\n", encoding="utf-8")
     syncer = MagicMock()
-    syncer._skills_path = skills_root  # noqa: SLF001
+    syncer.skills_path = skills_root
 
     session = _make_session(channel=channel, registry=registry)
     await session.append_user("thread-1", "/top-5-daily-news", "alice")
@@ -1673,7 +1673,7 @@ async def test_router_invoke_skill_creates_artifact_task_when_skill_name_resolve
         encoding="utf-8",
     )
     syncer = MagicMock()
-    syncer._skills_path = skills_root  # noqa: SLF001
+    syncer.skills_path = skills_root
 
     session = _make_session(channel=channel, registry=registry)
     gm = GatewayManager([], runtime_service=runtime, intent_router=router, skill_syncer=syncer, auto_task_creation=True)
@@ -1733,7 +1733,7 @@ async def test_router_invoke_existing_skill_uses_recent_merged_skill_context(tmp
         encoding="utf-8",
     )
     syncer = MagicMock()
-    syncer._skills_path = skills_root  # noqa: SLF001
+    syncer.skills_path = skills_root
 
     session = _make_session(channel=channel, registry=registry)
     await session.append_user("thread-1", "https://www.bilibili.com/video/BV1eGZSB6EnL/", "alice")
@@ -1772,7 +1772,7 @@ def test_router_context_turn_limit_is_configurable(tmp_path):
         encoding="utf-8",
     )
     syncer = MagicMock()
-    syncer._skills_path = skills_root  # noqa: SLF001
+    syncer.skills_path = skills_root
 
     gm = GatewayManager([], skill_syncer=syncer, router_context_turns=2)
     history = [
@@ -1799,7 +1799,7 @@ def test_router_context_includes_recent_thread_skill_with_description(tmp_path):
         encoding="utf-8",
     )
     syncer = MagicMock()
-    syncer._skills_path = skills_root  # noqa: SLF001
+    syncer.skills_path = skills_root
 
     gm = GatewayManager([], skill_syncer=syncer)
     gm._remember_thread_skill("discord", "100", "thread-1", "bilibili-video-summarizer")  # noqa: SLF001
@@ -2092,7 +2092,7 @@ async def test_router_repair_skill_borderline_forces_draft_and_confirm_text(tmp_
     (skills_root / "paper-digest").mkdir(parents=True)
     (skills_root / "paper-digest" / "SKILL.md").write_text("name: paper-digest\n", encoding="utf-8")
     syncer = MagicMock()
-    syncer._skills_path = skills_root
+    syncer.skills_path = skills_root
 
     session = _make_session(channel=channel, registry=registry)
     await session.append_user("t1", "/paper-digest", "alice")
@@ -2133,7 +2133,7 @@ async def test_router_repair_skill_high_confidence_drafts_in_v2(tmp_path):
     (skills_root / "paper-digest").mkdir(parents=True)
     (skills_root / "paper-digest" / "SKILL.md").write_text("name: paper-digest\n", encoding="utf-8")
     syncer = MagicMock()
-    syncer._skills_path = skills_root
+    syncer.skills_path = skills_root
 
     session = _make_session(channel=channel, registry=registry)
     await session.append_user("t1", "/paper-digest", "alice")
@@ -2243,7 +2243,7 @@ def _explicit_manager(tmp_path, *, known_skill=None):
         sd.mkdir(parents=True)
         (sd / "SKILL.md").write_text(f"name: {known_skill}\n", encoding="utf-8")
         syncer = MagicMock()
-        syncer._skills_path = skills_root  # noqa: SLF001
+        syncer.skills_path = skills_root
 
     # auto_task_creation defaults False → explicit-only.
     gm = GatewayManager([], runtime_service=runtime, skill_syncer=syncer, repo_root=tmp_path)

@@ -69,7 +69,10 @@ if [[ "${OMA_INSTALL_REPO_EDITABLE:-1}" != "0" ]]; then
     LOCK_FILE="${HOME:-/home}/.local/.oma-pip-install.lock"
     (
       flock -x 9
-      python -m pip install --disable-pip-version-check --no-deps -e "${REPO_ROOT}"
+      # OMA_SKIP_FRONTEND: the SPA is built at image-build/wheel time, never
+      # at container start — and setup.py now fails loudly on frontend build
+      # errors instead of swallowing them, which would abort container boot.
+      OMA_SKIP_FRONTEND=1 python -m pip install --disable-pip-version-check --no-deps -e "${REPO_ROOT}"
     ) 9>"${LOCK_FILE}"
   fi
 fi

@@ -20,7 +20,7 @@ pytest tests/test_memory_store.py # single file
 pytest -k "test_fallback"         # single test by name
 
 # Lint & type-check (CI runs these before pytest; push-blockers)
-ruff check src tests              # lint + import sort
+ruff check src tests scripts      # lint + import sort
 mypy src                          # static type-check
 
 # Scripted E2E harness — run a single scenario offline (no network, no API keys)
@@ -82,7 +82,7 @@ The system has nine major subsystems plus a config layer.
 - When `workspace` is configured, `_setup_workspace()` in `main.py` copies skills into `workspace/.claude/skills/` and `workspace/.gemini/skills/` (real files, not symlinks) so CLI agents find them from the workspace cwd.
 - `SkillValidator` (`skills/validator.py`): validates SKILL.md frontmatter (name+description required), script syntax, and executable permissions.
 - Agent-driven skill creation: `_try_skill_sync()` in `GatewayManager` detects new agent-created skills after each response, runs `full_sync()`, validates, and notifies via Discord.
-- Bundled skills under `skills/` (13): `adapt-community-skill`, `bilibili-video-summary`, `deals-scanner`, `market-briefing-ai`, `market-briefing-finance`, `market-briefing-politics`, `market-briefing-weekly`, `paper-digest`, `scheduler`, `seattle-metro-housing-watch`, `skill-creator`, `youtube-podcast-digest`, `youtube-video-summary`. The `scheduler` skill creates/updates recurring jobs in `config.yaml` and validates job schema.
+- Bundled skills under `skills/` (15): `adapt-community-skill`, `bilibili-video-summary`, `deals-scanner`, `jensen-huang-speech-research`, `market-briefing-ai`, `market-briefing-finance`, `market-briefing-politics`, `market-briefing-weekly`, `paper-digest`, `scheduler`, `seattle-metro-housing-watch`, `skill-creator`, `transcribe-media`, `youtube-podcast-digest`, `youtube-video-summary`. The `scheduler` skill creates/updates recurring jobs in `config.yaml` and validates job schema.
 
 **Runtime layer** (`src/oh_my_agent/runtime/`)
 
@@ -103,8 +103,8 @@ The system has nine major subsystems plus a config layer.
   The completion message renders `Published to:` as the primary path block; transport details (`Delivered via:`, `Attachments:`) and the ephemeral scratch dir (`_artifacts/<task_id>/`) are labeled subordinate. Follow-up threads seed the system turn with the absolute published path. Set `runtime.reports_dir: ""` to disable publishing.
 - Discord buttons for approval + slash command fallback.
 - **Merge flow dual-mode** (`merge_gate.target_branch_mode`):
-  - `current` (default, legacy): `_execute_merge` builds a patch from the worktree, applies it to the main repo working tree via `git apply`, optionally commits to the current branch. Terminal state: `MERGED` + `merge_commit_hash`.
-  - `pr` (WS B): `_execute_merge_pr` commits any dirty workspace changes to the task's worktree branch (`codex/task-<id>`), preflight-checks `gh` CLI + remote, `git fetch <remote> <base>` then 3-dot-diff vs. the fetched base (skips empty PRs even when the branch has commits), pushes the branch with `git push -u`, opens a PR via `gh pr create --base <base> --head <branch>`, lands at terminal state `PR_OPENED` + `pr_url` + `pr_number`. Tracking actual remote-merge is out of scope — user merges via the GitHub UI.
+  - `pr` (default): `_execute_merge_pr` commits any dirty workspace changes to the task's worktree branch (`codex/task-<id>`), preflight-checks `gh` CLI + remote, `git fetch <remote> <base>` then 3-dot-diff vs. the fetched base (skips empty PRs even when the branch has commits), pushes the branch with `git push -u`, opens a PR via `gh pr create --base <base> --head <branch>`, lands at terminal state `PR_OPENED` + `pr_url` + `pr_number`. Tracking actual remote-merge is out of scope — user merges via the GitHub UI. After persisting `PR_OPENED`, the epilogue sends the terminal notify and resolves the pending `task_waiting_merge` notification; a notify failure is logged and swallowed (never reverts the terminal state).
+  - `current` (opt-in, legacy): `_execute_merge` builds a patch from the worktree, applies it to the main repo working tree via `git apply`, optionally commits to the current branch. Terminal state: `MERGED` + `merge_commit_hash`.
   - Skill auto-merge (`skill_auto_approve=True` + non-borderline + `auto_merge_allowed`) is **disabled when `target_branch_mode=pr`** — the PR opening itself is meant to be human-reviewed. All skill tasks land in `WAITING_MERGE` so the operator decides whether to open the PR.
   - Unknown `target_branch_mode` → `MERGE_BLOCKED` with a clear reason (never silently falls back).
 - Retry on transient agent errors (`rate_limit` / `api_5xx` / `timeout`) with per-kind backoff; on `max_turns` failure, `_fail` surfaces a "Re-run +30 turns" button that spawns a sibling task with a bumped `agent_max_turns` (parent+30, fallback base 25). Terminal kinds (`auth` / `cli_error`) never retry.
@@ -153,7 +153,7 @@ See [`docs/EN/task-model.md`](docs/EN/task-model.md) ([中文](docs/CN/task-mode
   - `GET /api/v1/sessions/{platform}/{channel_id}/{thread_id}/history?limit=&before_id=` — turns via `data_sessions.fetch_session_history`, oldest-first.
   - `GET /api/v1/sessions/{platform}/{channel_id}/{thread_id}/trace?date=&limit=` — tool events via `trace.trace_reader.read_thread_trace`. `date` is **required** (no scan-all fallback); returns `{enabled: false, items: []}` when `experiment.tool_trace` is off.
 - Frontend (`dashboard-web/`): React 19 + Vite + TypeScript + TanStack Router/Query + Tailwind + custom minimal AI-Elements-style components (`conversation` / `message` / `tool-event`). Polling-first refresh (sessions 5s, history+trace 2s) — no SSE/WS in MVP. Vite base path is `/app/` so asset URLs work behind the FastAPI mount.
-- Build & ship: `setup.py` defines `BuildPyWithFrontend` cmdclass that runs `pnpm install + pnpm run build` (or npm fallback) before `build_py` collects files. Output goes to `src/oh_my_agent/dashboard/web_dist/` and is shipped via `pyproject.toml [tool.setuptools.package-data]`. The `dashboard-web/` source is tracked; the `web_dist/` output is `.gitignore`d. Set `OMA_SKIP_FRONTEND=1` to skip the hook (used in CI when the frontend was built in a separate step, and for dev installs without Node).
+- Build & ship: `setup.py` defines `BuildPyWithFrontend` cmdclass that runs `npm ci + npm run build` before `build_py` collects files. Output goes to `src/oh_my_agent/dashboard/web_dist/` and is shipped via `pyproject.toml [tool.setuptools.package-data]`. The `dashboard-web/` source is tracked; the `web_dist/` output is `.gitignore`d. Strictness is env-controlled: `OMA_REQUIRE_FRONTEND=1` makes any SPA-less outcome (missing sources/npm, failed build, missing index.html) **fatal** — set by CI's `package` job, which builds a wheel and asserts `web_dist/index.html` is inside it. `OMA_SKIP_FRONTEND=1` disables the hook entirely (CI steps that built the SPA separately; the Docker entrypoint's editable re-install). With neither set (plain `pip install -e .`), the build is best-effort: missing npm prints a loud warning instead of failing, but an actually *failing* npm build is always fatal.
 - New schema index: `idx_turns_thread_recency(platform, channel_id, thread_id, created_at)` in `memory/store.py` to support the GROUP-BY-MAX(created_at) sessions list query.
 - MVP is read-only. Write surfaces (post message, approve task, edit memory) are out of scope; the SPA is a viewer.
 

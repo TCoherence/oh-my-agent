@@ -27,7 +27,20 @@ from pathlib import Path
 from typing import Any, Callable
 
 from oh_my_agent.memory.diary_reflector import ReflectionResult
-from oh_my_agent.memory.judge_store import JudgeStore, parse_judge_actions
+from oh_my_agent.memory.judge import (
+    JUDGE_RULE_ONE_SENTENCE,
+    JUDGE_RULE_USER_EVIDENCE_DIARY,
+    JUDGE_RULES_DEDUP,
+    build_judge_blocklist_rule,
+    build_judge_ops_contract,
+    build_judge_output_shape,
+)
+from oh_my_agent.memory.judge_store import (
+    JudgeStore,
+    dump_judge_context,
+    run_judge_actions,
+    zero_stats,
+)
 from oh_my_agent.memory.session_diary import strip_system_blocks
 
 logger = logging.getLogger(__name__)
@@ -38,7 +51,11 @@ _PER_DAY_CHARS = 3_500
 _WINDOW_DAYS = 7
 
 
-_WEEKLY_REFLECT_PROMPT = """\
+# Shared rule blocks (allowed ops, categories/scopes, blocklist, dedup rules,
+# output shape) come from oh_my_agent.memory.judge — the single source of
+# truth for the judge prompt contract. Only weekly-specific wording lives here.
+_WEEKLY_REFLECT_PROMPT = (
+    """\
 You are a 7-day-window memory judge. You will be given a week of conversation \
 diary excerpts (one entry per day, possibly with missing days marked) between \
 the user and the assistant(s) across all threads.
@@ -49,36 +66,40 @@ reflector already captures single-day signals; target what the daily judge \
 CANNOT see in a single day.
 
 Allowed ops:
-- "add": brand new memory not yet in the store.
-  HARD REQUIREMENT: evidence MUST quote at least 2 distinct dated diary \
-sections. Single-day evidence → emit no_op or strengthen instead.
-  Required: summary, category, scope, confidence, evidence (a short user-side \
-snippet, each citation marked with its [YYYY-MM-DD]).
-- "strengthen": an existing memory was reinforced by this week's evidence.
-  Required: id, evidence. Optional: confidence_bump (0.0-0.20).
-- "supersede": an existing memory was replaced by a contradictory statement \
-this week.
-  Required: old_id, new_summary, category, scope, confidence, evidence \
-(≥ 2 dated sections).
-- "no_op": nothing this week deserves a new long-term memory.
-  Required: reason.
-
-You MUST always output something — at minimum a single no_op action.
-
-Categories: preference | workflow | project_knowledge | fact
-Scopes:     global_user | workspace | skill | thread
+"""
+    + build_judge_ops_contract(
+        add_qualifier=(
+            "  HARD REQUIREMENT: evidence MUST quote at least 2 distinct dated diary "
+            "sections. Single-day evidence → emit no_op or strengthen instead.\n"
+        ),
+        add_evidence="a short user-side snippet, each citation marked with its [YYYY-MM-DD]",
+        strengthen_source="this week's evidence",
+        supersede_event="was replaced by a contradictory statement this week",
+        supersede_suffix=" (≥ 2 dated sections)",
+        no_op_subject="this week",
+        no_op_target="a new long-term memory",
+    )
+    + """
 
 Strict rules (stricter than daily — weekly mistakes propagate further):
-- Use ONLY evidence from user turns (quoted ``> ...`` lines or ``user:`` headers).
-- Each memory must be ONE concise sentence about the user.
+"""
+    + JUDGE_RULE_USER_EVIDENCE_DIARY
+    + "\n"
+    + JUDGE_RULE_ONE_SENTENCE
+    + """
 - Cite every evidence snippet with its date in [YYYY-MM-DD] form.
 - Days marked ``(no diary)`` provide no evidence — count only days with content.
-- Do NOT memorize: one-off task details, this week's plans, slash command \
-usage, file paths, implementation choices, debugging steps, speculation, \
-specific PR / issue / commit numbers, library versions tried this week.
-- If a new observation paraphrases an existing memory → emit "strengthen", \
-do NOT "add" a duplicate.
-- If a new observation contradicts an existing memory → emit "supersede".
+"""
+    + build_judge_blocklist_rule(
+        plans="this week's",
+        tail=(
+            "speculation, specific PR / issue / commit numbers, "
+            "library versions tried this week"
+        ),
+    )
+    + "\n"
+    + JUDGE_RULES_DEDUP
+    + """
 - Prefer strengthen / supersede / no_op over add when uncertain.
 - For "add": confidence ≥ 0.80 AND ≥ 2 distinct dates required. Otherwise no_op.
 - If the week's signal is single-day or weak → emit a single no_op.
@@ -89,14 +110,15 @@ Current active memories ({active_count} entries):
 Diary (week ending {week_end_date}, window {week_start_date} → {week_end_date}):
 {diary_text}
 
-Output ONLY a JSON object with this exact shape (no markdown, no preamble):
-{{"actions": [
-  {{"op": "add", "summary": "...", "category": "preference", "scope": "global_user", "confidence": 0.85, "evidence": "[YYYY-MM-DD] ... ; [YYYY-MM-DD] ..."}},
-  {{"op": "strengthen", "id": "abc123", "evidence": "[YYYY-MM-DD] ..."}},
-  {{"op": "supersede", "old_id": "def456", "new_summary": "...", "category": "...", "scope": "...", "confidence": 0.85, "evidence": "[YYYY-MM-DD] ... ; [YYYY-MM-DD] ..."}},
-  {{"op": "no_op", "reason": "..."}}
-]}}
 """
+    + build_judge_output_shape(
+        confidence="0.85",
+        add_evidence="[YYYY-MM-DD] ... ; [YYYY-MM-DD] ...",
+        strengthen_evidence="[YYYY-MM-DD] ...",
+        supersede_evidence="[YYYY-MM-DD] ... ; [YYYY-MM-DD] ...",
+    )
+    + "\n"
+)
 
 
 class WeeklyReflector:
@@ -171,60 +193,40 @@ class WeeklyReflector:
     ) -> ReflectionResult:
         """Reflect over the 7 days ending on ``week_end_date`` (inclusive)."""
         week_start = week_end_date - timedelta(days=_WINDOW_DAYS - 1)
+        path = self._path_for(week_end_date)
         text, present = self._collect_week_text(week_end_date)
         if present == 0:
             return ReflectionResult(
                 diary_date=week_end_date,
-                diary_path=self._path_for(week_end_date),
+                diary_path=path,
                 actions=[],
-                stats={"add": 0, "strengthen": 0, "supersede": 0, "no_op": 0, "rejected": 0},
+                stats=zero_stats(),
                 skipped_reason="diary_missing",
             )
         active_context = self._store.to_judge_context()
-        import json as _json
-        active_text = (
-            _json.dumps(active_context, ensure_ascii=False, indent=2)
-            if active_context else "[]"
-        )
         prompt = _WEEKLY_REFLECT_PROMPT.format(
             active_count=len(active_context),
-            active_memories=active_text,
+            active_memories=dump_judge_context(active_context),
             week_end_date=week_end_date.isoformat(),
             week_start_date=week_start.isoformat(),
             diary_text=text,
         )
 
-        try:
-            _agent, response = await registry.run(prompt, run_label=run_label)
-        except Exception as exc:
-            logger.warning(
-                "weekly_reflect agent_exception week_end=%s err=%s",
-                week_end_date,
-                exc,
-            )
-            return ReflectionResult(
-                diary_date=week_end_date,
-                diary_path=self._path_for(week_end_date),
-                actions=[],
-                stats={"add": 0, "strengthen": 0, "supersede": 0, "no_op": 0, "rejected": 0},
-                error=f"agent_exception: {exc}",
-            )
-        if getattr(response, "error", None):
-            return ReflectionResult(
-                diary_date=week_end_date,
-                diary_path=self._path_for(week_end_date),
-                actions=[],
-                stats={"add": 0, "strengthen": 0, "supersede": 0, "no_op": 0, "rejected": 0},
-                raw_response=response.text or "",
-                error=response.error,
-            )
-        actions = parse_judge_actions(response.text or "")
-        stats = await self._store.apply_actions(
-            actions,
-            thread_id=None,
-            skill_name=None,
-            source_workspace=None,
+        actions, stats, raw_text, error = await run_judge_actions(
+            prompt, registry, self._store, run_label=run_label
         )
+        if error is not None:
+            logger.warning(
+                "weekly_reflect error week_end=%s err=%s", week_end_date, error
+            )
+            return ReflectionResult(
+                diary_date=week_end_date,
+                diary_path=path,
+                actions=[],
+                stats=stats,
+                raw_response=raw_text,
+                error=error,
+            )
         logger.info(
             "weekly_reflect applied week_end=%s present_days=%d actions=%d stats=%s",
             week_end_date,
@@ -234,10 +236,10 @@ class WeeklyReflector:
         )
         return ReflectionResult(
             diary_date=week_end_date,
-            diary_path=self._path_for(week_end_date),
+            diary_path=path,
             actions=actions,
             stats=stats,
-            raw_response=response.text or "",
+            raw_response=raw_text,
         )
 
     async def reflect_last_week(
