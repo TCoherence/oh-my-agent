@@ -645,3 +645,35 @@ async def test_non_empty_stray_skill_overrides_still_raises(tmp_path):
             await reopened.init()
     finally:
         await reopened.close()
+
+
+@pytest.mark.asyncio
+async def test_split_conversation_db_keeps_single_summary_row_and_index(tmp_path):
+    store = SplitSQLiteMemoryStore(
+        conversation_path=tmp_path / "memory.db",
+        runtime_state_path=tmp_path / "runtime.db",
+        skills_telemetry_path=tmp_path / "skills.db",
+    )
+    await store.init()
+    try:
+        ids = [
+            await store.append("discord", "100", "thread-1", {"role": "user", "content": f"m{i}"})
+            for i in range(4)
+        ]
+        await store.save_summary(
+            "discord", "100", "thread-1", summary="s1", turns_start=ids[0], turns_end=ids[1]
+        )
+        await store.save_summary(
+            "discord", "100", "thread-1", summary="s2", turns_start=ids[2], turns_end=ids[3]
+        )
+    finally:
+        await store.close()
+
+    with sqlite3.connect(tmp_path / "memory.db") as conn:
+        indexes = {
+            str(row[0])
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")
+        }
+        rows = conn.execute("SELECT summary FROM summaries").fetchall()
+    assert "idx_summaries_thread" in indexes
+    assert [str(row[0]) for row in rows] == ["s2"]

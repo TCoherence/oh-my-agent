@@ -128,6 +128,30 @@ def chunk_message(text: str, max_size: int = MAX_CHUNK_SIZE) -> list[str]:
     return chunks
 
 
+def chunk_message_with_first_budget(
+    text: str,
+    first_max_size: int,
+    max_size: int = MAX_CHUNK_SIZE,
+) -> list[str]:
+    """Chunk *text* so the first chunk fits a reduced *first_max_size* budget.
+
+    For replies that carry a header on the first message (e.g. an attribution
+    line), the first chunk has less room than the rest.  The full text is
+    chunked once with the standard *max_size*; if the first chunk exceeds
+    *first_max_size*, only that first chunk is re-split with the reduced
+    budget.  Every returned chunk is sent verbatim — chunks are never
+    re-derived as substrings of the original text, so stripped whitespace and
+    synthetic fence close/re-open never corrupt subsequent chunks.
+    """
+    chunks = chunk_message(text, max_size=max_size)
+    if not chunks or len(chunks[0]) <= first_max_size:
+        return chunks
+    head = chunk_message(chunks[0], max_size=first_max_size)
+    if not head:  # pragma: no cover - chunk_message never emits blank chunks
+        return chunks
+    return head + chunks[1:]
+
+
 # ── Code-block splitting ──────────────────────────────────────────────── #
 
 
@@ -156,13 +180,36 @@ def _split_code_block(block_text: str, lang: str, max_size: int) -> list[str]:
     overhead = len(open_fence) + len(close_fence) + 2
     available = max_size - overhead
     if available <= 0:
-        available = max_size // 2
+        # Fences alone blow the budget — fenced wrapping is impossible within
+        # max_size, so hard-cut the raw block text rather than emit oversized
+        # chunks that the platform would reject.
+        return [
+            block_text[i : i + max_size]
+            for i in range(0, len(block_text), max_size)
+        ]
 
     chunks: list[str] = []
     buf_lines: list[str] = []
     buf_size = 0
 
     for line in content_lines:
+        if len(line) > available:
+            # Hard-split a single line that can never fit the per-chunk
+            # budget (mirrors _find_split_point's hard cut for plain text).
+            # The final short piece falls through to normal buffering.
+            if buf_lines:
+                chunks.append(
+                    open_fence + "\n" + "\n".join(buf_lines) + "\n" + close_fence
+                )
+                buf_lines = []
+                buf_size = 0
+            while len(line) > available:
+                chunks.append(
+                    open_fence + "\n" + line[:available] + "\n" + close_fence
+                )
+                line = line[available:]
+            if not line:
+                continue
         line_len = len(line) + 1  # +1 for the \n separator
         if buf_size + line_len > available and buf_lines:
             chunk = open_fence + "\n" + "\n".join(buf_lines) + "\n" + close_fence

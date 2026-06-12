@@ -19,6 +19,7 @@ from oh_my_agent.agents.cli.base import (
     _drain_oversized_line,
     _stream_cli_lines,
     _stream_cli_process,
+    _StreamState,
 )
 from oh_my_agent.agents.cli.claude import ClaudeAgent
 from oh_my_agent.agents.cli.codex import CodexCLIAgent
@@ -109,6 +110,83 @@ async def test_stream_surfaces_error_event_on_missing_binary() -> None:
     async for event in agent.stream("ignored"):
         events.append(event)
     assert any(isinstance(e, ErrorEvent) for e in events)
+
+
+# ---------------------------------------------------------------------------
+# Exit-code-driven failure semantics in stream()
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_stream_cli_lines_publishes_returncode_via_state() -> None:
+    state = _StreamState()
+    async for _ in _stream_cli_lines(
+        "bash", "-c", "exit 7",
+        cwd=None,
+        env={"PATH": "/usr/bin:/bin:/usr/local/bin"},
+        timeout=5,
+        state=state,
+    ):
+        pass
+    assert state.returncode == 7
+
+
+@pytest.mark.asyncio
+async def test_stream_exit_zero_with_benign_stderr_is_not_an_error() -> None:
+    """Regression: 'Loaded cached credentials.'-style stderr noise on a
+    successful run used to be reported as failure, triggering registry
+    fallback that discarded good output."""
+    agent = _EchoAgent(
+        argv=["bash", "-c", "echo 'real answer'; echo 'Loaded cached credentials.' >&2"]
+    )
+    events: list[AgentEvent] = []
+    async for event in agent.stream("ignored"):
+        events.append(event)
+    assert not any(isinstance(e, ErrorEvent) for e in events)
+    complete = [e for e in events if isinstance(e, CompleteEvent)]
+    assert len(complete) == 1
+    assert "real answer" in complete[0].text
+
+
+@pytest.mark.asyncio
+async def test_stream_nonzero_exit_with_empty_stderr_is_an_error() -> None:
+    """Regression: the documented Claude failure mode (structured error on
+    stdout, non-zero exit, empty stderr) used to be reported as SUCCESS with
+    partial text."""
+    agent = _EchoAgent(argv=["bash", "-c", "echo '{\"error\":\"boom\"}'; exit 3"])
+    events: list[AgentEvent] = []
+    async for event in agent.stream("ignored"):
+        events.append(event)
+    errors = [e for e in events if isinstance(e, ErrorEvent)]
+    assert len(errors) == 1
+    # Block-mode _extract_cli_error semantics: stderr empty → stdout JSON error.
+    assert "exited 3" in errors[0].message
+    assert "boom" in errors[0].message
+
+
+@pytest.mark.asyncio
+async def test_stream_nonzero_exit_classifies_stderr_error_kind() -> None:
+    agent = _EchoAgent(argv=["bash", "-c", "echo 'rate limit exceeded' >&2; exit 1"])
+    events: list[AgentEvent] = []
+    async for event in agent.stream("ignored"):
+        events.append(event)
+    errors = [e for e in events if isinstance(e, ErrorEvent)]
+    assert len(errors) == 1
+    assert errors[0].error_kind == "rate_limit"
+
+
+@pytest.mark.asyncio
+async def test_stream_timeout_override_beats_configured_timeout() -> None:
+    agent = _EchoAgent(argv=["sleep", "10"], timeout=30)
+    events: list[AgentEvent] = []
+    async for event in agent.stream("ignored", timeout_override=1):
+        events.append(event)
+    errors = [e for e in events if isinstance(e, ErrorEvent)]
+    assert len(errors) == 1
+    assert errors[0].error_kind == "timeout"
+    assert "timed out after 1s" in errors[0].message
+    # Per-call only: the configured timeout is untouched.
+    assert agent._timeout == 30
 
 
 # ---------------------------------------------------------------------------
@@ -219,6 +297,38 @@ def test_claude_parse_stream_line_result_yields_usage() -> None:
     assert isinstance(events[0], UsageEvent)
     assert events[0].input_tokens == 10
     assert events[0].cost_usd == 0.001
+
+
+def test_claude_parse_stream_line_error_max_turns_yields_error_event() -> None:
+    """Streaming must classify error_max_turns like block mode does — without
+    this the registry's no-fallback-on-max_turns rule and the runtime's
+    re-run-with-more-turns button never trigger on streamed runs."""
+    agent = ClaudeAgent()
+    line = json.dumps(
+        {
+            "type": "result",
+            "subtype": "error_max_turns",
+            "num_turns": 61,
+            "result": "partial",
+            "usage": {"input_tokens": 9, "output_tokens": 4},
+        }
+    )
+    events = agent._parse_stream_line(line)
+    errors = [e for e in events if isinstance(e, ErrorEvent)]
+    assert len(errors) == 1
+    assert errors[0].error_kind == "max_turns"
+    assert errors[0].message == "claude: max_turns reached (61 turns)"
+    # Usage from the same frame is still surfaced.
+    assert any(isinstance(e, UsageEvent) for e in events)
+
+
+def test_claude_parse_stream_line_error_max_turns_without_count() -> None:
+    agent = ClaudeAgent()
+    line = json.dumps({"type": "result", "subtype": "error_max_turns"})
+    events = agent._parse_stream_line(line)
+    errors = [e for e in events if isinstance(e, ErrorEvent)]
+    assert len(errors) == 1
+    assert errors[0].message == "claude: max_turns reached"
 
 
 def test_codex_parse_stream_line_thread_started() -> None:

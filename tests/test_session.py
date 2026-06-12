@@ -207,3 +207,56 @@ async def test_append_diary_only_no_writer_is_noop():
     )
     # Should not raise.
     await s.append_diary_only("t-3", "ping")
+
+
+# ---------------------------------------------------------------------------
+# get_history concurrency + invalidate
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_concurrent_first_touch_shares_one_cache_list():
+    """Two concurrent first-touches must not orphan one of the loaded lists
+    (turns appended through the loser would vanish from the cached view)."""
+    import asyncio
+
+    from oh_my_agent.gateway.session import ChannelSession
+
+    class _SlowStore:
+        def __init__(self):
+            self.load_calls = 0
+
+        async def load_history(self, platform, channel_id, thread_id):
+            self.load_calls += 1
+            await asyncio.sleep(0.01)
+            return []
+
+    store = _SlowStore()
+    s = ChannelSession(
+        platform="discord",
+        channel_id="123",
+        channel=MagicMock(),
+        registry=MagicMock(),
+        memory_store=store,
+    )
+
+    h1, h2 = await asyncio.gather(s.get_history("t1"), s.get_history("t1"))
+
+    assert h1 is h2
+    assert store.load_calls == 1
+    h1.append({"role": "user", "content": "x"})
+    assert await s.get_history("t1") == h1
+
+
+@pytest.mark.asyncio
+async def test_invalidate_drops_cached_history():
+    s = _make_session()
+    await s.append_user("t1", "hello", "alice")
+    s.invalidate("t1")
+    assert "t1" not in s._cache
+
+
+@pytest.mark.asyncio
+async def test_invalidate_unknown_thread_is_noop():
+    s = _make_session()
+    s.invalidate("nope")  # should not raise

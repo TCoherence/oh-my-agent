@@ -8,6 +8,8 @@ import shutil
 import sqlite3
 import uuid
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -715,6 +717,11 @@ CREATE TABLE IF NOT EXISTS summaries (
     created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- load_history probes summaries per message; the trailing ``id`` lets the
+-- ORDER BY id DESC LIMIT 1 lookup run as a backwards index scan.
+CREATE INDEX IF NOT EXISTS idx_summaries_thread
+    ON summaries(platform, channel_id, thread_id, id);
+
 CREATE TABLE IF NOT EXISTS agent_sessions (
     platform          TEXT NOT NULL,
     channel_id        TEXT NOT NULL,
@@ -1137,6 +1144,27 @@ class SQLiteMemoryStore(MemoryStore):
             await self._db.execute("PRAGMA foreign_keys=ON")
         return self._db
 
+    @asynccontextmanager
+    async def _write_txn(self) -> AsyncIterator[aiosqlite.Connection]:
+        """Serialised write transaction: commit on success, rollback on error.
+
+        All writers share one deferred-isolation connection. Without the
+        rollback, an exception between statements (or in commit) would
+        release the write lock with an open dirty transaction, and the
+        NEXT writer's commit() would persist the partial work.
+        """
+        async with self._write_lock:
+            db = await self._conn()
+            try:
+                yield db
+                await db.commit()
+            except BaseException:
+                try:
+                    await db.rollback()
+                except Exception:
+                    logger.exception("Rollback failed after write transaction error")
+                raise
+
     # -- lifecycle ---------------------------------------------------------
 
     async def init(self) -> None:
@@ -1393,8 +1421,13 @@ class SQLiteMemoryStore(MemoryStore):
         turns_start: int,
         turns_end: int,
     ) -> None:
-        async with self._write_lock:
-            db = await self._conn()
+        async with self._write_txn() as db:
+            # Single summary row per thread: load_history only ever reads the
+            # latest row, so superseded summaries are unreachable — drop them.
+            await db.execute(
+                "DELETE FROM summaries WHERE platform=? AND channel_id=? AND thread_id=?",
+                (platform, channel_id, thread_id),
+            )
             await db.execute(
                 "INSERT INTO summaries (platform, channel_id, thread_id, summary, turns_start, turns_end) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
@@ -1406,7 +1439,6 @@ class SQLiteMemoryStore(MemoryStore):
                 "AND id BETWEEN ? AND ?",
                 (platform, channel_id, thread_id, turns_start, turns_end),
             )
-            await db.commit()
         logger.info(
             "Compressed turns %d–%d into summary for thread %s",
             turns_start,
@@ -1422,8 +1454,7 @@ class SQLiteMemoryStore(MemoryStore):
         channel_id: str,
         thread_id: str,
     ) -> None:
-        async with self._write_lock:
-            db = await self._conn()
+        async with self._write_txn() as db:
             if await self._table_exists("turns"):
                 await db.execute(
                     "DELETE FROM turns WHERE platform=? AND channel_id=? AND thread_id=?",
@@ -1439,7 +1470,6 @@ class SQLiteMemoryStore(MemoryStore):
                     "DELETE FROM agent_sessions WHERE platform=? AND channel_id=? AND thread_id=?",
                     (platform, channel_id, thread_id),
                 )
-            await db.commit()
 
     async def save_session(
         self, platform: str, channel_id: str, thread_id: str, agent: str, session_id: str
@@ -1706,8 +1736,7 @@ class SQLiteMemoryStore(MemoryStore):
     # -- automation runtime state ------------------------------------------
 
     async def upsert_automation_state(self, name: str, **updates) -> None:
-        async with self._write_lock:
-            db = await self._conn()
+        async with self._write_txn() as db:
             row = await (
                 await db.execute(
                     "SELECT 1 FROM automation_runtime_state WHERE name=?",
@@ -1748,7 +1777,6 @@ class SQLiteMemoryStore(MemoryStore):
                     f"UPDATE automation_runtime_state SET {', '.join(sets)} WHERE name=?",
                     tuple(values),
                 )
-            await db.commit()
 
     async def get_automation_state(self, name: str) -> AutomationRuntimeState | None:
         db = await self._conn()
@@ -2194,8 +2222,7 @@ class SQLiteMemoryStore(MemoryStore):
         return int(cursor.rowcount or 0)
 
     async def add_runtime_event(self, task_id: str, event_type: str, payload: dict[str, Any]) -> None:
-        async with self._write_lock:
-            db = await self._conn()
+        async with self._write_txn() as db:
             cursor = await db.execute(
                 "SELECT COALESCE(MAX(seq), 0) + 1 FROM runtime_task_events WHERE task_id=?",
                 (task_id,),
@@ -2207,7 +2234,6 @@ class SQLiteMemoryStore(MemoryStore):
                 "VALUES (?, ?, ?, ?)",
                 (task_id, next_seq, event_type, json.dumps(payload, ensure_ascii=False)),
             )
-            await db.commit()
 
     async def list_runtime_events(self, task_id: str, *, limit: int = 20) -> list[dict[str, Any]]:
         db = await self._conn()
@@ -3283,8 +3309,7 @@ ORDER BY recent_invocations DESC, s.skill_name ASC
         return {"version": 1, "turns": turns, "summaries": summaries}
 
     async def import_data(self, data: dict[str, Any]) -> int:
-        async with self._write_lock:
-            db = await self._conn()
+        async with self._write_txn() as db:
             count = 0
 
             for turn in data.get("turns", []):
@@ -3316,8 +3341,6 @@ ORDER BY recent_invocations DESC, s.skill_name ASC
                         summary["turns_end"],
                     ),
                 )
-
-            await db.commit()
         logger.info("Imported %d turns and %d summaries", count, len(data.get("summaries", [])))
         return count
 

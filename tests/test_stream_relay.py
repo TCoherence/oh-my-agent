@@ -604,3 +604,42 @@ def test_format_elapsed_hour_range_uses_h_m():
     assert StreamingRelay._format_elapsed(7320) == "2h 02m"
 
 
+
+
+@pytest.mark.asyncio
+async def test_finalize_long_code_block_loses_nothing():
+    """A >1900-char reply starting with a fenced code block survives chunked
+    delivery with zero characters lost or duplicated (the old offset math
+    sliced the original text by the length of a stripped/fence-augmented
+    first chunk, corrupting every subsequent chunk)."""
+    ch = FakeChannel()
+    relay = StreamingRelay(
+        channel=ch,
+        thread_id="t",
+        attribution_prefix="-# via **claude**",
+        heartbeat_interval=0,
+    )
+    await relay.start("…")
+
+    code_lines = [f"line_{i:04d} = 'payload_{i:04d}'" for i in range(80)]
+    final_text = "```python\n" + "\n".join(code_lines) + "\n```"
+    assert len(final_text) > 1900
+
+    delivered = await relay.finalize(final_text)
+
+    assert len(delivered) >= 2
+    anchor_body = ch.edits[-1][2]
+    overflow_bodies = [text for _, text in ch.sent[1:]]
+    for body in [anchor_body, *overflow_bodies]:
+        assert len(body) <= 2000
+    # Overflow chunks re-open the fence so Markdown still renders.
+    for body in overflow_bodies:
+        assert body.startswith("```python")
+    # Reassemble ignoring synthetic fences and the attribution line.
+    content = [
+        ln
+        for body in [anchor_body, *overflow_bodies]
+        for ln in body.splitlines()
+        if ln and not ln.startswith("```") and not ln.startswith("-#")
+    ]
+    assert content == code_lines

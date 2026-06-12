@@ -15,7 +15,7 @@ is the middle-man that fixes this:
   placeholder) and during ongoing text streaming;
 - on ``finalize()`` the relay flushes the last frame and then appends any
   overflow chunks past the platform's 2000-char message cap as fresh messages
-  using the existing ``chunk_message`` splitter.
+  using the existing ``chunk_message_with_first_budget`` splitter.
 
 The relay is deliberately platform-agnostic — it only talks to two methods on
 ``BaseChannel`` (``send`` + ``edit_message``) — so unit tests can drop a stub
@@ -29,7 +29,7 @@ import logging
 import time
 from typing import Any
 
-from oh_my_agent.utils.chunker import chunk_message
+from oh_my_agent.utils.chunker import chunk_message_with_first_budget
 
 logger = logging.getLogger(__name__)
 
@@ -210,20 +210,23 @@ class StreamingRelay:
                 pass
 
         # Figure out what will fit on the anchor message vs. overflow.
+        # Chunks are sent verbatim — never re-derived as substrings of the
+        # original text (chunks are stripped and synthetic fences added, so
+        # offset math would drop or duplicate characters).
         first_chunk_budget = max(1, self._max_chars - len(attribution) - 1)
-        first_chunks = chunk_message(final_text, max_size=first_chunk_budget)
-        if not first_chunks:
+        chunks = chunk_message_with_first_budget(
+            final_text, first_chunk_budget, max_size=self._max_chars
+        )
+        if not chunks:
             anchor_body = f"{attribution}\n*(empty response)*" if attribution else "*(empty response)*"
             await self._safe_edit(anchor_body)
             return [self._message_id] if self._message_id else []
 
-        first_body = f"{attribution}\n{first_chunks[0]}" if attribution else first_chunks[0]
+        first_body = f"{attribution}\n{chunks[0]}" if attribution else chunks[0]
         await self._safe_edit(first_body)
         delivered: list[str] = [self._message_id] if self._message_id else []
 
-        remainder = final_text[len(first_chunks[0]):].lstrip()
-        remaining_chunks = chunk_message(remainder) if remainder else []
-        for chunk in remaining_chunks:
+        for chunk in chunks[1:]:
             mid = await self._channel.send(self._thread_id, chunk)
             if mid:
                 delivered.append(mid)

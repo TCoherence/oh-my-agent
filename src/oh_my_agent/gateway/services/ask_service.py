@@ -16,10 +16,22 @@ class AskService:
     only handles history reset, history formatting, and agent list assembly.
     """
 
-    async def reset_history(self, session: ChannelSession | None, thread_id: str) -> ServiceResult:
+    async def reset_history(
+        self,
+        session: ChannelSession | None,
+        thread_id: str,
+        registry: AgentRegistry | None = None,
+    ) -> ServiceResult:
         if session is None:
             return ServiceResult(success=False, message="No session available.")
         await session.clear_history(thread_id)
+        # clear_history drops the persisted agent_sessions rows, but each CLI
+        # agent also caches its session id in memory — without clearing those
+        # the next message would resume the conversation the user just reset.
+        if registry is not None:
+            for agent in registry.agents:
+                if hasattr(agent, "clear_session"):
+                    agent.clear_session(thread_id)
         return ServiceResult(success=True, message="History cleared for this thread.")
 
     async def get_history(self, session: ChannelSession | None, thread_id: str) -> ServiceResult:

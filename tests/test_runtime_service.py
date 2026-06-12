@@ -5064,3 +5064,84 @@ async def test_active_task_for_thread_visible_beyond_recent_window(runtime_env):
     assert found.id == "t-old-active"
 
 
+@pytest.mark.asyncio
+async def test_draft_text_truncates_long_goal_and_caps_total(runtime_env):
+    """A 5000-char goal (full user message) must not yield a draft text that
+    blows Discord's 2000-char message limit."""
+    store: SQLiteMemoryStore = runtime_env["store"]
+    runtime: RuntimeService = runtime_env["runtime"]
+
+    task = await store.create_runtime_task(
+        task_id="t-long-goal", platform="discord", channel_id="100",
+        thread_id="thread-long-goal", created_by="owner-1", goal="x" * 5000,
+        status=TASK_STATUS_DRAFT, max_steps=5, max_minutes=15,
+        test_command="true", completion_mode="reply", task_type="artifact",
+    )
+
+    text = runtime._draft_text(task, reasons=["possible_large_change"])  # noqa: SLF001
+
+    assert len(text) <= 1900
+    assert f"Goal: {'x' * 220}...\n" in text
+    assert "Use Approve / Reject / Suggest." in text
+
+
+@pytest.mark.asyncio
+async def test_send_decision_surface_fallback_never_propagates(runtime_env):
+    """When send_task_draft AND the plain-text fallback both fail (e.g. HTTP
+    400 on an oversized body), the user must still get a minimal actionable
+    message and no exception may escape task creation."""
+    runtime: RuntimeService = runtime_env["runtime"]
+
+    @dataclass
+    class _DoubleFailChannel(_FakeChannel):
+        send_attempts: list[str] = field(default_factory=list)
+
+        async def send_task_draft(self, **kwargs) -> str | None:
+            raise RuntimeError("400 Bad Request (error code: 50035)")
+
+        async def send(self, thread_id: str, text: str) -> str:
+            self.send_attempts.append(text)
+            if len(self.send_attempts) == 1:
+                raise RuntimeError("400 Bad Request: body too long")
+            return await super().send(thread_id, text)
+
+    channel = _DoubleFailChannel()
+    registry = AgentRegistry([_DoneAgent()])
+    session = ChannelSession(
+        platform="discord",
+        channel_id="100",
+        channel=channel,
+        registry=registry,
+    )
+
+    msg_id = await runtime._send_decision_surface(  # noqa: SLF001
+        session, "thread-ds", "x" * 2500, "t-ds-1", "nonce-1",
+        ["approve", "reject", "suggest"],
+    )
+
+    assert msg_id is None
+    assert len(channel.send_attempts) == 2
+    minimal = channel.send_attempts[1]
+    assert "t-ds-1" in minimal
+    assert "/task_approve t-ds-1" in minimal
+
+    class _TotalFailChannel(_FakeChannel):
+        async def send_task_draft(self, **kwargs) -> str | None:
+            raise RuntimeError("draft send down")
+
+        async def send(self, thread_id: str, text: str) -> str:
+            raise RuntimeError("channel down")
+
+    dead_session = ChannelSession(
+        platform="discord",
+        channel_id="100",
+        channel=_TotalFailChannel(),
+        registry=registry,
+    )
+    msg_id = await runtime._send_decision_surface(  # noqa: SLF001
+        dead_session, "thread-ds", "x" * 2500, "t-ds-2", "nonce-2",
+        ["approve"],
+    )
+    assert msg_id is None
+
+

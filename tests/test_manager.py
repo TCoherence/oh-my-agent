@@ -2325,3 +2325,112 @@ async def test_duplicate_active_task_is_caught_and_reported(tmp_path):
     await gm.handle_message(session, registry, _make_msg(thread_id="t1", content="task: do it"))
     sent = " ".join(str(c.args[1]) for c in channel.send.await_args_list)
     assert "existing-123" in sent and "already exists" in sent
+
+
+# ---------------------------------------------------------------------------
+# _send_agent_response: chunked delivery never drops/duplicates characters
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_send_agent_response_long_code_block_loses_nothing():
+    """A >1900-char reply starting with a fenced code block survives chunked
+    delivery intact — chunks are sent verbatim, never re-derived as
+    substrings of the original text."""
+    channel = MagicMock()
+    channel.send = AsyncMock(side_effect=[f"m{i}" for i in range(10)])
+    gm = GatewayManager([])
+
+    code_lines = [f"line_{i:04d} = 'payload_{i:04d}'" for i in range(80)]
+    text = "```python\n" + "\n".join(code_lines) + "\n```"
+    assert len(text) > 1900
+
+    delivery = await gm._send_agent_response(
+        channel, "thread-1", agent_name="claude", text=text
+    )
+
+    bodies = [call.args[1] for call in channel.send.await_args_list]
+    assert delivery.chunk_count == len(bodies)
+    assert delivery.chunk_count >= 2
+    for body in bodies:
+        assert len(body) <= 2000
+    # Follow-up chunks re-open the fence so Markdown still renders.
+    for body in bodies[1:]:
+        assert body.startswith("```python")
+    # Reassemble ignoring synthetic fences and the attribution line.
+    content = [
+        ln
+        for body in bodies
+        for ln in body.splitlines()
+        if ln and not ln.startswith("```") and not ln.startswith("-#")
+    ]
+    assert content == code_lines
+
+
+# ---------------------------------------------------------------------------
+# Fire-and-forget task tracking
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_spawn_fire_and_forget_logs_exception_and_discards(caplog):
+    import logging
+
+    gm = GatewayManager([])
+
+    async def boom():
+        raise RuntimeError("kaboom")
+
+    with caplog.at_level(logging.WARNING, logger="oh_my_agent.gateway.manager"):
+        task = gm._spawn_fire_and_forget(boom(), name="boom-task")
+        assert task in gm._fire_and_forget_tasks
+        await asyncio.gather(task, return_exceptions=True)
+        await asyncio.sleep(0)  # let the done-callback run
+
+    assert task not in gm._fire_and_forget_tasks
+    assert any("boom-task" in rec.getMessage() for rec in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_stop_drains_fire_and_forget_tasks():
+    gm = GatewayManager([])
+    finished = asyncio.Event()
+
+    async def slow():
+        await asyncio.sleep(0.05)
+        finished.set()
+
+    gm._spawn_fire_and_forget(slow(), name="slow-task")
+    await gm.stop()
+    assert finished.is_set()
+    assert not gm._fire_and_forget_tasks
+
+
+@pytest.mark.asyncio
+async def test_handle_message_compression_task_is_tracked_and_drained():
+    """The compression task spawned after a reply is held by a strong
+    reference (GC-safe) and finishes before stop() returns."""
+    compressed = asyncio.Event()
+
+    class _SlowCompressor:
+        async def maybe_compress(
+            self, platform, channel_id, thread_id, registry, *, req_id=None
+        ):
+            await asyncio.sleep(0.05)
+            compressed.set()
+            return False
+
+    agent = _ThreadAwareOKAgent()
+    registry = AgentRegistry([agent])
+    session = _make_session(registry=registry)
+    gm = GatewayManager(
+        [(session.channel, registry)], compressor=_SlowCompressor()
+    )
+
+    await gm.handle_message(session, registry, _make_msg(thread_id="t1"))
+
+    assert any(
+        t.get_name().startswith("compress:") for t in gm._fire_and_forget_tasks
+    )
+    await gm.stop()
+    assert compressed.is_set()

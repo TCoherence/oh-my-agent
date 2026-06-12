@@ -19,15 +19,29 @@ from oh_my_agent.agents.cli.codex import CodexCLIAgent
 from oh_my_agent.agents.cli.gemini import GeminiCLIAgent
 
 
-def _install_fake_stream(monkeypatch, ndjson_lines: list[str]):
+def _install_fake_stream(
+    monkeypatch,
+    ndjson_lines: list[str],
+    *,
+    returncode: int = 0,
+    stderr_lines: list[str] | None = None,
+):
     """Replace ``_stream_cli_lines`` with a generator that yields the given
-    stdout lines. Returns the ``captured_cmd`` list that the fake writes to."""
+    stdout lines (plus optional stderr lines) and publishes ``returncode``
+    via the ``state`` side channel. Returns the ``captured_cmd`` list that
+    the fake writes to."""
     captured_cmd: list[list[str]] = []
 
-    async def _fake_stream(*cmd, cwd, env, timeout, cancel=None, log_path=None) -> AsyncIterator[tuple[str, str]]:
+    async def _fake_stream(
+        *cmd, cwd, env, timeout, cancel=None, log_path=None, state=None
+    ) -> AsyncIterator[tuple[str, str]]:
         captured_cmd.append(list(cmd))
+        for line in stderr_lines or []:
+            yield ("stderr", line)
         for line in ndjson_lines:
             yield ("stdout", line)
+        if state is not None:
+            state.returncode = returncode
 
     monkeypatch.setattr(cli_base, "_stream_cli_lines", _fake_stream)
     return captured_cmd
@@ -277,6 +291,81 @@ async def test_codex_streaming_fires_on_tool_use_for_command_execution(monkeypat
     # Command execution surfaces as a "Bash" tool-use event in Codex mapping.
     assert tool_names == ["Bash"]
     assert resp.text.strip() == "done"
+
+
+@pytest.mark.asyncio
+async def test_streaming_run_succeeds_despite_benign_stderr(monkeypatch):
+    """Regression: exit-0 runs with stderr noise (gemini's 'Loaded cached
+    credentials.', node deprecation warnings) used to come back as errors,
+    triggering registry fallback that discarded the good response."""
+    payload = '{"response": "fine answer", "session_id": "g1"}'
+    _install_fake_stream(
+        monkeypatch,
+        [payload],
+        returncode=0,
+        stderr_lines=["Loaded cached credentials.", "(node) DeprecationWarning: x"],
+    )
+
+    agent = GeminiCLIAgent(cli_path="gemini")
+
+    async def _on_partial(text: str) -> None:
+        pass
+
+    resp = await agent.run("hi", thread_id="t1", on_partial=_on_partial)
+
+    assert resp.error is None
+    assert resp.text == "fine answer"
+
+
+@pytest.mark.asyncio
+async def test_streaming_run_fails_on_nonzero_exit_with_empty_stderr(monkeypatch):
+    """Regression: non-zero exit with empty stderr (Claude's documented
+    failure mode) used to be reported as SUCCESS with partial text."""
+    ndjson = [
+        '{"type":"system","subtype":"init","session_id":"s1","model":"sonnet","tools":[]}',
+        '{"type":"assistant","message":{"content":[{"type":"text","text":"partial..."}]}}',
+    ]
+    _install_fake_stream(monkeypatch, ndjson, returncode=2)
+
+    agent = ClaudeAgent(cli_path="claude")
+
+    async def _on_partial(text: str) -> None:
+        pass
+
+    resp = await agent.run("hi", thread_id="t1", on_partial=_on_partial)
+
+    assert resp.error is not None
+    assert "exited 2" in resp.error
+
+
+@pytest.mark.asyncio
+async def test_claude_streaming_max_turns_classified_like_block_mode(monkeypatch):
+    """Regression: in streaming mode the error_max_turns result frame used to
+    map to UsageEvent only, so error_kind never became 'max_turns' and the
+    registry would fall back / the runtime re-run button never appeared."""
+    ndjson = [
+        '{"type":"system","subtype":"init","session_id":"s1","model":"sonnet","tools":[]}',
+        '{"type":"assistant","message":{"content":[{"type":"text","text":"got partway"}]}}',
+        '{"type":"result","subtype":"error_max_turns","num_turns":25,'
+        '"usage":{"input_tokens":5,"output_tokens":2}}',
+    ]
+    _install_fake_stream(monkeypatch, ndjson, returncode=1)
+
+    agent = ClaudeAgent(cli_path="claude")
+
+    async def _on_partial(text: str) -> None:
+        pass
+
+    resp = await agent.run("hi", thread_id="t1", on_partial=_on_partial)
+
+    assert resp.error_kind == "max_turns"
+    assert resp.terminal_reason == "max_turns"
+    assert resp.error == "claude: max_turns reached (25 turns)"
+    # The structured classification must not be clobbered by a generic
+    # "exited 1" error derived from the exit code.
+    assert "exited 1" not in (resp.error or "")
+    # Streamed partial text is preserved on the response.
+    assert "got partway" in resp.text
 
 
 @pytest.mark.asyncio

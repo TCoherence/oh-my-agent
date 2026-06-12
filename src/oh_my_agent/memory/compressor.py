@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING
 
@@ -16,6 +17,11 @@ _SUMMARY_PROMPT = (
     "conversation.  Respond ONLY with the summary text, no preamble.\n\n"
     "{conversation}"
 )
+
+# Char budget for the conversation block fed to the summariser (mirrors the
+# Judge's _MAX_WINDOW_CHARS pattern). Oldest turns are dropped first; the
+# previous summary is always kept so each new summary stays cumulative.
+_MAX_CONVERSATION_CHARS = 24000
 
 
 class HistoryCompressor:
@@ -37,6 +43,7 @@ class HistoryCompressor:
         self._store = store
         self._max_turns = max_turns
         self._summary_max_chars = summary_max_chars
+        self._thread_locks: dict[tuple[str, str, str], asyncio.Lock] = {}
 
     async def maybe_compress(
         self,
@@ -50,6 +57,24 @@ class HistoryCompressor:
 
         Returns ``True`` if compression was performed.
         """
+        # Per-thread serialization: maybe_compress fires per message, so
+        # concurrent runs for the same thread would insert overlapping
+        # summary rows. The count re-check happens inside the lock.
+        key = (platform, channel_id, thread_id)
+        lock = self._thread_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            return await self._compress_locked(
+                platform, channel_id, thread_id, registry, req_id,
+            )
+
+    async def _compress_locked(
+        self,
+        platform: str,
+        channel_id: str,
+        thread_id: str,
+        registry: AgentRegistry,
+        req_id: str | None = None,
+    ) -> bool:
         req_prefix = f"[{req_id}] " if req_id else ""
         count = await self._store.count_turns(platform, channel_id, thread_id)
         if count <= self._max_turns:
@@ -71,12 +96,34 @@ class HistoryCompressor:
         first_id = old_turns[0]["_id"]
         last_id = old_turns[-1]["_id"]
 
+        # The previous summary turn (synthetic, no _id) is prepended so each
+        # new summary stays cumulative — otherwise every compression after
+        # the first would discard the earlier summarised context.
+        prior_context = [
+            str(t.get("content") or "") for t in history if "_id" not in t
+        ]
+        prior_context = [c for c in prior_context if c]
+
         # Build conversation text for the summariser
         conv_lines = []
         for t in old_turns:
             label = t.get("author") or t.get("agent") or t["role"]
             conv_lines.append(f"[{label}] {t['content']}")
-        conversation_text = "\n".join(conv_lines)
+
+        # Cap the prompt: drop oldest raw turns first, never the prior
+        # summary (already bounded by summary_max_chars).
+        budget = _MAX_CONVERSATION_CHARS - sum(len(c) + 1 for c in prior_context)
+        total = sum(len(line) + 1 for line in conv_lines)
+        omitted = 0
+        while len(conv_lines) > 1 and total > budget:
+            total -= len(conv_lines.pop(0)) + 1
+            omitted += 1
+        if omitted:
+            conv_lines.insert(
+                0,
+                f"[Note: {omitted} older turn(s) omitted to fit the summarization window]",
+            )
+        conversation_text = "\n".join(prior_context + conv_lines)
 
         prompt = _SUMMARY_PROMPT.format(
             max_chars=self._summary_max_chars,

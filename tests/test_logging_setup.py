@@ -250,6 +250,17 @@ class TestSetupLogging:
         assert isinstance(console_handlers[0].formatter, PrettyFormatter)
         assert isinstance(file_handlers[0].formatter, KeyValueFormatter)
 
+    def test_file_handler_rotates_on_utc_midnight(self, tmp_path):
+        """Rotation must use UTC so date suffixes match _cleanup_old_logs'
+        UTC cutoff — local-midnight suffixes get pruned a day early on
+        US-Pacific hosts."""
+        setup_logging(None, runtime_root=tmp_path)
+        file_handlers = [
+            h for h in logging.getLogger().handlers
+            if isinstance(h, logging.handlers.TimedRotatingFileHandler)
+        ]
+        assert file_handlers[0].utc is True
+
     def test_thread_log_retention_accessible(self):
         """thread_log_retention_days is a config value the janitor reads directly."""
         config = {"logging": {"thread_log_retention_days": 30}}

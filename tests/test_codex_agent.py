@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from oh_my_agent.agents.cli.codex import CodexCLIAgent
@@ -97,6 +99,44 @@ def test_codex_command_supports_extra_args():
     )
     cmd = agent._build_command("hello")
     assert "--search" in cmd
+
+
+@pytest.mark.asyncio
+async def test_codex_timeout_returns_partial_excerpt_and_terminal_reason(tmp_path, monkeypatch):
+    """Codex's timeout path must populate partial_text + terminal_reason the
+    same way base/claude block mode does (previously a bare timeout response)."""
+    log_path = tmp_path / "codex.log"
+    log_path.write_text("b" * 2500, encoding="utf-8")
+
+    async def _timeout(*args, **kwargs):
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr("oh_my_agent.agents.cli.codex._stream_cli_process", _timeout)
+
+    agent = CodexCLIAgent(cli_path="codex", model="gpt-test", timeout=5)
+    response = await agent.run("hello", log_path=log_path)
+
+    assert response.error_kind == "timeout"
+    assert response.terminal_reason == "timeout"
+    assert response.partial_text == ("b" * 2000)
+
+
+@pytest.mark.asyncio
+async def test_codex_timeout_override_is_per_call(monkeypatch):
+    seen: dict[str, float] = {}
+
+    async def _timeout(*args, **kwargs):
+        seen["timeout"] = kwargs["timeout"]
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr("oh_my_agent.agents.cli.codex._stream_cli_process", _timeout)
+
+    agent = CodexCLIAgent(cli_path="codex", model="gpt-test", timeout=300)
+    response = await agent.run("hello", timeout_override=9)
+
+    assert seen["timeout"] == 9
+    assert "timed out after 9s" in response.error
+    assert agent._timeout == 300
 
 
 def test_codex_parse_output_handles_item_completed_agent_message():

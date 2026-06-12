@@ -19,6 +19,7 @@ from oh_my_agent.agents.cli.base import (
 from oh_my_agent.agents.control_prompt import build_system_preamble
 from oh_my_agent.agents.events import (
     AgentEvent,
+    ErrorEvent,
     SystemInitEvent,
     TextEvent,
     ThinkingEvent,
@@ -110,7 +111,7 @@ class ClaudeAgent(BaseCLIAgent):
         max_turns: int = 25,
         allowed_tools: list[str] | None = None,
         model: str = "sonnet",
-        dangerously_skip_permissions: bool = True,
+        dangerously_skip_permissions: bool = False,
         permission_mode: str | None = None,
         extra_args: list[str] | None = None,
         timeout: int = 300,
@@ -141,22 +142,31 @@ class ClaudeAgent(BaseCLIAgent):
     def clear_session(self, thread_id: str) -> None:
         self._session_ids.pop(thread_id, None)
 
+    def _effective_max_turns(self, max_turns: int | None) -> int:
+        """Per-call turn budget: a positive override wins, else the configured
+        one. Never mutates ``self._max_turns`` (concurrency-safe)."""
+        if max_turns is not None and max_turns > 0:
+            return max_turns
+        return self._max_turns
+
     def _base_command(
         self,
         prompt: str,
         model: str | None = None,
         *,
         system_append: str | None = None,
+        max_turns: int | None = None,
     ) -> list[str]:
         # ``model`` is a per-call override (e.g. self-eval routing); falls
         # back to the agent's configured model. ``system_append`` carries the
         # per-call ambient context (control protocol + memory) delivered via
         # ``--append-system-prompt`` so it never accumulates in the session.
-        # Both are parameters (not self state), so concurrent calls are safe.
+        # ``max_turns`` is the per-call turn-budget override (runtime tasks).
+        # All are parameters (not self state), so concurrent calls are safe.
         cmd = [
             self._cli_path,
             "-p", prompt,
-            "--max-turns", str(self._max_turns),
+            "--max-turns", str(self._effective_max_turns(max_turns)),
             "--model", model or self._model,
         ]
         if self._permission_mode:
@@ -182,8 +192,9 @@ class ClaudeAgent(BaseCLIAgent):
         model: str | None = None,
         *,
         system_append: str | None = None,
+        max_turns: int | None = None,
     ) -> list[str]:
-        cmd = self._base_command(prompt, model, system_append=system_append)
+        cmd = self._base_command(prompt, model, system_append=system_append, max_turns=max_turns)
         cmd.extend(["--output-format", "stream-json", "--verbose"])
         return cmd
 
@@ -282,7 +293,22 @@ class ClaudeAgent(BaseCLIAgent):
             cost = event.get("total_cost_usd") or event.get("cost_usd")
             # Don't synthesize a TextEvent from result.result — that text has
             # already been yielded via the assistant frames during the stream.
-            return [
+            out = []
+            if str(event.get("subtype", "")).strip() == "error_max_turns":
+                # Mirror the block-mode classification (run()'s rc!=0 branch):
+                # streaming consumers must see error_kind="max_turns" so the
+                # registry's no-fallback rule and the runtime's re-run button
+                # fire identically in both modes.
+                num_turns = event.get("num_turns")
+                message = (
+                    f"{self.name}: max_turns reached ({num_turns} turns)"
+                    if isinstance(num_turns, int)
+                    else f"{self.name}: max_turns reached"
+                )
+                out.append(
+                    ErrorEvent(message=message, error_kind="max_turns", agent=self.name)
+                )
+            out.append(
                 UsageEvent(
                     input_tokens=usage_obj.get("input_tokens"),
                     output_tokens=usage_obj.get("output_tokens"),
@@ -291,7 +317,8 @@ class ClaudeAgent(BaseCLIAgent):
                     cost_usd=cost,
                     agent=self.name,
                 )
-            ]
+            )
+            return out
 
         return []
 
@@ -302,6 +329,7 @@ class ClaudeAgent(BaseCLIAgent):
         model: str | None = None,
         *,
         system_append: str | None = None,
+        max_turns: int | None = None,
     ) -> list[str]:
         """Build a command that resumes an existing Claude session."""
         cmd = [
@@ -310,7 +338,7 @@ class ClaudeAgent(BaseCLIAgent):
             "--resume", session_id,
             "--output-format", "stream-json",
             "--verbose",
-            "--max-turns", str(self._max_turns),
+            "--max-turns", str(self._effective_max_turns(max_turns)),
             "--model", model or self._model,
         ]
         if self._permission_mode:
@@ -365,6 +393,8 @@ class ClaudeAgent(BaseCLIAgent):
         ambient_context: str | None = None,
         on_partial: PartialTextHook | None = None,
         on_tool_use: ToolUseHook | None = None,
+        timeout_override: float | None = None,
+        max_turns_override: int | None = None,
     ) -> AgentResponse:
         """Run the Claude CLI.
 
@@ -386,8 +416,10 @@ class ClaudeAgent(BaseCLIAgent):
         cwd = self._resolve_cwd(workspace_override)
         # Per-call model override (e.g. self-eval routing). Falls back to the
         # configured model. Threaded into command builders below; never
-        # mutates self._model.
+        # mutates self._model. Timeout / max-turns overrides follow the same
+        # non-mutating pattern (runtime tasks pass them per call).
         effective_model = model_override or self._model
+        effective_timeout = self._effective_timeout(timeout_override)
 
         # Augment prompt with image references
         if image_paths:
@@ -398,7 +430,11 @@ class ClaudeAgent(BaseCLIAgent):
         if session_id:
             # Resume existing session — send only the new prompt
             cmd = self._build_resume_command(
-                prompt, session_id, effective_model, system_append=system_append
+                prompt,
+                session_id,
+                effective_model,
+                system_append=system_append,
+                max_turns=max_turns_override,
             )
             if streaming and not image_paths:
                 logger.info("Streaming %s (resume session %s) ...", self.name, session_id[:12])
@@ -411,13 +447,17 @@ class ClaudeAgent(BaseCLIAgent):
                     log_path=log_path,
                     thread_id=thread_id,
                     command=cmd,
+                    timeout_override=timeout_override,
                 )
             logger.info("Resuming %s session %s ...", self.name, session_id[:12])
         else:
             # Fresh session — flatten history into prompt
             full_prompt = _build_prompt_with_history(prompt, history)
             cmd = self._build_command(
-                full_prompt, effective_model, system_append=system_append
+                full_prompt,
+                effective_model,
+                system_append=system_append,
+                max_turns=max_turns_override,
             )
             # When streaming is requested, delegate to the base streaming driver
             # which consumes self.stream() via `--output-format stream-json`.
@@ -434,6 +474,7 @@ class ClaudeAgent(BaseCLIAgent):
                     log_path=log_path,
                     thread_id=thread_id,
                     command=cmd,
+                    timeout_override=timeout_override,
                 )
             logger.info("Running %s (new session) ...", self.name)
 
@@ -442,13 +483,13 @@ class ClaudeAgent(BaseCLIAgent):
                 *cmd,
                 cwd=cwd,
                 env=self._build_env(),
-                timeout=self._timeout,
+                timeout=effective_timeout,
                 log_path=log_path,
             )
         except asyncio.TimeoutError:
             return AgentResponse(
                 text="",
-                error=f"{self.name} CLI timed out after {self._timeout}s",
+                error=f"{self.name} CLI timed out after {effective_timeout}s",
                 error_kind="timeout",
                 partial_text=_bounded_log_excerpt(log_path),
                 terminal_reason="timeout",

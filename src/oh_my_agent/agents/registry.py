@@ -4,7 +4,6 @@ import inspect
 import logging
 import re
 import time
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +14,17 @@ logger = logging.getLogger(__name__)
 # Track agents we've already warned about for missing ``ambient_context`` so
 # the message lands once per agent name rather than once per dispatch.
 _AGENTS_WARNED_NO_AMBIENT: set[str] = set()
+
+
+def _normalize_override(value: int | None) -> int | None:
+    """Coerce a per-run override to a positive int; None when absent/invalid."""
+    if value is None:
+        return None
+    try:
+        coerced = int(value)
+    except (TypeError, ValueError):
+        return None
+    return coerced if coerced > 0 else None
 
 
 class AgentRegistry:
@@ -40,56 +50,6 @@ class AgentRegistry:
         safe_agent = re.sub(r"[^A-Za-z0-9_.-]+", "-", agent_name).strip("-") or "agent"
         suffix = log_path.suffix or ".log"
         return log_path.with_name(f"{log_path.stem}-{safe_agent}{suffix}")
-
-    @staticmethod
-    @contextmanager
-    def _temporary_timeout(agent: BaseAgent, timeout_override_seconds: int | None):
-        if timeout_override_seconds is None or not hasattr(agent, "_timeout"):
-            yield
-            return
-        try:
-            override = int(timeout_override_seconds)
-        except (TypeError, ValueError):
-            yield
-            return
-        if override <= 0:
-            yield
-            return
-        original = getattr(agent, "_timeout")
-        setattr(agent, "_timeout", override)
-        try:
-            yield
-        finally:
-            setattr(agent, "_timeout", original)
-
-    @staticmethod
-    @contextmanager
-    def _temporary_max_turns(agent: BaseAgent, max_turns_override: int | None):
-        if max_turns_override is None:
-            yield
-            return
-        if not hasattr(agent, "_max_turns"):
-            logger.info(
-                "Agent '%s' does not support max_turns override; ignoring value=%r",
-                agent.name,
-                max_turns_override,
-            )
-            yield
-            return
-        try:
-            override = int(max_turns_override)
-        except (TypeError, ValueError):
-            yield
-            return
-        if override <= 0:
-            yield
-            return
-        original = getattr(agent, "_max_turns")
-        setattr(agent, "_max_turns", override)
-        try:
-            yield
-        finally:
-            setattr(agent, "_max_turns", original)
 
     async def _run_single_agent(
         self,
@@ -133,6 +93,24 @@ class AgentRegistry:
         # approach).
         if model_override is not None and "model_override" in sig.parameters:
             kwargs["model_override"] = model_override
+        # Per-call timeout / max-turns overrides follow the same non-mutating
+        # pattern: forwarded ONLY to agents whose run() accepts them, computed
+        # locally inside the agent — never setattr'd onto the shared singleton
+        # (concurrent runtime workers + chat turns would corrupt
+        # _timeout/_max_turns permanently).
+        timeout_override = _normalize_override(timeout_override_seconds)
+        if timeout_override is not None and "timeout_override" in sig.parameters:
+            kwargs["timeout_override"] = timeout_override
+        turns_override = _normalize_override(max_turns_override)
+        if turns_override is not None:
+            if "max_turns_override" in sig.parameters:
+                kwargs["max_turns_override"] = turns_override
+            else:
+                logger.info(
+                    "Agent '%s' does not support max_turns override; ignoring value=%r",
+                    agent.name,
+                    max_turns_override,
+                )
         if ambient_context is not None:
             if "ambient_context" in sig.parameters:
                 kwargs["ambient_context"] = ambient_context
@@ -150,9 +128,7 @@ class AgentRegistry:
                     agent.name,
                 )
         started_at = time.perf_counter()
-        with self._temporary_timeout(agent, timeout_override_seconds):
-            with self._temporary_max_turns(agent, max_turns_override):
-                response = await agent.run(prompt, history, **kwargs)
+        response = await agent.run(prompt, history, **kwargs)
         if on_agent_run is not None:
             maybe_result = on_agent_run(
                 agent=agent,
