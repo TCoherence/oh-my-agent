@@ -423,7 +423,7 @@ async def test_dispatcher_known_skill_artifact_force_draft_propagates(tmp_path) 
         encoding="utf-8",
     )
     syncer = MagicMock()
-    syncer._skills_path = skills_root  # noqa: SLF001
+    syncer.skills_path = skills_root
 
     router = MagicMock()
     router.confidence_threshold = 0.55
@@ -468,7 +468,7 @@ async def test_dispatcher_known_skill_artifact_draft_prefix_overrides(tmp_path) 
         encoding="utf-8",
     )
     syncer = MagicMock()
-    syncer._skills_path = skills_root  # noqa: SLF001
+    syncer.skills_path = skills_root
 
     router = MagicMock()
     router.confidence_threshold = 0.55
@@ -509,7 +509,7 @@ async def test_dispatcher_known_skill_artifact_default_auto_approves(tmp_path) -
         encoding="utf-8",
     )
     syncer = MagicMock()
-    syncer._skills_path = skills_root  # noqa: SLF001
+    syncer.skills_path = skills_root
 
     router = MagicMock()
     router.confidence_threshold = 0.55
@@ -552,7 +552,7 @@ async def test_dispatcher_repo_update_with_skill_always_drafts(tmp_path) -> None
         encoding="utf-8",
     )
     syncer = MagicMock()
-    syncer._skills_path = skills_root  # noqa: SLF001
+    syncer.skills_path = skills_root
 
     router = MagicMock()
     router.confidence_threshold = 0.55

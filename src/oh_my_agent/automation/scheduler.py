@@ -5,7 +5,7 @@ import contextlib
 import logging
 import os
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Literal
@@ -124,58 +124,21 @@ class ScheduledJob:
 
 
 @dataclass(frozen=True)
-class AutomationRecord:
-    name: str
-    platform: str
-    channel_id: str
-    prompt: str
-    enabled: bool
-    delivery: str = "channel"
-    thread_id: str | None = None
-    target_user_id: str | None = None
-    agent: str | None = None
-    author: str = "scheduler"
-    cron: str | None = None
-    interval_seconds: int | None = None
-    initial_delay_seconds: int = 0
-    source_path: Path | None = None
-    skill_name: str | None = None
-    timeout_seconds: int | None = None
-    max_turns: int | None = None
-    auto_approve: bool = False
-    notify_channel_id: str | None = None
+class AutomationRecord(ScheduledJob):
+    """An automation definition: every :class:`ScheduledJob` field plus ``enabled``.
 
-    @property
-    def schedule_kind(self) -> str:
-        return "cron" if self.cron else "interval"
+    Subclassing keeps the field list in exactly one place (``ScheduledJob``):
+    adding a job field no longer requires touching a parallel record class, a
+    ``to_job`` copy list, or a duplicated ``schedule_kind`` property.
+    """
+
+    enabled: bool = True
 
     def to_job(self) -> ScheduledJob:
+        """Return the plain :class:`ScheduledJob` view (drops ``enabled``)."""
         return ScheduledJob(
-            name=self.name,
-            platform=self.platform,
-            channel_id=self.channel_id,
-            prompt=self.prompt,
-            delivery=self.delivery,
-            thread_id=self.thread_id,
-            target_user_id=self.target_user_id,
-            agent=self.agent,
-            author=self.author,
-            cron=self.cron,
-            interval_seconds=self.interval_seconds,
-            initial_delay_seconds=self.initial_delay_seconds,
-            source_path=self.source_path,
-            skill_name=self.skill_name,
-            timeout_seconds=self.timeout_seconds,
-            max_turns=self.max_turns,
-            auto_approve=self.auto_approve,
-            notify_channel_id=self.notify_channel_id,
+            **{f.name: getattr(self, f.name) for f in fields(ScheduledJob)}
         )
-
-
-@dataclass(frozen=True)
-class _ParsedAutomation:
-    record: AutomationRecord
-    enabled: bool
 
 
 @dataclass(frozen=True)
@@ -415,38 +378,60 @@ class Scheduler:
             return updated
 
     @staticmethod
-    def _validate_patch_candidate(candidate: dict[str, Any]) -> None:
-        """Reject value-level errors before writing a patched automation file.
+    def _validate_schedule(
+        cron: str | None,
+        interval_seconds: Any,
+        *,
+        error_prefix: str = "",
+    ) -> int | None:
+        """Shared cron/interval schedule validation.
 
-        - cron + interval_seconds are mutually exclusive.
+        - cron + interval_seconds are mutually exclusive; one is required.
         - interval_seconds must be a positive int.
         - cron must parse.
+
+        Returns the parsed interval for interval schedules, ``None`` for cron
+        schedules. Raises :class:`ValueError` (with ``error_prefix``
+        prepended) on invalid input.
         """
-        has_cron = candidate.get("cron") not in (None, "")
-        has_interval = candidate.get("interval_seconds") not in (None, "")
+        has_cron = bool(cron)
+        has_interval = interval_seconds is not None
         if has_cron and has_interval:
             raise ValueError(
-                "patch_automation: cron and interval_seconds are mutually exclusive"
+                f"{error_prefix}cron and interval_seconds are mutually exclusive"
             )
         if not has_cron and not has_interval:
             raise ValueError(
-                "patch_automation: one of cron / interval_seconds is required"
+                f"{error_prefix}one of cron or interval_seconds is required"
             )
-        if has_interval:
-            try:
-                interval = int(candidate["interval_seconds"])
-            except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    f"patch_automation: interval_seconds must be an int "
-                    f"(got {candidate['interval_seconds']!r})"
-                ) from exc
-            if interval <= 0:
-                raise ValueError(
-                    f"patch_automation: interval_seconds must be > 0 (got {interval})"
-                )
         if has_cron:
             # Raises on invalid cron syntax.
-            _parse_cron_expression(str(candidate["cron"]))
+            _parse_cron_expression(str(cron))
+            return None
+        try:
+            interval = int(interval_seconds)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"{error_prefix}interval_seconds must be an int "
+                f"(got {interval_seconds!r})"
+            ) from exc
+        if interval <= 0:
+            raise ValueError(
+                f"{error_prefix}interval_seconds must be > 0 (got {interval})"
+            )
+        return interval
+
+    @staticmethod
+    def _validate_patch_candidate(candidate: dict[str, Any]) -> None:
+        """Reject value-level errors before writing a patched automation file."""
+        cron_value = candidate.get("cron")
+        cron = str(cron_value) if cron_value not in (None, "") else None
+        interval_value = candidate.get("interval_seconds")
+        if interval_value == "":
+            interval_value = None
+        Scheduler._validate_schedule(
+            cron, interval_value, error_prefix="patch_automation: "
+        )
 
     async def set_automation_enabled(self, name: str, *, enabled: bool) -> AutomationRecord:
         async with self._reload_lock:
@@ -724,10 +709,9 @@ class Scheduler:
         pinned_next_fire: datetime | None = None,
     ) -> None:
         try:
-            kind = "cron" if job.cron else "interval"
             logger.info(
                 "Scheduler firing %s job=%s platform=%s channel=%s thread=%s",
-                kind,
+                job.schedule_kind,
                 job.name,
                 job.platform,
                 job.channel_id,
@@ -799,16 +783,16 @@ class Scheduler:
         snapshot: dict[Path, tuple[int, int]] | None = None,
     ) -> None:
         snapshot = snapshot or self._scan_snapshot()
-        parsed: list[_ParsedAutomation] = []
+        parsed: list[AutomationRecord] = []
 
         for path in sorted(snapshot, key=lambda item: str(item)):
-            item = self._parse_automation_file(path)
-            if item is not None:
-                parsed.append(item)
+            record = self._parse_automation_file(path)
+            if record is not None:
+                parsed.append(record)
 
         duplicates: dict[str, list[Path]] = {}
-        for item in parsed:
-            duplicates.setdefault(item.record.name, []).append(item.record.source_path or Path("<unknown>"))
+        for record in parsed:
+            duplicates.setdefault(record.name, []).append(record.source_path or Path("<unknown>"))
 
         duplicate_names = {name for name, paths in duplicates.items() if len(paths) > 1}
         for name in sorted(duplicate_names):
@@ -821,12 +805,12 @@ class Scheduler:
 
         records_by_name: dict[str, AutomationRecord] = {}
         jobs_by_name: dict[str, ScheduledJob] = {}
-        for item in parsed:
-            if item.record.name in duplicate_names:
+        for record in parsed:
+            if record.name in duplicate_names:
                 continue
-            records_by_name[item.record.name] = item.record
-            if item.enabled:
-                jobs_by_name[item.record.name] = item.record.to_job()
+            records_by_name[record.name] = record
+            if record.enabled:
+                jobs_by_name[record.name] = record.to_job()
 
         self._records_by_name = records_by_name
         self._jobs_by_name = jobs_by_name
@@ -855,7 +839,7 @@ class Scheduler:
             snapshot[path.resolve()] = (stat.st_mtime_ns, stat.st_size)
         return snapshot
 
-    def _parse_automation_file(self, path: Path) -> _ParsedAutomation | None:
+    def _parse_automation_file(self, path: Path) -> AutomationRecord | None:
         try:
             raw = yaml.safe_load(path.read_text(encoding="utf-8"))
         except Exception as exc:
@@ -878,7 +862,7 @@ class Scheduler:
         raw: dict,
         *,
         source_path: Path,
-    ) -> _ParsedAutomation:
+    ) -> AutomationRecord:
         name = str(raw.get("name", "")).strip()
         if not name:
             raise ValueError("name is required")
@@ -913,24 +897,13 @@ class Scheduler:
                 )
 
         cron = str(raw.get("cron")).strip() if raw.get("cron") is not None else None
-        interval_seconds = raw.get("interval_seconds")
-        if cron and interval_seconds is not None:
-            raise ValueError("cron and interval_seconds are mutually exclusive")
-        if not cron and interval_seconds is None:
-            raise ValueError("one of cron or interval_seconds is required")
+        interval_value = self._validate_schedule(cron, raw.get("interval_seconds"))
 
-        interval_value: int | None = None
         initial_delay_seconds = 0
         if cron:
             if "initial_delay_seconds" in raw:
                 raise ValueError("initial_delay_seconds is not supported with cron")
-            _parse_cron_expression(cron)
         else:
-            # The 'cron xor interval_seconds' guard above ensures non-None here.
-            assert interval_seconds is not None
-            interval_value = int(interval_seconds)
-            if interval_value <= 0:
-                raise ValueError("interval_seconds must be > 0")
             initial_delay_seconds = int(raw.get("initial_delay_seconds", 0))
             if initial_delay_seconds < 0:
                 raise ValueError("initial_delay_seconds must be >= 0")
@@ -967,30 +940,26 @@ class Scheduler:
                     )
                 notify_channel_id = dump.channel_id
 
-        record = AutomationRecord(
-                name=name,
-                platform=platform,
-                channel_id=channel_id,
-                prompt=prompt,
-                enabled=enabled,
-                delivery=delivery,
-                thread_id=(str(raw["thread_id"]) if raw.get("thread_id") is not None else None),
-                target_user_id=target_user_id,
-                agent=agent_name,
-                author=str(raw.get("author", "scheduler")),
-                cron=cron,
-                interval_seconds=interval_value,
-                initial_delay_seconds=initial_delay_seconds,
-                source_path=source_path,
-                skill_name=skill_name,
-                timeout_seconds=timeout_seconds,
-                max_turns=max_turns,
-                auto_approve=auto_approve,
-                notify_channel_id=notify_channel_id,
-            )
-        return _ParsedAutomation(
-            record=record,
+        return AutomationRecord(
+            name=name,
+            platform=platform,
+            channel_id=channel_id,
+            prompt=prompt,
             enabled=enabled,
+            delivery=delivery,
+            thread_id=(str(raw["thread_id"]) if raw.get("thread_id") is not None else None),
+            target_user_id=target_user_id,
+            agent=agent_name,
+            author=str(raw.get("author", "scheduler")),
+            cron=cron,
+            interval_seconds=interval_value,
+            initial_delay_seconds=initial_delay_seconds,
+            source_path=source_path,
+            skill_name=skill_name,
+            timeout_seconds=timeout_seconds,
+            max_turns=max_turns,
+            auto_approve=auto_approve,
+            notify_channel_id=notify_channel_id,
         )
 
     async def _reload_now_locked(self) -> dict[str, int]:

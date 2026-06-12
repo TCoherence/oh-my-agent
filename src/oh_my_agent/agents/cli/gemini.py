@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import shutil
 from pathlib import Path
 
 from oh_my_agent.agents.base import AgentResponse, PartialTextHook, ToolUseHook
@@ -95,29 +94,8 @@ class GeminiCLIAgent(BaseCLIAgent):
             cmd.extend(self._extra_args)
         return cmd
 
-    def _augment_prompt_with_images(
-        self, prompt: str, image_paths: list[Path], cwd: str | Path | None
-    ) -> str:
-        """Copy images to the workspace and prepend file-reference instructions."""
-        if not image_paths:
-            return prompt
-        lines: list[str] = []
-        cwd_path = Path(cwd) if cwd else None
-        for img in image_paths:
-            if not img.is_file():
-                continue
-            if cwd_path:
-                dest_dir = cwd_path / "_attachments"
-                dest_dir.mkdir(parents=True, exist_ok=True)
-                dest = dest_dir / img.name
-                shutil.copy2(img, dest)
-                ref = f"_attachments/{img.name}"
-            else:
-                ref = str(img)
-            lines.append(f"An image file is available at `{ref}`. Please read and analyze it.")
-        if not lines:
-            return prompt
-        return "\n".join(lines) + "\n\n" + prompt
+    # _augment_prompt_with_images is inherited from BaseCLIAgent; the base
+    # default instruction text is already Gemini's generic wording.
 
     async def run(
         self,
@@ -232,40 +210,22 @@ class GeminiCLIAgent(BaseCLIAgent):
 
         raw = stdout.decode(errors="replace").strip()
 
-        try:
-            data = json.loads(raw)
-        except (json.JSONDecodeError, ValueError):
-            # Gemini occasionally returns plain text even with --output-format json
-            return AgentResponse(text=raw)
+        response = self._parse_output(raw)
 
-        text = data.get("response", "")
-        if not text:
-            return AgentResponse(text=raw)
+        # Capture and store session_id for future resume. ``response.raw`` is
+        # only populated when _parse_output extracted a structured response.
+        if thread_id and response.raw is not None:
+            new_session_id = response.raw.get("session_id")
+            if new_session_id:
+                self._session_ids[thread_id] = new_session_id
+                logger.info(
+                    "Stored %s session %s for thread %s",
+                    self.name,
+                    new_session_id[:12],
+                    thread_id,
+                )
 
-        # Capture and store session_id for future resume
-        new_session_id = data.get("session_id")
-        if new_session_id and thread_id:
-            self._session_ids[thread_id] = new_session_id
-            logger.info("Stored %s session %s for thread %s", self.name, new_session_id[:12], thread_id)
-
-        # Extract token stats from stats.models.<model-name>.tokens
-        usage: dict | None = None
-        models = data.get("stats", {}).get("models", {})
-        if models:
-            total_prompt = total_candidates = total_cached = 0
-            for model_stats in models.values():
-                tokens = model_stats.get("tokens", {})
-                total_prompt += tokens.get("prompt", 0)
-                total_candidates += tokens.get("candidates", 0)
-                total_cached += tokens.get("cached", 0)
-            if total_prompt or total_candidates:
-                usage = {
-                    "input_tokens": total_prompt,
-                    "output_tokens": total_candidates,
-                    "cache_read_input_tokens": total_cached,
-                }
-
-        return AgentResponse(text=text, raw=data, usage=usage)
+        return response
 
     def _extract_usage_from_stats(self, stats: dict | None) -> dict | None:
         if not isinstance(stats, dict):
@@ -332,7 +292,13 @@ class GeminiCLIAgent(BaseCLIAgent):
         return [TextEvent(text=stripped, agent=self.name)]
 
     def _parse_output(self, raw: str) -> AgentResponse:
-        """Parse Gemini JSON output (used by base class run(); session_id not captured here)."""
+        """Parse Gemini ``--output-format json`` stdout into an AgentResponse.
+
+        Falls back to plain text when the CLI returns non-JSON output (it
+        occasionally does even with ``--output-format json``) or when the
+        ``response`` field is missing. Session-id capture happens in
+        :meth:`run` from the returned ``raw`` payload.
+        """
         try:
             data = json.loads(raw)
         except (json.JSONDecodeError, ValueError):
@@ -342,20 +308,8 @@ class GeminiCLIAgent(BaseCLIAgent):
         if not text:
             return AgentResponse(text=raw)
 
-        usage: dict | None = None
-        models = data.get("stats", {}).get("models", {})
-        if models:
-            total_prompt = total_candidates = total_cached = 0
-            for model_stats in models.values():
-                tokens = model_stats.get("tokens", {})
-                total_prompt += tokens.get("prompt", 0)
-                total_candidates += tokens.get("candidates", 0)
-                total_cached += tokens.get("cached", 0)
-            if total_prompt or total_candidates:
-                usage = {
-                    "input_tokens": total_prompt,
-                    "output_tokens": total_candidates,
-                    "cache_read_input_tokens": total_cached,
-                }
-
-        return AgentResponse(text=text, raw=data, usage=usage)
+        return AgentResponse(
+            text=text,
+            raw=data,
+            usage=self._extract_usage_from_stats(data.get("stats")),
+        )

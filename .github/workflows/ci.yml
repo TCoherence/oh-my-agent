@@ -28,7 +28,7 @@ jobs:
           pip install -e ".[dev]"
 
       - name: Run ruff
-        run: ruff check src tests
+        run: ruff check src tests scripts
 
       - name: Run mypy
         run: mypy src
@@ -55,8 +55,8 @@ jobs:
         run: npm ci
 
       # Build first: the TanStack Router plugin generates routeTree.gen.ts here,
-      # which the typecheck needs. A broken Vite build also fails CI instead of
-      # silently shipping a degraded (SPA-less) wheel (setup.py swallows it).
+      # which the typecheck needs. The packaging path (setup.py hook + wheel
+      # contents) is exercised separately by the `package` job below.
       - name: Build SPA
         run: npm run build
 
@@ -65,3 +65,49 @@ jobs:
 
       - name: Run vitest
         run: npm run test:run
+
+  package:
+    name: wheel (SPA included)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: dashboard-web/package-lock.json
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install build frontend
+        run: |
+          python -m pip install --upgrade pip
+          pip install build
+
+      # No OMA_SKIP_FRONTEND here on purpose: this job exercises the real
+      # packaging path — setup.py's BuildPyWithFrontend must run npm ci +
+      # npm run build and fail loudly if the SPA can't be built.
+      - name: Build wheel
+        run: python -m build --wheel
+
+      - name: Assert SPA shipped inside the wheel
+        run: |
+          python - <<'PY'
+          import glob
+          import sys
+          import zipfile
+
+          wheels = glob.glob("dist/*.whl")
+          if len(wheels) != 1:
+              sys.exit(f"expected exactly one wheel in dist/, got: {wheels}")
+          target = "oh_my_agent/dashboard/web_dist/index.html"
+          with zipfile.ZipFile(wheels[0]) as wheel:
+              if target not in wheel.namelist():
+                  sys.exit(f"{target} missing from {wheels[0]} — wheel shipped without the SPA")
+          print(f"OK: {target} present in {wheels[0]}")
+          PY

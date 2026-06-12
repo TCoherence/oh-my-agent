@@ -55,7 +55,6 @@ from oh_my_agent.utils.errors import user_safe_agent_error, user_safe_message
 from oh_my_agent.utils.reports_link import ensure_reports_archive_link
 from oh_my_agent.utils.usage import (
     append_usage_audit,
-    format_usage_audit,
     record_usage_from_response,
 )
 
@@ -71,6 +70,22 @@ _PARTIAL_EXCERPT_MAX_CHARS = 2000
 class ResponseDelivery:
     first_message_id: str | None
     chunk_count: int
+
+
+@dataclass
+class _TaskDispatchOutcome:
+    """Result of the router/heuristic task-dispatch tree.
+
+    ``handled`` means a task was created (or delegated) and the message
+    needs no inline reply. On fall-through (``handled=False``),
+    ``router_decision`` carries the router verdict for downstream skill
+    resolution / purpose labels, and ``user_turn_appended`` records whether
+    a dispatch branch already persisted the user turn.
+    """
+
+    handled: bool
+    router_decision: object | None = None
+    user_turn_appended: bool = False
 
 class GatewayManager:
     """Manages multiple platform channels and routes messages to agent sessions."""
@@ -1141,19 +1156,6 @@ class GatewayManager:
         except Exception:
             logger.warning("refresh_next_run_at failed name=%s", name, exc_info=True)
 
-    async def fire_automation(self, name: str) -> str:
-        """Manually fire a named automation job.  Returns a status message."""
-        if not self._scheduler:
-            return "Scheduler not configured."
-        result = await self._scheduler.fire_job_now(name)
-        if result == "ok":
-            return f"Automation `{name}` dispatched."
-        if result == "already_firing":
-            return f"Automation `{name}` is already firing — manual run skipped."
-        if result == "not_found":
-            return f"Automation `{name}` not found."
-        return f"Automation `{name}` could not be fired (scheduler not running)."
-
     async def _dispatch_scheduled_job(self, job: ScheduledJob) -> None:
         try:
             await self._dispatch_scheduled_job_body(job)
@@ -1324,6 +1326,103 @@ class GatewayManager:
                 exc_info=True,
             )
 
+    async def _maybe_seed_automation_followup(
+        self,
+        session: ChannelSession,
+        msg: IncomingMessage,
+        *,
+        req_id: str,
+    ) -> None:
+        """Seed a follow-up thread when the message targets an automation post.
+
+        Two entry paths converge on the same final state ("thread with a
+        system turn pointing at the original run's artifacts"):
+
+          Case A (mode=reply): user *replied in the main channel* to a bot's
+                  automation post → we create the thread on their behalf,
+                  anchored on the post, and redirect ``msg.thread_id`` to it.
+          Case B (mode=manual): user *manually created a Discord thread* on
+                  the post via the "Create Thread" UI before sending anything
+                  → the thread already exists. We detect this on the first
+                  message because Discord guarantees ``thread.id ==
+                  anchor_message.id`` for message-anchored threads, so the
+                  same ``get_automation_post`` lookup keyed on the thread id
+                  finds the post.
+
+        TTL is enforced by the runtime janitor; we trust whatever
+        ``get_automation_post`` returns. Mutates ``msg.thread_id`` in Case A
+        (no-op in Case B, where it already points at the follow-up thread).
+        """
+        if msg.system or self._memory_store_ref is None:
+            return
+        if msg.thread_id is None:
+            # Case A: reply-in-channel.
+            if not msg.reply_to_message_id:
+                return
+            anchor_id = msg.reply_to_message_id
+            mode = "reply"
+        else:
+            # Case B: user manually created the thread. Only seed on the
+            # FIRST message in the thread — if there's already history we've
+            # either seeded before or this thread isn't a follow-up.
+            existing_history = await session.get_history(msg.thread_id)
+            if existing_history:
+                return
+            anchor_id = msg.thread_id
+            mode = "manual"
+        post = None
+        try:
+            post = await self._memory_store_ref.get_automation_post(
+                msg.platform, msg.channel_id, anchor_id,
+            )
+        except Exception:
+            logger.debug(
+                "[%s] get_automation_post failed %s=%s",
+                req_id,
+                "reply_to" if mode == "reply" else "thread",
+                anchor_id,
+                exc_info=True,
+            )
+        if post is None:
+            return
+        if mode == "reply":
+            thread_name = f"follow-up · {post.automation_name}"[:90]
+            # When the anchor message lives in a dump channel (different
+            # from the channel the BaseChannel was constructed with),
+            # create_followup_thread needs the parent channel id passed
+            # explicitly so it can fetch the anchor from there.
+            new_thread_id = await session.channel.create_followup_thread(
+                anchor_id,
+                thread_name,
+                parent_channel_id=msg.channel_id,
+            )
+            if not new_thread_id:
+                return
+            follow_up_thread_id = new_thread_id
+        else:
+            follow_up_thread_id = anchor_id
+        logger.info(
+            "[%s] AUTOMATION_FOLLOWUP thread=%s automation=%s anchor_msg=%s mode=%s",
+            req_id,
+            follow_up_thread_id,
+            post.automation_name,
+            anchor_id,
+            mode,
+        )
+        msg.thread_id = follow_up_thread_id
+        await session.append_assistant(
+            follow_up_thread_id,
+            self._build_automation_followup_seed(post),
+            "system",
+        )
+        await self._persist_automation_followup_mapping(
+            platform=msg.platform,
+            channel_id=msg.channel_id,
+            anchor_message_id=anchor_id,
+            follow_up_thread_id=follow_up_thread_id,
+            req_id=req_id,
+        )
+
     async def handle_message(
         self,
         session: ChannelSession,
@@ -1416,116 +1515,7 @@ class GatewayManager:
                 )
                 return
 
-        # Automation follow-up seeding has two entry paths into the same final
-        # state ("thread with a system turn pointing at the original run's
-        # artifacts"):
-        #
-        #   Case A: user *replied in the main channel* to a bot's automation
-        #           post → we create the thread on their behalf, anchored on
-        #           the post.
-        #   Case B: user *manually created a Discord thread* on the post via
-        #           the "Create Thread" UI before sending anything → the
-        #           thread already exists. We detect this on the first
-        #           message because Discord guarantees ``thread.id ==
-        #           anchor_message.id`` for message-anchored threads, so the
-        #           same ``get_automation_post`` lookup keyed on the thread
-        #           id finds the post.
-        #
-        # TTL is enforced by the runtime janitor; we trust whatever
-        # ``get_automation_post`` returns.
-        if (
-            msg.thread_id is None
-            and msg.reply_to_message_id
-            and not msg.system
-            and self._memory_store_ref is not None
-        ):
-            # Case A: reply-in-channel.
-            post = None
-            try:
-                post = await self._memory_store_ref.get_automation_post(
-                    msg.platform, msg.channel_id, msg.reply_to_message_id,
-                )
-            except Exception:
-                logger.debug(
-                    "[%s] get_automation_post failed reply_to=%s",
-                    req_id,
-                    msg.reply_to_message_id,
-                    exc_info=True,
-                )
-            if post is not None:
-                thread_name = f"follow-up · {post.automation_name}"[:90]
-                # When the anchor message lives in a dump channel (different
-                # from the channel the BaseChannel was constructed with),
-                # create_followup_thread needs the parent channel id passed
-                # explicitly so it can fetch the anchor from there.
-                new_thread_id = await channel.create_followup_thread(
-                    msg.reply_to_message_id,
-                    thread_name,
-                    parent_channel_id=msg.channel_id,
-                )
-                if new_thread_id:
-                    logger.info(
-                        "[%s] AUTOMATION_FOLLOWUP thread=%s automation=%s anchor_msg=%s mode=reply",
-                        req_id,
-                        new_thread_id,
-                        post.automation_name,
-                        msg.reply_to_message_id,
-                    )
-                    msg.thread_id = new_thread_id
-                    await session.append_assistant(
-                        new_thread_id,
-                        self._build_automation_followup_seed(post),
-                        "system",
-                    )
-                    await self._persist_automation_followup_mapping(
-                        platform=msg.platform,
-                        channel_id=msg.channel_id,
-                        anchor_message_id=msg.reply_to_message_id,
-                        follow_up_thread_id=new_thread_id,
-                        req_id=req_id,
-                    )
-        elif (
-            msg.thread_id is not None
-            and not msg.system
-            and self._memory_store_ref is not None
-        ):
-            # Case B: user manually created the thread. Only seed on the
-            # FIRST message in the thread — if there's already history we've
-            # either seeded before or this thread isn't a follow-up.
-            existing_history = await session.get_history(msg.thread_id)
-            if not existing_history:
-                post = None
-                try:
-                    post = await self._memory_store_ref.get_automation_post(
-                        msg.platform, msg.channel_id, msg.thread_id,
-                    )
-                except Exception:
-                    logger.debug(
-                        "[%s] get_automation_post failed thread=%s",
-                        req_id,
-                        msg.thread_id,
-                        exc_info=True,
-                    )
-                if post is not None:
-                    logger.info(
-                        "[%s] AUTOMATION_FOLLOWUP thread=%s automation=%s anchor_msg=%s mode=manual",
-                        req_id,
-                        msg.thread_id,
-                        post.automation_name,
-                        msg.thread_id,
-                    )
-                    await session.append_assistant(
-                        msg.thread_id,
-                        self._build_automation_followup_seed(post),
-                        "system",
-                    )
-                    await self._persist_automation_followup_mapping(
-                        platform=msg.platform,
-                        channel_id=msg.channel_id,
-                        anchor_message_id=msg.thread_id,
-                        follow_up_thread_id=msg.thread_id,
-                        req_id=req_id,
-                    )
+        await self._maybe_seed_automation_followup(session, msg, req_id=req_id)
 
         # Determine thread: use existing or create a new one
         thread_id = msg.thread_id
@@ -1545,7 +1535,6 @@ class GatewayManager:
                 return
 
         history = await session.get_history(thread_id)
-        user_turn_appended = False
         await self._refresh_auto_disabled_skills()
 
         explicit_skill = self._detect_explicit_skill_invocation(msg.content)
@@ -1669,6 +1658,183 @@ class GatewayManager:
                 )
                 return
 
+        dispatch = await self._dispatch_task_routing(
+            req_id=req_id,
+            session=session,
+            registry=registry,
+            msg=msg,
+            thread_id=thread_id,
+            history=history,
+            explicit_skill=explicit_skill,
+        )
+        if dispatch.handled:
+            return
+        router_decision = dispatch.router_decision
+        user_turn_appended = dispatch.user_turn_appended
+
+        # Extract image paths from attachments
+        image_paths = [
+            att.local_path for att in (msg.attachments or []) if att.is_image
+        ] or None
+
+        # Inject default prompt for image-only messages (no text)
+        if not msg.content and image_paths:
+            msg = IncomingMessage(
+                platform=msg.platform,
+                channel_id=msg.channel_id,
+                thread_id=msg.thread_id,
+                author=msg.author,
+                author_id=msg.author_id,
+                content="Please describe and analyze the attached image(s).",
+                raw=msg.raw,
+                preferred_agent=msg.preferred_agent,
+                system=msg.system,
+                attachments=msg.attachments,
+            )
+
+        # Append user turn to history
+        user_turn_id: int | None = None
+        if not user_turn_appended:
+            user_turn_id = await session.append_user(
+                thread_id, msg.content, msg.author,
+                attachments=msg.attachments or None,
+            )
+        else:
+            # Already appended upstream (artifact/heuristic fall-through). Recover
+            # its row id from the cache tail for the watermark protocol.
+            _hist = await session.get_history(thread_id)
+            for _t in reversed(_hist):
+                if _t.get("role") == "user" and isinstance(_t.get("_id"), int):
+                    user_turn_id = _t["_id"]
+                    break
+        prior_history = history[:-1] if len(history) > 1 else []
+        routed_skill = self._routed_skill_name(
+            router_decision=router_decision,
+            router_threshold=(self._intent_router.confidence_threshold if self._intent_router else None),
+            history=history,
+        )
+        tracked_skill = explicit_skill or routed_skill
+        skill_timeout_override = self._skill_timeout_seconds_by_name(tracked_skill)
+        agent_purpose = self._agent_run_purpose(
+            explicit_skill=explicit_skill or routed_skill,
+            router_decision=router_decision,
+            router_threshold=(self._intent_router.confidence_threshold if self._intent_router else None),
+        )
+        log_mode = self._thread_log_mode_from_purpose(agent_purpose)
+
+        logger.info(
+            "[%s] AGENT starting purpose=%s preferred_agent=%r skill_timeout_override=%r registry=%s history_turns=%d",
+            req_id,
+            agent_purpose,
+            msg.preferred_agent,
+            skill_timeout_override,
+            [a.name for a in registry.agents],
+            len(prior_history),
+        )
+
+        # Pre-load persisted CLI session IDs so agents can resume after restart
+        if self._memory_store_ref:
+            for agent in registry.agents:
+                if hasattr(agent, "set_session_id") and agent.get_session_id(thread_id) is None:
+                    stored = await self._memory_store_ref.load_session(
+                        session.platform, session.channel_id, thread_id, agent.name
+                    )
+                    if stored:
+                        agent.set_session_id(thread_id, stored)
+                        logger.debug("Restored session %s for %s thread %s", stored[:12], agent.name, thread_id)
+
+        # Inject adaptive memory context if available
+        agent_prompt = msg.content
+        if routed_skill and not explicit_skill:
+            agent_prompt = f"/{routed_skill}\n\n{agent_prompt}".strip()
+        # Memory is delivered as ambient_context (see registry/agent dispatch),
+        # not baked into the user prompt — so claude can route it through
+        # --append-system-prompt and it never accumulates across resume turns.
+        ambient_context: str | None = None
+        if self._judge_store is not None:
+            try:
+                relevant = self._judge_store.get_relevant(
+                    skill_name=tracked_skill,
+                    thread_id=thread_id,
+                    workspace=str(self._repo_root),
+                    limit=self._memory_inject_limit,
+                )
+                logger.info(
+                    "[%s] memory_inject selected_count=%d store_active=%d",
+                    req_id,
+                    len(relevant),
+                    len(self._judge_store.get_active()),
+                )
+                if relevant:
+                    # M0 PR2: use shared JudgeStore.format_memory_block so chat
+                    # and runtime paths produce identical [Remembered context].
+                    from oh_my_agent.memory.judge_store import JudgeStore as _JS
+                    block = _JS.format_memory_block(relevant)
+                    ambient_context = block or None
+            except Exception as exc:
+                logger.warning("[%s] Memory injection failed: %s", req_id, exc)
+
+        # Surface any cached provider credentials (e.g. Bilibili cookies) so the
+        # agent can reuse them instead of triggering a redundant QR auth flow.
+        runtime = self._runtime_service
+        collector = (
+            getattr(runtime, "collect_provider_credential_hints", None)
+            if runtime is not None
+            else None
+        )
+        if callable(collector):
+            try:
+                credential_hints = await collector(
+                    text=msg.content,
+                    owner_user_id=msg.author_id or msg.author,
+                )
+            except Exception as exc:
+                logger.warning("[%s] credential_hint_lookup_failed err=%s", req_id, exc)
+                credential_hints = []
+            if credential_hints:
+                agent_prompt = agent_prompt + "\n\n" + "\n\n".join(credential_hints)
+
+        await self._run_agent_and_deliver(
+            req_id=req_id,
+            t_start=t_start,
+            session=session,
+            registry=registry,
+            msg=msg,
+            thread_id=thread_id,
+            prior_history=prior_history,
+            user_turn_id=user_turn_id,
+            explicit_skill=explicit_skill,
+            routed_skill=routed_skill,
+            tracked_skill=tracked_skill,
+            skill_timeout_override=skill_timeout_override,
+            agent_purpose=agent_purpose,
+            log_mode=log_mode,
+            agent_prompt=agent_prompt,
+            ambient_context=ambient_context,
+            image_paths=image_paths,
+        )
+
+    async def _dispatch_task_routing(
+        self,
+        *,
+        req_id: str,
+        session: ChannelSession,
+        registry: AgentRegistry,
+        msg: IncomingMessage,
+        thread_id: str,
+        history: list[dict],
+        explicit_skill: str | None,
+    ) -> _TaskDispatchOutcome:
+        """Route the message into a runtime task via LLM router or heuristics.
+
+        Returns ``handled=True`` when a task was created (or the runtime
+        delegate consumed the message) and no inline reply is needed. On
+        fall-through the outcome carries the router decision plus whether a
+        dispatch branch already appended the user turn. Extracted verbatim
+        from ``_handle_message_impl`` — behavior-preserving.
+        """
+        channel = session.channel
+        user_turn_appended = False
         # Runtime interception for long-running autonomous tasks.
         # Router v2 emits 3 canonical intents: reply / artifact / repo_update.
         # Old intents (chat_reply / invoke_skill / oneoff_artifact /
@@ -1803,7 +1969,7 @@ class GatewayManager:
                         skill_name,
                         is_borderline,
                     )
-                    return
+                    return _TaskDispatchOutcome(handled=True)
                 # Generic repo change (no skill_name). Was the legacy
                 # ``propose_repo_change`` branch; always drafts.
                 goal = router_decision.goal or msg.content
@@ -1831,7 +1997,7 @@ class GatewayManager:
                     router_decision.confidence,
                     goal[:120],
                 )
-                return
+                return _TaskDispatchOutcome(handled=True)
 
             # artifact: produces a deliverable, does NOT modify source repo
             # (was: oneoff_artifact + invoke_skill). Default auto-approve;
@@ -1906,7 +2072,7 @@ class GatewayManager:
                             agent_timeout_seconds=self._skill_timeout_seconds_by_name(router_skill),
                             agent_max_turns=self._skill_max_turns_by_name(router_skill),
                         )
-                    return
+                    return _TaskDispatchOutcome(handled=True)
                 if router_skill:
                     # Skill name present but not in known_skills. Fall
                     # through to inline ``AgentRegistry.run`` (matches the
@@ -1980,7 +2146,7 @@ class GatewayManager:
                             draft_prefix_forced,
                             goal_str[:120],
                         )
-                        return
+                        return _TaskDispatchOutcome(handled=True)
 
             should_try_heuristic = (
                 router_decision is None
@@ -2017,7 +2183,7 @@ class GatewayManager:
                     thread_id,
                     "Heuristic skill-intent detection created a draft. Approve to start autonomous execution.",
                 )
-                return
+                return _TaskDispatchOutcome(handled=True)
             if is_artifact_intent(msg.content) or is_long_task_intent(msg.content):
                 await self._append_user_turn_if_needed(session, thread_id, msg)
                 user_turn_appended = True
@@ -2037,130 +2203,43 @@ class GatewayManager:
                 thread_id=thread_id,
             )
             if handled:
-                return
-
-        # Extract image paths from attachments
-        image_paths = [
-            att.local_path for att in (msg.attachments or []) if att.is_image
-        ] or None
-
-        # Inject default prompt for image-only messages (no text)
-        if not msg.content and image_paths:
-            msg = IncomingMessage(
-                platform=msg.platform,
-                channel_id=msg.channel_id,
-                thread_id=msg.thread_id,
-                author=msg.author,
-                author_id=msg.author_id,
-                content="Please describe and analyze the attached image(s).",
-                raw=msg.raw,
-                preferred_agent=msg.preferred_agent,
-                system=msg.system,
-                attachments=msg.attachments,
-            )
-
-        # Append user turn to history
-        user_turn_id: int | None = None
-        if not user_turn_appended:
-            user_turn_id = await session.append_user(
-                thread_id, msg.content, msg.author,
-                attachments=msg.attachments or None,
-            )
-        else:
-            # Already appended upstream (artifact/heuristic fall-through). Recover
-            # its row id from the cache tail for the watermark protocol.
-            _hist = await session.get_history(thread_id)
-            for _t in reversed(_hist):
-                if _t.get("role") == "user" and isinstance(_t.get("_id"), int):
-                    user_turn_id = _t["_id"]
-                    break
-        prior_history = history[:-1] if len(history) > 1 else []
-        routed_skill = self._routed_skill_name(
+                return _TaskDispatchOutcome(handled=True)
+        return _TaskDispatchOutcome(
+            handled=False,
             router_decision=router_decision,
-            router_threshold=(self._intent_router.confidence_threshold if self._intent_router else None),
-            history=history,
-        )
-        tracked_skill = explicit_skill or routed_skill
-        skill_timeout_override = self._skill_timeout_seconds_by_name(tracked_skill)
-        agent_purpose = self._agent_run_purpose(
-            explicit_skill=explicit_skill or routed_skill,
-            router_decision=router_decision,
-            router_threshold=(self._intent_router.confidence_threshold if self._intent_router else None),
-        )
-        log_mode = self._thread_log_mode_from_purpose(agent_purpose)
-
-        logger.info(
-            "[%s] AGENT starting purpose=%s preferred_agent=%r skill_timeout_override=%r registry=%s history_turns=%d",
-            req_id,
-            agent_purpose,
-            msg.preferred_agent,
-            skill_timeout_override,
-            [a.name for a in registry.agents],
-            len(prior_history),
+            user_turn_appended=user_turn_appended,
         )
 
-        # Pre-load persisted CLI session IDs so agents can resume after restart
-        if self._memory_store_ref:
-            for agent in registry.agents:
-                if hasattr(agent, "set_session_id") and agent.get_session_id(thread_id) is None:
-                    stored = await self._memory_store_ref.load_session(
-                        session.platform, session.channel_id, thread_id, agent.name
-                    )
-                    if stored:
-                        agent.set_session_id(thread_id, stored)
-                        logger.debug("Restored session %s for %s thread %s", stored[:12], agent.name, thread_id)
+    async def _run_agent_and_deliver(
+        self,
+        *,
+        req_id: str,
+        t_start: float,
+        session: ChannelSession,
+        registry: AgentRegistry,
+        msg: IncomingMessage,
+        thread_id: str,
+        prior_history: list[dict],
+        user_turn_id: int | None,
+        explicit_skill: str | None,
+        routed_skill: str | None,
+        tracked_skill: str | None,
+        skill_timeout_override: int | None,
+        agent_purpose: str,
+        log_mode: str,
+        agent_prompt: str,
+        ambient_context: str | None,
+        image_paths: list | None,
+    ) -> None:
+        """Agent-invocation tail of the message pipeline.
 
-        # Inject adaptive memory context if available
-        agent_prompt = msg.content
-        if routed_skill and not explicit_skill:
-            agent_prompt = f"/{routed_skill}\n\n{agent_prompt}".strip()
-        # Memory is delivered as ambient_context (see registry/agent dispatch),
-        # not baked into the user prompt — so claude can route it through
-        # --append-system-prompt and it never accumulates across resume turns.
-        ambient_context: str | None = None
-        if self._judge_store is not None:
-            try:
-                relevant = self._judge_store.get_relevant(
-                    skill_name=tracked_skill,
-                    thread_id=thread_id,
-                    workspace=str(self._repo_root),
-                    limit=self._memory_inject_limit,
-                )
-                logger.info(
-                    "[%s] memory_inject selected_count=%d store_active=%d",
-                    req_id,
-                    len(relevant),
-                    len(self._judge_store.get_active()),
-                )
-                if relevant:
-                    # M0 PR2: use shared JudgeStore.format_memory_block so chat
-                    # and runtime paths produce identical [Remembered context].
-                    from oh_my_agent.memory.judge_store import JudgeStore as _JS
-                    block = _JS.format_memory_block(relevant)
-                    ambient_context = block or None
-            except Exception as exc:
-                logger.warning("[%s] Memory injection failed: %s", req_id, exc)
-
-        # Surface any cached provider credentials (e.g. Bilibili cookies) so the
-        # agent can reuse them instead of triggering a redundant QR auth flow.
-        runtime = self._runtime_service
-        collector = (
-            getattr(runtime, "collect_provider_credential_hints", None)
-            if runtime is not None
-            else None
-        )
-        if callable(collector):
-            try:
-                credential_hints = await collector(
-                    text=msg.content,
-                    owner_user_id=msg.author_id or msg.author,
-                )
-            except Exception as exc:
-                logger.warning("[%s] credential_hint_lookup_failed err=%s", req_id, exc)
-                credential_hints = []
-            if credential_hints:
-                agent_prompt = agent_prompt + "\n\n" + "\n\n".join(credential_hints)
-
+        Streaming-relay setup, watermark gate (resume vs fresh), registry
+        run, error cleanup, control-frame handling, response delivery, and
+        post-reply background spawns (judge / compression / skill sync).
+        Extracted verbatim from ``_handle_message_impl`` —
+        behavior-preserving.
+        """
+        channel = session.channel
         # Run agent (with fallback, or targeted if preferred_agent is set)
         workspace_override = await self._resolve_short_workspace(session, thread_id)
         log_path = self._chat_agent_log_base_path(
@@ -2910,10 +2989,6 @@ class GatewayManager:
             return "resume"
         return "chat"
 
-    @staticmethod
-    def _format_usage(usage: dict) -> str:
-        return format_usage_audit(usage)
-
     async def _send_agent_response(
         self,
         channel,
@@ -2954,18 +3029,11 @@ class GatewayManager:
         return skill_name
 
     def _skills_root(self) -> Path | None:
-        """Canonical skills directory from the syncer, or None.
-
-        Prefers the public ``SkillSync.skills_path`` property; falls back to
-        the legacy private attribute for test doubles that only stub
-        ``_skills_path``.
-        """
+        """Canonical skills directory from the public ``SkillSync.skills_path``
+        property, or None."""
         if not self._skill_syncer:
             return None
         path = getattr(self._skill_syncer, "skills_path", None)
-        if isinstance(path, Path):
-            return path
-        path = getattr(self._skill_syncer, "_skills_path", None)
         return path if isinstance(path, Path) else None
 
     def _known_skill_names(self) -> set[str]:
@@ -3212,10 +3280,3 @@ class GatewayManager:
             ]
         )
         return "\n".join(lines).strip()
-
-    def resolve_session(self, platform: str, channel_id: str) -> ChannelSession | None:
-        return self._sessions.get(self._session_key(platform, channel_id))
-
-    def resolve_channel(self, platform: str, channel_id: str) -> BaseChannel | None:
-        session = self.resolve_session(platform, channel_id)
-        return session.channel if session else None

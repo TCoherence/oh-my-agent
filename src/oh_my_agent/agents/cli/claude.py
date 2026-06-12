@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import shutil
 from pathlib import Path
 
 from oh_my_agent.agents.base import AgentResponse, PartialTextHook, ToolUseHook
@@ -104,6 +103,12 @@ class ClaudeAgent(BaseCLIAgent):
     """
 
     _oma_agent_home = ".claude"
+
+    # See BaseCLIAgent._augment_prompt_with_images — Claude is steered to its
+    # Read tool explicitly.
+    _image_reference_instruction = (
+        "Read the image file at `{ref}` using the Read tool to see its contents."
+    )
 
     def __init__(
         self,
@@ -353,32 +358,6 @@ class ClaudeAgent(BaseCLIAgent):
         if system_append:
             cmd.extend(["--append-system-prompt", system_append])
         return cmd
-
-    def _augment_prompt_with_images(
-        self, prompt: str, image_paths: list[Path], cwd: str | Path | None
-    ) -> str:
-        """Copy images to the workspace and prepend Read-tool instructions to the prompt."""
-        if not image_paths:
-            return prompt
-        lines: list[str] = []
-        cwd_path = Path(cwd) if cwd else None
-        for img in image_paths:
-            if not img.is_file():
-                continue
-            if cwd_path:
-                dest_dir = cwd_path / "_attachments"
-                dest_dir.mkdir(parents=True, exist_ok=True)
-                dest = dest_dir / img.name
-                shutil.copy2(img, dest)
-                ref = f"_attachments/{img.name}"
-            else:
-                ref = str(img)
-            lines.append(
-                f"Read the image file at `{ref}` using the Read tool to see its contents."
-            )
-        if not lines:
-            return prompt
-        return "\n".join(lines) + "\n\n" + prompt
 
     async def run(
         self,

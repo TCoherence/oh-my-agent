@@ -6,18 +6,21 @@ provides ONLY a cmdclass override so the frontend bundle lands in
 ``src/oh_my_agent/dashboard/web_dist/`` before ``build_py`` copies it
 into the wheel.
 
-Skip conditions (each independently disables the hook so dev installs
-without node still work):
+Skip conditions (each independently disables the hook):
 
 - ``OMA_SKIP_FRONTEND=1`` env var → operator explicitly opts out
   (used by CI when the frontend has already been built in a separate
-  step to avoid double work)
+  step to avoid double work, and for dev installs without Node)
 - ``dashboard-web/`` source directory absent → e.g. running build from
   an sdist that didn't include the frontend sources
 
 When skipped, the wheel still installs cleanly. ``dashboard/app.py``
 checks for ``web_dist/index.html`` at runtime and falls back to the
 legacy Jinja monitoring page at ``/`` when the SPA isn't present.
+
+Outside those skip conditions, a missing npm or a failing frontend
+build is FATAL: a release wheel must never silently ship without the
+SPA. ``OMA_SKIP_FRONTEND=1`` is the single explicit opt-out.
 """
 
 from __future__ import annotations
@@ -37,7 +40,10 @@ WEB_DIST = REPO_ROOT / "src" / "oh_my_agent" / "dashboard" / "web_dist"
 
 
 class BuildPyWithFrontend(build_py):
-    """Runs ``npm ci`` + ``npm run build`` before build_py (no-op without npm)."""
+    """Runs ``npm ci`` + ``npm run build`` before build_py.
+
+    Fatal on missing npm or a failed build unless ``OMA_SKIP_FRONTEND=1``.
+    """
 
     def run(self):  # type: ignore[override]
         self._maybe_build_frontend()
@@ -57,13 +63,15 @@ class BuildPyWithFrontend(build_py):
 
         installer = self._pick_installer()
         if installer is None:
-            print(
-                "[setup] npm not found on PATH — skipping frontend build. "
-                "Install Node.js (>=22) or set OMA_SKIP_FRONTEND=1 to "
-                "silence this.",
-                file=sys.stderr,
+            # Fatal: a build that quietly skips the SPA produces a wheel
+            # that silently serves the degraded legacy Jinja page. Dev
+            # installs without Node keep working via OMA_SKIP_FRONTEND=1.
+            raise RuntimeError(
+                "[setup] npm not found on PATH — cannot build the dashboard "
+                "SPA. Install Node.js (>=22), or set OMA_SKIP_FRONTEND=1 to "
+                "deliberately install without the SPA (dashboard falls back "
+                "to the legacy Jinja page)."
             )
-            return
 
         install_cmd, build_cmd = installer
         print(f"[setup] running {install_cmd[0]} install / build in {WEB_SRC}", file=sys.stderr)
@@ -71,12 +79,21 @@ class BuildPyWithFrontend(build_py):
             subprocess.run(install_cmd, cwd=WEB_SRC, check=True)
             subprocess.run(build_cmd, cwd=WEB_SRC, check=True)
         except subprocess.CalledProcessError as exc:
-            # Don't fail the whole install on a frontend build error —
-            # the operator gets a wheel with the legacy Jinja fallback,
-            # and ``npm run build`` from dashboard-web/ later fixes it.
-            print(
-                f"[setup] frontend build failed: {exc} — installing without SPA",
-                file=sys.stderr,
+            # Fatal (used to be swallowed): a release wheel silently
+            # shipping without the SPA is worse than a failed build.
+            raise RuntimeError(
+                f"[setup] frontend build failed: {exc}. Fix the npm build, "
+                "or set OMA_SKIP_FRONTEND=1 to deliberately install "
+                "without the SPA."
+            ) from exc
+        index_html = WEB_DIST / "index.html"
+        if not index_html.exists():
+            raise RuntimeError(
+                f"[setup] frontend build succeeded but {index_html} is "
+                "missing — the Vite outDir no longer matches what "
+                "packaging ships. Fix dashboard-web/vite.config.ts, or "
+                "set OMA_SKIP_FRONTEND=1 to deliberately install without "
+                "the SPA."
             )
 
     @staticmethod

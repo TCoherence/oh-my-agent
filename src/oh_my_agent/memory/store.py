@@ -10,7 +10,6 @@ import uuid
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -652,12 +651,6 @@ class MemoryStore(ABC):
         skill_name: str,
     ) -> list[dict[str, Any]]:
         return []
-
-
-@dataclass
-class SkillInvocationDelivery:
-    invocation_id: int | None = None
-    response_message_id: str | None = None
 
 
 # --------------------------------------------------------------------------- #

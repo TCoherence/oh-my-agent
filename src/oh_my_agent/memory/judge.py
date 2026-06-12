@@ -13,7 +13,13 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from oh_my_agent.memory.judge_store import JudgeStore, parse_judge_actions
+from oh_my_agent.memory.judge_store import (
+    JudgeStore,
+    dump_judge_context,
+    parse_judge_actions,
+    run_judge_actions,
+    zero_stats,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +49,104 @@ _DEFAULT_SELF_EVAL_MODEL = "claude-sonnet-4-6"
 # calls stay isolated. Agents whose run() lacks the param (gemini/codex) are
 # skipped and use their configured model.
 
-_JUDGE_PROMPT = """\
+# ---------------------------------------------------------------------------
+# Shared judge prompt contract
+#
+# The chat judge (this module) and the daily / weekly diary reflectors all
+# speak the same action contract to the LLM: allowed ops + required fields,
+# the category / scope vocabulary, the do-not-memorize blocklist, the dedup
+# rules, and the JSON output shape. These blocks are composed here once so
+# the contract cannot drift between callers; per-caller wording (conversation
+# vs diary vs week) is injected via the builder parameters.
+# ---------------------------------------------------------------------------
+
+JUDGE_CONTRACT_MUST_OUTPUT = (
+    "You MUST always output something — at minimum a single no_op action."
+)
+
+JUDGE_CONTRACT_CATEGORIES_SCOPES = """\
+Categories: preference | workflow | project_knowledge | fact
+Scopes:     global_user | workspace | skill | thread"""
+
+JUDGE_RULE_ONE_SENTENCE = "- Each memory must be ONE concise sentence about the user."
+
+# Diary-shaped evidence rule shared by the daily + weekly reflectors (the chat
+# judge sees [user]/[assistant] turns instead of diary headers).
+JUDGE_RULE_USER_EVIDENCE_DIARY = (
+    "- Use ONLY evidence from user turns (quoted ``> ...`` lines or ``user:`` headers)."
+)
+
+JUDGE_RULES_DEDUP = """\
+- If a new observation paraphrases an existing memory → emit "strengthen", do NOT "add" a duplicate.
+- If a new observation contradicts an existing memory → emit "supersede"."""
+
+
+def build_judge_ops_contract(
+    *,
+    strengthen_source: str,
+    supersede_event: str,
+    no_op_subject: str,
+    no_op_target: str = "long-term memory",
+    add_qualifier: str = "",
+    add_evidence: str = "a short user-side snippet",
+    supersede_suffix: str = "",
+) -> str:
+    """Render the shared allowed-ops contract block.
+
+    Op names and required fields are fixed here — the single source of truth
+    for every judge-pipeline prompt. Per-caller wording (what counts as
+    evidence, which time window the ops refer to) is parameterized.
+    """
+    return f"""\
+- "add": brand new memory not yet in the store.
+{add_qualifier}  Required: summary, category, scope, confidence, evidence ({add_evidence}).
+- "strengthen": an existing memory was reinforced by {strengthen_source}.
+  Required: id, evidence. Optional: confidence_bump (0.0-0.20).
+- "supersede": an existing memory {supersede_event}.
+  Required: old_id, new_summary, category, scope, confidence, evidence{supersede_suffix}.
+- "no_op": nothing {no_op_subject} deserves {no_op_target}.
+  Required: reason.
+
+{JUDGE_CONTRACT_MUST_OUTPUT}
+
+{JUDGE_CONTRACT_CATEGORIES_SCOPES}"""
+
+
+def build_judge_blocklist_rule(*, plans: str, tail: str = "or speculation") -> str:
+    """Render the shared do-not-memorize blocklist rule."""
+    return (
+        f"- Do NOT memorize: one-off task details, {plans} plans, slash command usage, "
+        f"file paths, implementation choices, debugging steps, {tail}."
+    )
+
+
+def build_judge_output_shape(
+    *,
+    confidence: str,
+    add_evidence: str,
+    strengthen_evidence: str = "...",
+    supersede_evidence: str = "...",
+) -> str:
+    """Render the JSON output-shape block.
+
+    Braces are doubled (``{{`` / ``}}``) because the assembled prompt template
+    still goes through ``str.format`` at call time.
+    """
+    return (
+        "Output ONLY a JSON object with this exact shape (no markdown, no preamble):\n"
+        '{{"actions": [\n'
+        '  {{"op": "add", "summary": "...", "category": "preference", "scope": "global_user", '
+        '"confidence": ' + confidence + ', "evidence": "' + add_evidence + '"}},\n'
+        '  {{"op": "strengthen", "id": "abc123", "evidence": "' + strengthen_evidence + '"}},\n'
+        '  {{"op": "supersede", "old_id": "def456", "new_summary": "...", "category": "...", '
+        '"scope": "...", "confidence": ' + confidence + ', "evidence": "' + supersede_evidence + '"}},\n'
+        '  {{"op": "no_op", "reason": "..."}}\n'
+        "]}}"
+    )
+
+
+_JUDGE_PROMPT = (
+    """\
 You are a long-term memory judge. Decide what (if anything) about the USER should be \
 remembered for future sessions.
 
@@ -54,28 +157,25 @@ You will be given:
 
 Emit a list of ACTIONS describing how the memory store should change. Allowed ops:
 
-- "add": brand new memory not yet in the store.
-  Required: summary, category, scope, confidence, evidence (a short user-side snippet).
-- "strengthen": an existing memory was reinforced by new user evidence.
-  Required: id, evidence. Optional: confidence_bump (0.0-0.20).
-- "supersede": an existing memory has been replaced by a new, contradictory user statement.
-  Required: old_id, new_summary, category, scope, confidence, evidence.
-- "no_op": nothing in this conversation deserves long-term memory.
-  Required: reason.
-
-You MUST always output something — at minimum a single no_op action.
-
-Categories: preference | workflow | project_knowledge | fact
-Scopes:     global_user | workspace | skill | thread
+"""
+    + build_judge_ops_contract(
+        strengthen_source="new user evidence",
+        supersede_event="has been replaced by a new, contradictory user statement",
+        no_op_subject="in this conversation",
+    )
+    + """
 
 Strict rules:
 - Use ONLY [user] turns as evidence. The assistant's text is context, not signal.
-- Each memory must be ONE concise sentence about the user.
-- Do NOT memorize: one-off task details, temporary plans, slash command usage, file paths, \
-implementation choices, debugging steps, or speculation.
+"""
+    + JUDGE_RULE_ONE_SENTENCE
+    + "\n"
+    + build_judge_blocklist_rule(plans="temporary")
+    + """
 - Confidence: 0.85+ for explicit stable preferences ("我喜欢…", "I always…"). 0.5-0.7 for inferred patterns.
-- If a new observation paraphrases an existing memory → emit "strengthen", do NOT "add" a duplicate.
-- If a new observation contradicts an existing memory → emit "supersede".
+"""
+    + JUDGE_RULES_DEDUP
+    + """
 - If the conversation contains no real signal → emit a single no_op.
 
 Execution context:
@@ -87,14 +187,10 @@ Current active memories ({active_count} entries):
 Conversation:
 {conversation}
 
-Output ONLY a JSON object with this exact shape (no markdown, no preamble):
-{{"actions": [
-  {{"op": "add", "summary": "...", "category": "preference", "scope": "global_user", "confidence": 0.9, "evidence": "用户原话片段"}},
-  {{"op": "strengthen", "id": "abc123", "evidence": "..."}},
-  {{"op": "supersede", "old_id": "def456", "new_summary": "...", "category": "...", "scope": "...", "confidence": 0.9, "evidence": "..."}},
-  {{"op": "no_op", "reason": "..."}}
-]}}
 """
+    + build_judge_output_shape(confidence="0.9", add_evidence="用户原话片段")
+    + "\n"
+)
 
 _SIMPLIFIED_JUDGE_PROMPT = """\
 You are a memory judge. Output a JSON list of actions describing memory changes.
@@ -116,7 +212,8 @@ Output ONLY JSON like: {{"actions": [{{"op":"no_op","reason":"..."}}]}}
 # Judge.run_for_task() with headless automation / runtime context where the
 # "conversation" is synthetic (prompt + agent output, no human turns).
 
-_PROMPT_TASK_COMPLETION = """\
+_PROMPT_TASK_COMPLETION = (
+    """\
 You are a memory judge for an automated task that just finished. Decide what \
 DURABLE KNOWLEDGE about the task domain (NOT about a user) should be \
 remembered so the next run of the same automation / skill benefits.
@@ -136,8 +233,9 @@ Emit a JSON list of ACTIONS. Allowed ops:
 - "no_op": nothing in this run deserves long-term memory.
   Required: reason.
 
-Categories: preference | workflow | project_knowledge | fact
-Scopes:     global_user | workspace | skill | thread
+"""
+    + JUDGE_CONTRACT_CATEGORIES_SCOPES
+    + """
 
 Strict rules for headless task memory:
 - DO memorize: domain facts the output discovered, recurring patterns, gotchas,
@@ -162,6 +260,7 @@ Agent output:
 
 Output ONLY a JSON object: {{"actions": [...]}}
 """
+)
 
 _PROMPT_SELF_EVAL = """\
 You are evaluating how well an automated task ran. Output a single JSON object \
@@ -347,11 +446,11 @@ class Judge:
 
         rendered_convo = self._render_conversation(conversation or [])
         if not rendered_convo:
-            stats = {"add": 0, "strengthen": 0, "supersede": 0, "no_op": 1, "rejected": 0}
+            stats = zero_stats() | {"no_op": 1}
             return JudgeResult(actions=[{"op": "no_op", "reason": "empty conversation"}], stats=stats)
 
         active_context = self._store.to_judge_context()
-        active_text = json.dumps(active_context, ensure_ascii=False, indent=2) if active_context else "[]"
+        active_text = dump_judge_context(active_context)
         execution_context = self._format_execution_context(
             skill_name=skill_name,
             source_workspace=source_workspace,
@@ -365,29 +464,37 @@ class Judge:
             conversation=rendered_convo,
         )
 
-        actions, raw_text, err = await self._invoke(prompt, registry, req_id=req_id, label="memory_judge")
+        # Applying an empty action list is a no-op, so retrying with the
+        # simplified prompt after an empty (but error-free) first pass is safe.
+        actions, stats, raw_text, err = await run_judge_actions(
+            prompt,
+            registry,
+            self._store,
+            run_label="memory_judge",
+            thread_id=thread_id,
+            skill_name=skill_name,
+            source_workspace=source_workspace,
+        )
         if err is None and not actions:
             simplified = _SIMPLIFIED_JUDGE_PROMPT.format(
                 active_memories=active_text,
                 conversation=rendered_convo,
             )
-            actions, raw_text2, err2 = await self._invoke(
-                simplified, registry, req_id=req_id, label="memory_judge_simplified"
+            actions, stats, raw_text2, err = await run_judge_actions(
+                simplified,
+                registry,
+                self._store,
+                run_label="memory_judge_simplified",
+                thread_id=thread_id,
+                skill_name=skill_name,
+                source_workspace=source_workspace,
             )
             raw_text = raw_text2 or raw_text
-            err = err2 or err
 
         if err:
-            stats = {"add": 0, "strengthen": 0, "supersede": 0, "no_op": 0, "rejected": 0}
             logger.warning("memory_judge error thread_id=%s err=%s", thread_id, err)
-            return JudgeResult(actions=[], stats=stats, raw_response=raw_text, error=err)
+            return JudgeResult(actions=[], stats=zero_stats(), raw_response=raw_text, error=err)
 
-        stats = await self._store.apply_actions(
-            actions,
-            thread_id=thread_id,
-            skill_name=skill_name,
-            source_workspace=source_workspace,
-        )
         logger.info(
             "memory_judge_run thread_id=%s actions=%d stats=%s",
             thread_id,
@@ -435,11 +542,7 @@ class Judge:
 
         if mode == "completion":
             active_context = self._store.to_judge_context()
-            active_text = (
-                json.dumps(active_context, ensure_ascii=False, indent=2)
-                if active_context
-                else "[]"
-            )
+            active_text = dump_judge_context(active_context)
             execution_context = self._format_execution_context(
                 skill_name=skill_name,
                 source_workspace=source_workspace,
@@ -452,8 +555,15 @@ class Judge:
                 task_prompt=prompt_trunc,
                 task_output=output_trunc,
             )
-            actions, raw_text, err = await self._invoke(
-                prompt, registry, req_id=req_id, label="memory_judge_task_completion"
+            # Shared judge pipeline: invoke → parse → apply_actions.
+            actions, stats, raw_text, err = await run_judge_actions(
+                prompt,
+                registry,
+                self._store,
+                run_label="memory_judge_task_completion",
+                thread_id=thread_id,
+                skill_name=skill_name,
+                source_workspace=source_workspace,
             )
         elif mode == "self_eval":
             effective_model = model or self._self_eval_model
@@ -508,11 +618,8 @@ class Judge:
                             skill_name=skill_name,
                             source_workspace=source_workspace,
                         )
-                        stats = {
+                        stats = zero_stats() | {
                             "add": 1 if entry_id else 0,
-                            "strengthen": 0,
-                            "supersede": 0,
-                            "no_op": 0,
                             "rejected": 0 if entry_id else 1,
                         }
                         logger.info(
@@ -532,32 +639,23 @@ class Judge:
                             error=None,
                         )
                 # No automation_name/task_id → can't write self_eval (manual run)
-                actions = []
-            else:
-                actions = []
+            # self_eval either returned above (upsert_self_eval_signal) or
+            # reaches here with nothing to persist (parse / quality error, or
+            # manual run without automation context).
+            actions = []
+            stats = zero_stats()
         else:
             raise ValueError(f"unknown Judge.run_for_task mode: {mode!r}")
 
         if err:
-            stats = {"add": 0, "strengthen": 0, "supersede": 0, "no_op": 0, "rejected": 0}
             logger.warning(
                 "memory_judge_run_for_task mode=%s automation=%s err=%s",
                 mode,
                 automation_name,
                 err,
             )
-            return JudgeResult(actions=[], stats=stats, raw_response=raw_text, error=err)
+            return JudgeResult(actions=[], stats=zero_stats(), raw_response=raw_text, error=err)
 
-        # Persist completion-mode actions via the shared apply_actions path.
-        # self_eval either returned above (upsert_self_eval_signal) or reaches
-        # here with an empty actions list (manual run without automation
-        # context), making this a no-op for that mode.
-        stats = await self._store.apply_actions(
-            actions,
-            thread_id=thread_id,
-            skill_name=skill_name,
-            source_workspace=source_workspace,
-        )
         logger.info(
             "memory_judge_run_for_task mode=%s automation=%s actions=%d stats=%s",
             mode,
@@ -602,19 +700,6 @@ class Judge:
         except Exception as exc:
             logger.warning("self_eval usage record failed: %s", exc)
 
-    async def _invoke(
-        self,
-        prompt: str,
-        registry,
-        *,
-        req_id: str | None,
-        label: str,
-    ) -> tuple[list[dict[str, Any]], str, str | None]:
-        actions, raw, err, _ = await self._invoke_with_response(
-            prompt, registry, req_id=req_id, label=label
-        )
-        return actions, raw, err
-
     async def _invoke_with_response(
         self,
         prompt: str,
@@ -624,11 +709,13 @@ class Judge:
         label: str,
         model_override: str | None = None,
     ) -> tuple[list[dict[str, Any]], str, str | None, Any]:
-        """Variant of :meth:`_invoke` that also returns the raw AgentResponse.
+        """Invoke the registry and return ``(actions, raw, error, response)``.
 
-        Used by self_eval to extract ``response.usage`` for budget reconcile.
-        ``model_override`` routes this one call to a specific model (e.g. a
-        cheaper self-eval model) via AgentRegistry's per-call model swap.
+        Unlike the shared :func:`run_judge_actions` pipeline, this returns the
+        raw AgentResponse — used by self_eval to extract ``response.usage`` for
+        budget reconcile. ``model_override`` routes this one call to a specific
+        model (e.g. a cheaper self-eval model) via AgentRegistry's per-call
+        model swap.
         """
         run_kwargs: dict[str, Any] = {"run_label": label}
         if model_override:

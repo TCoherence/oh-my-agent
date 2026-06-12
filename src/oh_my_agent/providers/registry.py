@@ -7,13 +7,6 @@ KNOWN_PROVIDERS = {
     "xianyu",
 }
 
-AUTH_CAPABLE_PROVIDERS = {
-    "bilibili",
-    "youtube",
-    "xiaohongshu",
-    "xianyu",
-}
-
 _ALIASES = {
     "bili": "bilibili",
     "bilibili": "bilibili",
@@ -34,7 +27,3 @@ def normalize_provider_name(name: str) -> str | None:
     if resolved in KNOWN_PROVIDERS:
         return resolved
     return None
-
-
-def is_known_provider(name: str) -> bool:
-    return normalize_provider_name(name) is not None

@@ -403,6 +403,89 @@ async def test_surface_button_includes_owner_mentions_and_ttl():
 
 
 @pytest.mark.asyncio
+async def test_bump_flavor_message_strings_pinned():
+    """Snapshot guard for the shared-implementation refactor: both bump
+    flavors (turns / timeout) must keep producing byte-identical user-facing
+    strings — the rerun notify text, the rerun result text, and the decision
+    surface text. Strings below were captured verbatim from the pre-refactor
+    implementations."""
+    from oh_my_agent.runtime.service import RuntimeService as RS
+
+    # --- rerun: turns flavor (base 25 + 30 bump = 55) ---
+    parent = _task(agent_max_turns=25)
+    stub = _rerun_stub(parent=parent)
+    result = await stub._rerun_task_with_bumped_turns(
+        parent, actor_id="owner-1", source="button"
+    )
+    sibling = stub._notify.await_args.args[0]
+    assert stub._notify.await_args.args[1] == (
+        f"Task `{sibling.id}` queued (re-run of `parent-1` with `max_turns=55`, was 25)."
+    )
+    assert result == (
+        f"Task `parent-1` queued for re-run as `{sibling.id}` with max_turns=55."
+    )
+
+    # --- rerun: timeout flavor (base 1500 + 1800 bump = 3300) ---
+    parent = _task(agent_timeout_seconds=1500)
+    stub = _rerun_stub(parent=parent)
+    result = await stub._rerun_task_with_bumped_timeout(
+        parent, actor_id="owner-1", source="button"
+    )
+    sibling = stub._notify.await_args.args[0]
+    assert stub._notify.await_args.args[1] == (
+        f"Task `{sibling.id}` queued (re-run of `parent-1` with `timeout_seconds=3300`, "
+        "was 1500)."
+    )
+    assert result == (
+        f"Task `parent-1` queued for re-run as `{sibling.id}` with timeout_seconds=3300."
+    )
+
+    # --- surface buttons (no owners → no mention prefix; ttl 1440 min → 24h) ---
+    def _surface_stub():
+        s = SimpleNamespace()
+        s._store = SimpleNamespace(
+            create_runtime_decision_nonce=AsyncMock(return_value="nonce"),
+        )
+        session = SimpleNamespace(
+            channel=SimpleNamespace(render_user_mention=lambda uid: f"<@{uid}>")
+        )
+        s._session_for = lambda task: session
+        s._owner_user_ids = set()
+        s._decision_ttl_minutes = 1440
+        captured: dict = {}
+
+        async def _capture(session_arg, thread_id, text, task_id, nonce, actions):
+            captured["text"] = text
+            captured["actions"] = actions
+
+        s._send_decision_surface = _capture
+        return s, captured
+
+    stub, captured = _surface_stub()
+    stub._surface_rerun_bump_turns_button = MethodType(
+        RS._surface_rerun_bump_turns_button, stub
+    )
+    await stub._surface_rerun_bump_turns_button(_task(agent_max_turns=25))
+    assert captured["text"] == (
+        "Task `parent-1` hit `max_turns` (25). Re-run with `max_turns=55`?\n"
+        "_Button expires in ~24h._"
+    )
+    assert captured["actions"] == ["rerun_bump_turns"]
+
+    stub, captured = _surface_stub()
+    stub._surface_rerun_bump_timeout_button = MethodType(
+        RS._surface_rerun_bump_timeout_button, stub
+    )
+    await stub._surface_rerun_bump_timeout_button(_task(agent_timeout_seconds=1500))
+    assert captured["text"] == (
+        "Task `parent-1` hit wall-clock `timeout` (1500s). "
+        "Re-run with `timeout_seconds=3300` (+30 min)?\n"
+        "_Button expires in ~24h._"
+    )
+    assert captured["actions"] == ["rerun_bump_timeout"]
+
+
+@pytest.mark.asyncio
 async def test_surface_button_omits_mentions_when_no_owners_configured():
     """When ``owner_user_ids`` is empty, the surface text must not contain a
     stray leading space or partial mention syntax."""
