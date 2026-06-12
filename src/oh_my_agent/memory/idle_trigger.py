@@ -87,12 +87,33 @@ class IdleTracker:
             if metadata:
                 state.metadata.update(metadata)
 
-    async def mark_judged(self, thread_key: ThreadKey) -> None:
-        async with self._lock:
-            state = self._states.get(thread_key)
-            if state is not None:
-                state.last_judge_ts = time.time()
-                state.pending = False
+    def last_message_ts(self, thread_id: ThreadKey) -> float | None:
+        """Current last-message timestamp for a thread (None if untracked)."""
+        state = self._states.get(thread_id)
+        return state.last_message_ts if state is not None else None
+
+    def mark_judged(
+        self, thread_id: ThreadKey, *, observed_ts: float | None = None
+    ) -> None:
+        """Record that a judge pass covered this thread.
+
+        ``observed_ts`` is the ``last_message_ts`` captured when the judge
+        started. If a message arrived while the judge was in flight the
+        timestamps differ and we do NOT advance ``last_judge_ts`` — the thread
+        stays eligible for the next idle fire. ``None`` keeps the legacy
+        unconditional advance.
+
+        Synchronous on purpose (callers fire it from non-async bookkeeping):
+        the mutation has no awaits, so it cannot interleave with the locked
+        sections on the event loop.
+        """
+        state = self._states.get(thread_id)
+        if state is None:
+            return
+        if observed_ts is not None and state.last_message_ts != observed_ts:
+            return
+        state.last_judge_ts = time.time()
+        state.pending = False
 
     async def forget(self, thread_key: ThreadKey) -> None:
         async with self._lock:
@@ -114,7 +135,7 @@ class IdleTracker:
 
     async def _tick(self) -> None:
         now = time.time()
-        to_fire: list[tuple[ThreadKey, dict]] = []
+        to_fire: list[tuple[ThreadKey, dict, float]] = []
         async with self._lock:
             for key, state in list(self._states.items()):
                 if state.pending:
@@ -126,8 +147,8 @@ class IdleTracker:
                 if (now - state.last_message_ts) < self._idle_seconds:
                     continue
                 state.pending = True
-                to_fire.append((key, dict(state.metadata)))
-        for key, meta in to_fire:
+                to_fire.append((key, dict(state.metadata), state.last_message_ts))
+        for key, meta, observed_ts in to_fire:
             try:
                 await self._on_fire(key, meta)
             except Exception as exc:  # noqa: BLE001
@@ -137,4 +158,8 @@ class IdleTracker:
                     refreshed = self._states.get(key)
                     if refreshed is not None:
                         refreshed.pending = False
-                        refreshed.last_judge_ts = time.time()
+                        # Only advance the judged watermark if no new message
+                        # arrived while the judge was in flight — otherwise the
+                        # new message would silently never be idle-judged.
+                        if refreshed.last_message_ts == observed_ts:
+                            refreshed.last_judge_ts = time.time()

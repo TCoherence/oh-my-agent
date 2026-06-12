@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -790,3 +792,128 @@ async def test_apply_supersede_inherits_quality_when_action_omits_it(store_dir: 
     assert v3.quality == "fail"
     assert v3.feedback_source == "explicit"
     assert v3.source_automation == "auto-Y"  # still inherited
+
+
+# =====================================================================
+# Perf batch 3 — off-loop save, load-time compaction, synthesis race
+# =====================================================================
+
+
+@pytest.mark.asyncio
+async def test_load_compacts_expired_superseded_and_self_eval(store_dir: Path, caplog):
+    """superseded + self_eval entries older than 90 days are dropped at load."""
+    store_dir.mkdir(parents=True, exist_ok=True)
+    old_ts = (datetime.now(timezone.utc) - timedelta(days=120)).isoformat()
+    fresh_ts = datetime.now(timezone.utc).isoformat()
+    payload = [
+        {
+            "id": "old-sup", "summary": "old superseded", "category": "fact",
+            "scope": "global_user", "status": "superseded",
+            "created_at": old_ts, "last_observed_at": old_ts,
+        },
+        {
+            "id": "old-eval", "summary": "old self eval", "category": "self_eval",
+            "scope": "automation", "source_automation": "auto-x", "status": "active",
+            "created_at": old_ts, "last_observed_at": old_ts,
+        },
+        {
+            "id": "fresh-sup", "summary": "fresh superseded", "category": "fact",
+            "scope": "global_user", "status": "superseded",
+            "created_at": fresh_ts, "last_observed_at": fresh_ts,
+        },
+        {
+            "id": "fresh-active", "summary": "fresh active", "category": "fact",
+            "scope": "global_user", "status": "active",
+            "created_at": fresh_ts, "last_observed_at": fresh_ts,
+        },
+        {
+            # Active non-self_eval entry is NEVER compacted, however old.
+            "id": "old-active", "summary": "old but active fact", "category": "fact",
+            "scope": "global_user", "status": "active",
+            "created_at": old_ts, "last_observed_at": old_ts,
+        },
+    ]
+    (store_dir / "memories.yaml").write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    store = _build_store(store_dir)
+    await store.load()
+    ids = {e.id for e in store.all_entries}
+    assert ids == {"fresh-sup", "fresh-active", "old-active"}
+    # Compaction is not "skipped malformed" — no quarantine, clean stats.
+    assert list(store_dir.glob("memories.yaml.quarantine-*")) == []
+    assert store.last_load_stats == {"loaded": 3, "skipped": 0}
+    assert store.is_readonly is False
+
+
+@pytest.mark.asyncio
+async def test_load_keeps_entries_with_unparseable_timestamps(store_dir: Path):
+    store_dir.mkdir(parents=True, exist_ok=True)
+    payload = [
+        {
+            "id": "weird-ts", "summary": "superseded, garbage ts", "category": "fact",
+            "scope": "global_user", "status": "superseded",
+            "created_at": "not-a-date", "last_observed_at": "also-not-a-date",
+        },
+    ]
+    (store_dir / "memories.yaml").write_text(yaml.safe_dump(payload), encoding="utf-8")
+    store = _build_store(store_dir)
+    await store.load()
+    assert {e.id for e in store.all_entries} == {"weird-ts"}
+
+
+@pytest.mark.asyncio
+async def test_concurrent_saves_keep_file_consistent(store_dir: Path):
+    """save() snapshots under the state lock and writes off-loop; concurrent
+    saves must not interleave/corrupt the file."""
+    store = _build_store(store_dir)
+    await store.load()
+    await store.apply_actions([
+        {"op": "add", "summary": "uses fish shell", "category": "fact",
+         "scope": "global_user", "confidence": 0.8, "evidence": ""},
+    ])
+    await asyncio.gather(*(store.save() for _ in range(5)))
+    store2 = _build_store(store_dir)
+    await store2.load()
+    assert len(store2.get_active()) == 1
+    assert store2.get_active()[0].summary == "uses fish shell"
+
+
+@pytest.mark.asyncio
+async def test_synthesis_keeps_dirty_when_write_interleaves(store_dir: Path):
+    """A judge write landing during the synthesis LLM call must not have its
+    dirty flag wiped by the (stale) synthesis completing."""
+    store = _build_store(store_dir)
+    await store.load()
+    await store.apply_actions([
+        {"op": "add", "summary": "user likes tea", "category": "preference",
+         "scope": "global_user", "confidence": 0.9, "evidence": ""},
+    ])
+
+    class FakeAgent:
+        name = "fake"
+
+    class FakeResponse:
+        text = "## preference\n- You like tea\n"
+        error = None
+
+    class InterleavingRegistry:
+        async def run(self, prompt, run_label=None):
+            # Write lands while synthesis awaits the LLM.
+            await store.apply_actions([
+                {"op": "add", "summary": "user also likes coffee", "category": "preference",
+                 "scope": "global_user", "confidence": 0.9, "evidence": ""},
+            ])
+            return FakeAgent(), FakeResponse()
+
+    ok = await store.synthesize_memory_md(InterleavingRegistry())
+    assert ok is True
+    # Interleaved write keeps the store dirty → next trigger re-synthesizes.
+    assert store.should_synthesize() is True
+
+
+def test_clear_synthesis_flag_legacy_no_args_clears_unconditionally(store_dir: Path):
+    store = _build_store(store_dir)
+    store._note_mutation()
+    assert store.should_synthesize() is True
+    store.clear_synthesis_flag()
+    assert store._dirty is False

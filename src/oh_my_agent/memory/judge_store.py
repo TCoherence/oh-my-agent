@@ -17,12 +17,19 @@ import os
 import shutil
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal, cast
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+try:  # C-accelerated yaml (libyaml) when available
+    from yaml import CSafeDumper as _YamlDumper
+    from yaml import CSafeLoader as _YamlLoader
+except ImportError:  # pragma: no cover — depends on how PyYAML was built
+    from yaml import SafeDumper as _YamlDumper  # type: ignore[assignment]
+    from yaml import SafeLoader as _YamlLoader  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +49,10 @@ VALID_SCOPES = frozenset(
     {"global_user", "workspace", "skill", "thread", "automation"}
 )
 VALID_STATUS = frozenset({"active", "superseded"})
+# Load-time compaction horizon: superseded entries and self_eval entries whose
+# last observation is older than this are dropped at load() so the YAML file
+# does not grow monotonically (every save rewrites the full file).
+_COMPACTION_MAX_AGE_DAYS = 90
 VALID_FEEDBACK_SOURCES = frozenset({"llm_judge", "implicit", "explicit"})
 VALID_QUALITIES = frozenset({"pass", "borderline", "fail"})
 # M1 PR4 tie-break: when two signals share confidence, prefer the more
@@ -61,6 +72,19 @@ _RETRIEVAL_SCOPE_BONUS = {
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_iso_ts(value: str) -> datetime | None:
+    """Best-effort ISO timestamp → aware datetime (None on parse failure)."""
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 def _new_id() -> str:
@@ -316,7 +340,14 @@ class JudgeStore:
         self._memory_md_path = self._memory_dir / "MEMORY.md"
         self._memories: list[MemoryEntry] = []
         self._lock = asyncio.Lock()
+        # Orders on-disk renames only; state snapshots happen under _lock, so
+        # last-snapshot-wins is safe (each snapshot carries full state).
+        self._write_lock = asyncio.Lock()
         self._dirty = False
+        # Monotonic counter advanced on every state mutation. Synthesis
+        # snapshots it before its LLM call so clear_synthesis_flag() can tell
+        # whether a write interleaved (and keep _dirty set if so).
+        self._mutation_count = 0
         self._synthesize_after_seconds = synthesize_after_seconds
         self._max_evidence_per_entry = max_evidence_per_entry
         # M0 PR1: load defenses — flip to read-only on unrecoverable load to
@@ -372,7 +403,7 @@ class JudgeStore:
             return
         try:
             raw = self._entries_path.read_text(encoding="utf-8")
-            data = yaml.safe_load(raw)
+            data = yaml.load(raw, Loader=_YamlLoader)  # noqa: S506 — SafeLoader variant
         except Exception as exc:
             logger.warning(
                 "Failed to read %s: %s — disabling further saves to protect file",
@@ -417,6 +448,15 @@ class JudgeStore:
                 continue
             loaded.append(entry)
 
+        loaded, compacted = self._compact_expired(loaded)
+        if compacted:
+            logger.info(
+                "Memory store compaction dropped %d expired entries "
+                "(superseded / self_eval older than %d days)",
+                compacted,
+                _COMPACTION_MAX_AGE_DAYS,
+            )
+
         self._memories = loaded
         self._last_load_stats = {"loaded": len(loaded), "skipped": skipped}
 
@@ -447,7 +487,34 @@ class JudgeStore:
                     quarantine,
                 )
 
+    @staticmethod
+    def _compact_expired(
+        entries: list[MemoryEntry],
+    ) -> tuple[list[MemoryEntry], int]:
+        """Drop entries that can no longer influence behavior.
+
+        - ``status=superseded`` older than ``_COMPACTION_MAX_AGE_DAYS``: nothing
+          renders supersede chains (``superseded_by`` points old → new, so an
+          active entry never references a superseded one) — safe to drop.
+        - ``category=self_eval`` older than the same horizon: per-task feedback
+          signals lose relevance long before 90 days.
+
+        Entries with unparseable timestamps are kept (conservative).
+        """
+        cutoff = datetime.now(timezone.utc) - timedelta(days=_COMPACTION_MAX_AGE_DAYS)
+        kept: list[MemoryEntry] = []
+        dropped = 0
+        for entry in entries:
+            if entry.status == "superseded" or entry.category == "self_eval":
+                ts = _parse_iso_ts(entry.last_observed_at) or _parse_iso_ts(entry.created_at)
+                if ts is not None and ts < cutoff:
+                    dropped += 1
+                    continue
+            kept.append(entry)
+        return kept, dropped
+
     async def save(self) -> None:
+        """Snapshot state under the lock, then persist off the event loop."""
         if self._load_failed_readonly:
             # Round-6 defense: refuse to overwrite a file we could not load.
             logger.debug(
@@ -455,19 +522,47 @@ class JudgeStore:
                 self._entries_path,
             )
             return
+        async with self._lock:
+            payload = self._snapshot_payload()
+        await self._write_snapshot(payload)
+
+    def _snapshot_payload(self) -> list[dict[str, Any]]:
+        """Serialize current state. Caller must hold ``self._lock``."""
+        return [entry.to_dict() for entry in self._memories]
+
+    async def _write_snapshot(self, payload: list[dict[str, Any]]) -> None:
+        """Dump + atomic-rename ``payload`` in a worker thread.
+
+        ``_write_lock`` orders renames so two concurrent saves cannot
+        interleave; each payload is a full-state snapshot, so the last writer
+        winning is correct.
+        """
+        if self._load_failed_readonly:
+            return
+        async with self._write_lock:
+            try:
+                await asyncio.to_thread(self._write_payload_sync, payload)
+            except Exception as exc:
+                logger.warning("Failed to save %s: %s", self._entries_path, exc)
+
+    def _write_payload_sync(self, payload: list[dict[str, Any]]) -> None:
         self._memory_dir.mkdir(parents=True, exist_ok=True)
         tmp = self._entries_path.with_suffix(".tmp")
         try:
-            payload = [entry.to_dict() for entry in self._memories]
             tmp.write_text(
-                yaml.dump(payload, allow_unicode=True, default_flow_style=False, sort_keys=False),
+                yaml.dump(
+                    payload,
+                    Dumper=_YamlDumper,
+                    allow_unicode=True,
+                    default_flow_style=False,
+                    sort_keys=False,
+                ),
                 encoding="utf-8",
             )
             os.rename(str(tmp), str(self._entries_path))
-        except Exception as exc:
-            logger.warning("Failed to save %s: %s", self._entries_path, exc)
-            if tmp.exists():
-                tmp.unlink(missing_ok=True)
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            raise
 
     @property
     def is_readonly(self) -> bool:
@@ -580,36 +675,41 @@ class JudgeStore:
                     existing.evidence_log = existing.evidence_log[
                         -self._max_evidence_per_entry :
                     ]
-                self._dirty = True
-                await self.save()
-                return existing.id
-            # New entry
-            try:
-                entry = MemoryEntry(
-                    summary=f"reason={reason}; task={task_id}"[:280],
-                    category="self_eval",
-                    scope="automation",
-                    source_automation=automation_name,
-                    feedback_source=cast(
-                        Literal["llm_judge", "implicit", "explicit"], source
-                    ),
-                    quality=cast(Literal["pass", "borderline", "fail"], quality),
-                    confidence=confidence,
-                    observation_count=1,
-                    signals=[signal],
-                    source_skills=[skill_name] if skill_name else [],
-                    source_workspace=source_workspace or "",
-                    evidence_log=[
-                        EvidenceRecord(thread_id=key, ts=_now_iso(), snippet=reason[:280])
-                    ],
-                )
-            except Exception as exc:
-                logger.warning("upsert_self_eval_signal: entry construction failed: %s", exc)
-                return None
-            self._memories.append(entry)
-            self._dirty = True
-            await self.save()
-            return entry.id
+                self._note_mutation()
+                entry_id = existing.id
+                payload = self._snapshot_payload()
+            else:
+                # New entry
+                try:
+                    entry = MemoryEntry(
+                        summary=f"reason={reason}; task={task_id}"[:280],
+                        category="self_eval",
+                        scope="automation",
+                        source_automation=automation_name,
+                        feedback_source=cast(
+                            Literal["llm_judge", "implicit", "explicit"], source
+                        ),
+                        quality=cast(Literal["pass", "borderline", "fail"], quality),
+                        confidence=confidence,
+                        observation_count=1,
+                        signals=[signal],
+                        source_skills=[skill_name] if skill_name else [],
+                        source_workspace=source_workspace or "",
+                        evidence_log=[
+                            EvidenceRecord(thread_id=key, ts=_now_iso(), snippet=reason[:280])
+                        ],
+                    )
+                except Exception as exc:
+                    logger.warning("upsert_self_eval_signal: entry construction failed: %s", exc)
+                    return None
+                self._memories.append(entry)
+                self._note_mutation()
+                entry_id = entry.id
+                payload = self._snapshot_payload()
+        # Disk write happens outside the state lock so other mutations are
+        # never blocked on YAML serialization.
+        await self._write_snapshot(payload)
+        return entry_id
 
     # ------------------------------------------------------------------
     # Lookup helpers
@@ -700,6 +800,7 @@ class JudgeStore:
         stats = {"add": 0, "strengthen": 0, "supersede": 0, "no_op": 0, "rejected": 0}
         if not actions:
             return stats
+        payload: list[dict[str, Any]] | None = None
         async with self._lock:
             for action in actions:
                 if not isinstance(action, dict):
@@ -710,19 +811,19 @@ class JudgeStore:
                     if op == "add":
                         if self._apply_add(action, thread_id, skill_name, source_workspace):
                             stats["add"] += 1
-                            self._dirty = True
+                            self._note_mutation()
                         else:
                             stats["rejected"] += 1
                     elif op == "strengthen":
                         if self._apply_strengthen(action, thread_id):
                             stats["strengthen"] += 1
-                            self._dirty = True
+                            self._note_mutation()
                         else:
                             stats["rejected"] += 1
                     elif op == "supersede":
                         if self._apply_supersede(action, thread_id, skill_name, source_workspace):
                             stats["supersede"] += 1
-                            self._dirty = True
+                            self._note_mutation()
                         else:
                             stats["rejected"] += 1
                     elif op == "no_op":
@@ -733,7 +834,9 @@ class JudgeStore:
                     logger.warning("apply_action failed for %r: %s", action, exc)
                     stats["rejected"] += 1
             if self._dirty:
-                await self.save()
+                payload = self._snapshot_payload()
+        if payload is not None:
+            await self._write_snapshot(payload)
         return stats
 
     async def manual_supersede(self, memory_id: str) -> bool:
@@ -745,13 +848,24 @@ class JudgeStore:
             entry.status = "superseded"
             entry.superseded_by = None
             entry.last_observed_at = _now_iso()
-            self._dirty = True
-            await self.save()
-            return True
+            self._note_mutation()
+            payload = self._snapshot_payload()
+        await self._write_snapshot(payload)
+        return True
 
     # ------------------------------------------------------------------
     # Synthesis (MEMORY.md)
     # ------------------------------------------------------------------
+
+    def _note_mutation(self) -> None:
+        """Mark state dirty and advance the write counter.
+
+        The counter lets ``clear_synthesis_flag`` detect writes that landed
+        while a synthesis pass was awaiting its LLM call — those must not be
+        wiped by the (now stale) synthesis clearing ``_dirty``.
+        """
+        self._dirty = True
+        self._mutation_count += 1
 
     def should_synthesize(self) -> bool:
         if self._dirty:
@@ -764,10 +878,22 @@ class JudgeStore:
             return True
         return (time.time() - mtime) > self._synthesize_after_seconds
 
-    def clear_synthesis_flag(self) -> None:
+    def clear_synthesis_flag(self, *, observed_mutations: int | None = None) -> None:
+        """Clear the dirty flag.
+
+        ``observed_mutations`` is the write-counter value snapshotted before a
+        synthesis pass started. If writes landed during the pass the counter
+        has advanced and ``_dirty`` is left set so the next trigger
+        re-synthesizes. ``None`` clears unconditionally (legacy callers).
+        """
+        if observed_mutations is not None and observed_mutations != self._mutation_count:
+            return
         self._dirty = False
 
     async def synthesize_memory_md(self, registry) -> bool:
+        # Snapshot before any await: writes interleaving with the LLM call
+        # below advance the counter and keep the store dirty.
+        observed_mutations = self._mutation_count
         active = self.get_active()
         if not active:
             try:
@@ -775,7 +901,7 @@ class JudgeStore:
                     self._memory_md_path.unlink()
             except OSError:
                 pass
-            self.clear_synthesis_flag()
+            self.clear_synthesis_flag(observed_mutations=observed_mutations)
             return True
 
         # M0 PR1: split self_eval entries from user-fact entries.
@@ -833,11 +959,11 @@ class JudgeStore:
         parts = [synthesized_user_facts, self_eval_section]
         body = "\n\n".join(p for p in parts if p).strip()
         if not body:
-            self.clear_synthesis_flag()
+            self.clear_synthesis_flag(observed_mutations=observed_mutations)
             return True
         try:
             self._memory_md_path.write_text(body + "\n", encoding="utf-8")
-            self.clear_synthesis_flag()
+            self.clear_synthesis_flag(observed_mutations=observed_mutations)
             logger.info("MEMORY.md synthesized (%d chars)", len(body))
             return True
         except Exception as exc:

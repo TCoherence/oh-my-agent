@@ -413,11 +413,12 @@ class Judge:
     ) -> JudgeResult:
         """M0 PR3: judge entry for headless task completion + self-evaluation.
 
-        ``mode`` toggles the prompt template only. Both modes share the parse
-        helper (``parse_judge_actions``) and the persist helper
-        (``JudgeStore.apply_actions``). ``self_eval`` mode's response shape is
-        translated into a same-shape add-action via
-        :meth:`_coerce_self_eval_to_action` so persist plumbing stays unified.
+        ``mode`` selects both the prompt template and the persist path:
+        ``completion`` parses an actions list (``parse_judge_actions``) and
+        persists via ``JudgeStore.apply_actions``; ``self_eval`` parses a
+        ``{quality, reason, suggested_improvement}`` object and persists via
+        ``JudgeStore.upsert_self_eval_signal`` (M1 PR4) so the LLM verdict
+        merges with implicit/explicit feedback into ONE entry per task.
 
         The ``model`` kwarg (per-call override, falls back to the configured
         ``self_eval_model``) routes the self-eval LLM call: it flows to
@@ -547,9 +548,10 @@ class Judge:
             )
             return JudgeResult(actions=[], stats=stats, raw_response=raw_text, error=err)
 
-        # Persist via the shared apply_actions path. For self_eval, the coerced
-        # action's source_automation will be passed through judge metadata so
-        # _apply_add picks it up.
+        # Persist completion-mode actions via the shared apply_actions path.
+        # self_eval either returned above (upsert_self_eval_signal) or reaches
+        # here with an empty actions list (manual run without automation
+        # context), making this a no-op for that mode.
         stats = await self._store.apply_actions(
             actions,
             thread_id=thread_id,
@@ -599,41 +601,6 @@ class Judge:
             )
         except Exception as exc:
             logger.warning("self_eval usage record failed: %s", exc)
-
-    @staticmethod
-    def _coerce_self_eval_to_action(
-        parsed: dict[str, Any], *, automation_name: str
-    ) -> dict[str, Any] | None:
-        """Translate self_eval LLM output → same-shape add action.
-
-        self_eval response: ``{quality, reason, suggested_improvement}``
-        ⇒ ``{op:"add", category:"self_eval", scope:"automation", ...}``
-
-        The ``quality`` value is preserved as a structured field on the
-        MemoryEntry (queryable for skill-health rejection-rate metrics);
-        ``reason`` and ``suggested_improvement`` go into the summary.
-        """
-        quality = str(parsed.get("quality", "")).strip().lower()
-        if quality not in {"pass", "borderline", "fail"}:
-            return None
-        reason = str(parsed.get("reason", "")).strip()
-        suggested = str(parsed.get("suggested_improvement", "")).strip()
-        summary = f"reason={reason}" if reason else "reason=(unspecified)"
-        if suggested:
-            summary = f"{summary}; suggested={suggested}"
-        # confidence: pass=high, borderline=mid, fail=mid (a failure verdict is
-        # itself a signal worth keeping, but verdict-quality is not high).
-        confidence = {"pass": 0.7, "borderline": 0.55, "fail": 0.6}[quality]
-        return {
-            "op": "add",
-            "summary": summary[:280],
-            "category": "self_eval",
-            "scope": "automation",
-            "source_automation": automation_name,
-            "feedback_source": "llm_judge",
-            "quality": quality,
-            "confidence": confidence,
-        }
 
     async def _invoke(
         self,

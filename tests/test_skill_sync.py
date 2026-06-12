@@ -240,3 +240,62 @@ def test_refresh_workspace_hint_files_skips_directory_target(skill_dir, tmp_path
     # AGENTS.md and GEMINI.md still get written.
     assert (workspace / "AGENTS.md").read_text(encoding="utf-8") == "# WS guide\n"
     assert (workspace / "GEMINI.md").read_text(encoding="utf-8") == "# WS guide\n"
+
+
+def test_skills_path_property_returns_resolved_path(skill_dir, tmp_path):
+    syncer = SkillSync(skills_path=skill_dir, project_root=tmp_path)
+    assert syncer.skills_path == skill_dir.resolve()
+
+
+def test_workspace_source_state_cached_until_source_edit(skill_dir, tmp_path, monkeypatch):
+    """The content-hash state is memoized behind a stat fingerprint: repeat
+    calls must not re-hash the tree, but a same-size in-place edit (mtime_ns
+    bump) must invalidate the cache."""
+    (tmp_path / "AGENTS.md").write_text("# Repo Rules\n", encoding="utf-8")
+    syncer = SkillSync(skills_path=skill_dir, project_root=tmp_path)
+
+    real_hash = SkillSync._hash_skills_tree
+    tree_hash_calls = []
+
+    def _counting(cls, root):
+        tree_hash_calls.append(root)
+        return real_hash(root)
+
+    monkeypatch.setattr(SkillSync, "_hash_skills_tree", classmethod(_counting))
+
+    state1 = syncer._workspace_source_state()
+    state2 = syncer._workspace_source_state()
+    assert state1 == state2
+    assert len(tree_hash_calls) == 1  # second call served from cache
+
+    # Same byte length, different content — only mtime_ns distinguishes it.
+    script = skill_dir / "test-skill" / "scripts" / "run.sh"
+    old_size = script.stat().st_size
+    script.write_text("#!/bin/bash\necho hellp\n", encoding="utf-8")
+    assert script.stat().st_size == old_size
+    # Guard against coarse-mtime filesystems: force a distinct mtime_ns.
+    import os
+
+    st = script.stat()
+    os.utime(script, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+
+    state3 = syncer._workspace_source_state()
+    assert len(tree_hash_calls) == 2  # cache invalidated, tree re-hashed
+    assert state3["canonical_skills_hash"] != state1["canonical_skills_hash"]
+
+
+def test_workspace_needs_refresh_detects_same_size_edit(skill_dir, tmp_path):
+    (tmp_path / "AGENTS.md").write_text("# Repo Rules\n", encoding="utf-8")
+    syncer = SkillSync(skills_path=skill_dir, project_root=tmp_path)
+    workspace = tmp_path / "workspace"
+    syncer.refresh_workspace(workspace)
+    assert syncer.workspace_needs_refresh(workspace) is False
+
+    script = skill_dir / "test-skill" / "scripts" / "run.sh"
+    script.write_text("#!/bin/bash\necho hellp\n", encoding="utf-8")
+    import os
+
+    st = script.stat()
+    os.utime(script, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+
+    assert syncer.workspace_needs_refresh(workspace) is True

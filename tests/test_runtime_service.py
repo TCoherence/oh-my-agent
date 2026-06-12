@@ -4101,6 +4101,177 @@ async def test_scan_reports_dir_writes_skips_files_inside_workspace(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Bounded log I/O (tail-read via seek + to_thread offloads)
+# ---------------------------------------------------------------------------
+
+
+def test_tail_read_returns_bounded_tail(tmp_path):
+    log = tmp_path / "big.log"
+    log.write_text("x" * 10_000 + "TAIL-END", encoding="utf-8")
+
+    out = RuntimeService._tail_read(log, 64)  # noqa: SLF001
+
+    assert out.endswith("TAIL-END")
+    assert len(out) <= 64
+    # Short file: returned whole.
+    short = tmp_path / "short.log"
+    short.write_text("tiny", encoding="utf-8")
+    assert RuntimeService._tail_read(short, 64) == "tiny"  # noqa: SLF001
+    # Missing file: empty, no raise.
+    assert RuntimeService._tail_read(tmp_path / "missing.log", 64) == ""  # noqa: SLF001
+
+
+def _make_log_runtime(tmp_path, store, *, reports_dir: str | None = None):
+    return RuntimeService(
+        store,
+        config={
+            "enabled": True,
+            "worker_concurrency": 1,
+            "worktree_root": str(tmp_path / "worktrees"),
+            "reports_dir": reports_dir if reports_dir is not None else "",
+            "cleanup": {"enabled": False},
+        },
+        repo_root=tmp_path,
+        agent_workspace=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_collect_changed_files_combines_workspace_and_reports(tmp_path):
+    """Smoke test for the to_thread offload: the walk still returns
+    workspace-relative entries plus absolute fresh reports_dir writes."""
+    import dataclasses
+
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    started_iso = "2026-04-28 12:00:00"
+    started_ts = datetime(2026, 4, 28, 12, 0, 0, tzinfo=timezone.utc).timestamp()
+    fresh = reports / "paper-digest" / "today.md"
+    fresh.parent.mkdir(parents=True)
+    fresh.write_text("fresh\n", encoding="utf-8")
+    os.utime(fresh, (started_ts + 60, started_ts + 60))
+
+    store = SQLiteMemoryStore(tmp_path / "runtime.db")
+    await store.init()
+    runtime = _make_log_runtime(tmp_path, store, reports_dir=str(reports))
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "out.md").write_text("out\n", encoding="utf-8")
+
+    task = dataclasses.replace(_make_artifact_task("collect-1"), started_at=started_iso)
+    files = await runtime._collect_changed_files(task, workspace)  # noqa: SLF001
+
+    assert "out.md" in files
+    assert str(fresh.resolve()) in files
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_record_thread_agent_run_appends_bounded_excerpt(tmp_path):
+    """The per-thread log must carry a bounded tail excerpt plus a pointer
+    to the live agent log — not a full copy of the agent output (which
+    duplicated every run's complete output into the thread log)."""
+    store = SQLiteMemoryStore(tmp_path / "runtime.db")
+    await store.init()
+    runtime = _make_log_runtime(tmp_path, store)
+
+    live_log = tmp_path / "live-agent.log"
+    live_log.write_text(
+        "HEAD-MARKER\n" + ("y" * 100_000) + "\nTAIL-MARKER", encoding="utf-8"
+    )
+
+    await runtime._record_thread_agent_run(  # noqa: SLF001
+        thread_id="thread-excerpt",
+        mode="artifact",
+        agent_name="claude",
+        live_log_path=live_log,
+        duration_s=1.5,
+        task_id="abcdef123456",
+        request_id="abcdef123456-step1",
+    )
+
+    thread_log = runtime._thread_log_path("thread-excerpt")  # noqa: SLF001
+    text = thread_log.read_text(encoding="utf-8")
+    assert "TAIL-MARKER" in text
+    assert "HEAD-MARKER" not in text  # full copy would include the head
+    assert f"live_log_path={live_log}" in text  # pointer to the full log
+    assert thread_log.stat().st_size < 32 * 1024
+
+    # Second run appends another bounded block instead of re-copying.
+    await runtime._record_thread_agent_run(  # noqa: SLF001
+        thread_id="thread-excerpt",
+        mode="artifact",
+        agent_name="claude",
+        live_log_path=live_log,
+        duration_s=0.5,
+        task_id="abcdef123456",
+        request_id="abcdef123456-step2",
+    )
+    assert thread_log.stat().st_size < 64 * 1024
+    assert thread_log.read_text(encoding="utf-8").count("=== run start ===") == 2
+
+    excerpt = runtime._extract_thread_log_excerpt(  # noqa: SLF001
+        thread_id="thread-excerpt", task_id="abcdef123456"
+    )
+    assert excerpt is not None
+    assert "TAIL-MARKER" in excerpt
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_latest_activity_for_task_returns_last_line_of_large_log(tmp_path):
+    store = SQLiteMemoryStore(tmp_path / "runtime.db")
+    await store.init()
+    runtime = _make_log_runtime(tmp_path, store)
+
+    live_log = tmp_path / "live-activity.log"
+    live_log.write_text(
+        ("noise line\n" * 5000) + "final activity line", encoding="utf-8"
+    )
+    runtime._live_agent_logs["task-act"] = live_log  # noqa: SLF001
+
+    activity = runtime._latest_activity_for_task("task-act")  # noqa: SLF001
+
+    assert activity is not None
+    assert activity.endswith("final activity line")
+    # Bounded: at most max_chars (200) survive, minus the leading partial line.
+    assert len(activity) <= 200
+    assert runtime._latest_activity_for_task("unknown-task") is None  # noqa: SLF001
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_retain_background_task_tracks_and_discards(tmp_path):
+    """Fire-and-forget spawns must be retained (GC hazard) and drained by
+    stop(); uncaught exceptions are logged, not silently swallowed."""
+    store = SQLiteMemoryStore(tmp_path / "runtime.db")
+    await store.init()
+    runtime = _make_log_runtime(tmp_path, store)
+
+    gate = asyncio.Event()
+
+    async def _work() -> None:
+        await gate.wait()
+
+    bg = runtime._retain_background_task(_work(), name="bg-test")  # noqa: SLF001
+    assert bg in runtime._background_judge_tasks  # noqa: SLF001
+    gate.set()
+    await bg
+    await asyncio.sleep(0)  # let the done callback run
+    assert bg not in runtime._background_judge_tasks  # noqa: SLF001
+
+    async def _boom() -> None:
+        raise RuntimeError("background failure")
+
+    failing = runtime._retain_background_task(_boom(), name="bg-fail")  # noqa: SLF001
+    await asyncio.gather(failing, return_exceptions=True)
+    await asyncio.sleep(0)
+    assert failing not in runtime._background_judge_tasks  # noqa: SLF001
+    await store.close()
+
+
+# ---------------------------------------------------------------------------
 # Status-aware retention (Plan A)
 # ---------------------------------------------------------------------------
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import subprocess
 from dataclasses import dataclass, field
@@ -31,6 +32,15 @@ class SkillValidator:
 
     Strategy: warn-but-import — errors are recorded but skills are still imported.
     """
+
+    async def validate_async(self, skill_dir: Path) -> ValidationResult:
+        """Run :meth:`validate` in a worker thread.
+
+        The script syntax checks shell out to ``bash -n`` / ``py_compile``
+        (blocking, up to 10s each) — async callers on the shared event loop
+        must not run those inline.
+        """
+        return await asyncio.to_thread(self.validate, skill_dir)
 
     def validate(self, skill_dir: Path) -> ValidationResult:
         """Validate *skill_dir* and return a :class:`ValidationResult`."""

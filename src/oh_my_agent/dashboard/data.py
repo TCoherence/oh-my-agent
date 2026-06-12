@@ -1,8 +1,10 @@
 """Pure-function data layer for the dashboard.
 
 Every ``fetch_*`` function takes explicit ``Path`` inputs and returns a plain
-``dict`` / ``list``. No global state, no caching, no ORM. Easy to test with
-``tmp_path`` fixtures.
+``dict`` / ``list``. No global state, no ORM, and (with one exception) no
+caching — :func:`fetch_disk_usage` keeps a module-level TTL cache because
+directory sizing walks entire task worktrees on every page render. Easy to
+test with ``tmp_path`` fixtures.
 
 All functions self-contain error handling: on ``sqlite3.OperationalError``,
 ``FileNotFoundError``, ``yaml.YAMLError``, or any IO exception they return a
@@ -12,8 +14,10 @@ renders the error string verbatim instead of crashing the page.
 
 from __future__ import annotations
 
+import os
 import re
 import sqlite3
+import time
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1116,41 +1120,75 @@ def _bucket_key(ts_str: str) -> str | None:
     return ts.replace(minute=minute, second=0, microsecond=0).isoformat()
 
 
+# Disk-usage TTL cache. Directory entries walk full task worktrees (real
+# git checkouts) — far too expensive to redo on every legacy-page render.
+# Keyed by resolved path so the same target reached via different spellings
+# (symlink, relative, trailing slash) shares one entry.
+DISK_USAGE_CACHE_TTL_SECONDS = 120.0
+_disk_usage_cache: dict[str, tuple[float, dict]] = {}
+
+
+def _disk_usage_cache_key(path: Path) -> str:
+    try:
+        return str(path.expanduser().resolve())
+    except OSError:
+        return str(path)
+
+
+def _measure_path(path: Path) -> dict:
+    """Uncached single-path measurement for :func:`fetch_disk_usage`."""
+
+    try:
+        if not path.exists():
+            return {"path": str(path), "exists": False, "size_bytes": 0, "kind": "missing"}
+        if path.is_file():
+            return {
+                "path": str(path),
+                "exists": True,
+                "size_bytes": path.stat().st_size,
+                "kind": "file",
+            }
+        if path.is_dir():
+            total = 0
+            for dirpath, dirnames, filenames in os.walk(path):
+                # Task worktrees are full git checkouts; the object store
+                # under .git dominates the walk and isn't operator-actionable
+                # ("how big are my artifacts" is the question being answered).
+                dirnames[:] = [d for d in dirnames if d != ".git"]
+                for fname in filenames:
+                    try:
+                        total += os.lstat(os.path.join(dirpath, fname)).st_size
+                    except OSError:
+                        continue
+            return {"path": str(path), "exists": True, "size_bytes": total, "kind": "dir"}
+        return {"path": str(path), "exists": True, "size_bytes": 0, "kind": "other"}
+    except OSError as exc:
+        return {"path": str(path), "exists": False, "size_bytes": 0, "kind": f"error: {exc}"}
+
+
 def fetch_disk_usage(paths_to_measure: list[Path]) -> list[dict]:
     """Per-path size in bytes. Each entry: {path, exists, size_bytes, kind}.
 
-    For directories the size is the sum of file sizes (``os.walk``). For files
-    the size comes from ``stat()``.
+    For directories the size is the sum of file sizes (``os.walk``, skipping
+    ``.git`` subtrees). For files the size comes from ``stat()``. Results are
+    cached per resolved path for ``DISK_USAGE_CACHE_TTL_SECONDS``.
     """
 
+    now = time.monotonic()
     out: list[dict] = []
     for path in paths_to_measure:
-        try:
-            if not path.exists():
-                out.append({"path": str(path), "exists": False, "size_bytes": 0, "kind": "missing"})
-                continue
-            if path.is_file():
-                out.append(
-                    {
-                        "path": str(path),
-                        "exists": True,
-                        "size_bytes": path.stat().st_size,
-                        "kind": "file",
-                    }
-                )
-            elif path.is_dir():
-                total = 0
-                for child in path.rglob("*"):
-                    try:
-                        if child.is_file():
-                            total += child.stat().st_size
-                    except OSError:
-                        continue
-                out.append({"path": str(path), "exists": True, "size_bytes": total, "kind": "dir"})
-            else:
-                out.append({"path": str(path), "exists": True, "size_bytes": 0, "kind": "other"})
-        except OSError as exc:
-            out.append({"path": str(path), "exists": False, "size_bytes": 0, "kind": f"error: {exc}"})
+        key = _disk_usage_cache_key(path)
+        cached = _disk_usage_cache.get(key)
+        if cached is not None and now - cached[0] < DISK_USAGE_CACHE_TTL_SECONDS:
+            row = dict(cached[1])
+            # Report the caller's spelling even when the cache entry was
+            # created under a different alias of the same resolved path.
+            row["path"] = str(path)
+            out.append(row)
+            continue
+        entry = _measure_path(path)
+        _disk_usage_cache[key] = (now, entry)
+        out.append(dict(entry))
     return out
 
 

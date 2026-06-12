@@ -25,7 +25,7 @@ import logging
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Callable
 
 from oh_my_agent.memory.judge_store import JudgeStore, parse_judge_actions
 from oh_my_agent.memory.session_diary import strip_system_blocks
@@ -251,7 +251,6 @@ class DiaryReflectionLoop:
         registry: Any,
         fire_hour_local: int = 2,
         clock: Callable[[], datetime] | None = None,
-        sleeper: Callable[[float], Awaitable[None]] | None = None,
     ) -> None:
         if not 0 <= fire_hour_local <= 23:
             raise ValueError(f"fire_hour_local must be 0-23, got {fire_hour_local}")
@@ -259,7 +258,6 @@ class DiaryReflectionLoop:
         self._registry = registry
         self._fire_hour_local = int(fire_hour_local)
         self._clock = clock or datetime.now
-        self._sleeper = sleeper or asyncio.sleep
         self._task: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
 

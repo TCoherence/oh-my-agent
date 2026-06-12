@@ -132,3 +132,104 @@ async def test_stop_returns_promptly_under_long_poll_interval():
     await tracker.stop()
     elapsed = loop.time() - start
     assert elapsed < 1.0, f"stop() took {elapsed:.2f}s; expected <1s"
+
+
+@pytest.mark.asyncio
+async def test_message_during_inflight_judge_is_rejudged(monkeypatch):
+    """A message arriving while the judge fire is in flight must keep the
+    thread eligible — the old code unconditionally advanced last_judge_ts in
+    the finally, silently dropping the new message from idle judging."""
+    fired: list[str] = []
+    fake_now = {"value": 1_000.0}
+    monkeypatch.setattr("oh_my_agent.memory.idle_trigger.time.time", lambda: fake_now["value"])
+
+    holder: dict[str, IdleTracker] = {}
+
+    async def cb(key, meta):
+        fired.append(key)
+        if len(fired) == 1:
+            # Simulate a user message landing mid-judge.
+            fake_now["value"] += 1
+            await holder["tracker"].touch(key)
+
+    tracker = IdleTracker(on_fire=cb, idle_seconds=10, poll_interval_seconds=60)
+    holder["tracker"] = tracker
+
+    await tracker.touch("d|c|t1")
+    fake_now["value"] += 11
+    await tracker._tick()
+    assert fired == ["d|c|t1"]
+
+    # The mid-flight message must trigger a second judge once idle again.
+    fake_now["value"] += 11
+    await tracker._tick()
+    assert fired == ["d|c|t1", "d|c|t1"]
+
+
+@pytest.mark.asyncio
+async def test_mark_judged_with_stale_observed_ts_is_noop(monkeypatch):
+    fired: list[str] = []
+
+    async def cb(key, meta):
+        fired.append(key)
+
+    tracker = IdleTracker(on_fire=cb, idle_seconds=10, poll_interval_seconds=60)
+    fake_now = {"value": 1_000.0}
+    monkeypatch.setattr("oh_my_agent.memory.idle_trigger.time.time", lambda: fake_now["value"])
+
+    await tracker.touch("k")
+    observed = tracker.last_message_ts("k")
+    assert observed == 1_000.0
+    # New message after the judge captured its snapshot.
+    fake_now["value"] += 5
+    await tracker.touch("k")
+    tracker.mark_judged("k", observed_ts=observed)  # stale → no-op
+    fake_now["value"] += 11
+    await tracker._tick()
+    assert fired == ["k"]  # still fires for the newer message
+
+
+@pytest.mark.asyncio
+async def test_mark_judged_with_current_observed_ts_advances(monkeypatch):
+    fired: list[str] = []
+
+    async def cb(key, meta):
+        fired.append(key)
+
+    tracker = IdleTracker(on_fire=cb, idle_seconds=10, poll_interval_seconds=60)
+    fake_now = {"value": 1_000.0}
+    monkeypatch.setattr("oh_my_agent.memory.idle_trigger.time.time", lambda: fake_now["value"])
+
+    await tracker.touch("k")
+    tracker.mark_judged("k", observed_ts=tracker.last_message_ts("k"))
+    fake_now["value"] += 100
+    await tracker._tick()
+    assert fired == []
+
+
+@pytest.mark.asyncio
+async def test_mark_judged_legacy_no_observed_ts_unconditional(monkeypatch):
+    fired: list[str] = []
+
+    async def cb(key, meta):
+        fired.append(key)
+
+    tracker = IdleTracker(on_fire=cb, idle_seconds=10, poll_interval_seconds=60)
+    fake_now = {"value": 1_000.0}
+    monkeypatch.setattr("oh_my_agent.memory.idle_trigger.time.time", lambda: fake_now["value"])
+
+    await tracker.touch("k")
+    fake_now["value"] += 5
+    await tracker.touch("k")  # newer message
+    tracker.mark_judged("k")  # legacy: advances regardless
+    fake_now["value"] += 100
+    await tracker._tick()
+    assert fired == []
+
+
+def test_last_message_ts_untracked_returns_none():
+    async def cb(key, meta):
+        pass
+
+    tracker = IdleTracker(on_fire=cb, idle_seconds=10)
+    assert tracker.last_message_ts("never-touched") is None

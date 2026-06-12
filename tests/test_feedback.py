@@ -440,3 +440,51 @@ def test_parse_ts_handles_iso_and_sql_formats():
     # datetime passes through
     aware = datetime(2026, 5, 21, tzinfo=timezone.utc)
     assert _parse_ts(aware) == aware
+
+
+# =====================================================================
+# Perf batch 3 — per-task lock eviction (no unbounded growth)
+# =====================================================================
+
+
+@pytest.mark.asyncio
+async def test_task_locks_evicted_after_use(collector, memory_store, judge_store):
+    await memory_store.record_automation_post(
+        platform="discord",
+        channel_id="ch-1",
+        message_id="msg-evict",
+        automation_name="auto-evict",
+        task_id="task-evict",
+    )
+    ok = await collector.record_reaction(
+        message_id="msg-evict", emoji="👍", action="add", actor_id="owner-1"
+    )
+    assert ok
+    # Lock entry dropped once the write completed — no monotonic growth.
+    assert collector._task_locks == {}
+
+
+@pytest.mark.asyncio
+async def test_task_locks_concurrent_writes_serialize_and_evict(
+    memory_store, judge_store
+):
+    await memory_store.record_automation_post(
+        platform="discord",
+        channel_id="ch-1",
+        message_id="msg-conc",
+        automation_name="auto-conc",
+        task_id="task-conc",
+    )
+    collector = FeedbackCollector(memory_store=memory_store, judge_store=judge_store)
+    results = await asyncio.gather(
+        collector.record_reaction(message_id="msg-conc", emoji="👍", action="add"),
+        collector.record_reaction(message_id="msg-conc", emoji="👎", action="add"),
+        collector.record_explicit_feedback(task_id="task-conc", verdict="good"),
+    )
+    assert all(results)
+    # All three signals merged into ONE per-task entry (lock still serialized).
+    entries = [e for e in judge_store.get_active() if e.category == "self_eval"]
+    assert len(entries) == 1
+    assert len(entries[0].signals) == 3
+    # And every lock entry was evicted after its last holder released.
+    assert collector._task_locks == {}

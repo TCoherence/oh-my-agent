@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import tempfile
@@ -1246,41 +1247,6 @@ class DiscordChannel(BaseChannel):
 
         target_id = int(self._channel_id)
 
-        async def _sync_skill_feedback_from_payload(payload: discord.RawReactionActionEvent) -> None:
-            if not self._skill_eval_enabled or self._skill_eval_service is None:
-                return
-            if not self._skill_eval_service.is_feedback_emoji(str(payload.emoji)):
-                return
-            if self._owner_user_ids and str(payload.user_id) not in self._owner_user_ids:
-                return
-            if hasattr(client, "user") and client.user and payload.user_id == client.user.id:
-                return
-
-            channel_obj = client.get_channel(payload.channel_id)
-            if channel_obj is None:
-                channel_obj = await client.fetch_channel(payload.channel_id)
-            if not isinstance(channel_obj, (discord.TextChannel, discord.Thread, discord.DMChannel)):
-                return
-            message = await channel_obj.fetch_message(payload.message_id)
-
-            active_score = None
-            for reaction in message.reactions:
-                reaction_emoji = str(reaction.emoji)
-                if not self._skill_eval_service.is_feedback_emoji(reaction_emoji):
-                    continue
-                users = [u async for u in reaction.users()]
-                if any(u.id == payload.user_id for u in users):
-                    active_score = 1 if reaction_emoji == "👍" else -1
-
-            await self._skill_eval_service.record_reaction(
-                message_id=str(payload.message_id),
-                actor_id=str(payload.user_id),
-                platform=self.platform,
-                channel_id=self._channel_id,
-                thread_id=str(payload.channel_id),
-                active_score=active_score,
-            )
-
         def _interaction_thread_id(interaction: discord.Interaction) -> str | None:
             ch = interaction.channel
             if isinstance(ch, discord.Thread):
@@ -1417,40 +1383,8 @@ class DiscordChannel(BaseChannel):
 
             await interaction.response.defer()
             try:
-                forward, reverse = self._skill_syncer.full_sync(
-                    extra_source_dirs=self._workspace_skills_dirs
-                )
-                self._skill_syncer.refresh_workspace_dirs(self._workspace_skills_dirs)
-
-                from oh_my_agent.skills.validator import SkillValidator
-                validator = SkillValidator()
-                skills_path = self._skill_syncer._skills_path
-
-                validation_lines = []
-                if skills_path.is_dir():
-                    for skill_dir in sorted(skills_path.iterdir()):
-                        if not skill_dir.is_dir() or not (skill_dir / "SKILL.md").exists():
-                            continue
-                        result = validator.validate(skill_dir)
-                        icon = "✅" if result.valid else "⚠️"
-                        line = f"{icon} **{skill_dir.name}**"
-                        if result.errors:
-                            line += f" — {len(result.errors)} error(s)"
-                        if result.warnings:
-                            line += f" — {len(result.warnings)} warning(s)"
-                        validation_lines.append(line)
-
-                summary = [
-                    f"**Skill reload complete** — {forward} synced, {reverse} reverse-imported",
-                    "Active Claude/Gemini/Codex workspace skill directories refreshed.",
-                ]
-                if validation_lines:
-                    summary.append("**Skills:**")
-                    summary.extend(validation_lines)
-                else:
-                    summary.append("No skills found.")
-
-                await interaction.followup.send("\n".join(summary)[:2000])
+                summary_text = await self._run_skill_reload()
+                await interaction.followup.send(summary_text[:2000])
             except Exception as exc:
                 logger.exception("Skill reload failed")
                 await self._send_interaction_error(interaction, user_safe_message(exc))
@@ -2326,7 +2260,7 @@ class DiscordChannel(BaseChannel):
         @client.event
         async def on_raw_reaction_add(payload: discord.RawReactionActionEvent) -> None:
             try:
-                await _sync_skill_feedback_from_payload(payload)
+                await self._sync_skill_feedback_from_payload(payload)
             except Exception:
                 logger.debug("Failed to sync skill feedback from reaction add", exc_info=True)
             try:
@@ -2337,7 +2271,7 @@ class DiscordChannel(BaseChannel):
         @client.event
         async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent) -> None:
             try:
-                await _sync_skill_feedback_from_payload(payload)
+                await self._sync_skill_feedback_from_payload(payload)
             except Exception:
                 logger.debug("Failed to sync skill feedback from reaction remove", exc_info=True)
             try:
@@ -2393,18 +2327,140 @@ class DiscordChannel(BaseChannel):
         _, task_id, action, nonce = parts
         return {"task_id": task_id, "action": action, "nonce": nonce}
 
+    async def _run_skill_reload(self) -> str:
+        """Heavy half of ``/reload-skills``: sync + validate, off the loop.
+
+        Sync and per-skill validation are filesystem/subprocess heavy (up to
+        ~10s per skill script), so every blocking step is offloaded via
+        ``asyncio.to_thread`` and the shared event loop keeps serving other
+        traffic. Returns the operator-facing summary text; the slash handler
+        owns the interaction plumbing (defer / followup / error reporting).
+        """
+        syncer = self._skill_syncer
+        assert syncer is not None, "/reload-skills handler checks the syncer first"
+        forward, reverse = await asyncio.to_thread(
+            syncer.full_sync,
+            extra_source_dirs=self._workspace_skills_dirs,
+        )
+        await asyncio.to_thread(
+            syncer.refresh_workspace_dirs,
+            self._workspace_skills_dirs,
+        )
+
+        from oh_my_agent.skills.validator import SkillValidator
+        validator = SkillValidator()
+        skills_path = syncer._skills_path
+
+        validation_lines = []
+        if skills_path.is_dir():
+            for skill_dir in sorted(skills_path.iterdir()):
+                if not skill_dir.is_dir() or not (skill_dir / "SKILL.md").exists():
+                    continue
+                result = await validator.validate_async(skill_dir)
+                icon = "✅" if result.valid else "⚠️"
+                line = f"{icon} **{skill_dir.name}**"
+                if result.errors:
+                    line += f" — {len(result.errors)} error(s)"
+                if result.warnings:
+                    line += f" — {len(result.warnings)} warning(s)"
+                validation_lines.append(line)
+
+        summary = [
+            f"**Skill reload complete** — {forward} synced, {reverse} reverse-imported",
+            "Active Claude/Gemini/Codex workspace skill directories refreshed.",
+        ]
+        if validation_lines:
+            summary.append("**Skills:**")
+            summary.extend(validation_lines)
+        else:
+            summary.append("No skills found.")
+        return "\n".join(summary)
+
+    async def _sync_skill_feedback_from_payload(
+        self, payload: discord.RawReactionActionEvent
+    ) -> None:
+        """Record 👍/👎 skill feedback from a raw reaction event.
+
+        Raw reaction events fire for reactions in EVERY channel the bot can
+        see, so the channel-scope gate must run before any REST call —
+        otherwise each thumbs-up anywhere costs fetch_channel +
+        fetch_message + full reaction pagination against the global rate
+        budget.
+        """
+        if not self._skill_eval_enabled or self._skill_eval_service is None:
+            return
+        if not self._skill_eval_service.is_feedback_emoji(str(payload.emoji)):
+            return
+        if self._owner_user_ids and str(payload.user_id) not in self._owner_user_ids:
+            return
+        client = self._client
+        if client is None:
+            return
+        if hasattr(client, "user") and client.user and payload.user_id == client.user.id:
+            return
+
+        accepted_ids = {int(self._channel_id)}
+        accepted_ids.update(int(cid) for cid in self._dump_channel_ids if cid.isdigit())
+        channel_obj: Any = None
+        if payload.channel_id not in accepted_ids:
+            # Not the bound channel or a dump channel — only threads under
+            # them remain eligible. Prefer the gateway cache for the parent
+            # check; REST fetch only as a fallback, and only after the cheap
+            # exact-id checks above have failed.
+            channel_obj = client.get_channel(payload.channel_id)
+            if channel_obj is None:
+                try:
+                    channel_obj = await client.fetch_channel(payload.channel_id)
+                except Exception:
+                    return
+            if (
+                not isinstance(channel_obj, discord.Thread)
+                or channel_obj.parent_id not in accepted_ids
+            ):
+                return
+        if channel_obj is None:
+            channel_obj = client.get_channel(payload.channel_id)
+            if channel_obj is None:
+                channel_obj = await client.fetch_channel(payload.channel_id)
+        if not isinstance(channel_obj, (discord.TextChannel, discord.Thread, discord.DMChannel)):
+            return
+        message = await channel_obj.fetch_message(payload.message_id)
+
+        active_score = None
+        for reaction in message.reactions:
+            reaction_emoji = str(reaction.emoji)
+            if not self._skill_eval_service.is_feedback_emoji(reaction_emoji):
+                continue
+            users = [u async for u in reaction.users()]
+            if any(u.id == payload.user_id for u in users):
+                active_score = 1 if reaction_emoji == "👍" else -1
+
+        await self._skill_eval_service.record_reaction(
+            message_id=str(payload.message_id),
+            actor_id=str(payload.user_id),
+            platform=self.platform,
+            channel_id=self._channel_id,
+            thread_id=str(payload.channel_id),
+            active_score=active_score,
+        )
+
     async def signal_task_status(self, thread_id: str, message_id: str | None, emoji: str) -> None:
         if not message_id:
             return
         try:
             target = await self._resolve_channel(thread_id)
+            # Same 50/s HTTP cap rationale as add_reactions: both the message
+            # fetch and the reaction add consume outbound budget.
+            await self._acquire_outbound_slot()
             msg = await target.fetch_message(int(message_id))
+            await self._acquire_outbound_slot()
             await msg.add_reaction(emoji)
         except Exception:
             logger.debug("Failed to add reaction %s to %s", emoji, message_id, exc_info=True)
 
     async def create_thread(self, msg: IncomingMessage, name: str) -> str:
         original: discord.Message = msg.raw
+        await self._acquire_outbound_slot()
         thread = await original.create_thread(
             name=name[:100],
             auto_archive_duration=THREAD_ARCHIVE_MINUTES,
@@ -2537,6 +2593,7 @@ class DiscordChannel(BaseChannel):
     ) -> None:
         try:
             thread = await self._resolve_channel(thread_id)
+            await self._acquire_outbound_slot()
             msg = await thread.fetch_message(int(message_id))
             await self._acquire_outbound_slot()
             await msg.edit(content=text)
@@ -2562,6 +2619,7 @@ class DiscordChannel(BaseChannel):
     ) -> None:
         try:
             thread = await self._resolve_channel(thread_id)
+            await self._acquire_outbound_slot()
             msg = await thread.fetch_message(int(message_id))
             view = self._build_interactive_view(prompt)
             await self._acquire_outbound_slot()

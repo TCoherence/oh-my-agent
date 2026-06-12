@@ -1,20 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
-  fetchSkillHealth,
   fetchSkillRecentTasks,
   fetchSkillsOverview,
   setSkillEnabled,
 } from "@/lib/api";
-
-/** Legacy: runs-only health view. Kept for back-compat with any external use. */
-export function useSkillHealth() {
-  return useQuery({
-    queryKey: ["skill-health"],
-    queryFn: fetchSkillHealth,
-    refetchInterval: 5000,
-  });
-}
 
 /** Installed-catalog overview merged with runtime stats. Polls every 5s
  *  (matches sessions cadence — stats don't change faster than the bot
@@ -39,16 +29,14 @@ export function useSkillRecentTasks(name: string | null, opts?: { limit?: number
   });
 }
 
-/** Toggle a skill's manual enable/disable. Invalidates both the new
- *  overview cache AND the legacy health cache (in case some operator
- *  has it open in a separate tab). */
+/** Toggle a skill's manual enable/disable. Invalidates the overview
+ *  cache so the row flips without waiting for the next poll. */
 export function useSetSkillEnabled() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: ({ name, enabled }: { name: string; enabled: boolean }) =>
       setSkillEnabled(name, enabled),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["skill-health"] });
       qc.invalidateQueries({ queryKey: ["skills-overview"] });
     },
   });
