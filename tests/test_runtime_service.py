@@ -27,6 +27,7 @@ from oh_my_agent.runtime import (
     TASK_STATUS_RUNNING,
     TASK_STATUS_STOPPED,
     TASK_STATUS_TIMEOUT,
+    TASK_STATUS_VALIDATING,
     TASK_STATUS_WAITING_MERGE,
     TASK_STATUS_WAITING_USER_INPUT,
     RuntimeService,
@@ -4781,5 +4782,237 @@ async def test_collect_provider_credential_hints_bilibili(tmp_path):
     assert other == []
 
     await store.close()
+
+
+# ---------------------------------------------------------------------------
+# Review batch 1: timeout terminal bundle, stop/pause vs. completion races,
+# stop_task terminal guard, worker-crash FAILED, thread-scoped active lookup
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_stop_task_does_not_clobber_terminal_status(runtime_env):
+    """stop_task on an already-finished task must report it and not rewrite
+    the status (previously it unconditionally wrote STOPPED)."""
+    store: SQLiteMemoryStore = runtime_env["store"]
+    runtime: RuntimeService = runtime_env["runtime"]
+
+    task = await store.create_runtime_task(
+        task_id="t-stop-terminal", platform="discord", channel_id="100",
+        thread_id="thread-stop-terminal", created_by="owner-1", goal="g",
+        status=TASK_STATUS_DRAFT, max_steps=5, max_minutes=15,
+        test_command="true", completion_mode="reply", task_type="artifact",
+    )
+    await store.update_runtime_task(
+        task.id, status=TASK_STATUS_COMPLETED, ended_at_now=True
+    )
+
+    result = await runtime.stop_task(task.id, actor_id="owner-1")
+    assert "already finished" in result
+    assert TASK_STATUS_COMPLETED in result
+
+    reloaded = await store.get_runtime_task(task.id)
+    assert reloaded is not None
+    assert reloaded.status == TASK_STATUS_COMPLETED
+    events = await store.list_runtime_events(task.id, limit=20)
+    assert not [e for e in events if e.get("event_type") == "task.stopped"]
+
+
+@pytest.mark.asyncio
+async def test_wall_clock_timeout_runs_full_terminal_bundle(runtime_env):
+    """The max_minutes timeout exit must produce the same terminal bundle as
+    the other TIMEOUT paths: terminal notify, task.timeout event, automation
+    last_error, and external push (previously all skipped for automations)."""
+    store: SQLiteMemoryStore = runtime_env["store"]
+    runtime: RuntimeService = runtime_env["runtime"]
+    channel: _FakeChannel = runtime_env["channel"]
+
+    registry = AgentRegistry([_DoneAgent()])
+    session = ChannelSession(
+        platform="discord",
+        channel_id="100",
+        channel=channel,
+        registry=registry,
+    )
+    runtime.register_session(session, registry)
+
+    pushes: list = []
+    dispatcher = MagicMock()
+    dispatcher.schedule = pushes.append
+    dispatcher.level_for = lambda kind: "active"
+    runtime._push_dispatcher = dispatcher  # noqa: SLF001
+
+    task = await store.create_runtime_task(
+        task_id="t-wallclock", platform="discord", channel_id="100",
+        thread_id="thread-wallclock", created_by="owner-1", goal="g",
+        status=TASK_STATUS_RUNNING, max_steps=5, max_minutes=0,
+        test_command="true", completion_mode="reply", task_type="artifact",
+        automation_name="auto-wc",
+    )
+    await runtime._run_task(task)  # noqa: SLF001
+
+    reloaded = await store.get_runtime_task(task.id)
+    assert reloaded is not None
+    assert reloaded.status == TASK_STATUS_TIMEOUT
+    assert reloaded.ended_at is not None
+    assert reloaded.summary == "Task exceeded runtime budget."
+
+    events = await store.list_runtime_events(task.id, limit=50)
+    assert [e for e in events if e.get("event_type") == "task.timeout"]
+
+    state = await store.get_automation_state("auto-wc")
+    assert state is not None
+    assert "timed out" in (state.last_error or "")
+
+    assert pushes
+    assert pushes[0].kind == "automation_failed"
+    # Terminal notify reached the channel via the automation terminal path.
+    assert any("timed out" in text for _, text in channel.sent)
+
+
+@pytest.mark.asyncio
+async def test_worker_crash_marks_task_failed(runtime_env):
+    """A _run_task crash must flip the row to FAILED instead of leaving it
+    RUNNING forever (which wedged the worker's claim slot)."""
+    store: SQLiteMemoryStore = runtime_env["store"]
+    runtime: RuntimeService = runtime_env["runtime"]
+    channel: _FakeChannel = runtime_env["channel"]
+
+    registry = AgentRegistry([_DoneAgent()])
+    session = ChannelSession(
+        platform="discord",
+        channel_id="100",
+        channel=channel,
+        registry=registry,
+    )
+    runtime.register_session(session, registry)
+
+    async def _boom(task) -> None:
+        raise RuntimeError("boom")
+
+    runtime._run_task = _boom  # type: ignore[method-assign]  # noqa: SLF001
+    await runtime.start()
+
+    task = await runtime.create_task(
+        session=session,
+        registry=registry,
+        thread_id="thread-crash",
+        goal="write a file and finish",
+        created_by="owner-1",
+        source="slash",
+    )
+    failed = await _wait_for_status(store, task.id, {TASK_STATUS_FAILED}, timeout=8.0)
+    assert failed.status == TASK_STATUS_FAILED
+    assert "worker crash" in (failed.error or "")
+
+
+@pytest.mark.asyncio
+async def test_stop_requested_helper_detects_stop_and_pause(runtime_env):
+    store: SQLiteMemoryStore = runtime_env["store"]
+    runtime: RuntimeService = runtime_env["runtime"]
+
+    task = await store.create_runtime_task(
+        task_id="t-stop-req", platform="discord", channel_id="100",
+        thread_id="thread-stop-req", created_by="owner-1", goal="g",
+        status=TASK_STATUS_RUNNING, max_steps=5, max_minutes=15,
+        test_command="true", completion_mode="reply", task_type="artifact",
+    )
+    assert await runtime._stop_requested(task) is None  # noqa: SLF001
+    await store.update_runtime_task(task.id, status=TASK_STATUS_PAUSED)
+    assert await runtime._stop_requested(task) == TASK_STATUS_PAUSED  # noqa: SLF001
+    await store.update_runtime_task(task.id, status=TASK_STATUS_STOPPED)
+    assert await runtime._stop_requested(task) == TASK_STATUS_STOPPED  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_stop_during_test_phase_cancels_test_and_preserves_stopped(runtime_env):
+    """Stopping while the test command runs must kill the subprocess via the
+    run_shell should_cancel probe and bail out before any completion write —
+    the row stays STOPPED, never WAITING_MERGE/COMPLETED."""
+    store: SQLiteMemoryStore = runtime_env["store"]
+    runtime: RuntimeService = runtime_env["runtime"]
+    channel: _FakeChannel = runtime_env["channel"]
+    # Keep the fixture's 0.6s test timeout out of the way: the long test
+    # below must be ended by the cancel probe, not the timeout path.
+    runtime._test_timeout_seconds = 30.0  # noqa: SLF001
+
+    registry = AgentRegistry([_DoneAgent()])
+    session = ChannelSession(
+        platform="discord",
+        channel_id="100",
+        channel=channel,
+        registry=registry,
+    )
+    runtime.register_session(session, registry)
+    await runtime.start()
+
+    task = await runtime.create_task(
+        session=session,
+        registry=registry,
+        thread_id="thread-stop-test",
+        goal="write a file and finish",
+        created_by="owner-1",
+        test_command="python -c \"import time; time.sleep(20)\"",
+        source="slash",
+    )
+    await _wait_for_status(store, task.id, {TASK_STATUS_VALIDATING}, timeout=8.0)
+    stop_result = await runtime.stop_task(task.id, actor_id="owner-1")
+    assert "stopped" in stop_result.lower()
+
+    # Cancel must land within a few heartbeats — well before the 20s sleep
+    # or the 30s test timeout would return control.
+    deadline = asyncio.get_running_loop().time() + 6.0
+    interrupted: list[dict] = []
+    while asyncio.get_running_loop().time() < deadline:
+        events = await store.list_runtime_events(task.id, limit=100)
+        interrupted = [e for e in events if e.get("event_type") == "task.run_interrupted"]
+        if interrupted:
+            break
+        await asyncio.sleep(0.1)
+    assert interrupted, "expected task.run_interrupted after stop during tests"
+    assert interrupted[-1].get("payload", {}).get("phase") == "test_result"
+
+    final = await store.get_runtime_task(task.id)
+    assert final is not None
+    assert final.status == TASK_STATUS_STOPPED
+    events = await store.list_runtime_events(task.id, limit=100)
+    assert not [e for e in events if e.get("event_type") == "task.completed"]
+
+
+@pytest.mark.asyncio
+async def test_active_task_for_thread_visible_beyond_recent_window(runtime_env):
+    """An active task in an old thread must stay visible even when 20+ newer
+    tasks exist in other threads (previously list_runtime_tasks(limit=20)
+    silently dropped it)."""
+    store: SQLiteMemoryStore = runtime_env["store"]
+    runtime: RuntimeService = runtime_env["runtime"]
+
+    active = await store.create_runtime_task(
+        task_id="t-old-active", platform="discord", channel_id="100",
+        thread_id="thread-old", created_by="owner-1", goal="g",
+        status=TASK_STATUS_RUNNING, max_steps=5, max_minutes=15,
+        test_command="true", completion_mode="reply", task_type="artifact",
+    )
+    # Backdate so it sorts strictly older than the filler tasks below.
+    db = await store._conn()  # noqa: SLF001
+    await db.execute(
+        "UPDATE runtime_tasks SET created_at = datetime('now', '-1 day') WHERE id = ?",
+        (active.id,),
+    )
+    await db.commit()
+
+    for i in range(25):
+        await store.create_runtime_task(
+            task_id=f"t-filler-{i}", platform="discord", channel_id="100",
+            thread_id=f"thread-filler-{i}", created_by="owner-1", goal="g",
+            status=TASK_STATUS_COMPLETED, max_steps=5, max_minutes=15,
+            test_command="true", completion_mode="reply", task_type="artifact",
+        )
+
+    found = await runtime._active_task_for_thread(  # noqa: SLF001
+        "discord", "100", "thread-old"
+    )
+    assert found is not None
+    assert found.id == "t-old-active"
 
 

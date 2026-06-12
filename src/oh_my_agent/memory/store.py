@@ -60,6 +60,7 @@ SKILLS_TELEMETRY_TABLES = {
     "skill_invocations",
     "skill_feedback",
     "skill_evaluations",
+    "skill_overrides",
 }
 ALL_TOP_LEVEL_TABLES = CONVERSATION_TABLES | RUNTIME_STATE_TABLES | SKILLS_TELEMETRY_TABLES
 TABLE_COPY_ORDER = [
@@ -82,7 +83,18 @@ TABLE_COPY_ORDER = [
     "skill_invocations",
     "skill_feedback",
     "skill_evaluations",
+    "skill_overrides",
 ]
+# Tables that joined a scoped table set after the split stores first shipped.
+# Older builds created them in every split DB (init() runs the full schema
+# script) but never dropped them because no scoped set claimed them, so
+# existing deployments carry stray copies. The strays hold no data — writes
+# were not dispatched by SplitSQLiteMemoryStore before the table was claimed —
+# so the unexpected-table guards tolerate them when empty and the next init()
+# drops them via _drop_unkept_tables().
+LATE_SCOPED_TABLES = {
+    "skill_overrides",
+}
 TABLE_COPY_DEFAULTS: dict[str, dict[str, Any]] = {
     "runtime_tasks": {
         "completion_mode": "merge",
@@ -234,6 +246,16 @@ class MemoryStore(ABC):
         channel_id: str,
         status: str | None = None,
         limit: int = 20,
+    ) -> list[RuntimeTask]:
+        return []
+
+    async def list_runtime_tasks_for_thread(
+        self,
+        *,
+        platform: str,
+        channel_id: str,
+        thread_id: str,
+        limit: int = 50,
     ) -> list[RuntimeTask]:
         return []
 
@@ -753,6 +775,8 @@ CREATE INDEX IF NOT EXISTS idx_runtime_tasks_status
     ON runtime_tasks(status, updated_at);
 CREATE INDEX IF NOT EXISTS idx_runtime_tasks_channel
     ON runtime_tasks(platform, channel_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_runtime_tasks_thread
+    ON runtime_tasks(platform, channel_id, thread_id, created_at);
 
 CREATE TABLE IF NOT EXISTS auth_credentials (
     id              TEXT PRIMARY KEY,
@@ -1613,6 +1637,24 @@ class SQLiteMemoryStore(MemoryStore):
         rows = await cursor.fetchall()
         return [RuntimeTask.from_row(self._normalize_runtime_task_row(dict(r))) for r in rows]
 
+    async def list_runtime_tasks_for_thread(
+        self,
+        *,
+        platform: str,
+        channel_id: str,
+        thread_id: str,
+        limit: int = 50,
+    ) -> list[RuntimeTask]:
+        db = await self._conn()
+        cursor = await db.execute(
+            "SELECT * FROM runtime_tasks "
+            "WHERE platform=? AND channel_id=? AND thread_id=? "
+            "ORDER BY created_at DESC LIMIT ?",
+            (platform, channel_id, thread_id, limit),
+        )
+        rows = await cursor.fetchall()
+        return [RuntimeTask.from_row(self._normalize_runtime_task_row(dict(r))) for r in rows]
+
     async def upsert_ephemeral_workspace(self, workspace_key: str, workspace_path: str) -> None:
         async with self._write_lock:
             db = await self._conn()
@@ -1676,14 +1718,6 @@ class SQLiteMemoryStore(MemoryStore):
                 platform = str(updates.pop("platform", ""))
                 channel_id = str(updates.pop("channel_id", ""))
                 enabled = bool(updates.pop("enabled", True))
-                sets: list[str] = []
-                values: list[Any] = []
-                for key, value in updates.items():
-                    if value == "__NOW__":
-                        sets.append(f"{key}=CURRENT_TIMESTAMP")
-                    else:
-                        sets.append(f"{key}=?")
-                        values.append(value)
                 cols = "name, platform, channel_id, enabled, updated_at"
                 vals = "?, ?, ?, ?, CURRENT_TIMESTAMP"
                 params: list[Any] = [name, platform, channel_id, int(enabled)]
@@ -1700,8 +1734,8 @@ class SQLiteMemoryStore(MemoryStore):
                     tuple(params),
                 )
             else:
-                sets = []
-                values = []
+                sets: list[str] = []
+                values: list[Any] = []
                 for key, value in updates.items():
                     if value == "__NOW__":
                         sets.append(f"{key}=CURRENT_TIMESTAMP")
@@ -3324,6 +3358,13 @@ class SQLiteScopedStore(SQLiteMemoryStore):
                 for table in existing_tables
                 if table in (ALL_TOP_LEVEL_TABLES | CONVERSATION_FTS_SHADOW_TABLES) and table not in allowed
             }
+            # Empty late-scoped strays (see LATE_SCOPED_TABLES) are expected
+            # on DBs created before the table joined its scoped set; tolerate
+            # them so _drop_unkept_tables() below can remove them.
+            for table in sorted(unexpected & LATE_SCOPED_TABLES):
+                cursor = await db.execute(f'SELECT 1 FROM "{table}" LIMIT 1')
+                if await cursor.fetchone() is None:
+                    unexpected.discard(table)
             if unexpected:
                 raise RuntimeError(
                     f"{self._label} store at {self._db_path} has unexpected tables: {sorted(unexpected)}"
@@ -3375,6 +3416,7 @@ class SplitSQLiteMemoryStore:
         "create_runtime_task",
         "get_runtime_task",
         "list_runtime_tasks",
+        "list_runtime_tasks_for_thread",
         "update_runtime_task",
         "claim_pending_runtime_task",
         "requeue_inflight_runtime_tasks",
@@ -3419,8 +3461,11 @@ class SplitSQLiteMemoryStore:
         "delete_automation_state",
         "record_automation_post",
         "get_automation_post",
+        "get_automation_post_by_message",
+        "get_automation_post_by_task",
         "set_automation_post_follow_up_thread",
         "list_automation_posts",
+        "list_automation_posts_older_than",
         "purge_expired_automation_posts",
         "record_usage_event",
         "get_usage_summary",
@@ -3439,6 +3484,8 @@ class SplitSQLiteMemoryStore:
         "get_skill_stats",
         "set_skill_auto_disabled",
         "list_auto_disabled_skills",
+        "set_skill_override",
+        "list_manual_disabled_skills",
         "add_skill_evaluation",
         "get_latest_skill_evaluations",
     }
@@ -3496,6 +3543,18 @@ def _user_tables_sync(db_path: Path) -> set[str]:
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
         ).fetchall()
     return {str(row[0]) for row in rows}
+
+
+def _empty_tables_sync(db_path: Path, tables: set[str]) -> set[str]:
+    """Subset of ``tables`` that exist in ``db_path`` but hold zero rows."""
+    if not tables or not db_path.exists():
+        return set()
+    empty: set[str] = set()
+    with sqlite3.connect(str(db_path)) as conn:
+        for table in sorted(tables):
+            if conn.execute(f'SELECT 1 FROM "{table}" LIMIT 1').fetchone() is None:
+                empty.add(table)
+    return empty
 
 
 def _copy_tables_sync(source_db: Path, dest_db: Path, tables: set[str]) -> None:
@@ -3628,6 +3687,11 @@ async def maybe_split_legacy_memory_db(
         unexpected_conversation_tables = {
             table for table in conversation_tables if table in (RUNTIME_STATE_TABLES | SKILLS_TELEMETRY_TABLES)
         }
+        # Empty late-scoped strays are leftovers from older builds; the
+        # conversation store's own init() drops them later in boot.
+        unexpected_conversation_tables -= _empty_tables_sync(
+            conversation_path, unexpected_conversation_tables & LATE_SCOPED_TABLES
+        )
         if unexpected_conversation_tables:
             raise RuntimeError(
                 f"Conversation DB still contains non-conversation tables after split: {sorted(unexpected_conversation_tables)}"

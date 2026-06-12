@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import signal
 from abc import abstractmethod
 from collections.abc import AsyncIterator
 from contextlib import suppress
@@ -23,6 +24,18 @@ from oh_my_agent.agents.events import (
 logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT_SECONDS = 300
+
+# StreamReader buffer limit for CLI subprocess pipes. asyncio's default is
+# 64 KiB, but Claude's ``--output-format stream-json`` emits one JSON object
+# per line and a single tool_result frame routinely exceeds that — with the
+# default limit the readline/readuntil call raises mid-turn, the pump dies,
+# and the CLI blocks on a full pipe until the wall-clock timeout. 10 MiB
+# gives ample headroom while still bounding memory.
+_STREAM_LINE_LIMIT = 10 * 1024 * 1024
+
+# Tail window read from stream logs when building a bounded excerpt — the
+# logs can be multi-MB on the timeout path, so never read them whole.
+_LOG_EXCERPT_TAIL_BYTES = 8192
 
 # Environment variable keys considered safe to pass to CLI subprocesses.
 # Everything else is stripped unless explicitly listed in passthrough_env.
@@ -167,12 +180,77 @@ def _bounded_log_excerpt(log_path: Path | None, *, max_chars: int = 2000) -> str
     if log_path is None or not log_path.exists():
         return None
     try:
-        text = log_path.read_text(encoding="utf-8", errors="replace").strip()
+        with log_path.open("rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            fh.seek(max(0, size - _LOG_EXCERPT_TAIL_BYTES))
+            # Seeking may land mid-codepoint; errors="replace" absorbs it.
+            text = fh.read().decode("utf-8", errors="replace").strip()
     except Exception:
         return None
     if not text:
         return None
     return text[-max_chars:]
+
+
+def _kill_process_tree(proc: asyncio.subprocess.Process) -> None:
+    """SIGKILL the subprocess's whole process group, falling back to the child.
+
+    Wrapped CLIs spawn their own tool children (ffmpeg, yt-dlp, shell
+    commands); killing only the direct child would leave those running as
+    orphans. Both spawn sites use ``start_new_session=True`` so the child's
+    pid doubles as its process-group id.
+    """
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+        return
+    except ProcessLookupError:
+        # Group already gone — raced with normal exit.
+        return
+    except OSError:
+        pass
+    with suppress(ProcessLookupError):
+        proc.kill()
+
+
+async def _drain_oversized_line(
+    stream: asyncio.StreamReader,
+    *,
+    max_keep: int = _STREAM_LINE_LIMIT,
+) -> tuple[bytes, int]:
+    """Consume one logical line that overflowed the StreamReader limit.
+
+    Called after ``readuntil`` raised :class:`asyncio.LimitOverrunError` —
+    the reader's buffer is still intact, so the line can be reassembled by
+    consuming buffered chunks until the newline (or EOF) shows up. Returns
+    ``(kept_bytes, dropped_byte_count)``; bytes beyond ``max_keep`` are
+    dropped so a pathological no-newline stream cannot grow memory without
+    bound.
+    """
+    kept = bytearray()
+    dropped = 0
+
+    def _absorb(chunk: bytes) -> None:
+        nonlocal dropped
+        room = max_keep - len(kept)
+        if room > 0:
+            kept.extend(chunk[:room])
+            dropped += max(0, len(chunk) - room)
+        else:
+            dropped += len(chunk)
+
+    while True:
+        try:
+            chunk = await stream.readuntil(b"\n")
+        except asyncio.IncompleteReadError as exc:  # EOF before the newline
+            _absorb(exc.partial)
+            return bytes(kept), dropped
+        except asyncio.LimitOverrunError as exc:
+            # Newline still not in reach — consume what was scanned and retry.
+            _absorb(await stream.read(max(exc.consumed, 1)))
+            continue
+        _absorb(chunk)
+        return bytes(kept), dropped
 
 
 async def _stream_cli_lines(
@@ -212,6 +290,9 @@ async def _stream_cli_lines(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=env,
+        limit=_STREAM_LINE_LIMIT,
+        # Own process group so timeout/cancel can reap grandchildren too.
+        start_new_session=True,
     )
 
     # Pump both pipes into a queue; one consumer pulls interleaved frames.
@@ -219,15 +300,35 @@ async def _stream_cli_lines(
 
     async def _pump(stream, label: str) -> None:
         try:
-            while True:
-                chunk = await stream.readline()
+            eof = False
+            while not eof:
+                # readuntil rather than readline: on an over-limit line,
+                # readline() raises only after discarding its buffer (the
+                # head of the line is lost), while readuntil keeps the
+                # buffer intact so _drain_oversized_line can salvage it.
+                try:
+                    chunk = await stream.readuntil(b"\n")
+                except asyncio.IncompleteReadError as exc:
+                    chunk = exc.partial  # EOF, possibly mid-line
+                    eof = True
+                except asyncio.LimitOverrunError:
+                    chunk, dropped = await _drain_oversized_line(stream)
+                    if dropped:
+                        logger.warning(
+                            "CLI %s line exceeded %d bytes; truncated %d bytes",
+                            label, _STREAM_LINE_LIMIT, dropped,
+                        )
                 if not chunk:
-                    break
+                    continue
                 text = chunk.decode(errors="replace").rstrip("\n")
                 if log_handle is not None:
                     log_handle.write(f"[{label}] {text}\n")
                     log_handle.flush()
                 await queue.put((label, text))
+        except Exception:
+            # Never die silently: the finally-sentinel below would end the
+            # stream early while the CLI blocks on a full pipe.
+            logger.exception("CLI %s pump failed unexpectedly", label)
         finally:
             await queue.put(None)
 
@@ -263,7 +364,7 @@ async def _stream_cli_lines(
                     killed_reason = "cancelled"
                 elif timeout_waiter is not None and timeout_waiter in done:
                     killed_reason = "timeout"
-                proc.kill()
+                _kill_process_tree(proc)
                 break
 
             item = get_task.result()
@@ -288,13 +389,13 @@ async def _stream_cli_lines(
         with suppress(asyncio.TimeoutError):
             await asyncio.wait_for(proc.wait(), timeout=2)
         if proc.returncode is None:
-            proc.kill()
+            _kill_process_tree(proc)
             await proc.wait()
 
         if killed_reason == "timeout":
             raise asyncio.TimeoutError()
     except (asyncio.CancelledError, GeneratorExit):
-        proc.kill()
+        _kill_process_tree(proc)
         with suppress(Exception):
             await asyncio.wait_for(proc.wait(), timeout=2)
         raise
@@ -332,6 +433,9 @@ async def _stream_cli_process(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=env,
+        limit=_STREAM_LINE_LIMIT,
+        # Own process group so timeout/cancel can reap grandchildren too.
+        start_new_session=True,
     )
 
     stdout_buf = bytearray()
@@ -357,12 +461,12 @@ async def _stream_cli_process(
         await asyncio.gather(stdout_task, stderr_task)
         return returncode, bytes(stdout_buf), bytes(stderr_buf)
     except asyncio.TimeoutError:
-        proc.kill()
+        _kill_process_tree(proc)
         await proc.wait()
         await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
         raise
     except asyncio.CancelledError:
-        proc.kill()
+        _kill_process_tree(proc)
         await proc.wait()
         await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
         raise

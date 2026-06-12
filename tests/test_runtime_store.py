@@ -5,7 +5,9 @@ from oh_my_agent.memory.store import SQLiteMemoryStore
 from oh_my_agent.runtime.types import (
     TASK_COMPLETION_MERGE,
     TASK_COMPLETION_REPLY,
+    TASK_STATUS_COMPLETED,
     TASK_STATUS_DRAFT,
+    TASK_STATUS_FAILED,
     TASK_STATUS_MERGED,
     TASK_STATUS_PENDING,
     TASK_STATUS_RUNNING,
@@ -305,6 +307,50 @@ async def test_auth_credential_and_flow_crud(store):
 
     active_after = await store.get_active_auth_flow("bilibili", "owner-1")
     assert active_after is None
+
+
+@pytest.mark.asyncio
+async def test_list_runtime_tasks_for_thread(store):
+    async def _create(task_id, thread_id, status, channel_id="100", created_at=None):
+        await store.create_runtime_task(
+            task_id=task_id,
+            platform="discord",
+            channel_id=channel_id,
+            thread_id=thread_id,
+            created_by="u1",
+            goal="g",
+            status=status,
+            max_steps=1,
+            max_minutes=10,
+            test_command="true",
+        )
+        if created_at is not None:
+            # created_at defaults to CURRENT_TIMESTAMP (second granularity);
+            # pin distinct values so the DESC ordering assertion is stable.
+            await store.update_runtime_task(task_id, created_at=created_at)
+
+    # Same-thread siblings must be terminal — the per-thread dedup index
+    # forbids two active manual tasks in one thread.
+    await _create("task-old", "200", TASK_STATUS_COMPLETED, created_at="2026-01-01 00:00:00")
+    await _create("task-mid", "200", TASK_STATUS_FAILED, created_at="2026-01-02 00:00:00")
+    await _create("task-new", "200", TASK_STATUS_RUNNING, created_at="2026-01-03 00:00:00")
+    await _create("task-other-thread", "201", TASK_STATUS_RUNNING)
+    await _create("task-other-channel", "200", TASK_STATUS_RUNNING, channel_id="999")
+
+    tasks = await store.list_runtime_tasks_for_thread(
+        platform="discord", channel_id="100", thread_id="200"
+    )
+    assert [t.id for t in tasks] == ["task-new", "task-mid", "task-old"]
+
+    limited = await store.list_runtime_tasks_for_thread(
+        platform="discord", channel_id="100", thread_id="200", limit=2
+    )
+    assert [t.id for t in limited] == ["task-new", "task-mid"]
+
+    empty = await store.list_runtime_tasks_for_thread(
+        platform="discord", channel_id="100", thread_id="missing"
+    )
+    assert empty == []
 
 
 @pytest.mark.asyncio

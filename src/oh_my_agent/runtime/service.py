@@ -70,6 +70,7 @@ from oh_my_agent.runtime.types import (
     TASK_TYPE_ARTIFACT,
     TASK_TYPE_REPO_CHANGE,
     TASK_TYPE_SKILL_CHANGE,
+    TERMINAL_STATUSES,
     DuplicateActiveTaskError,
     HitlPrompt,
     NotificationEvent,
@@ -1342,6 +1343,8 @@ class RuntimeService:
         task = await self._store.get_runtime_task(task_id)
         if task is None:
             return f"Task `{task_id}` not found."
+        if task.status in TERMINAL_STATUSES:
+            return f"Task `{task.id}` already finished (status: {task.status})."
         await self._store.update_runtime_task(
             task_id,
             status=TASK_STATUS_STOPPED,
@@ -2865,6 +2868,7 @@ class RuntimeService:
 
     async def _worker_loop(self, idx: int) -> None:
         while not self._stop_event.is_set():
+            task: RuntimeTask | None = None
             try:
                 task = await self._store.claim_pending_runtime_task()
                 if task is None:
@@ -2876,6 +2880,17 @@ class RuntimeService:
                 raise
             except Exception as exc:
                 logger.exception("Runtime worker %s crashed: %s", idx, exc)
+                # Without this, a _run_task crash leaves the row RUNNING
+                # forever and the task can never be retried or cleaned up.
+                if task is not None:
+                    try:
+                        await self._fail(task, f"worker crash: {exc}")
+                    except Exception:
+                        logger.exception(
+                            "Runtime worker %s could not mark task=%s FAILED",
+                            idx,
+                            task.id,
+                        )
                 await asyncio.sleep(1.5)
 
     async def _janitor_loop(self) -> None:
@@ -2964,14 +2979,12 @@ class RuntimeService:
             if current.status in {TASK_STATUS_STOPPED, TASK_STATUS_PAUSED}:
                 return
             if (time.monotonic() - start) > (task.max_minutes * 60):
-                await self._store.update_runtime_task(
-                    task.id,
-                    status=TASK_STATUS_TIMEOUT,
-                    ended_at_now=True,
+                await self._finalize_timeout(
+                    task,
+                    reason=f"max_minutes={task.max_minutes}",
                     summary="Task exceeded runtime budget.",
+                    notify_text=f"Task `{task.id}` timed out.",
                 )
-                await self._notify(task, f"Task `{task.id}` timed out.")
-                await self._signal_status_by_id(task, TASK_STATUS_TIMEOUT)
                 return
 
             step += 1
@@ -3151,6 +3164,8 @@ class RuntimeService:
                     {"step": step, "phase": "test_skipped", "command": task.test_command},
                 )
             else:
+                if await self._abandon_run_if_stopped(task, phase="validation"):
+                    return
                 await self._store.update_runtime_task(task.id, status=TASK_STATUS_VALIDATING)
                 logger.info(
                     "Runtime task=%s step=%d status=VALIDATING test=%r changed=%d",
@@ -3193,6 +3208,9 @@ class RuntimeService:
                             f"Task `{task.id}` step {step}: tests still running ({int(elapsed)}s elapsed).",
                         )
 
+                async def _test_should_cancel() -> bool:
+                    return await self._stop_requested(task) is not None
+
                 t_test = time.perf_counter()
                 rc, out, err, test_timed_out = await self._worktree.run_shell(
                     workspace,
@@ -3200,8 +3218,14 @@ class RuntimeService:
                     timeout_seconds=self._test_timeout_seconds,
                     heartbeat_seconds=self._test_heartbeat_seconds,
                     on_heartbeat=_on_test_heartbeat,
+                    should_cancel=_test_should_cancel,
                 )
                 total_test_s += time.perf_counter() - t_test
+                # A stop/pause during the test phase cancels the subprocess
+                # via should_cancel; route that into the same early-return
+                # as the loop-top check instead of continuing to completion.
+                if await self._abandon_run_if_stopped(task, phase="test_result"):
+                    return
                 test_ok = rc == 0
                 test_summary = (out + ("\n" + err if err else "")).strip()
                 if not test_summary:
@@ -3223,20 +3247,13 @@ class RuntimeService:
                         "task.test_timeout",
                         {"step": step, "timeout_seconds": self._test_timeout_seconds},
                     )
-                    await self._store.update_runtime_task(
-                        task.id,
-                        status=TASK_STATUS_TIMEOUT,
-                        ended_at_now=True,
-                        summary="Test command timed out.",
-                        error=timeout_msg[:2000],
-                    )
-                    await self._notify(
+                    await self._finalize_timeout(
                         task,
-                        f"Task `{task.id}` timed out during tests.\n```text\n{test_display}\n```",
-                        record_history=True,
-                        terminal=True,
+                        reason=f"test command exceeded timeout ({int(self._test_timeout_seconds)}s)",
+                        summary="Test command timed out.",
+                        notify_text=f"Task `{task.id}` timed out during tests.\n```text\n{test_display}\n```",
+                        error=timeout_msg,
                     )
-                    await self._signal_status_by_id(task, TASK_STATUS_TIMEOUT)
                     return
 
             await self._store.add_runtime_checkpoint(
@@ -3357,6 +3374,8 @@ class RuntimeService:
                     )
                 artifact_manifest = changed_files if task.completion_mode != TASK_COMPLETION_MERGE else None
                 if self._uses_merge_flow(task) and self._merge_gate_enabled:
+                    if await self._abandon_run_if_stopped(task, phase="waiting_merge"):
+                        return
                     # Merge flow: WAITING_MERGE is non-terminal and is
                     # coupled to its own decision surface (buttons), so the
                     # notify-before-commit reorder below does not apply.
@@ -3452,6 +3471,8 @@ class RuntimeService:
                     logger.info("Runtime task=%s WAITING_MERGE step=%d", task.id, step)
                     return
 
+                if await self._abandon_run_if_stopped(task, phase="completion"):
+                    return
                 # Reply / artifact path: notify BEFORE writing
                 # status=COMPLETED. Python code between ``await``s is atomic
                 # from an observer's perspective, so placing the DB commit
@@ -3623,26 +3644,11 @@ class RuntimeService:
 
             prior_failure = test_summary if not test_ok else None
 
-        await self._store.update_runtime_task(
-            task.id,
-            status=TASK_STATUS_TIMEOUT,
-            ended_at_now=True,
-            summary="Task exceeded step budget.",
-        )
-        logger.info("Runtime task=%s TIMEOUT max_steps=%d", task.id, task.max_steps)
-        if task.automation_name:
-            await self._store.upsert_automation_state(
-                task.automation_name,
-                platform=task.platform,
-                channel_id=task.channel_id,
-                last_error=f"task {task.id} timed out (max_steps={task.max_steps})",
-            )
-        await self._notify(task, f"Task `{task.id}` reached max steps and stopped.")
-        await self._signal_status_by_id(task, TASK_STATUS_TIMEOUT)
-        self._emit_automation_terminal_push(
+        await self._finalize_timeout(
             task,
-            kind="automation_failed",
-            body=f"task timed out (max_steps={task.max_steps})",
+            reason=f"max_steps={task.max_steps}",
+            summary="Task exceeded step budget.",
+            notify_text=f"Task `{task.id}` reached max steps and stopped.",
         )
 
     async def _run_agent(
@@ -4289,8 +4295,20 @@ class RuntimeService:
             # _on_skill_task_merged hook in PR mode — the skill source
             # isn't on main yet; the sync should happen after the
             # human merges the PR. Documented in CLAUDE.md.
-            await self._signal_status_by_id(task, TASK_STATUS_PR_OPENED)
             note = f"Task `{task.id}` opened PR: {pr_url}"
+            try:
+                await self._notify(task, note, record_history=True, terminal=True)
+                await self._signal_status_by_id(task, TASK_STATUS_PR_OPENED)
+                await self._resolve_notification("task_waiting_merge", task_id=task.id)
+            except Exception:
+                # PR_OPENED is already persisted; a notify hiccup must not
+                # fall through to the outer handler, which would revert the
+                # terminal state via _mark_merge_blocked.
+                logger.warning(
+                    "Runtime task=%s PR_OPENED epilogue notify failed",
+                    task.id,
+                    exc_info=True,
+                )
             return note
         except Exception as exc:  # noqa: BLE001
             return await self._mark_merge_blocked(
@@ -4769,6 +4787,82 @@ class RuntimeService:
         return (
             f"Task `{parent.id}` queued for re-run as `{sibling.id}` "
             f"with timeout_seconds={new_timeout}."
+        )
+
+    async def _stop_requested(self, task: RuntimeTask) -> str | None:
+        """Return the task's current status when an external stop/pause has
+        been requested, else ``None``. Used to re-check between phases of
+        ``_run_task`` so completion writes never clobber STOPPED/PAUSED."""
+        current = await self._store.get_runtime_task(task.id)
+        if current is not None and current.status in {TASK_STATUS_STOPPED, TASK_STATUS_PAUSED}:
+            return current.status
+        return None
+
+    async def _abandon_run_if_stopped(self, task: RuntimeTask, *, phase: str) -> bool:
+        """Check for an external stop/pause request and, when present, record
+        the interruption and tell the caller to bail out of ``_run_task``
+        without writing any further status. Workspace is preserved (PAUSED
+        stays resumable, consistent with existing pause semantics)."""
+        status = await self._stop_requested(task)
+        if status is None:
+            return False
+        logger.info(
+            "Runtime task=%s %s requested; abandoning run before %s",
+            task.id,
+            status,
+            phase,
+        )
+        await self._store.add_runtime_event(
+            task.id,
+            "task.run_interrupted",
+            {"status": status, "phase": phase},
+        )
+        return True
+
+    async def _finalize_timeout(
+        self,
+        task: RuntimeTask,
+        *,
+        reason: str,
+        summary: str,
+        notify_text: str,
+        error: str | None = None,
+    ) -> None:
+        """Terminal bundle shared by every TIMEOUT exit (wall-clock budget,
+        test timeout, step budget). Mirrors ``_fail`` semantics: status write,
+        runtime event, terminal notify, status signal, automation last_error,
+        and external push."""
+        update_kwargs: dict[str, Any] = {}
+        if error is not None:
+            update_kwargs["error"] = error[:2000]
+        await self._store.update_runtime_task(
+            task.id,
+            status=TASK_STATUS_TIMEOUT,
+            ended_at_now=True,
+            summary=summary,
+            **update_kwargs,
+        )
+        await self._store.add_runtime_event(task.id, "task.timeout", {"reason": reason[:1000]})
+        logger.info("Runtime task=%s TIMEOUT reason=%s", task.id, reason[:300])
+        if task.automation_name:
+            await self._store.upsert_automation_state(
+                task.automation_name,
+                platform=task.platform,
+                channel_id=task.channel_id,
+                last_error=f"task {task.id} timed out ({reason})"[:1000],
+            )
+        await self._notify(
+            task,
+            notify_text,
+            record_history=True,
+            terminal=True,
+            diary_detail=reason,
+        )
+        await self._signal_status_by_id(task, TASK_STATUS_TIMEOUT)
+        self._emit_automation_terminal_push(
+            task,
+            kind="automation_failed",
+            body=f"task timed out ({reason})",
         )
 
     async def _fail(self, task: RuntimeTask, error: str, *, response: AgentResponse | None = None) -> None:
@@ -7408,13 +7502,14 @@ class RuntimeService:
             TASK_STATUS_APPLIED,
             TASK_STATUS_MERGE_FAILED,
         }
-        tasks = await self._store.list_runtime_tasks(
+        tasks = await self._store.list_runtime_tasks_for_thread(
             platform=platform,
             channel_id=channel_id,
-            limit=20,
+            thread_id=thread_id,
+            limit=50,
         )
         for task in tasks:
-            if task.thread_id == thread_id and task.status in active_statuses:
+            if task.status in active_statuses:
                 return task
         return None
 
