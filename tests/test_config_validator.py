@@ -656,3 +656,137 @@ def test_short_workspace_cleanup_interval_minutes_null_is_error():
     ]
     assert errs, result.errors
     assert not result.ok
+
+
+# ── Unresolved env placeholders ─────────────────────────────────────── #
+#
+# load_config keeps the literal ``${VAR}`` when the env var is unset, so
+# without the validator pass the misconfig only surfaces much later as an
+# opaque runtime error (e.g. Discord login auth failure).
+
+
+def test_unresolved_placeholder_in_channel_token_is_error():
+    cfg = _base_config()
+    cfg["gateway"]["channels"][0]["token"] = "${DISCORD_BOT_TOKEN}"
+    result = validate_config(cfg)
+    errs = [
+        e for e in result.errors
+        if e.path == "gateway.channels[0].token" and e.severity == "error"
+    ]
+    assert errs, result.errors
+    assert "${DISCORD_BOT_TOKEN}" in errs[0].message
+    assert "unresolved env placeholder" in errs[0].message
+    assert not result.ok
+
+
+def test_unresolved_placeholder_in_nested_list_is_error():
+    cfg = _base_config()
+    cfg["agents"]["claude"]["env_passthrough"] = ["PATH", "${MISSING_VAR}"]
+    result = validate_config(cfg)
+    errs = [
+        e for e in result.errors
+        if e.path == "agents.claude.env_passthrough[1]" and e.severity == "error"
+    ]
+    assert errs, result.errors
+    assert "${MISSING_VAR}" in errs[0].message
+
+
+def test_multiple_placeholders_in_one_value_all_reported():
+    cfg = _base_config()
+    cfg["gateway"]["channels"][0]["token"] = "${A}-${B}"
+    result = validate_config(cfg)
+    errs = [e for e in result.errors if e.path == "gateway.channels[0].token"]
+    placeholder_errs = [e for e in errs if "unresolved" in e.message]
+    assert placeholder_errs, result.errors
+    assert "${A}" in placeholder_errs[0].message
+    assert "${B}" in placeholder_errs[0].message
+
+
+def test_no_placeholders_is_clean():
+    result = validate_config(_base_config())
+    errs = [e for e in result.errors if "unresolved env placeholder" in e.message]
+    assert errs == []
+
+
+# ── access.owner_user_ids ───────────────────────────────────────────── #
+
+
+def test_access_absent_is_fine():
+    result = validate_config(_base_config())
+    errs = [e for e in result.errors if e.path.startswith("access")]
+    assert errs == []
+
+
+def test_access_non_dict_is_error():
+    cfg = _base_config()
+    cfg["access"] = "somestring"
+    result = validate_config(cfg)
+    errs = [e for e in result.errors if e.path == "access" and e.severity == "error"]
+    assert errs, result.errors
+    assert not result.ok
+
+
+def test_access_owner_user_ids_bare_string_is_error():
+    # A YAML string iterates char-by-char in a naive set comprehension,
+    # silently locking the owner out.
+    cfg = _base_config()
+    cfg["access"] = {"owner_user_ids": "123456789"}
+    result = validate_config(cfg)
+    errs = [
+        e for e in result.errors
+        if e.path == "access.owner_user_ids" and e.severity == "error"
+    ]
+    assert errs, result.errors
+    assert "list" in errs[0].message
+    assert not result.ok
+
+
+def test_access_owner_user_ids_non_list_is_error():
+    cfg = _base_config()
+    cfg["access"] = {"owner_user_ids": {"id": "123"}}
+    result = validate_config(cfg)
+    errs = [
+        e for e in result.errors
+        if e.path == "access.owner_user_ids" and e.severity == "error"
+    ]
+    assert errs, result.errors
+
+
+def test_access_owner_user_ids_non_scalar_entry_is_error():
+    cfg = _base_config()
+    cfg["access"] = {"owner_user_ids": [{"id": "123"}]}
+    result = validate_config(cfg)
+    errs = [
+        e for e in result.errors
+        if e.path == "access.owner_user_ids[0]" and e.severity == "error"
+    ]
+    assert errs, result.errors
+
+
+def test_access_owner_user_ids_valid_list_is_clean():
+    cfg = _base_config()
+    cfg["access"] = {"owner_user_ids": ["123456789", 987654321]}
+    result = validate_config(cfg)
+    errs = [e for e in result.errors if e.path.startswith("access")]
+    assert errs == []
+    assert result.ok
+
+
+# ── channel agents must be declared ──────────────────────────────────── #
+
+
+def test_channel_referencing_undeclared_agent_is_error():
+    cfg = _base_config()
+    cfg["gateway"]["channels"][0]["agents"] = ["claude", "ghost"]
+    result = validate_config(cfg)
+    errs = [
+        e for e in result.errors
+        if e.path == "gateway.channels[0].agents" and "ghost" in e.message
+    ]
+    assert errs, result.errors
+
+
+def test_channel_with_declared_agents_is_clean():
+    result = validate_config(_base_config())
+    errs = [e for e in result.errors if e.path.startswith("gateway.channels")]
+    assert errs == []

@@ -286,3 +286,72 @@ async def test_refresh_helper_tolerates_exception_without_suppressing_main(tmp_p
     assert state.last_error is not None
     assert "agent boom" in state.last_error
     await store.close()
+
+
+# ---------------------------------------------------------------------------
+# _sync_automation_runtime_state: prefer in-memory runtime next_fire_at
+# ---------------------------------------------------------------------------
+
+
+def _build_interval_scheduler(tmp_path: Path) -> Scheduler:
+    storage = tmp_path / "automations"
+    storage.mkdir(exist_ok=True)
+    _write_yaml(
+        storage / "ticker.yaml",
+        """
+        name: ticker
+        enabled: true
+        platform: discord
+        channel_id: "100"
+        thread_id: "200"
+        prompt: tick
+        interval_seconds: 3600
+        """,
+    )
+    return Scheduler(storage_dir=storage, reload_interval_seconds=5.0)
+
+
+@pytest.mark.asyncio
+async def test_sync_runtime_state_prefers_in_memory_next_fire_at(tmp_path):
+    """Interval jobs: compute_all_next_run_at() always yields now+interval,
+    so a reload-driven sync must surface the authoritative in-memory
+    next_fire_at instead of pushing the persisted value forward."""
+    from datetime import timedelta
+
+    from oh_my_agent.automation.scheduler import JobRuntimeState
+
+    scheduler = _build_interval_scheduler(tmp_path)
+    store = await _fresh_store(tmp_path)
+    gm = _make_manager(scheduler=scheduler, store=store, sessions={})
+
+    authoritative = scheduler._now() + timedelta(seconds=42)
+    scheduler._job_state["ticker"] = JobRuntimeState(
+        name="ticker",
+        phase="sleeping",
+        next_fire_at=authoritative,
+        fire_started_at=None,
+        last_progress_at=scheduler._now(),
+    )
+
+    await gm._sync_automation_runtime_state()
+
+    state = await store.get_automation_state("ticker")
+    assert state is not None
+    assert state.next_run_at == authoritative.isoformat()
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_sync_runtime_state_falls_back_to_computed_without_state(tmp_path):
+    """Jobs with no runtime state yet (startup) still persist a computed
+    next_run_at."""
+    scheduler = _build_interval_scheduler(tmp_path)
+    store = await _fresh_store(tmp_path)
+    gm = _make_manager(scheduler=scheduler, store=store, sessions={})
+
+    await gm._sync_automation_runtime_state()
+
+    state = await store.get_automation_state("ticker")
+    assert state is not None
+    assert state.next_run_at is not None
+    await store.close()

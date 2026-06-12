@@ -93,3 +93,24 @@ def test_validator_rejects_cron_with_initial_delay(tmp_path):
     result = _run_validator(target)
     assert result.returncode == 1
     assert "initial_delay_seconds is not supported with cron" in result.stdout
+
+
+def test_validator_rejects_infeasible_cron(tmp_path):
+    target = tmp_path / "bad.yaml"
+    target.write_text(
+        "\n".join(
+            [
+                "name: bad-cron",
+                "platform: discord",
+                'channel_id: "${DISCORD_CHANNEL_ID}"',
+                'prompt: "Run it."',
+                'cron: "0 0 31 2 *"',  # Feb 31 never exists
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = _run_validator(target)
+    assert result.returncode == 1
+    assert "never occur" in result.stdout

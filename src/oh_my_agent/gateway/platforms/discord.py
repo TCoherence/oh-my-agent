@@ -1310,7 +1310,9 @@ class DiscordChannel(BaseChannel):
                 )
                 return
 
-            result = await self._ask_service.reset_history(self._session, str(ch.id))
+            result = await self._ask_service.reset_history(
+                self._session, str(ch.id), self._registry
+            )
             await interaction.response.send_message(result.message, ephemeral=not result.success)
 
         @tree.command(name="history", description="Show conversation history for this thread (for debugging)")

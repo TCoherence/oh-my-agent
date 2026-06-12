@@ -1,6 +1,7 @@
 """Tests for GeminiCLIAgent session resume."""
 from __future__ import annotations
 
+import asyncio
 import json
 from unittest.mock import AsyncMock, patch
 
@@ -163,6 +164,44 @@ async def test_gemini_ambient_none_keeps_control_no_memory(monkeypatch):
     assert "[Control Protocol]" in joined
     assert "[Remembered context]" not in joined
     assert "just ask" in joined
+
+
+@pytest.mark.asyncio
+async def test_gemini_timeout_returns_partial_excerpt_and_terminal_reason(tmp_path, monkeypatch):
+    """Gemini's timeout path must populate partial_text + terminal_reason the
+    same way base/claude block mode does (previously a bare timeout response)."""
+    log_path = tmp_path / "gemini.log"
+    log_path.write_text("c" * 2500, encoding="utf-8")
+
+    async def _timeout(*args, **kwargs):
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr("oh_my_agent.agents.cli.gemini._stream_cli_process", _timeout)
+
+    agent = GeminiCLIAgent(cli_path="gemini", model="gemini-test", timeout=5)
+    response = await agent.run("hello", log_path=log_path)
+
+    assert response.error_kind == "timeout"
+    assert response.terminal_reason == "timeout"
+    assert response.partial_text == ("c" * 2000)
+
+
+@pytest.mark.asyncio
+async def test_gemini_timeout_override_is_per_call(monkeypatch):
+    seen: dict[str, float] = {}
+
+    async def _timeout(*args, **kwargs):
+        seen["timeout"] = kwargs["timeout"]
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr("oh_my_agent.agents.cli.gemini._stream_cli_process", _timeout)
+
+    agent = GeminiCLIAgent(cli_path="gemini", model="gemini-test", timeout=300)
+    response = await agent.run("hello", timeout_override=11)
+
+    assert seen["timeout"] == 11
+    assert "timed out after 11s" in response.error
+    assert agent._timeout == 300
 
 
 @pytest.mark.asyncio

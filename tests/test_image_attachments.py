@@ -432,3 +432,96 @@ def test_incoming_message_default_empty_attachments():
         content="hello",
     )
     assert msg.attachments == []
+
+
+# ---------------------------------------------------------------------------
+# Attachment temp-file cleanup (handle_message finally)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_attachment_temp_file_removed_after_success(tmp_path):
+    from oh_my_agent.gateway.manager import GatewayManager
+
+    agent = _SimpleAgent()
+    registry = AgentRegistry([agent])
+    channel = _make_channel()
+
+    gm = GatewayManager([(channel, registry)])
+    session = gm._get_session(channel, registry)
+
+    img = tmp_path / "photo.png"
+    img.write_bytes(b"PNG")
+
+    msg = IncomingMessage(
+        platform="discord",
+        channel_id="100",
+        thread_id="thread-1",
+        author="alice",
+        content="look",
+        attachments=[Attachment("photo.png", "image/png", img, "http://x", 100)],
+    )
+
+    await gm.handle_message(session, registry, msg)
+
+    assert not img.exists()
+
+
+@pytest.mark.asyncio
+async def test_attachment_temp_file_removed_on_owner_gate_early_return(tmp_path):
+    """Early returns inside the handler must not leak the downloaded file."""
+    from oh_my_agent.gateway.manager import GatewayManager
+
+    agent = _SimpleAgent()
+    registry = AgentRegistry([agent])
+    channel = _make_channel()
+
+    gm = GatewayManager([(channel, registry)], owner_user_ids={"owner-1"})
+    session = gm._get_session(channel, registry)
+
+    img = tmp_path / "photo.png"
+    img.write_bytes(b"PNG")
+
+    msg = IncomingMessage(
+        platform="discord",
+        channel_id="100",
+        thread_id="thread-1",
+        author="mallory",
+        author_id="intruder-9",
+        content="look",
+        attachments=[Attachment("photo.png", "image/png", img, "http://x", 100)],
+    )
+
+    await gm.handle_message(session, registry, msg)
+
+    assert agent.last_prompt is None  # gate rejected the message
+    assert not img.exists()
+
+
+@pytest.mark.asyncio
+async def test_attachment_temp_file_removed_when_handler_raises(tmp_path):
+    from oh_my_agent.gateway.manager import GatewayManager
+
+    agent = _SimpleAgent()
+    registry = AgentRegistry([agent])
+    channel = _make_channel()
+
+    gm = GatewayManager([(channel, registry)])
+    session = gm._get_session(channel, registry)
+    gm._handle_message_impl = AsyncMock(side_effect=RuntimeError("boom"))
+
+    img = tmp_path / "photo.png"
+    img.write_bytes(b"PNG")
+
+    msg = IncomingMessage(
+        platform="discord",
+        channel_id="100",
+        thread_id="thread-1",
+        author="alice",
+        content="look",
+        attachments=[Attachment("photo.png", "image/png", img, "http://x", 100)],
+    )
+
+    await gm.handle_message(session, registry, msg)
+
+    assert not img.exists()

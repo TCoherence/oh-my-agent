@@ -123,6 +123,19 @@ def _refresh_workspace_hint_files(project_root: Path, workspace: Path) -> None:
             )
 
 
+def _infer_agent_provider(name: str, cfg: dict) -> str:
+    """Mirror :func:`_build_agent`'s provider dispatch.
+
+    Explicit ``provider`` wins, otherwise the agent's config name; anything
+    that isn't gemini/codex builds a ClaudeAgent, so defaults and env
+    overrides must treat it as claude too.
+    """
+    provider = str(cfg.get("provider", name))
+    if provider in ("gemini", "codex"):
+        return provider
+    return "claude"
+
+
 def _build_agent(name: str, cfg: dict, workspace: Path | None = None):
     """Instantiate an agent from its config dict."""
     agent_type = cfg.get("type", "cli")
@@ -130,7 +143,7 @@ def _build_agent(name: str, cfg: dict, workspace: Path | None = None):
     passthrough_env: list[str] | None = cfg.get("env_passthrough")
 
     if agent_type == "cli":
-        provider = cfg.get("provider", name)
+        provider = _infer_agent_provider(name, cfg)
         if provider == "gemini":
             from oh_my_agent.agents.cli.gemini import GeminiCLIAgent
             timeout = int(cfg.get("timeout", 120))
@@ -169,7 +182,7 @@ def _build_agent(name: str, cfg: dict, workspace: Path | None = None):
                 max_turns=int(cfg.get("max_turns", 25)),
                 allowed_tools=tools,
                 model=cfg.get("model", "sonnet"),
-                dangerously_skip_permissions=bool(cfg.get("dangerously_skip_permissions", True)),
+                dangerously_skip_permissions=bool(cfg.get("dangerously_skip_permissions", False)),
                 permission_mode=cfg.get("permission_mode"),
                 extra_args=cfg.get("extra_args"),
                 timeout=timeout,
@@ -178,6 +191,36 @@ def _build_agent(name: str, cfg: dict, workspace: Path | None = None):
             )
 
     raise ValueError(f"Unknown agent type '{agent_type}' for agent '{name}'")
+
+
+def _resolve_owner_user_ids(config: dict, logger: logging.Logger) -> set[str]:
+    """Build the owner-id set from ``access.owner_user_ids``, defensively.
+
+    The validator rejects malformed shapes at verify time, but ignite must
+    not crash (or silently iterate a string char-by-char, locking the owner
+    out) when handed a config that bypassed validation.
+    """
+    access = config.get("access")
+    if access is None:
+        return set()
+    if not isinstance(access, dict):
+        logger.error(
+            "access section must be a mapping; ignoring (got %s)",
+            type(access).__name__,
+        )
+        return set()
+    raw = access.get("owner_user_ids")
+    if raw is None:
+        return set()
+    if isinstance(raw, (str, int)) and not isinstance(raw, bool):
+        raw = [raw]
+    if not isinstance(raw, list):
+        logger.error(
+            "access.owner_user_ids must be a list of user ids; ignoring (got %s)",
+            type(raw).__name__,
+        )
+        return set()
+    return {str(uid).strip() for uid in raw if str(uid).strip()}
 
 
 def _build_channel(
@@ -349,19 +392,25 @@ def _apply_v052_defaults(config: dict) -> None:
     auth_bili_cfg.setdefault("scope_key", "default")
 
     agents_cfg = _ensure_dict(config, "agents", path="agents")
-    claude_cfg = _ensure_dict(agents_cfg, "claude", path="agents.claude")
-    claude_cfg.setdefault("dangerously_skip_permissions", False)
-    claude_cfg.setdefault("permission_mode", None)
-    claude_cfg.setdefault("extra_args", [])
-
-    gemini_cfg = _ensure_dict(agents_cfg, "gemini", path="agents.gemini")
-    gemini_cfg.setdefault("yolo", True)
-    gemini_cfg.setdefault("extra_args", [])
-
-    codex_cfg = _ensure_dict(agents_cfg, "codex", path="agents.codex")
-    codex_cfg.setdefault("sandbox_mode", "workspace-write")
-    codex_cfg.setdefault("dangerously_bypass_approvals_and_sandbox", False)
-    codex_cfg.setdefault("extra_args", [])
+    # Only normalize agents the user actually declared — fabricating
+    # claude/gemini/codex entries here would make ignite build real
+    # instances the user never configured. Defaults are keyed by the same
+    # provider inference _build_agent uses, so e.g. an agent named
+    # ``claude_opus`` with ``provider: claude`` gets the safe defaults too.
+    for agent_name in list(agents_cfg):
+        agent_cfg = _ensure_dict(agents_cfg, agent_name, path=f"agents.{agent_name}")
+        if str(agent_cfg.get("type", "cli")) != "cli":
+            continue
+        provider = _infer_agent_provider(agent_name, agent_cfg)
+        if provider == "gemini":
+            agent_cfg.setdefault("yolo", True)
+        elif provider == "codex":
+            agent_cfg.setdefault("sandbox_mode", "workspace-write")
+            agent_cfg.setdefault("dangerously_bypass_approvals_and_sandbox", False)
+        else:
+            agent_cfg.setdefault("dangerously_skip_permissions", False)
+            agent_cfg.setdefault("permission_mode", None)
+        agent_cfg.setdefault("extra_args", [])
 
     runtime_cfg = _ensure_dict(config, "runtime", path="runtime")
     runtime_cfg.setdefault("enabled", True)
@@ -415,25 +464,35 @@ def _parse_env_bool(name: str) -> bool | None:
 def _apply_agent_env_overrides(config: dict) -> None:
     agents_cfg = _ensure_dict(config, "agents", path="agents")
 
-    claude_cfg = _ensure_dict(agents_cfg, "claude", path="agents.claude")
+    # Parse eagerly so a malformed env var fails fast even when no agent of
+    # that provider is configured.
     claude_skip = _parse_env_bool("OMA_AGENT_CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS")
-    if claude_skip is not None:
-        claude_cfg["dangerously_skip_permissions"] = claude_skip
-    if "OMA_AGENT_CLAUDE_PERMISSION_MODE" in os.environ:
-        value = os.environ.get("OMA_AGENT_CLAUDE_PERMISSION_MODE", "").strip()
-        claude_cfg["permission_mode"] = value or None
-
-    gemini_cfg = _ensure_dict(agents_cfg, "gemini", path="agents.gemini")
+    claude_mode_set = "OMA_AGENT_CLAUDE_PERMISSION_MODE" in os.environ
+    claude_mode = os.environ.get("OMA_AGENT_CLAUDE_PERMISSION_MODE", "").strip() or None
     gemini_yolo = _parse_env_bool("OMA_AGENT_GEMINI_YOLO")
-    if gemini_yolo is not None:
-        gemini_cfg["yolo"] = gemini_yolo
-
-    codex_cfg = _ensure_dict(agents_cfg, "codex", path="agents.codex")
-    if "OMA_AGENT_CODEX_SANDBOX_MODE" in os.environ:
-        codex_cfg["sandbox_mode"] = os.environ["OMA_AGENT_CODEX_SANDBOX_MODE"].strip()
+    codex_sandbox_set = "OMA_AGENT_CODEX_SANDBOX_MODE" in os.environ
+    codex_sandbox = os.environ.get("OMA_AGENT_CODEX_SANDBOX_MODE", "").strip()
     codex_bypass = _parse_env_bool("OMA_AGENT_CODEX_DANGEROUSLY_BYPASS_APPROVALS_AND_SANDBOX")
-    if codex_bypass is not None:
-        codex_cfg["dangerously_bypass_approvals_and_sandbox"] = codex_bypass
+
+    # Like _apply_v052_defaults: only touch agents the user declared.
+    for agent_name in list(agents_cfg):
+        agent_cfg = _ensure_dict(agents_cfg, agent_name, path=f"agents.{agent_name}")
+        if str(agent_cfg.get("type", "cli")) != "cli":
+            continue
+        provider = _infer_agent_provider(agent_name, agent_cfg)
+        if provider == "claude":
+            if claude_skip is not None:
+                agent_cfg["dangerously_skip_permissions"] = claude_skip
+            if claude_mode_set:
+                agent_cfg["permission_mode"] = claude_mode
+        elif provider == "gemini":
+            if gemini_yolo is not None:
+                agent_cfg["yolo"] = gemini_yolo
+        elif provider == "codex":
+            if codex_sandbox_set:
+                agent_cfg["sandbox_mode"] = codex_sandbox
+            if codex_bypass is not None:
+                agent_cfg["dangerously_bypass_approvals_and_sandbox"] = codex_bypass
 
 
 def _runtime_root(config: dict) -> Path:
@@ -567,12 +626,24 @@ async def _shutdown(
     if feedback_scan_worker is not None:
         with suppress(Exception):
             await feedback_scan_worker.stop()
+    # Each core stop runs in its own try/except so one failure can't skip
+    # the rest of the teardown (a half-shutdown leaks subprocesses and an
+    # open WAL connection).
     if gateway_manager:
-        await gateway_manager.stop()
+        try:
+            await gateway_manager.stop()
+        except Exception:
+            logger.exception("Gateway stop failed during shutdown; continuing")
     if runtime_service:
-        await runtime_service.stop()
+        try:
+            await runtime_service.stop()
+        except Exception:
+            logger.exception("Runtime stop failed during shutdown; continuing")
     if memory_store:
-        await memory_store.close()
+        try:
+            await memory_store.close()
+        except Exception:
+            logger.exception("Memory store close failed during shutdown; continuing")
     if diary_writer is not None:
         with suppress(Exception):
             await diary_writer.stop()
@@ -678,6 +749,11 @@ def verify_integrity(
     except ConfigShapeError as exc:
         print(f"Config shape error: {exc}", file=sys.stderr)
         sys.exit(1)
+    except ValueError as exc:
+        # e.g. _parse_env_bool on OMA_AGENT_GEMINI_YOLO=maybe — surface a
+        # one-line message instead of a raw traceback.
+        print(f"Config error: {exc}", file=sys.stderr)
+        sys.exit(1)
 
     runtime_root = _runtime_root(config)
     _setup_logging(config, runtime_root)
@@ -714,11 +790,7 @@ async def ignite(ctx: BootContext) -> None:
     logger = ctx.logger
     project_root = ctx.project_root
 
-    owner_user_ids = {
-        str(uid).strip()
-        for uid in config.get("access", {}).get("owner_user_ids", [])
-        if str(uid).strip()
-    }
+    owner_user_ids = _resolve_owner_user_ids(config, logger)
     if owner_user_ids:
         logger.info("Owner-only mode enabled for %d user(s)", len(owner_user_ids))
 
@@ -1048,7 +1120,14 @@ async def ignite(ctx: BootContext) -> None:
         selected = []
         for name in agent_names:
             if name not in agent_instances:
-                logger.error("Agent '%s' referenced in channel config but not defined", name)
+                logger.error(
+                    "Agent '%s' referenced by channel %s:%s is not declared under "
+                    "agents: (declared: %s)",
+                    name,
+                    ch_cfg.get("platform"),
+                    ch_cfg.get("channel_id"),
+                    sorted(agent_instances),
+                )
                 sys.exit(1)
             selected.append(agent_instances[name])
         if not selected:

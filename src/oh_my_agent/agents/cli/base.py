@@ -6,6 +6,7 @@ import logging
 import os
 import signal
 from abc import abstractmethod
+from collections import deque
 from collections.abc import AsyncIterator
 from contextlib import suppress
 from pathlib import Path
@@ -36,6 +37,11 @@ _STREAM_LINE_LIMIT = 10 * 1024 * 1024
 # Tail window read from stream logs when building a bounded excerpt — the
 # logs can be multi-MB on the timeout path, so never read them whole.
 _LOG_EXCERPT_TAIL_BYTES = 8192
+
+# Trailing stdout lines buffered during streaming so a non-zero exit can
+# derive a block-mode-equivalent error message (Claude puts structured error
+# frames on stdout with stderr empty).
+_STREAM_STDOUT_TAIL_LINES = 50
 
 # Environment variable keys considered safe to pass to CLI subprocesses.
 # Everything else is stripped unless explicitly listed in passthrough_env.
@@ -253,20 +259,37 @@ async def _drain_oversized_line(
         return bytes(kept), dropped
 
 
+class _StreamState:
+    """Mutable side channel for :func:`_stream_cli_lines`.
+
+    Async generators cannot return a value to ``async for`` consumers, so the
+    subprocess exit code is published here once the process has been reaped.
+    ``returncode`` stays ``None`` while the stream is running (or if the
+    generator was torn down before the process exited).
+    """
+
+    __slots__ = ("returncode",)
+
+    def __init__(self) -> None:
+        self.returncode: int | None = None
+
+
 async def _stream_cli_lines(
     *cmd: str,
     cwd: str | None,
     env: dict[str, str],
-    timeout: int | None,
+    timeout: float | None,
     cancel: asyncio.Event | None = None,
     log_path: Path | None = None,
+    state: _StreamState | None = None,
 ) -> AsyncIterator[tuple[str, str]]:
     """Spawn the CLI subprocess and yield ``(stream_label, line)`` tuples as output arrives.
 
     ``stream_label`` is ``"stdout"`` / ``"stderr"``. The generator exits normally
     once the subprocess has exited and both pipes are drained. The final
-    return code is exposed via :class:`_StreamState` in a side channel — see
-    :meth:`BaseCLIAgent.stream` for the typical consumption pattern.
+    return code is published to ``state`` (a :class:`_StreamState`) when one
+    is supplied — see :meth:`BaseCLIAgent.stream` for the typical consumption
+    pattern.
 
     ``cancel`` — when set during iteration, the subprocess is killed and the
     generator stops. Semantically equivalent to ``AbortSignal.abort()`` — a
@@ -405,6 +428,8 @@ async def _stream_cli_lines(
                 t.cancel()
                 with suppress(asyncio.CancelledError, Exception):
                     await t
+        if state is not None:
+            state.returncode = proc.returncode
         if log_handle is not None:
             log_handle.write(f"\n[exit] {proc.returncode}\n")
             log_handle.close()
@@ -414,7 +439,7 @@ async def _stream_cli_process(
     *cmd: str,
     cwd: str | None,
     env: dict[str, str],
-    timeout: int,
+    timeout: float,
     log_path: Path | None = None,
 ) -> tuple[int, bytes, bytes]:
     log_handle = None
@@ -553,6 +578,14 @@ class BaseCLIAgent(BaseAgent):
             return str(workspace_override)
         return self._cwd
 
+    def _effective_timeout(self, timeout_override: float | None) -> float:
+        """Per-call effective timeout: a positive override wins, else the
+        configured one. Never mutates ``self._timeout`` — concurrent calls
+        with different overrides must not corrupt shared agent state."""
+        if timeout_override is not None and timeout_override > 0:
+            return timeout_override
+        return self._timeout
+
     @abstractmethod
     def _build_command(self, prompt: str) -> list[str]:
         """Return the full command to run, with prompt included."""
@@ -593,6 +626,8 @@ class BaseCLIAgent(BaseAgent):
         log_path: Path | None = None,
         on_partial: PartialTextHook | None = None,
         on_tool_use: ToolUseHook | None = None,
+        timeout_override: float | None = None,
+        max_turns_override: int | None = None,
     ) -> AgentResponse:
         # Deliberately does NOT declare ``ambient_context``: if it did, the
         # registry's `'ambient_context' in sig.parameters` check would pass for
@@ -600,6 +635,13 @@ class BaseCLIAgent(BaseAgent):
         # forwarded, and we'd silently drop memory with no warning. Concrete
         # agents (ClaudeAgent / CodexCLIAgent / GeminiCLIAgent) override run()
         # and add the kwarg themselves.
+        #
+        # ``timeout_override`` / ``max_turns_override`` are per-call values
+        # (never written back to self — concurrent calls must not corrupt
+        # shared agent singletons). The base command builder has no turn
+        # budget, so ``max_turns_override`` is only consumed by subclasses
+        # whose run() override threads it into their argv (ClaudeAgent).
+        del max_turns_override
         if on_partial is not None or on_tool_use is not None:
             return await self._run_streamed(
                 prompt=prompt,
@@ -608,23 +650,25 @@ class BaseCLIAgent(BaseAgent):
                 on_tool_use=on_tool_use,
                 workspace_override=workspace_override,
                 log_path=log_path,
+                timeout_override=timeout_override,
             )
         full_prompt = _build_prompt_with_history(prompt, history)
         cmd = self._build_command(full_prompt)
         logger.info("Running %s: %s ...", self.name, " ".join(cmd[:4]))
 
+        effective_timeout = self._effective_timeout(timeout_override)
         try:
             returncode, stdout, stderr = await _stream_cli_process(
                 *cmd,
                 cwd=self._resolve_cwd(workspace_override),
                 env=self._build_env(),
-                timeout=self._timeout,
+                timeout=effective_timeout,
                 log_path=log_path,
             )
         except asyncio.TimeoutError:
             return AgentResponse(
                 text="",
-                error=f"{self.name} CLI timed out after {self._timeout}s",
+                error=f"{self.name} CLI timed out after {effective_timeout}s",
                 error_kind="timeout",
                 partial_text=_bounded_log_excerpt(log_path),
                 terminal_reason="timeout",
@@ -658,6 +702,7 @@ class BaseCLIAgent(BaseAgent):
         thread_id: str | None = None,
         command: list[str] | None = None,
         on_tool_use: ToolUseHook | None = None,
+        timeout_override: float | None = None,
     ) -> AgentResponse:
         """Drive ``self.stream()`` and build an AgentResponse from the events.
 
@@ -677,6 +722,7 @@ class BaseCLIAgent(BaseAgent):
                 workspace_override=workspace_override,
                 log_path=log_path,
                 command=command,
+                timeout_override=timeout_override,
             ):
                 if isinstance(event, TextEvent):
                     accumulated.append(event.text)
@@ -718,10 +764,17 @@ class BaseCLIAgent(BaseAgent):
             )
 
         if last_error is not None:
+            error_kind = last_error.error_kind or "cli_error"
+            # Terminal kinds mirror the block-mode response shape so the
+            # registry's no-fallback-on-max_turns logic and the runtime's
+            # re-run affordances behave identically in streaming mode.
+            terminal_reason = error_kind if error_kind in {"timeout", "max_turns"} else None
             return AgentResponse(
                 text="\n".join(accumulated),
                 error=last_error.message,
-                error_kind=last_error.error_kind or "cli_error",
+                error_kind=error_kind,
+                partial_text=_bounded_log_excerpt(log_path) if terminal_reason else None,
+                terminal_reason=terminal_reason,
             )
 
         text = "\n".join(accumulated)
@@ -762,14 +815,20 @@ class BaseCLIAgent(BaseAgent):
         workspace_override: Path | None = None,
         log_path: Path | None = None,
         command: list[str] | None = None,
+        timeout_override: float | None = None,
+        max_turns_override: int | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """Run the CLI and yield typed :class:`AgentEvent` objects as they arrive.
 
         The default implementation shells out via :func:`_stream_cli_lines`,
         calls :meth:`_parse_stream_line` on each stdout line, and yields a
         :class:`CompleteEvent` at the end with the accumulated plain-text view.
-        Stderr is buffered and only surfaced (as an :class:`ErrorEvent`) on
-        non-zero exit.
+        Failure is determined by the subprocess exit code, matching block
+        mode: a non-zero exit yields an :class:`ErrorEvent` whose message is
+        derived from buffered stderr + stdout tail (same
+        :func:`_extract_cli_error` semantics), while stderr noise on a
+        successful exit is only debug-logged — benign warnings (cached
+        credentials, node deprecations) must not trigger registry fallback.
 
         ``cancel`` — optional asyncio.Event. When set, the subprocess is killed
         and the generator exits without yielding a CompleteEvent.
@@ -778,7 +837,14 @@ class BaseCLIAgent(BaseAgent):
         ``_build_prompt_with_history + _build_command`` path, letting callers
         drive streaming for resume commands (e.g. ``claude --resume <id>``)
         that need different argv than a fresh invocation.
+
+        ``timeout_override`` / ``max_turns_override`` — per-call overrides,
+        never written back to self. The base implementation only applies the
+        timeout; turn budgets live in subclass command builders, so callers
+        needing a per-call max-turns pass a pre-built ``command`` (see
+        ClaudeAgent.run()).
         """
+        del max_turns_override
         if command is None:
             full_prompt = _build_prompt_with_history(prompt, history)
             cmd = self._build_command(full_prompt)
@@ -786,29 +852,37 @@ class BaseCLIAgent(BaseAgent):
             cmd = list(command)
         logger.info("Streaming %s: %s ...", self.name, " ".join(cmd[:4]))
 
+        effective_timeout = self._effective_timeout(timeout_override)
         collected_text: list[str] = []
         stderr_lines: list[str] = []
+        stdout_tail: deque[str] = deque(maxlen=_STREAM_STDOUT_TAIL_LINES)
+        saw_parsed_error = False
+        exit_state = _StreamState()
 
         try:
             async for stream_label, line in _stream_cli_lines(
                 *cmd,
                 cwd=self._resolve_cwd(workspace_override),
                 env=self._build_env(),
-                timeout=self._timeout,
+                timeout=effective_timeout,
                 cancel=cancel,
                 log_path=log_path,
+                state=exit_state,
             ):
                 if stream_label == "stderr":
                     stderr_lines.append(line)
                     continue
+                stdout_tail.append(line)
                 events = self._parse_stream_line(line)
                 for event in events:
                     yield event
                     if isinstance(event, TextEvent):
                         collected_text.append(event.text)
+                    elif isinstance(event, ErrorEvent):
+                        saw_parsed_error = True
         except asyncio.TimeoutError:
             yield ErrorEvent(
-                message=f"{self.name} CLI timed out after {self._timeout}s",
+                message=f"{self.name} CLI timed out after {effective_timeout}s",
                 error_kind="timeout",
                 agent=self.name,
             )
@@ -825,14 +899,32 @@ class BaseCLIAgent(BaseAgent):
             # Cancelled mid-stream; skip the complete marker.
             return
 
-        if stderr_lines:
-            # Non-fatal stderr still gets surfaced as an error event so the
-            # caller can surface it (e.g. into the session diary).
-            err_msg = "\n".join(stderr_lines)[-400:]
-            yield ErrorEvent(
-                message=err_msg,
-                error_kind=classify_cli_error_kind(err_msg),
-                agent=self.name,
+        returncode = exit_state.returncode
+        if returncode is not None and returncode != 0:
+            err_msg = _extract_cli_error(
+                "\n".join(stderr_lines).encode(),
+                "\n".join(stdout_tail).encode(),
+            )
+            logger.error("%s CLI failed (rc=%d): %s", self.name, returncode, err_msg)
+            if not saw_parsed_error:
+                # A structured ErrorEvent already parsed from stdout (e.g.
+                # Claude's error_max_turns result frame) is more specific
+                # than the exit-code view — don't clobber it with a generic
+                # one (the streamed-run driver keeps the LAST error).
+                yield ErrorEvent(
+                    message=f"{self.name} exited {returncode}: {err_msg[:400]}",
+                    error_kind=classify_cli_error_kind(err_msg),
+                    agent=self.name,
+                )
+        elif stderr_lines:
+            # Exit 0 with stderr output is a success: CLIs routinely emit
+            # benign noise there (gemini's "Loaded cached credentials.",
+            # node deprecation warnings). Keep it out of the event stream so
+            # good output isn't discarded by registry fallback.
+            logger.debug(
+                "%s stderr on successful exit: %s",
+                self.name,
+                "\n".join(stderr_lines)[-400:],
             )
 
         yield CompleteEvent(

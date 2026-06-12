@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -64,8 +65,10 @@ ROUTER_RESERVED_PAYLOAD_KEYS = frozenset({"messages", "model", "max_tokens", "te
 def validate_config(config: dict[str, Any]) -> ValidationResult:
     """Validate a loaded config dict.  Returns a ``ValidationResult``."""
     result = ValidationResult()
+    _check_env_placeholders(config, result)
     _check_gateway(config, result)
     _check_agents(config, result)
+    _check_access(config, result)
     _check_automations(config, result)
     _check_logging(config, result)
     _check_sections(config, result)
@@ -74,6 +77,39 @@ def validate_config(config: dict[str, Any]) -> ValidationResult:
     _check_runtime_cleanup(config, result)
     _check_short_workspace(config, result)
     return result
+
+
+# ── Unresolved env placeholders ─────────────────────────────────────── #
+
+_ENV_PLACEHOLDER_RE = re.compile(r"\$\{[^}]+\}")
+
+
+def _check_env_placeholders(config: dict, result: ValidationResult) -> None:
+    """Flag string values still containing ``${...}`` after substitution.
+
+    ``load_config`` deliberately keeps the literal placeholder when the env
+    var is unset (operators may template later), so without this check an
+    unset env var only surfaces much later as an opaque runtime failure —
+    e.g. a Discord login rejecting a token equal to ``${DISCORD_BOT_TOKEN}``.
+    """
+
+    def _walk(value: Any, path: str) -> None:
+        if isinstance(value, str):
+            found = _ENV_PLACEHOLDER_RE.findall(value)
+            if found:
+                result.errors.append(ConfigError(
+                    path,
+                    f"unresolved env placeholder {', '.join(found)}",
+                    "error",
+                ))
+        elif isinstance(value, dict):
+            for key, child in value.items():
+                _walk(child, f"{path}.{key}" if path else str(key))
+        elif isinstance(value, list):
+            for idx, item in enumerate(value):
+                _walk(item, f"{path}[{idx}]")
+
+    _walk(config, "")
 
 
 # ── Gateway / channels ──────────────────────────────────────────────── #
@@ -137,6 +173,19 @@ def _check_gateway(config: dict, result: ValidationResult) -> None:
         agents_ref = ch.get("agents")
         if not agents_ref or not isinstance(agents_ref, list) or len(agents_ref) == 0:
             result.errors.append(ConfigError(f"{prefix}.agents", "must be a non-empty list", "error"))
+        elif isinstance(config.get("agents"), dict):
+            # Agent entries are no longer fabricated at boot, so a channel
+            # referencing an undeclared agent fails ignite — catch it here
+            # so --validate-config flags it before deploy.
+            declared = set(config["agents"].keys())
+            for name in agents_ref:
+                if isinstance(name, str) and name not in declared:
+                    result.errors.append(ConfigError(
+                        f"{prefix}.agents",
+                        f"references agent '{name}' which is not declared under "
+                        f"agents: (declared: {sorted(declared)})",
+                        "error",
+                    ))
 
 
 # ── Agents ──────────────────────────────────────────────────────────── #
@@ -170,6 +219,50 @@ def _check_agents(config: dict, result: ValidationResult) -> None:
                 f"{prefix}.cli_path",
                 "not set; will use default binary name",
                 "warning",
+            ))
+
+
+# ── Access (owner gate) ─────────────────────────────────────────────── #
+
+def _check_access(config: dict, result: ValidationResult) -> None:
+    """Validate the optional ``access`` section.
+
+    A bare YAML string for ``owner_user_ids`` would iterate char-by-char in
+    boot and silently lock the owner out; reject it loudly instead.
+    """
+    access = config.get("access")
+    if access is None:
+        return
+    if not isinstance(access, dict):
+        result.errors.append(ConfigError(
+            "access", "must be a mapping if present", "error",
+        ))
+        return
+
+    owner_ids = access.get("owner_user_ids")
+    if owner_ids is None:
+        return
+    if isinstance(owner_ids, str):
+        result.errors.append(ConfigError(
+            "access.owner_user_ids",
+            f"must be a list of user ids, got a bare string '{owner_ids}' "
+            '(write it as a YAML list: owner_user_ids: ["123456789"])',
+            "error",
+        ))
+        return
+    if not isinstance(owner_ids, list):
+        result.errors.append(ConfigError(
+            "access.owner_user_ids",
+            f"must be a list of user ids, got {type(owner_ids).__name__}",
+            "error",
+        ))
+        return
+    for idx, uid in enumerate(owner_ids):
+        if isinstance(uid, bool) or not isinstance(uid, (str, int)):
+            result.errors.append(ConfigError(
+                f"access.owner_user_ids[{idx}]",
+                f"must be a scalar user id, got '{uid}' ({type(uid).__name__})",
+                "error",
             ))
 
 

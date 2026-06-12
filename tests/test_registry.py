@@ -63,21 +63,30 @@ class _LogAgent(BaseAgent):
 
 
 class _TimedAgent(BaseAgent):
+    """Accepts a per-call ``timeout_override`` (like BaseCLIAgent) and records
+    the effective timeout — WITHOUT mutating ``self._timeout``."""
+
     def __init__(self, name: str, timeout: int):
         self._name = name
         self._timeout = timeout
-        self.seen_timeouts: list[int] = []
+        self.seen_timeouts: list[float] = []
 
     @property
     def name(self) -> str:
         return self._name
 
-    async def run(self, prompt, history=None):
-        self.seen_timeouts.append(self._timeout)
+    async def run(self, prompt, history=None, *, timeout_override=None):
+        import asyncio
+
+        await asyncio.sleep(0.01)  # force interleave under concurrency
+        self.seen_timeouts.append(timeout_override or self._timeout)
         return AgentResponse(text="ok")
 
 
 class _TurnLimitedAgent(BaseAgent):
+    """Accepts a per-call ``max_turns_override`` (like ClaudeAgent) and records
+    the effective budget — WITHOUT mutating ``self._max_turns``."""
+
     def __init__(self, name: str, max_turns: int):
         self._name = name
         self._max_turns = max_turns
@@ -87,8 +96,11 @@ class _TurnLimitedAgent(BaseAgent):
     def name(self) -> str:
         return self._name
 
-    async def run(self, prompt, history=None):
-        self.seen_max_turns.append(self._max_turns)
+    async def run(self, prompt, history=None, *, max_turns_override=None):
+        import asyncio
+
+        await asyncio.sleep(0.01)  # force interleave under concurrency
+        self.seen_max_turns.append(max_turns_override or self._max_turns)
         return AgentResponse(text="ok")
 
 
@@ -272,6 +284,11 @@ async def test_timeout_override_applies_only_for_single_run():
     assert agent.seen_timeouts == [900]
     assert agent._timeout == 300
 
+    # Next run without an override uses the configured timeout again.
+    await registry.run("q2")
+    assert agent.seen_timeouts == [900, 300]
+    assert agent._timeout == 300
+
 
 @pytest.mark.asyncio
 async def test_max_turns_override_applies_only_for_single_run():
@@ -282,6 +299,74 @@ async def test_max_turns_override_applies_only_for_single_run():
 
     assert agent.seen_max_turns == [80]
     assert agent._max_turns == 25
+
+    await registry.run("q2")
+    assert agent.seen_max_turns == [80, 25]
+    assert agent._max_turns == 25
+
+
+@pytest.mark.asyncio
+async def test_overrides_are_per_call_under_concurrency():
+    """Two concurrent runs with different overrides on the SAME agent must each
+    see their own value, and the configured attrs must never be mutated — the
+    old setattr-around-await context managers corrupted shared singletons when
+    runtime workers and chat turns interleaved."""
+    import asyncio
+
+    timed = _TimedAgent("slow", timeout=300)
+    registry = AgentRegistry([timed])
+    await asyncio.gather(
+        registry.run("a", timeout_override_seconds=900),
+        registry.run("b", timeout_override_seconds=1200),
+        registry.run("c"),
+    )
+    assert sorted(timed.seen_timeouts) == [300, 900, 1200]
+    assert timed._timeout == 300
+
+    turned = _TurnLimitedAgent("claude", max_turns=25)
+    registry = AgentRegistry([turned])
+    await asyncio.gather(
+        registry.run("a", max_turns_override=80),
+        registry.run("b", max_turns_override=55),
+        registry.run("c"),
+    )
+    assert sorted(turned.seen_max_turns) == [25, 55, 80]
+    assert turned._max_turns == 25
+
+
+@pytest.mark.asyncio
+async def test_overrides_skipped_for_agent_without_params(caplog):
+    """Agents whose run() lacks the override params must not receive unexpected
+    kwargs; an unsupported max_turns override is logged for the operator."""
+    agent = _OKAgent("plain", "ok")
+    registry = AgentRegistry([agent])
+
+    with caplog.at_level("INFO", logger="oh_my_agent.agents.registry"):
+        _agent, resp = await registry.run(
+            "q", timeout_override_seconds=900, max_turns_override=80
+        )
+
+    assert resp.text == "ok"
+    assert any(
+        "does not support max_turns override" in r.message for r in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_invalid_overrides_are_ignored():
+    """Non-positive / non-numeric overrides fall back to configured values."""
+    timed = _TimedAgent("slow", timeout=300)
+    registry = AgentRegistry([timed])
+    await registry.run("a", timeout_override_seconds=0)
+    await registry.run("b", timeout_override_seconds=-5)
+    await registry.run("c", timeout_override_seconds="bogus")  # type: ignore[arg-type]
+    assert timed.seen_timeouts == [300, 300, 300]
+
+    turned = _TurnLimitedAgent("claude", max_turns=25)
+    registry = AgentRegistry([turned])
+    await registry.run("a", max_turns_override=0)
+    await registry.run("b", max_turns_override="bogus")  # type: ignore[arg-type]
+    assert turned.seen_max_turns == [25, 25]
 
 
 @pytest.mark.asyncio

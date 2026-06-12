@@ -163,11 +163,15 @@ def setup_logging(
     log_dir = runtime_root / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 
+    # utc=True keeps rotation boundaries and date suffixes on the same UTC
+    # clock as line timestamps and _cleanup_old_logs' cutoff — local-midnight
+    # suffixes would get pruned a day early on US-Pacific hosts.
     file_handler = logging.handlers.TimedRotatingFileHandler(
         log_dir / "service.log",
         when="midnight",
         backupCount=retention_days,
         encoding="utf-8",
+        utc=True,
     )
     file_handler.setFormatter(file_formatter)
     root.addHandler(file_handler)

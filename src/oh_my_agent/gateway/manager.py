@@ -49,7 +49,7 @@ from oh_my_agent.skills.frontmatter import (
     resolve_skill_frontmatter,
     skill_execution_limits,
 )
-from oh_my_agent.utils.chunker import chunk_message
+from oh_my_agent.utils.chunker import chunk_message_with_first_budget
 from oh_my_agent.utils.errors import user_safe_agent_error, user_safe_message
 from oh_my_agent.utils.reports_link import ensure_reports_archive_link
 from oh_my_agent.utils.usage import (
@@ -207,9 +207,34 @@ class GatewayManager:
         self._stopping = False
         self._background_tasks: list[asyncio.Task] = []
         self._inflight_messages: set[asyncio.Task] = set()
+        # Fire-and-forget work (judge / compression / skill sync / MEMORY.md
+        # synthesis). Holding a strong reference keeps the tasks from being
+        # garbage-collected mid-flight; stop() drains the set.
+        self._fire_and_forget_tasks: set[asyncio.Task] = set()
         # Set on stop() to wake long-sleeping background loops cooperatively,
         # avoiding cancel-on-sleep that the previous shutdown path relied on.
         self._shutdown_event: asyncio.Event = asyncio.Event()
+
+    def _spawn_fire_and_forget(self, coro, *, name: str) -> asyncio.Task:
+        """Create a tracked fire-and-forget task.
+
+        The done-callback discards the strong reference and logs any
+        exception so failures never become unretrieved-task noise at GC time.
+        """
+        task = asyncio.create_task(coro, name=name)
+        self._fire_and_forget_tasks.add(task)
+        task.add_done_callback(self._on_fire_and_forget_done)
+        return task
+
+    def _on_fire_and_forget_done(self, task: asyncio.Task) -> None:
+        self._fire_and_forget_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.warning(
+                "Fire-and-forget task %r failed: %r", task.get_name(), exc
+            )
 
     def _session_key(self, platform: str, channel_id: str) -> str:
         return f"{platform}:{channel_id}"
@@ -872,8 +897,11 @@ class GatewayManager:
              background loops) to exit on their own.
           3. Drain in-flight message handlers — they may still need to send
              responses, so do this before tearing down channels.
-          4. Stop channel transports so each ``channel.start()`` task returns.
-          5. Await all background tasks via ``gather(return_exceptions=True)``;
+          4. Drain fire-and-forget tasks spawned by handlers (judge,
+             compression, skill sync, MEMORY.md synthesis) — they too may
+             still send to channels.
+          5. Stop channel transports so each ``channel.start()`` task returns.
+          6. Await all background tasks via ``gather(return_exceptions=True)``;
              an exception in one must not block the rest of shutdown.
 
         ``timeout`` is accepted for API compatibility but ignored — shutdown
@@ -920,7 +948,22 @@ class GatewayManager:
                         task.get_name(), result,
                     )
 
-        # 3. Stop channel transports — this lets each channel.start() task return.
+        # 3. Drain fire-and-forget work (judge / compression / skill sync /
+        #    MEMORY.md synthesis). These may still send to channels, so they
+        #    must finish before channel teardown. Loop because a draining task
+        #    can spawn a successor (judge → MEMORY.md synthesis).
+        while True:
+            pending = [
+                task
+                for task in self._fire_and_forget_tasks
+                if task is not current_task and not task.done()
+            ]
+            if not pending:
+                break
+            logger.info("Awaiting %d fire-and-forget task(s) to finish.", len(pending))
+            await asyncio.gather(*pending, return_exceptions=True)
+
+        # 4. Stop channel transports — this lets each channel.start() task return.
         for channel, _ in self._channels:
             try:
                 await channel.stop()
@@ -932,7 +975,7 @@ class GatewayManager:
                     exc_info=True,
                 )
 
-        # 4. Await all background tasks — channel runners, scheduler runner,
+        # 5. Await all background tasks — channel runners, scheduler runner,
         #    scheduler-supervisor, short-workspace-janitor.  No timeout, no
         #    cancel: a stuck task is a real bug to surface, not silently mask.
         background = [
@@ -1031,7 +1074,17 @@ class GatewayManager:
             return
         next_runs = self._scheduler.compute_all_next_run_at()
         for record in self._scheduler.list_automations():
-            next_dt = next_runs.get(record.name)
+            # The in-memory runtime state holds the authoritative fire time —
+            # compute_all_next_run_at() returns now+interval for interval jobs,
+            # which would push the persisted next_run_at forward on every
+            # reload. Fall back to the computed value only for jobs without
+            # runtime state (startup / disabled).
+            state = self._scheduler.get_job_runtime_state(record.name)
+            next_dt: datetime | None
+            if state is not None and state.next_fire_at is not None:
+                next_dt = state.next_fire_at
+            else:
+                next_dt = next_runs.get(record.name)
             next_run_iso = next_dt.isoformat() if next_dt else None
             await store.upsert_automation_state(
                 record.name,
@@ -1311,6 +1364,17 @@ class GatewayManager:
         finally:
             if current_task is not None:
                 self._inflight_messages.discard(current_task)
+            # Clean up downloaded attachment temp files. Lives here (not at
+            # the impl tail) so every early return and exception path still
+            # releases the files.
+            for att in msg.attachments or []:
+                local_path = getattr(att, "local_path", None)
+                if not local_path:
+                    continue
+                try:
+                    Path(local_path).unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     async def _handle_message_impl(
         self,
@@ -2378,7 +2442,7 @@ class GatewayManager:
 
         # Synchronous keyword-triggered judge (e.g. "记一下", "remember this")
         if self._judge is not None and self._user_message_has_memory_keyword(msg.content):
-            asyncio.create_task(
+            self._spawn_fire_and_forget(
                 self._run_memory_judge(
                     session=session,
                     registry=registry,
@@ -2388,26 +2452,23 @@ class GatewayManager:
                     req_id=req_id,
                     explicit_summary=None,
                     explicit_scope=None,
-                )
+                ),
+                name=f"memory-judge:{thread_id}",
             )
 
         # Async: history compression
         if self._compressor:
-            asyncio.create_task(self._try_compress(session, registry, thread_id, req_id))
+            self._spawn_fire_and_forget(
+                self._try_compress(session, registry, thread_id, req_id),
+                name=f"compress:{thread_id}",
+            )
 
         # Async: detect and hot-reload new skills created by agents
         if self._skill_syncer:
-            asyncio.create_task(
-                self._try_skill_sync(session, thread_id, req_id)
+            self._spawn_fire_and_forget(
+                self._try_skill_sync(session, thread_id, req_id),
+                name=f"skill-sync:{thread_id}",
             )
-
-        # Clean up downloaded attachment temp files
-        if image_paths:
-            for p in image_paths:
-                try:
-                    p.unlink(missing_ok=True)
-                except OSError:
-                    pass
 
     async def _try_skill_sync(
         self,
@@ -2485,7 +2546,7 @@ class GatewayManager:
             )
             if did_compress:
                 # Invalidate cache so next load picks up the summary
-                session._cache.pop(thread_id, None)
+                session.invalidate(thread_id)
                 logger.info("[%s] COMPRESS thread=%s completed", req_id, thread_id)
         except Exception as exc:
             logger.warning("[%s] COMPRESS failed: %s", req_id, exc)
@@ -2542,12 +2603,20 @@ class GatewayManager:
         except Exception as exc:
             logger.warning("memory_judge crashed thread=%s: %s", thread_id, exc)
             return None
-        if self._idle_tracker is not None:
-            await self._idle_tracker.mark_judged(
-                self._thread_key(session.platform, session.channel_id, thread_id)
-            )
-        if self._judge_store.should_synthesize():
-            asyncio.create_task(self._try_memory_md_synth(registry))
+        # Post-judge bookkeeping is best-effort: a failure here must not
+        # surface as an unretrieved-task exception on the fire-and-forget path.
+        try:
+            if self._idle_tracker is not None:
+                await self._idle_tracker.mark_judged(
+                    self._thread_key(session.platform, session.channel_id, thread_id)
+                )
+            if self._judge_store.should_synthesize():
+                self._spawn_fire_and_forget(
+                    self._try_memory_md_synth(registry),
+                    name="memory-md-synth",
+                )
+        except Exception as exc:
+            logger.warning("memory_judge post-actions failed thread=%s: %s", thread_id, exc)
         return {"actions": result.actions, "stats": result.stats, "error": result.error}
 
     async def _try_memory_md_synth(self, registry: AgentRegistry) -> None:
@@ -2803,21 +2872,21 @@ class GatewayManager:
     ) -> ResponseDelivery:
         attribution = append_usage_audit(f"-# via **{agent_name}**", usage)
 
+        # Chunks are sent verbatim — never re-derived as substrings of the
+        # original text (chunks are stripped and synthetic fences added, so
+        # offset math would drop or duplicate characters).
         first_chunk_budget = max(1, 2000 - len(attribution) - 1)
-        first_chunks = chunk_message(text, max_size=first_chunk_budget)
-        if not first_chunks:
+        chunks = chunk_message_with_first_budget(text, first_chunk_budget)
+        if not chunks:
             message_id = await channel.send(thread_id, f"{attribution}\n*(empty response)*")
             return ResponseDelivery(first_message_id=message_id, chunk_count=1)
 
-        first_message_id = await channel.send(thread_id, f"{attribution}\n{first_chunks[0]}")
-
-        remainder = text[len(first_chunks[0]):].lstrip()
-        remaining_chunks = chunk_message(remainder) if remainder else []
-        for chunk in remaining_chunks:
+        first_message_id = await channel.send(thread_id, f"{attribution}\n{chunks[0]}")
+        for chunk in chunks[1:]:
             await channel.send(thread_id, chunk)
         return ResponseDelivery(
             first_message_id=first_message_id,
-            chunk_count=1 + len(remaining_chunks),
+            chunk_count=len(chunks),
         )
 
     def _detect_explicit_skill_invocation(self, content: str) -> str | None:

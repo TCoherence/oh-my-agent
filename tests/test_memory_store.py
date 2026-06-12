@@ -96,6 +96,111 @@ async def test_save_summary_and_load(store):
 
 
 @pytest.mark.asyncio
+async def test_save_summary_failure_rolls_back_partial_writes(store):
+    P = ("discord", "ch1", "t1")
+    ids = []
+    for i in range(10):
+        ids.append(await store.append(*P, {"role": "user", "content": f"msg-{i}"}))
+
+    db = await store._conn()  # noqa: SLF001
+    real_execute = db.execute
+    injected = False
+
+    async def failing_execute(sql, *args, **kwargs):
+        nonlocal injected
+        # Fail the LAST statement of save_summary's transaction (after the
+        # summary INSERT has already executed), once.
+        if not injected and sql.lstrip().startswith("DELETE FROM turns"):
+            injected = True
+            raise RuntimeError("injected failure")
+        return await real_execute(sql, *args, **kwargs)
+
+    db.execute = failing_execute  # type: ignore[method-assign]
+    try:
+        with pytest.raises(RuntimeError, match="injected failure"):
+            await store.save_summary(
+                *P, summary="partial", turns_start=ids[0], turns_end=ids[4],
+            )
+    finally:
+        db.execute = real_execute  # type: ignore[method-assign]
+
+    # The failed write must roll back fully: no summary row, no deleted
+    # turns, and no open transaction handed to the next writer.
+    assert not db.in_transaction
+    cursor = await db.execute("SELECT COUNT(*) FROM summaries")
+    assert (await cursor.fetchone())[0] == 0
+    assert await store.count_turns(*P) == 10
+
+    # The next writer commits cleanly and sees consistent state.
+    await store.save_summary(*P, summary="retry", turns_start=ids[0], turns_end=ids[4])
+    history = await store.load_history(*P)
+    assert history[0]["role"] == "system"
+    assert "retry" in history[0]["content"]
+    assert await store.count_turns(*P) == 5
+
+
+@pytest.mark.asyncio
+async def test_repeated_compression_keeps_single_summary_row(store):
+    P = ("discord", "ch1", "t1")
+    other = ("discord", "ch1", "t2")
+    oid = await store.append(*other, {"role": "user", "content": "other-thread"})
+    await store.save_summary(*other, summary="other", turns_start=oid, turns_end=oid)
+
+    ids = [
+        await store.append(*P, {"role": "user", "content": f"msg-{i}"})
+        for i in range(6)
+    ]
+    await store.save_summary(*P, summary="first", turns_start=ids[0], turns_end=ids[1])
+    await store.save_summary(*P, summary="second", turns_start=ids[2], turns_end=ids[3])
+    await store.save_summary(*P, summary="third", turns_start=ids[4], turns_end=ids[5])
+
+    db = await store._conn()  # noqa: SLF001
+    cursor = await db.execute(
+        "SELECT summary FROM summaries WHERE platform=? AND channel_id=? AND thread_id=?",
+        P,
+    )
+    rows = await cursor.fetchall()
+    assert [r["summary"] for r in rows] == ["third"]
+    history = await store.load_history(*P)
+    assert len(history) == 1
+    assert "third" in history[0]["content"]
+
+    # Per-thread invariant: the other thread's summary is untouched.
+    other_history = await store.load_history(*other)
+    assert "other" in other_history[0]["content"]
+
+
+async def _index_names(store) -> set[str]:
+    db = await store._conn()  # noqa: SLF001
+    cursor = await db.execute("SELECT name FROM sqlite_master WHERE type='index'")
+    return {str(row["name"]) for row in await cursor.fetchall()}
+
+
+@pytest.mark.asyncio
+async def test_summaries_thread_index_exists_on_fresh_db(store):
+    assert "idx_summaries_thread" in await _index_names(store)
+
+
+@pytest.mark.asyncio
+async def test_summaries_thread_index_added_to_existing_db(tmp_path):
+    db_path = tmp_path / "pre_index.db"
+    # Simulate a DB created before the index existed.
+    s = SQLiteMemoryStore(db_path)
+    await s.init()
+    db = await s._conn()  # noqa: SLF001
+    await db.execute("DROP INDEX idx_summaries_thread")
+    await db.commit()
+    await s.close()
+
+    s2 = SQLiteMemoryStore(db_path)
+    await s2.init()
+    try:
+        assert "idx_summaries_thread" in await _index_names(s2)
+    finally:
+        await s2.close()
+
+
+@pytest.mark.asyncio
 async def test_fts_search(store):
     await store.append("discord", "ch1", "t1", {"role": "user", "content": "the weather in Seattle is rainy"})
     await store.append("discord", "ch1", "t1", {"role": "user", "content": "hello world"})

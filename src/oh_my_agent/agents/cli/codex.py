@@ -8,6 +8,7 @@ from pathlib import Path
 from oh_my_agent.agents.base import AgentResponse, PartialTextHook, ToolUseHook
 from oh_my_agent.agents.cli.base import (
     BaseCLIAgent,
+    _bounded_log_excerpt,
     _build_prompt_with_history,
     _extract_cli_error,
     _should_clear_resumed_session,
@@ -194,6 +195,8 @@ class CodexCLIAgent(BaseCLIAgent):
         ambient_context: str | None = None,
         on_partial: PartialTextHook | None = None,
         on_tool_use: ToolUseHook | None = None,
+        timeout_override: float | None = None,
+        max_turns_override: int | None = None,
     ) -> AgentResponse:
         """Run the Codex CLI.
 
@@ -204,11 +207,17 @@ class CodexCLIAgent(BaseCLIAgent):
         to the streaming path on **both** fresh and resume invocations. Only
         image-bearing turns stay in block mode today (``--image`` argv +
         streaming fold together but we keep the simple path until we need it).
+
+        ``timeout_override`` is a per-call value (never written back to self).
+        ``max_turns_override`` is accepted for signature parity but ignored —
+        the codex CLI exposes no turn-budget flag.
         """
+        del max_turns_override
         # Codex has no system-prompt channel: fold ambient context (memory)
         # into the prompt, then the control protocol, preserving prior ordering.
         prompt = inject_control_protocol(prepend_ambient(prompt, ambient_context))
         session_id = self._session_ids.get(thread_id) if thread_id else None
+        effective_timeout = self._effective_timeout(timeout_override)
 
         streaming = (on_partial is not None or on_tool_use is not None)
 
@@ -225,6 +234,7 @@ class CodexCLIAgent(BaseCLIAgent):
                     log_path=log_path,
                     thread_id=thread_id,
                     command=cmd,
+                    timeout_override=timeout_override,
                 )
             logger.info("Resuming %s session %s ...", self.name, session_id[:12])
         else:
@@ -239,6 +249,7 @@ class CodexCLIAgent(BaseCLIAgent):
                     workspace_override=workspace_override,
                     log_path=log_path,
                     thread_id=thread_id,
+                    timeout_override=timeout_override,
                 )
             cmd = self._build_command(full_prompt, image_paths=image_paths)
             logger.info("Running %s (new session) ...", self.name)
@@ -248,14 +259,16 @@ class CodexCLIAgent(BaseCLIAgent):
                 *cmd,
                 cwd=self._resolve_cwd(workspace_override),
                 env=self._build_env(),
-                timeout=self._timeout,
+                timeout=effective_timeout,
                 log_path=log_path,
             )
         except asyncio.TimeoutError:
             return AgentResponse(
                 text="",
-                error=f"{self.name} CLI timed out after {self._timeout}s",
+                error=f"{self.name} CLI timed out after {effective_timeout}s",
                 error_kind="timeout",
+                partial_text=_bounded_log_excerpt(log_path),
+                terminal_reason="timeout",
             )
         except FileNotFoundError:
             return AgentResponse(

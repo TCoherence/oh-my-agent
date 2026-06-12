@@ -264,6 +264,60 @@ async def test_persist_credential_writes_cookies_and_metadata(tmp_path: Path):
     assert names == {"SESSDATA", "bili_jct"}
 
 
+def _persist_payload() -> AuthPollResult:
+    return AuthPollResult(
+        status=AUTH_POLL_STATUS_APPROVED,
+        credential_payload={
+            "cookies": [
+                {
+                    "name": "SESSDATA",
+                    "value": "sess1",
+                    "domain": ".bilibili.com",
+                    "path": "/",
+                    "secure": True,
+                    "http_only": True,
+                    "expires": 1700000000,
+                },
+            ],
+            "refresh_token": "refresh-xyz",
+            "timestamp": 1700000000,
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_persist_credential_files_are_owner_only(tmp_path: Path):
+    """Secrets are written with 0600 from the outset and the provider dir
+    is 0700 — never umask-default world-readable."""
+    provider = BilibiliAuthProvider()
+    cookie_path, _ = await provider.persist_credential(
+        _make_flow(), _persist_payload(), tmp_path
+    )
+    meta_path = cookie_path.with_name("meta.json")
+    assert cookie_path.stat().st_mode & 0o777 == 0o600
+    assert meta_path.stat().st_mode & 0o777 == 0o600
+    assert cookie_path.parent.stat().st_mode & 0o777 == 0o700
+
+
+@pytest.mark.asyncio
+async def test_persist_credential_tightens_preexisting_loose_perms(tmp_path: Path):
+    """Re-persisting over files left world-readable by an older version
+    tightens them to 0600 before any secret bytes are written."""
+    provider = BilibiliAuthProvider()
+    flow = _make_flow()
+    provider_root = tmp_path / "providers" / "bilibili" / flow.owner_user_id
+    provider_root.mkdir(parents=True)
+    for name in ("cookies.txt", "meta.json"):
+        stale = provider_root / name
+        stale.write_text("stale")
+        stale.chmod(0o644)
+
+    cookie_path, _ = await provider.persist_credential(flow, _persist_payload(), tmp_path)
+    meta_path = cookie_path.with_name("meta.json")
+    assert cookie_path.stat().st_mode & 0o777 == 0o600
+    assert meta_path.stat().st_mode & 0o777 == 0o600
+
+
 @pytest.mark.asyncio
 async def test_persist_credential_raises_if_no_cookies(tmp_path: Path):
     provider = BilibiliAuthProvider()

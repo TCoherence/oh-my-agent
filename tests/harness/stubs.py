@@ -113,9 +113,8 @@ class StubAgent(BaseAgent):
         self._last_cwd: dict[str, str] = {}
         # per-thread call counter for step_no_eq predicates
         self._step_counter: dict[str, int] = {}
-        # Only used by AgentRegistry's _temporary_timeout / _temporary_max_turns
-        # context managers (they look up these attrs by name; harmless to
-        # have them present on a stub).
+        # Mirrors the configured-default attrs real CLI agents carry;
+        # per-call overrides arrive via run() kwargs instead.
         self._timeout = timeout_seconds or 600
         self._max_turns = max_turns or 25
 

@@ -4054,12 +4054,28 @@ class RuntimeService:
             kwargs["log_path"] = log_path
         if ambient_context is not None and "ambient_context" in sig.parameters:
             kwargs["ambient_context"] = ambient_context
-        async def _run_with_overrides() -> AgentResponse:
-            with AgentRegistry._temporary_timeout(agent, task.agent_timeout_seconds):
-                with AgentRegistry._temporary_max_turns(agent, task.agent_max_turns):
-                    return await agent.run(prompt, [], **kwargs)
+        # Per-call overrides forwarded by keyword (never setattr'd onto the
+        # shared agent singleton — concurrent workers would corrupt it).
+        if (
+            task.agent_timeout_seconds
+            and task.agent_timeout_seconds > 0
+            and "timeout_override" in sig.parameters
+        ):
+            kwargs["timeout_override"] = task.agent_timeout_seconds
+        if task.agent_max_turns and task.agent_max_turns > 0:
+            if "max_turns_override" in sig.parameters:
+                kwargs["max_turns_override"] = task.agent_max_turns
+            else:
+                logger.info(
+                    "Agent '%s' does not support max_turns override; ignoring value=%r",
+                    agent.name,
+                    task.agent_max_turns,
+                )
 
-        run_task = asyncio.create_task(_run_with_overrides())
+        async def _run_agent() -> AgentResponse:
+            return await agent.run(prompt, [], **kwargs)
+
+        run_task = asyncio.create_task(_run_agent())
         self._running_tasks[task.id] = run_task
         self._live_agent_logs[task.id] = log_path
         started = asyncio.get_running_loop().time()
@@ -5956,7 +5972,28 @@ class RuntimeService:
                 )
             except Exception as exc:
                 logger.warning("send_task_draft failed, falling back to plain text: %s", exc)
-        await session.channel.send(thread_id, text)
+        try:
+            await session.channel.send(thread_id, text)
+        except Exception as exc:
+            # A send failure here must not propagate out of task creation —
+            # the task row already exists and would otherwise become a stuck
+            # DRAFT with no visible decision surface.
+            logger.error(
+                "Decision surface plain-text fallback failed for task %s: %s", task_id, exc
+            )
+            minimal = (
+                f"Task `{task_id}` is waiting for a decision "
+                f"({' / '.join(actions)}). Use `/task_approve {task_id}` "
+                "or the matching `/task_*` command."
+            )
+            try:
+                await session.channel.send(thread_id, minimal)
+            except Exception as minimal_exc:
+                logger.error(
+                    "Minimal decision notice also failed for task %s: %s",
+                    task_id,
+                    minimal_exc,
+                )
         return None
 
     async def _remind_blocking_draft(
@@ -7307,16 +7344,21 @@ class RuntimeService:
 
     def _draft_text(self, task: RuntimeTask, *, reasons: list[str]) -> str:
         reason_text = self._human_risk_reasons(reasons, task)
-        return (
+        # task.goal is often the full user message; Discord rejects bodies > 2000 chars.
+        goal = task.goal
+        if len(goal) > 220:
+            goal = goal[:220].rstrip() + "..."
+        text = (
             f"### Runtime Task Draft `{task.id}`\n"
             f"Task type: `{task.task_type}` · completion: `{task.completion_mode}`\n"
-            f"Goal: {task.goal}\n"
+            f"Goal: {goal}\n"
             f"Agent: `{task.preferred_agent or self._default_agent}`\n"
             f"Budget: {task.max_steps} steps / {task.max_minutes} min\n"
             f"Test command: `{task.test_command}`\n"
             f"⚠️ Reason: {reason_text}\n"
             "Use Approve / Reject / Suggest."
         )
+        return text[:1900]
 
     async def _merge_gate_text(self, task: RuntimeTask) -> str:
         lines = [

@@ -44,8 +44,18 @@ async def test_claude_fresh_flattens_history_resume_drops_it(monkeypatch):
     assert "EARLIER-QUESTION" not in _prompt_arg(captured["argv"])
 
 
-def test_claude_command_includes_permission_bypass_by_default():
+def test_claude_command_omits_permission_bypass_by_default():
+    """The documented default: permission bypass must be opt-in (boot.py's
+    config fallback is False; the constructor default matches it)."""
     agent = ClaudeAgent(cli_path="claude", model="sonnet-test")
+    cmd = agent._build_command("hello")
+    assert "--dangerously-skip-permissions" not in cmd
+
+
+def test_claude_command_includes_permission_bypass_when_enabled():
+    agent = ClaudeAgent(
+        cli_path="claude", model="sonnet-test", dangerously_skip_permissions=True
+    )
     cmd = agent._build_command("hello")
     assert "--dangerously-skip-permissions" in cmd
 
@@ -205,7 +215,8 @@ async def test_claude_fresh_streaming_builds_command_with_append(monkeypatch):
     captured: dict = {}
 
     async def _fake_run_streamed(self, *, prompt, history, on_partial, workspace_override,
-                                 log_path, thread_id=None, command=None, on_tool_use=None):
+                                 log_path, thread_id=None, command=None, on_tool_use=None,
+                                 timeout_override=None):
         captured["command"] = command
         return AgentResponse(text="ok")
 
@@ -357,6 +368,55 @@ async def test_claude_success_parses_stream_json_and_stores_session(monkeypatch)
     assert response.text == "done"
     assert agent.get_session_id("thread-1") == "sess-42"
     assert response.usage == {"input_tokens": 100, "cost_usd": 0.02}
+
+
+@pytest.mark.asyncio
+async def test_claude_max_turns_override_is_per_call(monkeypatch):
+    """Per-call ``max_turns_override`` lands in argv without mutating the
+    configured ``_max_turns`` (concurrent runs must not corrupt each other)."""
+    captured: dict[str, list] = {}
+
+    async def _capture(*args, **kwargs):
+        captured["argv"] = list(args)
+        return 0, json.dumps({"type": "result", "result": "ok", "session_id": "s1"}).encode(), b""
+
+    monkeypatch.setattr("oh_my_agent.agents.cli.claude._stream_cli_process", _capture)
+    agent = ClaudeAgent(cli_path="claude", max_turns=25)
+
+    await agent.run("hello", thread_id="t1", max_turns_override=80)
+    assert _arg_after(captured["argv"], "--max-turns") == "80"
+    assert agent._max_turns == 25
+
+    # Resume path honors the override too.
+    await agent.run("again", thread_id="t1", max_turns_override=55)
+    assert "--resume" in captured["argv"]
+    assert _arg_after(captured["argv"], "--max-turns") == "55"
+    assert agent._max_turns == 25
+
+    # No override → configured budget.
+    await agent.run("third", thread_id="t1")
+    assert _arg_after(captured["argv"], "--max-turns") == "25"
+
+
+@pytest.mark.asyncio
+async def test_claude_timeout_override_is_per_call(monkeypatch):
+    """Per-call ``timeout_override`` drives the subprocess timeout and the
+    error message; ``_timeout`` stays untouched."""
+    seen: dict[str, float] = {}
+
+    async def _timeout(*args, **kwargs):
+        seen["timeout"] = kwargs["timeout"]
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr("oh_my_agent.agents.cli.claude._stream_cli_process", _timeout)
+    agent = ClaudeAgent(cli_path="claude", model="sonnet-test", timeout=300)
+
+    response = await agent.run("hello", timeout_override=7)
+
+    assert seen["timeout"] == 7
+    assert response.error_kind == "timeout"
+    assert "timed out after 7s" in response.error
+    assert agent._timeout == 300
 
 
 @pytest.mark.asyncio

@@ -6,7 +6,11 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from oh_my_agent.automation import ScheduledJob, Scheduler, build_scheduler_from_config
-from oh_my_agent.automation.scheduler import _next_cron_fire, _parse_cron_expression
+from oh_my_agent.automation.scheduler import (
+    _matches_cron,
+    _next_cron_fire,
+    _parse_cron_expression,
+)
 
 
 def _write_yaml(path, text: str) -> None:
@@ -394,6 +398,200 @@ def test_next_cron_fire_uses_expected_weekday_semantics():
     now = datetime(2026, 3, 7, 18, 30, tzinfo=timezone.utc)  # Saturday
     next_fire = _next_cron_fire(spec, now)
     assert next_fire == datetime(2026, 3, 9, 9, 0, tzinfo=timezone.utc)
+
+
+# =====================================================================
+# Cron engine — _parse_cron_expression / _matches_cron / _next_cron_fire
+# =====================================================================
+
+_LA = ZoneInfo("America/Los_Angeles")
+
+
+def test_next_cron_fire_spring_forward_gap_day():
+    """US spring-forward 2026-03-08: wall times 02:00-02:59 don't exist in LA.
+
+    The engine steps wall-clock minutes and matches on wall fields only, so a
+    daily 02:30 job still matches wall 02:30 on the gap day; ZoneInfo resolves
+    that nonexistent wall time via the pre-gap PST offset (fold=0), so the
+    fire materializes at 03:30 PDT real time. Documented behavior: the job is
+    not skipped on the gap day — it lands one hour later in real time.
+    """
+    spec = _parse_cron_expression("30 2 * * *")
+    now = datetime(2026, 3, 8, 1, 0, tzinfo=_LA)
+    next_fire = _next_cron_fire(spec, now)
+    assert next_fire.replace(tzinfo=None) == datetime(2026, 3, 8, 2, 30)
+    assert next_fire.astimezone(timezone.utc) == datetime(
+        2026, 3, 8, 10, 30, tzinfo=timezone.utc
+    )
+
+
+def test_next_cron_fire_fall_back_ambiguous_hour():
+    """US fall-back 2026-11-01: wall times 01:00-01:59 occur twice in LA.
+
+    The engine matches the first wall occurrence (fold=0, PDT). Recomputing
+    from that fire steps forward past 02:00 wall time, so the repeated
+    fold=1 (PST) hour never produces a second fire. Documented behavior:
+    exactly one fire per day on the ambiguous wall time.
+    """
+    spec = _parse_cron_expression("30 1 * * *")
+    now = datetime(2026, 11, 1, 0, 50, tzinfo=_LA)
+    next_fire = _next_cron_fire(spec, now)
+    assert next_fire.replace(tzinfo=None) == datetime(2026, 11, 1, 1, 30)
+    assert next_fire.fold == 0
+    assert next_fire.astimezone(timezone.utc) == datetime(
+        2026, 11, 1, 8, 30, tzinfo=timezone.utc
+    )  # PDT (-7): the first occurrence
+
+    # The post-fire recompute lands on tomorrow, not the repeated fold=1 hour.
+    after_fire = _next_cron_fire(spec, next_fire)
+    assert after_fire.replace(tzinfo=None) == datetime(2026, 11, 2, 1, 30)
+
+
+@pytest.mark.parametrize(
+    ("expr", "now", "expected"),
+    [
+        # day=13 AND weekday=FRI both restricted → vixie OR: fires on the
+        # next Friday (2026-02-06) even though it isn't the 13th...
+        (
+            "0 0 13 * 5",
+            datetime(2026, 2, 1, 12, 0, tzinfo=timezone.utc),
+            datetime(2026, 2, 6, 0, 0, tzinfo=timezone.utc),
+        ),
+        # ...and on the 13th (a Monday in April 2026) even though it isn't Friday.
+        (
+            "0 0 13 * 5",
+            datetime(2026, 4, 11, 12, 0, tzinfo=timezone.utc),
+            datetime(2026, 4, 13, 0, 0, tzinfo=timezone.utc),
+        ),
+        # day wildcard → weekday-only filter: next Friday.
+        (
+            "0 0 * * 5",
+            datetime(2026, 4, 13, 12, 0, tzinfo=timezone.utc),
+            datetime(2026, 4, 17, 0, 0, tzinfo=timezone.utc),
+        ),
+        # weekday wildcard → day-only filter: the next 13th.
+        (
+            "0 0 13 * *",
+            datetime(2026, 2, 14, 12, 0, tzinfo=timezone.utc),
+            datetime(2026, 3, 13, 0, 0, tzinfo=timezone.utc),
+        ),
+    ],
+)
+def test_next_cron_fire_vixie_day_or_weekday(expr, now, expected):
+    assert _next_cron_fire(_parse_cron_expression(expr), now) == expected
+
+
+def test_matches_cron_or_semantics_direct():
+    spec = _parse_cron_expression("0 0 13 * 5")
+    # Friday that isn't the 13th.
+    assert _matches_cron(spec, datetime(2026, 2, 6, 0, 0, tzinfo=timezone.utc)) is True
+    # The 13th that isn't a Friday (Monday).
+    assert _matches_cron(spec, datetime(2026, 4, 13, 0, 0, tzinfo=timezone.utc)) is True
+    # Thursday the 12th — neither.
+    assert _matches_cron(spec, datetime(2026, 2, 12, 0, 0, tzinfo=timezone.utc)) is False
+
+
+def test_cron_parser_named_months_and_weekdays():
+    assert _parse_cron_expression("0 9 * JAN,JUL *").month == frozenset({1, 7})
+    # Names are case-insensitive.
+    assert _parse_cron_expression("0 9 * * mon-fri").weekday == frozenset({1, 2, 3, 4, 5})
+    assert _parse_cron_expression("0 9 * * SUN").weekday == frozenset({0})
+
+
+def test_cron_parser_normalizes_7_as_sunday():
+    assert _parse_cron_expression("0 9 * * 7").weekday == frozenset({0})
+    assert _parse_cron_expression("0 9 * * 0").weekday == frozenset({0})
+
+
+def test_cron_parser_rejects_names_in_numeric_fields():
+    with pytest.raises(ValueError):
+        _parse_cron_expression("JAN 9 * * *")
+
+
+@pytest.mark.parametrize(
+    "expr",
+    [
+        "0 0 31 2 *",  # Feb 31
+        "0 0 30 2 *",  # Feb 30 (leap years stop at 29)
+        "0 0 31 4 *",  # Apr 31
+        "0 0 31 4,6,9,11 *",  # only 30-day months allowed
+    ],
+)
+def test_cron_parser_rejects_infeasible_day_month(expr):
+    with pytest.raises(ValueError, match="never occur"):
+        _parse_cron_expression(expr)
+
+
+@pytest.mark.parametrize(
+    "expr",
+    [
+        "0 0 29 2 *",  # Feb 29 exists in leap years
+        "0 0 31 2,3 *",  # March rescues day 31
+        "0 0 31 2 5",  # restricted weekday → vixie OR can fire on Fridays
+        "0 0 31 * *",  # wildcard month includes 31-day months
+        "0 0 */31 2 *",  # stepped field (not a literal '*') still covers day 1
+    ],
+)
+def test_cron_parser_accepts_feasible_edge_specs(expr):
+    _parse_cron_expression(expr)  # must not raise
+
+
+def test_build_scheduler_rejects_infeasible_cron(tmp_path, caplog):
+    storage_dir = tmp_path / "automations"
+    storage_dir.mkdir()
+    _write_yaml(
+        storage_dir / "bad-cron.yaml",
+        """
+        name: bad-cron
+        enabled: true
+        platform: discord
+        channel_id: "123"
+        prompt: summarize
+        cron: "0 0 31 2 *"
+        """,
+    )
+    scheduler = build_scheduler_from_config(
+        {
+            "automations": {
+                "enabled": True,
+                "storage_dir": str(storage_dir),
+                "reload_interval_seconds": 5,
+            }
+        },
+        project_root=tmp_path,
+    )
+    assert scheduler is not None
+    assert scheduler.jobs == []
+    assert "never occur" in caplog.text
+
+
+def test_compute_all_next_run_at_isolates_uncomputable_job(tmp_path, caplog):
+    """One pathological spec maps to None instead of killing the whole call."""
+    scheduler = Scheduler(
+        storage_dir=tmp_path / "automations",
+        reload_interval_seconds=60,
+    )
+    # Inject directly — file validation rejects infeasible crons up front.
+    scheduler._jobs_by_name = {
+        "good": ScheduledJob(
+            name="good",
+            platform="discord",
+            channel_id="123",
+            prompt="run",
+            interval_seconds=60,
+        ),
+        "bad": ScheduledJob(
+            name="bad",
+            platform="discord",
+            channel_id="123",
+            prompt="run",
+            cron="0 0 31 2 *",
+        ),
+    }
+    result = scheduler.compute_all_next_run_at()
+    assert result["bad"] is None
+    assert result["good"] is not None  # interval jobs always get now + interval
+    assert "failed to compute next fire time" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -838,3 +1036,36 @@ async def test_patch_automation_rejects_cron_interval_coexist(tmp_path):
     # Adding cron while interval_seconds is still set → mutually exclusive
     with pytest.raises(ValueError, match="mutually exclusive"):
         await scheduler.patch_automation("job4", {"cron": "0 9 * * *"})
+
+
+@pytest.mark.asyncio
+async def test_patch_automation_rejects_infeasible_cron(tmp_path):
+    storage_dir = tmp_path / "automations"
+    storage_dir.mkdir()
+    _write_yaml(
+        storage_dir / "job5.yaml",
+        """
+        name: job5
+        enabled: true
+        platform: discord
+        channel_id: "123"
+        thread_id: "456"
+        delivery: channel
+        prompt: do thing
+        agent: claude
+        cron: "0 9 * * *"
+        author: scheduler
+        """,
+    )
+    scheduler = build_scheduler_from_config(
+        {"automations": {"enabled": True, "storage_dir": str(storage_dir)}},
+        project_root=tmp_path,
+    )
+    assert scheduler is not None
+    # Feasibility is enforced at validation time — rejected before any write.
+    with pytest.raises(ValueError, match="never occur"):
+        await scheduler.patch_automation("job5", {"cron": "0 0 31 2 *"})
+    import yaml as _yaml
+
+    raw = _yaml.safe_load((storage_dir / "job5.yaml").read_text())
+    assert raw["cron"] == "0 9 * * *"

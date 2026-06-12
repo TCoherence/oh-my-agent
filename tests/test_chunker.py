@@ -2,6 +2,7 @@ from oh_my_agent.utils.chunker import (
     MAX_CHUNK_SIZE,
     _parse_segments,
     chunk_message,
+    chunk_message_with_first_budget,
 )
 
 # ── Original plain-text tests (backward compatibility) ───────────────── #
@@ -196,3 +197,84 @@ def test_tilde_fence():
     code_segs = [s for s in segs if s.is_code]
     assert len(code_segs) == 1
     assert "~~~python" in code_segs[0].text
+
+
+# ── Hard-limit guarantees for adversarial code blocks ─────────────────── #
+
+
+def test_single_oversized_code_line_respects_max_size():
+    """A single 5000-char code line is hard-split into fenced pieces ≤ max."""
+    payload = "x" * 5000
+    text = "```python\n" + payload + "\n```"
+    chunks = chunk_message(text, max_size=1990)
+    assert len(chunks) >= 3
+    for chunk in chunks:
+        assert len(chunk) <= 1990
+        assert chunk.startswith("```python")
+        assert chunk.endswith("```")
+    # Zero characters lost or duplicated once synthetic fences are stripped.
+    reassembled = "".join(
+        ln for c in chunks for ln in c.splitlines() if not ln.startswith("```")
+    )
+    assert reassembled == payload
+
+
+def test_oversized_line_at_fence_boundary_respects_max_size():
+    """Over-budget line immediately before the closing fence stays ≤ max."""
+    text = "```\nshort\n" + "y" * 4000 + "\n```"
+    chunks = chunk_message(text, max_size=1990)
+    for chunk in chunks:
+        assert len(chunk) <= 1990
+
+
+def test_nested_fences_with_oversized_line_respect_max_size():
+    """Tilde fence nested in a backtick block with an over-budget line."""
+    inner = "~~~\n" + "z" * 2500 + "\n~~~"
+    text = "```markdown\n" + inner + "\n```\n\n" + "tail " * 50
+    chunks = chunk_message(text, max_size=1990)
+    assert chunks
+    for chunk in chunks:
+        assert len(chunk) <= 1990
+
+
+def test_degenerate_budget_smaller_than_fences_hard_cuts():
+    """When the fences alone exceed max_size, fall back to raw hard cuts."""
+    text = "```python\n" + "a" * 200 + "\n```"
+    chunks = chunk_message(text, max_size=12)  # overhead is 14 > 12
+    assert chunks
+    for chunk in chunks:
+        assert len(chunk) <= 12
+
+
+# ── chunk_message_with_first_budget ───────────────────────────────────── #
+
+
+def test_first_budget_short_text_passthrough():
+    assert chunk_message_with_first_budget("hello", 100) == ["hello"]
+
+
+def test_first_budget_first_chunk_fits_reduced_budget():
+    text = "word " * 1000
+    chunks = chunk_message_with_first_budget(text, 500, max_size=1990)
+    assert chunks
+    assert len(chunks[0]) <= 500
+    for chunk in chunks[1:]:
+        assert len(chunk) <= 1990
+
+
+def test_first_budget_code_block_preserves_content():
+    """Re-splitting the first chunk never drops or duplicates code lines."""
+    lines = [f"line_{i:04d} = {i}" for i in range(150)]
+    text = "```python\n" + "\n".join(lines) + "\n```"
+    assert len(text) > 1990
+    chunks = chunk_message_with_first_budget(text, 900, max_size=1990)
+    assert len(chunks[0]) <= 900
+    for chunk in chunks:
+        assert len(chunk) <= 1990
+    content = [
+        ln
+        for chunk in chunks
+        for ln in chunk.splitlines()
+        if ln and not ln.startswith("```")
+    ]
+    assert content == lines

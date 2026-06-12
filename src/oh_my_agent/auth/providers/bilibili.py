@@ -4,6 +4,7 @@ import asyncio
 import http.cookiejar
 import json
 import logging
+import os
 import time
 import urllib.parse
 import urllib.request
@@ -115,9 +116,15 @@ class BilibiliAuthProvider:
 
         provider_root = storage_root / "providers" / self.provider_name() / flow.owner_user_id
         provider_root.mkdir(parents=True, exist_ok=True)
+        provider_root.chmod(0o700)
         cookie_path = provider_root / "cookies.txt"
         meta_path = provider_root / "meta.json"
 
+        # Pre-create with owner-only perms: MozillaCookieJar.save() opens
+        # the file with open('w'), which truncates in place — so the 0600
+        # mode set here survives and the secret is never world-readable,
+        # even transiently.
+        self._create_private_file(cookie_path)
         jar = http.cookiejar.MozillaCookieJar(str(cookie_path))
         for cookie in cookies:
             jar.set_cookie(
@@ -160,9 +167,12 @@ class BilibiliAuthProvider:
                 for cookie in cookies
             ],
         }
-        meta_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
-        cookie_path.chmod(0o600)
-        meta_path.chmod(0o600)
+        fd = os.open(str(meta_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            # O_CREAT's mode only applies to newly created files; tighten a
+            # pre-existing meta.json before any secret bytes are written.
+            os.fchmod(fd, 0o600)
+            fh.write(json.dumps(metadata, ensure_ascii=False, indent=2))
 
         expires = [int(cookie["expires"]) for cookie in cookies if cookie.get("expires") not in (None, "")]
         metadata["expires_at"] = self._iso_from_epoch(max(expires)) if expires else None
@@ -296,6 +306,17 @@ class BilibiliAuthProvider:
                 }
             )
         return cookies
+
+    @staticmethod
+    def _create_private_file(path: Path) -> None:
+        """Create/truncate *path* with 0600 from the outset (no umask window)."""
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            # O_CREAT's mode only applies to newly created files; tighten a
+            # pre-existing file too.
+            os.fchmod(fd, 0o600)
+        finally:
+            os.close(fd)
 
     @staticmethod
     def _load_cookie_map(cookie_path: Path) -> dict[str, str]:

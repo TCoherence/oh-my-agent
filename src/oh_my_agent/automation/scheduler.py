@@ -304,7 +304,12 @@ class Scheduler:
         return self._timezone_name
 
     def compute_next_run_at(self, job: ScheduledJob) -> datetime | None:
-        """Return the next fire time for *job* from now, or None for interval jobs on first fire."""
+        """Return the next fire time for *job* from now.
+
+        None only when the job defines neither cron nor interval_seconds
+        (interval jobs always get ``now + interval``, including before the
+        first fire).
+        """
         now = self._now()
         if job.cron:
             spec = _parse_cron_expression(job.cron)
@@ -314,8 +319,22 @@ class Scheduler:
         return None
 
     def compute_all_next_run_at(self) -> dict[str, datetime | None]:
-        """Return ``{name: next_fire_dt | None}`` for every *active* job."""
-        return {name: self.compute_next_run_at(job) for name, job in self._jobs_by_name.items()}
+        """Return ``{name: next_fire_dt | None}`` for every *active* job.
+
+        A job whose next fire cannot be computed maps to None instead of
+        propagating — this is called from the manager's reload binding, where
+        one pathological spec must not take down the whole scheduler.
+        """
+        result: dict[str, datetime | None] = {}
+        for name, job in self._jobs_by_name.items():
+            try:
+                result[name] = self.compute_next_run_at(job)
+            except ValueError:
+                logger.exception(
+                    "Scheduler job %r: failed to compute next fire time", name
+                )
+                result[name] = None
+        return result
 
     def list_automations(self) -> list[AutomationRecord]:
         return [self._records_by_name[name] for name in sorted(self._records_by_name)]
@@ -721,14 +740,32 @@ class Scheduler:
             current = asyncio.current_task()
             if self._fire_tasks.get(job.name) is current:
                 self._fire_tasks.pop(job.name, None)
-                if self._job_state.get(job.name) is not None:
+                state = self._job_state.get(job.name)
+                if state is not None:
                     post_now = self._now()
+                    next_fire: datetime | None
                     if pinned_next_fire is not None and pinned_next_fire > post_now:
                         next_fire = pinned_next_fire
                     else:
-                        next_fire = self._compute_next_fire_after_completion(
-                            job, post_now
-                        )
+                        try:
+                            next_fire = self._compute_next_fire_after_completion(
+                                job, post_now
+                            )
+                        except ValueError:
+                            # Must still leave phase="firing" — a raise here
+                            # would wedge the job (due loop, fire_job_now,
+                            # and health checks all skip firing jobs).
+                            logger.exception(
+                                "Scheduler job %r: cannot compute next fire "
+                                "time after completion; job will not "
+                                "auto-fire until its schedule is fixed",
+                                job.name,
+                            )
+                            next_fire = None
+                            # _mark_job_sleeping keeps the prior next_fire_at
+                            # when passed None; clear it explicitly so the due
+                            # loop doesn't re-dispatch the stale (past) time.
+                            state.next_fire_at = None
                     self._mark_job_sleeping(job.name, next_fire_at=next_fire)
                     self._due_loop_wakeup.set()
 
@@ -1024,8 +1061,20 @@ class Scheduler:
         are gone.
         """
         now = self._now()
+        initial_next_fire: datetime | None
         if job.cron:
-            initial_next_fire = self.compute_next_run_at(job)
+            try:
+                initial_next_fire = self.compute_next_run_at(job)
+            except ValueError:
+                # A pathological spec disables only this job: state is kept
+                # (visible to /doctor, manually fireable) but next_fire_at
+                # stays None so the due loop never auto-dispatches it.
+                logger.exception(
+                    "Scheduler job %r: cannot compute next fire time; "
+                    "job will not auto-fire until its schedule is fixed",
+                    job.name,
+                )
+                initial_next_fire = None
         else:
             initial_next_fire = now + timedelta(seconds=job.initial_delay_seconds)
 
@@ -1406,13 +1455,30 @@ def _parse_positive_optional_int(raw: Any, *, field_name: str) -> int | None:
     return value
 
 
+# Maximum length each month can ever reach (February counts leap years).
+_MAX_MONTH_LENGTHS = {
+    1: 31,
+    2: 29,
+    3: 31,
+    4: 30,
+    5: 31,
+    6: 30,
+    7: 31,
+    8: 31,
+    9: 30,
+    10: 31,
+    11: 30,
+    12: 31,
+}
+
+
 def _parse_cron_expression(expr: str) -> _CronSpec:
     parts = expr.split()
     if len(parts) != 5:
         raise ValueError("cron must be a 5-field expression: minute hour day month weekday")
 
     minute, hour, day, month, weekday = parts
-    return _CronSpec(
+    spec = _CronSpec(
         minute=_parse_cron_field(minute, 0, 59),
         hour=_parse_cron_field(hour, 0, 23),
         day=_parse_cron_field(day, 1, 31),
@@ -1421,6 +1487,27 @@ def _parse_cron_expression(expr: str) -> _CronSpec:
         day_wildcard=day.strip() == "*",
         weekday_wildcard=weekday.strip() == "*",
     )
+    _check_cron_feasibility(spec)
+    return spec
+
+
+def _check_cron_feasibility(spec: _CronSpec) -> None:
+    """Reject field-valid specs that can never fire (e.g. ``0 0 31 2 *``).
+
+    Without this, ``_next_cron_fire`` walks its full 5-year search window
+    minute-by-minute on the event loop before raising. Per the vixie
+    day-OR-weekday semantics in ``_matches_cron``, a restricted weekday field
+    can always match on its own (every month contains every weekday), so only
+    the weekday-wildcard / day-restricted shape can be infeasible.
+    """
+    if spec.day_wildcard or not spec.weekday_wildcard:
+        return
+    max_month_len = max(_MAX_MONTH_LENGTHS[m] for m in spec.month)
+    if min(spec.day) > max_month_len:
+        raise ValueError(
+            f"cron day-of-month value(s) {sorted(spec.day)} never occur in "
+            f"month(s) {sorted(spec.month)}"
+        )
 
 
 def _parse_cron_field(

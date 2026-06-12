@@ -1,3 +1,5 @@
+import sqlite3
+
 import pytest
 
 from oh_my_agent.auth.types import AUTH_SCOPE_DEFAULT
@@ -393,3 +395,49 @@ async def test_get_task_statuses_returns_subset(store):
     }
 
     assert await store.get_task_statuses(["ghost-1", "ghost-2"]) == {}
+
+
+@pytest.mark.asyncio
+async def test_add_runtime_event_failure_rolls_back(store):
+    await store.create_runtime_task(
+        task_id="task-evt",
+        platform="discord",
+        channel_id="100",
+        thread_id="100",
+        created_by="u1",
+        goal="x",
+        preferred_agent="codex",
+        status=TASK_STATUS_DRAFT,
+        max_steps=8,
+        max_minutes=20,
+        test_command="pytest",
+    )
+
+    db = await store._conn()  # noqa: SLF001
+    real_execute = db.execute
+    injected = False
+
+    async def failing_execute(sql, *args, **kwargs):
+        nonlocal injected
+        # Fail the INSERT (second statement, after the seq SELECT), once.
+        if not injected and sql.lstrip().startswith("INSERT INTO runtime_task_events"):
+            injected = True
+            raise sqlite3.OperationalError("injected failure")
+        return await real_execute(sql, *args, **kwargs)
+
+    db.execute = failing_execute  # type: ignore[method-assign]
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="injected failure"):
+            await store.add_runtime_event("task-evt", "task.created", {"n": 1})
+    finally:
+        db.execute = real_execute  # type: ignore[method-assign]
+
+    # Rolled back: no event row, no open transaction left on the shared
+    # connection for the next writer to commit.
+    assert not db.in_transaction
+    assert await store.list_runtime_events("task-evt") == []
+
+    await store.add_runtime_event("task-evt", "task.created", {"n": 2})
+    events = await store.list_runtime_events("task-evt")
+    assert [e["seq"] for e in events] == [1]
+    assert events[0]["payload"] == {"n": 2}

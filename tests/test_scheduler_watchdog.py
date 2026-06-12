@@ -744,3 +744,79 @@ async def test_compute_job_next_run_at_uses_cron(tmp_path):
     assert next_fire is not None
     assert next_fire.minute == 30
     assert next_fire.hour == 9
+
+
+# ----------------------------------------------------------------------
+# Pathological cron specs must disable only the affected job
+# ----------------------------------------------------------------------
+
+
+def _inject_bad_cron_job(scheduler: Scheduler, name: str = "bad") -> None:
+    # Bypass file validation (which rejects infeasible crons at parse time)
+    # to prove the runtime guards hold for specs that slip past parsing.
+    scheduler._jobs_by_name[name] = ScheduledJob(
+        name=name,
+        platform="discord",
+        channel_id="100",
+        prompt="x",
+        cron="0 0 31 2 *",
+    )
+
+
+@pytest.mark.asyncio
+async def test_start_job_with_uncomputable_cron_disables_only_that_job(tmp_path, caplog):
+    """run()'s startup loop survives a bad spec; sibling jobs still fire."""
+    _seed_interval_job(tmp_path, "good", interval_seconds=1, initial_delay_seconds=0)
+    scheduler = _mk_scheduler(tmp_path, due_loop_max_tick_seconds=0.05)
+    _inject_bad_cron_job(scheduler)
+    fired = asyncio.Event()
+
+    async def on_fire(job: ScheduledJob) -> None:
+        if job.name == "good":
+            fired.set()
+
+    run_task = asyncio.create_task(scheduler.run(on_fire))
+    try:
+        await asyncio.wait_for(fired.wait(), timeout=2.0)
+        bad_state = scheduler._job_state["bad"]
+        assert bad_state.phase == "sleeping"
+        assert bad_state.next_fire_at is None  # never auto-dispatched
+        assert "cannot compute next fire time" in caplog.text
+    finally:
+        await _stop(scheduler, run_task)
+
+
+@pytest.mark.asyncio
+async def test_fire_completion_with_uncomputable_cron_does_not_wedge_job(tmp_path, caplog):
+    """A raise in the post-fire recompute must not leave phase='firing'."""
+    scheduler = _mk_scheduler(tmp_path, due_loop_max_tick_seconds=0.05)
+    _inject_bad_cron_job(scheduler)
+    fired = asyncio.Event()
+
+    async def on_fire(job: ScheduledJob) -> None:
+        fired.set()
+
+    run_task = asyncio.create_task(scheduler.run(on_fire))
+    try:
+        await asyncio.sleep(0.1)
+        assert await scheduler.fire_job_now("bad") == "ok"
+        await asyncio.wait_for(fired.wait(), timeout=1.0)
+
+        # Let the fire task's finally block run.
+        deadline = asyncio.get_event_loop().time() + 1.0
+        while (
+            scheduler._job_state["bad"].phase == "firing"
+            and asyncio.get_event_loop().time() < deadline
+        ):
+            await asyncio.sleep(0.02)
+
+        state = scheduler._job_state["bad"]
+        assert state.phase == "sleeping", "job must not wedge in phase='firing'"
+        # Cleared, not left at a stale past time — otherwise the due loop
+        # would re-dispatch in a tight loop.
+        assert state.next_fire_at is None
+        assert "cannot compute next fire" in caplog.text
+        # Still manually fireable — the job is disabled, not wedged.
+        assert await scheduler.fire_job_now("bad") == "ok"
+    finally:
+        await _stop(scheduler, run_task)

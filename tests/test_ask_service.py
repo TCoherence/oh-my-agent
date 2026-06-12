@@ -62,3 +62,45 @@ async def test_list_agents_returns_fallback_order():
     assert result.success is True
     assert "`claude`" in result.message
     assert "`codex`" in result.message
+
+
+class _ResumeAgentStub:
+    name = "claude"
+
+    def __init__(self):
+        self._sessions = {"thread-1": "sess-abc"}
+
+    def get_session_id(self, thread_id: str):
+        return self._sessions.get(thread_id)
+
+    def clear_session(self, thread_id: str) -> None:
+        self._sessions.pop(thread_id, None)
+
+
+@pytest.mark.asyncio
+async def test_reset_history_clears_in_memory_agent_sessions():
+    """A cached CLI session id must not survive /reset — otherwise the next
+    message resumes the conversation the user just cleared."""
+    service = AskService()
+    session = _SessionStub()
+    agent = _ResumeAgentStub()
+    registry = _RegistryStub()
+    registry.agents = [agent]
+
+    result = await service.reset_history(session, "thread-1", registry)
+
+    assert result.success is True
+    assert session.cleared == ["thread-1"]
+    assert agent.get_session_id("thread-1") is None
+
+
+@pytest.mark.asyncio
+async def test_reset_history_tolerates_agents_without_clear_session():
+    service = AskService()
+    session = _SessionStub()
+    registry = _RegistryStub()  # agents expose no clear_session
+
+    result = await service.reset_history(session, "thread-1", registry)
+
+    assert result.success is True
+    assert session.cleared == ["thread-1"]

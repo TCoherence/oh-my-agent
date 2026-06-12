@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -33,6 +34,10 @@ class ChannelSession:
 
     # In-memory cache: thread_id → list of turns
     _cache: dict[str, list[dict]] = field(default_factory=dict)
+    # Per-thread load locks so two concurrent first-touches don't both load
+    # and orphan one of the cached lists (turns appended to the loser would
+    # silently vanish from the in-memory view).
+    _load_locks: dict[str, asyncio.Lock] = field(default_factory=dict)
 
     async def get_history(self, thread_id: str) -> list[dict]:
         """Return the conversation history for *thread_id*.
@@ -42,15 +47,26 @@ class ChannelSession:
         if thread_id in self._cache:
             return self._cache[thread_id]
 
-        if self.memory_store:
-            turns = await self.memory_store.load_history(
-                self.platform, self.channel_id, thread_id,
-            )
-            self._cache[thread_id] = turns
-            return turns
+        lock = self._load_locks.setdefault(thread_id, asyncio.Lock())
+        async with lock:
+            # Double-checked: a concurrent first-touch may have loaded while
+            # we waited on the lock.
+            if thread_id in self._cache:
+                return self._cache[thread_id]
 
-        self._cache[thread_id] = []
-        return self._cache[thread_id]
+            if self.memory_store:
+                turns = await self.memory_store.load_history(
+                    self.platform, self.channel_id, thread_id,
+                )
+                self._cache[thread_id] = turns
+                return turns
+
+            self._cache[thread_id] = []
+            return self._cache[thread_id]
+
+    def invalidate(self, thread_id: str) -> None:
+        """Drop the cached history so the next read reloads from the store."""
+        self._cache.pop(thread_id, None)
 
     async def append_user(
         self,
