@@ -227,6 +227,18 @@ async def test_skill_auto_disabled_persists_without_existing_provenance(store):
 
 
 @pytest.mark.asyncio
+async def test_skill_override_roundtrip(store):
+    assert await store.list_manual_disabled_skills() == set()
+
+    await store.set_skill_override("weather", enabled=False)
+    assert await store.list_manual_disabled_skills() == {"weather"}
+
+    # Re-enable flips the same row back; only enabled=0 rows are reported.
+    await store.set_skill_override("weather", enabled=True)
+    assert await store.list_manual_disabled_skills() == set()
+
+
+@pytest.mark.asyncio
 async def test_skill_evaluations_return_latest_per_type(store):
     await store.add_skill_evaluation(
         skill_name="weather",

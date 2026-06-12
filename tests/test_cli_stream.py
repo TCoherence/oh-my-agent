@@ -4,10 +4,22 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import os
+import sys
+import time
+from pathlib import Path
 
 import pytest
 
-from oh_my_agent.agents.cli.base import BaseCLIAgent, _stream_cli_lines
+from oh_my_agent.agents.cli.base import (
+    _STREAM_LINE_LIMIT,
+    BaseCLIAgent,
+    _bounded_log_excerpt,
+    _drain_oversized_line,
+    _stream_cli_lines,
+    _stream_cli_process,
+)
 from oh_my_agent.agents.cli.claude import ClaudeAgent
 from oh_my_agent.agents.cli.codex import CodexCLIAgent
 from oh_my_agent.agents.events import (
@@ -277,3 +289,149 @@ def test_codex_parse_stream_line_turn_completed_usage() -> None:
     events = agent._parse_stream_line(line)
     assert len(events) == 1 and isinstance(events[0], UsageEvent)
     assert events[0].cache_read_input_tokens == 3
+
+
+# ---------------------------------------------------------------------------
+# Oversized stream-json lines (StreamReader limit)
+# ---------------------------------------------------------------------------
+
+_TEST_ENV = {"PATH": "/usr/bin:/bin:/usr/local/bin"}
+
+
+@pytest.mark.asyncio
+async def test_stream_cli_lines_survives_line_over_64kib() -> None:
+    # A single stream-json tool_result frame routinely exceeds asyncio's
+    # default 64 KiB StreamReader limit. With the raised limit the pump must
+    # deliver the line intact and keep streaming subsequent lines.
+    big_len = 256 * 1024
+    code = f"print('x' * {big_len}); print('after')"
+    items: list[tuple[str, str]] = []
+    async for frame in _stream_cli_lines(
+        sys.executable, "-c", code,
+        cwd=None,
+        env=_TEST_ENV,
+        timeout=15,
+    ):
+        items.append(frame)
+    stdout_lines = [text for label, text in items if label == "stdout"]
+    assert stdout_lines == ["x" * big_len, "after"]
+
+
+@pytest.mark.asyncio
+async def test_stream_cli_lines_truncates_line_over_limit_and_keeps_pumping(caplog) -> None:
+    # Lines beyond _STREAM_LINE_LIMIT are salvaged (truncated to the cap) with
+    # a warning, and the pump keeps going instead of dying silently.
+    big_len = _STREAM_LINE_LIMIT + 64 * 1024
+    code = f"print('y' * {big_len}); print('after')"
+    items: list[tuple[str, str]] = []
+    with caplog.at_level(logging.WARNING, logger="oh_my_agent.agents.cli.base"):
+        async for frame in _stream_cli_lines(
+            sys.executable, "-c", code,
+            cwd=None,
+            env=_TEST_ENV,
+            timeout=30,
+        ):
+            items.append(frame)
+    stdout_lines = [text for label, text in items if label == "stdout"]
+    assert len(stdout_lines) == 2
+    assert stdout_lines[0] == "y" * _STREAM_LINE_LIMIT
+    assert stdout_lines[1] == "after"
+    assert any("truncated" in rec.getMessage() for rec in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_drain_oversized_line_salvages_full_line_and_keeps_alignment() -> None:
+    reader = asyncio.StreamReader(limit=16)
+    reader.feed_data(b"A" * 64 + b"\nnext\n")
+    reader.feed_eof()
+    with pytest.raises(asyncio.LimitOverrunError):
+        await reader.readuntil(b"\n")
+    kept, dropped = await _drain_oversized_line(reader, max_keep=1024)
+    assert kept == b"A" * 64 + b"\n"
+    assert dropped == 0
+    # The following line is untouched — stream stays aligned.
+    assert await reader.readuntil(b"\n") == b"next\n"
+
+
+@pytest.mark.asyncio
+async def test_drain_oversized_line_truncates_beyond_cap() -> None:
+    reader = asyncio.StreamReader(limit=16)
+    reader.feed_data(b"B" * 64 + b"\nnext\n")
+    reader.feed_eof()
+    with pytest.raises(asyncio.LimitOverrunError):
+        await reader.readuntil(b"\n")
+    kept, dropped = await _drain_oversized_line(reader, max_keep=10)
+    assert kept == b"B" * 10
+    assert dropped == 55  # 54 remaining B's + the newline
+    assert await reader.readuntil(b"\n") == b"next\n"
+
+
+# ---------------------------------------------------------------------------
+# Process-group kill on timeout (grandchild reaping)
+# ---------------------------------------------------------------------------
+
+
+async def _wait_process_gone(pid: int, deadline_s: float = 5.0) -> bool:
+    """Poll until ``pid`` no longer exists (covers the zombie-reap window)."""
+    end = time.monotonic() + deadline_s
+    while time.monotonic() < end:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        await asyncio.sleep(0.05)
+    return False
+
+
+@pytest.mark.asyncio
+async def test_stream_cli_lines_timeout_kills_grandchildren(tmp_path: Path) -> None:
+    pid_file = tmp_path / "grandchild.pid"
+    script = f'sleep 30 & echo $! > "{pid_file}"; wait'
+    with pytest.raises(asyncio.TimeoutError):
+        async for _ in _stream_cli_lines(
+            "sh", "-c", script,
+            cwd=None,
+            env=_TEST_ENV,
+            timeout=1,
+        ):
+            pass
+    pid = int(pid_file.read_text().strip())
+    assert await _wait_process_gone(pid), f"grandchild {pid} survived the timeout kill"
+
+
+@pytest.mark.asyncio
+async def test_stream_cli_process_timeout_kills_grandchildren(tmp_path: Path) -> None:
+    pid_file = tmp_path / "grandchild.pid"
+    script = f'sleep 30 & echo $! > "{pid_file}"; wait'
+    with pytest.raises(asyncio.TimeoutError):
+        await _stream_cli_process(
+            "sh", "-c", script,
+            cwd=None,
+            env=_TEST_ENV,
+            timeout=1,
+        )
+    pid = int(pid_file.read_text().strip())
+    assert await _wait_process_gone(pid), f"grandchild {pid} survived the timeout kill"
+
+
+# ---------------------------------------------------------------------------
+# _bounded_log_excerpt tail reads
+# ---------------------------------------------------------------------------
+
+
+def test_bounded_log_excerpt_reads_tail_of_large_file(tmp_path: Path) -> None:
+    log = tmp_path / "stream.log"
+    # Well beyond the 8 KiB seek window so only the tail may be read.
+    content = ("head-" * 20000) + "TAIL-MARKER-" + ("z" * 500)
+    log.write_text(content, encoding="utf-8")
+    excerpt = _bounded_log_excerpt(log)
+    assert excerpt == content[-2000:]
+    assert excerpt.endswith("z" * 500)
+
+
+def test_bounded_log_excerpt_small_file_and_missing(tmp_path: Path) -> None:
+    log = tmp_path / "small.log"
+    log.write_text("  hello tail  \n", encoding="utf-8")
+    assert _bounded_log_excerpt(log) == "hello tail"
+    assert _bounded_log_excerpt(tmp_path / "missing.log") is None
+    assert _bounded_log_excerpt(None) is None

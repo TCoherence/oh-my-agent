@@ -1,6 +1,9 @@
 """Covers WorktreeManager create/success/error paths with a real-but-isolated git repo."""
 from __future__ import annotations
 
+import asyncio
+import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -66,6 +69,35 @@ async def test_changed_files_detects_new_and_modified(manager):
     files = await manager.changed_files(workspace)
     assert "new.txt" in files
     assert "README.md" in files
+
+
+@pytest.mark.asyncio
+async def test_changed_files_returns_literal_paths_for_space_and_unicode(manager):
+    """Regression: the non-z porcelain format C-quotes paths with spaces or
+    non-ASCII (e.g. "\\344\\270\\255.txt"), breaking downstream path guards.
+    -z mode emits paths literally."""
+    workspace = await manager.ensure_worktree("task-quoted")
+    (workspace / "with space.txt").write_text("x\n")
+    (workspace / "中文文件.txt").write_text("y\n")
+    files = await manager.changed_files(workspace)
+    assert "with space.txt" in files
+    assert "中文文件.txt" in files
+    # No C-quoted artifacts left over.
+    assert not any(f.startswith('"') for f in files)
+
+
+@pytest.mark.asyncio
+async def test_changed_files_rename_reports_new_path_only(manager):
+    """In -z mode a rename entry carries the NEW path; the OLD path follows as
+    the next NUL record and must be consumed, not reported as a change."""
+    workspace = await manager.ensure_worktree("task-renamed")
+    _git("mv", "README.md", "renamed doc.md", cwd=workspace)
+    (workspace / "extra.txt").write_text("z\n")
+    files = await manager.changed_files(workspace)
+    assert "renamed doc.md" in files
+    assert "README.md" not in files
+    # The record after the rename pair must still be parsed correctly.
+    assert "extra.txt" in files
 
 
 @pytest.mark.asyncio
@@ -145,6 +177,119 @@ async def test_run_shell_times_out(manager):
         workspace, "sleep 5", timeout_seconds=0.2
     )
     assert timed_out is True
+
+
+async def _assert_pid_gone(pid: int, attempts: int = 60) -> None:
+    """Poll until ``pid`` no longer exists (psutil-free liveness check).
+
+    ``os.kill(pid, 0)`` succeeds for zombies, so allow a short retry window
+    for the reparented child to be reaped after the group kill.
+    """
+    for _ in range(attempts):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        await asyncio.sleep(0.1)
+    pytest.fail(f"process {pid} is still alive")
+
+
+@pytest.mark.asyncio
+async def test_run_shell_timeout_kills_whole_process_group(manager):
+    """Regression: a grandchild spawned by the shell inherits the output pipes;
+    a bare proc.kill() left it alive and the post-kill communicate() hung until
+    the grandchild exited. The group kill must reach it, so run_shell returns
+    well within the grace window and the grandchild is dead."""
+    workspace = await manager.ensure_worktree("task-group-kill")
+    loop = asyncio.get_running_loop()
+    start = loop.time()
+    rc, stdout, _, timed_out = await asyncio.wait_for(
+        manager.run_shell(
+            workspace,
+            "sleep 30 & echo started-$!; wait",
+            timeout_seconds=0.3,
+        ),
+        timeout=8.0,
+    )
+    assert timed_out is True
+    assert loop.time() - start < 7.0  # never waits out the 30s sleep
+    # Group kill closes the pipes promptly, so buffered output survives.
+    match = re.search(r"started-(\d+)", stdout)
+    assert match is not None, f"expected child pid marker in stdout, got {stdout!r}"
+    await _assert_pid_gone(int(match.group(1)))
+
+
+@pytest.mark.asyncio
+async def test_run_shell_should_cancel_returns_promptly_not_timed_out(manager):
+    workspace = await manager.ensure_worktree("task-cancel-probe")
+    calls: list[str] = []
+
+    async def on_hb(elapsed: float) -> None:
+        calls.append("heartbeat")
+
+    async def probe() -> bool:
+        calls.append("should_cancel")
+        return True
+
+    loop = asyncio.get_running_loop()
+    start = loop.time()
+    rc, _, _, timed_out = await asyncio.wait_for(
+        manager.run_shell(
+            workspace,
+            "sleep 30",
+            heartbeat_seconds=0.1,
+            on_heartbeat=on_hb,
+            should_cancel=probe,
+        ),
+        timeout=8.0,
+    )
+    assert timed_out is False
+    assert rc != 0  # killed, not a clean exit
+    assert loop.time() - start < 7.0
+    # Contract: probed after on_heartbeat so progress is still recorded.
+    assert calls[:2] == ["heartbeat", "should_cancel"]
+
+
+@pytest.mark.asyncio
+async def test_run_shell_should_cancel_exception_treated_as_false(manager):
+    workspace = await manager.ensure_worktree("task-cancel-raise")
+
+    async def broken() -> bool:
+        raise RuntimeError("probe exploded")
+
+    rc, stdout, _, timed_out = await manager.run_shell(
+        workspace,
+        "sleep 0.3; echo done",
+        heartbeat_seconds=0.1,
+        should_cancel=broken,
+    )
+    assert rc == 0
+    assert "done" in stdout
+    assert timed_out is False
+
+
+@pytest.mark.asyncio
+async def test_run_shell_cancellation_kills_subprocess(manager, tmp_path):
+    """Regression: cancelling the task awaiting run_shell (runtime shutdown)
+    used to leak the subprocess — asyncio.shield kept it running unsupervised.
+    Cancellation must group-kill the process before CancelledError propagates."""
+    workspace = await manager.ensure_worktree("task-await-cancel")
+    pid_file = tmp_path / "pid.txt"
+    task = asyncio.create_task(
+        manager.run_shell(workspace, f"echo $$ > '{pid_file}'; sleep 30")
+    )
+    for _ in range(100):
+        if pid_file.exists() and pid_file.read_text().strip():
+            break
+        await asyncio.sleep(0.05)
+    else:
+        pytest.fail("subprocess never wrote its pid")
+    pid = int(pid_file.read_text().strip())
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=8.0)
+    await _assert_pid_gone(pid)
 
 
 @pytest.mark.asyncio

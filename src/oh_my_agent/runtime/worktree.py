@@ -1,9 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import logging
+import os
 import shutil
+import signal
+from collections.abc import Awaitable, Callable
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+# Bounded grace window for draining communicate() after a kill. A grandchild
+# that escaped the kill (or a wedged pipe) must never block a runtime worker
+# forever — after this window we abandon the pipes and return what we have.
+_KILL_GRACE_SECONDS = 5.0
 
 
 class WorktreeError(RuntimeError):
@@ -52,17 +64,70 @@ class WorktreeManager:
         return workspace
 
     async def changed_files(self, workspace: Path) -> list[str]:
-        out = await self._run_git("-C", str(workspace), "status", "--porcelain")
+        # ``-z``: NUL-separated records with paths emitted literally — the
+        # default format C-quotes paths containing spaces / non-ASCII
+        # (e.g. ``"\344\270\255.txt"``), which broke downstream path guards.
+        out = await self._run_git("-C", str(workspace), "status", "--porcelain", "-z")
         files: list[str] = []
-        for line in out.splitlines():
-            if not line.strip():
+        records = iter(out.split("\0"))
+        for record in records:
+            if not record:
                 continue
-            # Format: XY <path> or XY <old> -> <new>
-            raw_path = line[3:].strip()
-            if " -> " in raw_path:
-                raw_path = raw_path.split(" -> ", 1)[1]
-            files.append(raw_path)
+            # Record format: "XY <path>". For rename/copy entries the entry
+            # path is the NEW path; the ORIGINAL path follows as the next
+            # NUL-separated record (no "old -> new" in -z mode).
+            status, path = record[:2], record[3:]
+            files.append(path)
+            if "R" in status or "C" in status:
+                next(records, None)
         return files
+
+    @staticmethod
+    def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
+        """SIGKILL the subprocess's whole process group.
+
+        The subprocess is spawned with ``start_new_session=True`` so its pid
+        doubles as the pgid. A bare ``proc.kill()`` only hits the shell —
+        grandchildren survive holding the stdout/stderr pipes open, which
+        makes the post-kill ``communicate()`` hang until they exit.
+        """
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+            return
+        except ProcessLookupError:
+            # Already exited in the check/kill race window.
+            return
+        except OSError:
+            pass
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+
+    async def _kill_and_drain(
+        self,
+        proc: asyncio.subprocess.Process,
+        communicate_task: asyncio.Task[tuple[bytes, bytes]],
+    ) -> tuple[bytes, bytes]:
+        """Group-kill, then drain ``communicate()`` within a bounded grace
+        window. Returns whatever output was captured — empty on a wedged
+        pipe, so the caller never blocks forever.
+        """
+        self._kill_process_group(proc)
+        try:
+            return await asyncio.wait_for(communicate_task, timeout=_KILL_GRACE_SECONDS)
+        except asyncio.TimeoutError:
+            # wait_for already cancelled communicate_task; abandon the pipes.
+            return b"", b""
+
+    @staticmethod
+    async def _check_should_cancel(should_cancel: Callable[[], Awaitable[bool]]) -> bool:
+        try:
+            return bool(await should_cancel())
+        except Exception:
+            # A broken cancel probe must not take the shell run down with it.
+            logger.exception("run_shell should_cancel probe raised; treating as False")
+            return False
 
     async def run_shell(
         self,
@@ -71,58 +136,89 @@ class WorktreeManager:
         *,
         timeout_seconds: float | None = None,
         heartbeat_seconds: float | None = None,
-        on_heartbeat=None,
+        on_heartbeat: Callable[[float], Awaitable[None]] | None = None,
+        should_cancel: Callable[[], Awaitable[bool]] | None = None,
     ) -> tuple[int, str, str, bool]:
+        """Run ``command`` in ``workspace``; returns
+        ``(returncode, stdout, stderr, timed_out)``.
+
+        ``should_cancel`` is polled once per heartbeat wakeup (after
+        ``on_heartbeat``, so progress is still recorded); when it returns
+        True the process group is killed and the normal 4-tuple is returned
+        with ``timed_out=False``. Note it is only ever polled when a wakeup
+        exists, i.e. ``heartbeat_seconds`` and/or ``timeout_seconds`` is set.
+        """
         proc = await asyncio.create_subprocess_shell(
             command,
             cwd=str(workspace),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
         )
         communicate_task = asyncio.create_task(proc.communicate())
         started = asyncio.get_running_loop().time()
         interval = heartbeat_seconds if heartbeat_seconds and heartbeat_seconds > 0 else None
 
-        while True:
-            now = asyncio.get_running_loop().time()
-            wait_timeout = interval
-            if timeout_seconds is not None:
-                remaining = float(timeout_seconds) - (now - started)
-                if remaining <= 0:
-                    proc.kill()
-                    stdout, stderr = await communicate_task
-                    return (
-                        proc.returncode if proc.returncode is not None else -1,
-                        stdout.decode(errors="replace"),
-                        stderr.decode(errors="replace"),
-                        True,
+        try:
+            while True:
+                now = asyncio.get_running_loop().time()
+                wait_timeout = interval
+                if timeout_seconds is not None:
+                    remaining = float(timeout_seconds) - (now - started)
+                    if remaining <= 0:
+                        stdout, stderr = await self._kill_and_drain(proc, communicate_task)
+                        return (
+                            proc.returncode if proc.returncode is not None else -1,
+                            stdout.decode(errors="replace"),
+                            stderr.decode(errors="replace"),
+                            True,
+                        )
+                    wait_timeout = (
+                        remaining if wait_timeout is None else min(wait_timeout, remaining)
                     )
-                wait_timeout = remaining if wait_timeout is None else min(wait_timeout, remaining)
 
-            try:
-                stdout, stderr = await asyncio.wait_for(
-                    asyncio.shield(communicate_task),
-                    timeout=wait_timeout,
-                )
-                return (
-                    proc.returncode if proc.returncode is not None else -1,
-                    stdout.decode(errors="replace"),
-                    stderr.decode(errors="replace"),
-                    False,
-                )
-            except asyncio.TimeoutError:
-                elapsed = asyncio.get_running_loop().time() - started
-                if timeout_seconds is not None and elapsed >= float(timeout_seconds):
-                    proc.kill()
-                    stdout, stderr = await communicate_task
+                try:
+                    stdout, stderr = await asyncio.wait_for(
+                        asyncio.shield(communicate_task),
+                        timeout=wait_timeout,
+                    )
                     return (
                         proc.returncode if proc.returncode is not None else -1,
                         stdout.decode(errors="replace"),
                         stderr.decode(errors="replace"),
-                        True,
+                        False,
                     )
-                if on_heartbeat is not None:
-                    await on_heartbeat(elapsed)
+                except asyncio.TimeoutError:
+                    elapsed = asyncio.get_running_loop().time() - started
+                    if timeout_seconds is not None and elapsed >= float(timeout_seconds):
+                        stdout, stderr = await self._kill_and_drain(proc, communicate_task)
+                        return (
+                            proc.returncode if proc.returncode is not None else -1,
+                            stdout.decode(errors="replace"),
+                            stderr.decode(errors="replace"),
+                            True,
+                        )
+                    if on_heartbeat is not None:
+                        await on_heartbeat(elapsed)
+                    if should_cancel is not None and await self._check_should_cancel(
+                        should_cancel
+                    ):
+                        stdout, stderr = await self._kill_and_drain(proc, communicate_task)
+                        return (
+                            proc.returncode if proc.returncode is not None else -1,
+                            stdout.decode(errors="replace"),
+                            stderr.decode(errors="replace"),
+                            False,
+                        )
+        except asyncio.CancelledError:
+            # Worker cancellation (e.g. runtime shutdown) lands here: the
+            # shield() above keeps the subprocess alive unsupervised, so kill
+            # the group and bound the drain before propagating.
+            self._kill_process_group(proc)
+            communicate_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
+                await asyncio.wait_for(communicate_task, timeout=_KILL_GRACE_SECONDS)
+            raise
 
     async def repo_is_clean(self) -> bool:
         out = await self._run_git("-C", str(self._repo_root), "status", "--porcelain")

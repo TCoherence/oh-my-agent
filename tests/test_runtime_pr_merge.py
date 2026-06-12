@@ -23,6 +23,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from oh_my_agent.agents.base import AgentResponse, BaseAgent
+from oh_my_agent.agents.registry import AgentRegistry
+from oh_my_agent.gateway.session import ChannelSession
 from oh_my_agent.memory.store import SQLiteMemoryStore
 from oh_my_agent.runtime import (
     TASK_STATUS_DRAFT,
@@ -343,6 +346,96 @@ async def test_pr_metadata_persists_and_reloads(tmp_path: Path):
     assert reloaded.pr_url == "https://github.com/x/y/pull/99"
     assert reloaded.pr_number == 99
     await store.close()
+
+
+# ── PR_OPENED epilogue: terminal notify + notification resolve ── #
+
+
+class _NoopAgent(BaseAgent):
+    @property
+    def name(self) -> str:
+        return "noop"
+
+    async def run(self, prompt: str, history: list[dict] | None = None) -> AgentResponse:
+        del prompt, history
+        return AgentResponse(text="ok")
+
+
+class _MiniChannel:
+    def __init__(self) -> None:
+        self.sent: list[tuple[str, str]] = []
+
+    async def send(self, thread_id: str, text: str) -> str:
+        self.sent.append((thread_id, text))
+        return f"m-{len(self.sent)}"
+
+
+@pytest.mark.asyncio
+async def test_pr_merge_success_notifies_and_resolves_waiting_merge(pr_runtime):
+    """The PR_OPENED success path must mirror _execute_merge's epilogue:
+    send a terminal notify and resolve the task_waiting_merge notification
+    (previously both were skipped, leaving a stale action-required ping)."""
+
+    runtime: RuntimeService = pr_runtime["runtime"]
+    store: SQLiteMemoryStore = pr_runtime["store"]
+
+    channel = _MiniChannel()
+    registry = AgentRegistry([_NoopAgent()])
+    session = ChannelSession(
+        platform="discord",
+        channel_id="100",
+        channel=channel,
+        registry=registry,
+    )
+    runtime.register_session(session, registry)
+
+    workspace = pr_runtime["tmp"] / "worktrees" / "task-pr-1"
+    workspace.mkdir(parents=True)
+    task_id = await _seed_waiting_merge(store, workspace=workspace)
+
+    dedupe_key = f"task:{task_id}:waiting_merge"
+    await store.create_notification_event(
+        notification_id="n-wm-1",
+        kind="task_waiting_merge",
+        status="active",
+        platform="discord",
+        channel_id="100",
+        thread_id="t1",
+        task_id=task_id,
+        owner_user_id="owner-1",
+        dedupe_key=dedupe_key,
+        title="Action required",
+        body="waiting merge",
+        payload_json={},
+        thread_message_id=None,
+        dm_message_id=None,
+    )
+    assert await store.list_active_notification_events(dedupe_key=dedupe_key, limit=10)
+
+    wt = runtime._worktree  # noqa: SLF001
+    wt.check_gh_ready = AsyncMock(return_value=(True, "gh ready"))
+    wt.check_remote_configured = AsyncMock(return_value=(True, "https://github.com/x/y.git"))
+    wt.workspace_has_dirty_or_new_commits = AsyncMock(return_value=False)
+    wt.fetch_base_ref = AsyncMock(return_value=None)
+    wt.has_diff_vs_base = AsyncMock(return_value=True)
+    wt.push_task_branch = AsyncMock(return_value=None)
+    wt.create_pr = AsyncMock(return_value=("https://github.com/x/y/pull/7", 7))
+
+    task = await store.get_runtime_task(task_id)
+    assert task is not None
+    result = await runtime._execute_merge_pr(  # noqa: SLF001
+        task, actor_id="owner-1", source="slash"
+    )
+    assert "opened PR" in result
+
+    updated = await store.get_runtime_task(task_id)
+    assert updated is not None
+    assert updated.status == TASK_STATUS_PR_OPENED
+
+    # Terminal notify reached the channel with the PR URL.
+    assert any("https://github.com/x/y/pull/7" in text for _, text in channel.sent)
+    # The waiting_merge action-required notification is resolved.
+    assert await store.list_active_notification_events(dedupe_key=dedupe_key, limit=10) == []
 
 
 # ── skill auto-merge disabled in PR mode ───────────────────── #
