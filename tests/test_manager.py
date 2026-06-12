@@ -1,5 +1,6 @@
 import asyncio
 import sqlite3
+import time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -7,7 +8,7 @@ import pytest
 
 from oh_my_agent.agents.base import AgentResponse, BaseAgent
 from oh_my_agent.agents.registry import AgentRegistry
-from oh_my_agent.automation import ScheduledJob
+from oh_my_agent.automation import DumpChannelConfig, ScheduledJob, Scheduler
 from oh_my_agent.gateway.base import IncomingMessage
 from oh_my_agent.gateway.manager import GatewayManager
 from oh_my_agent.gateway.router import RouteDecision
@@ -2434,3 +2435,156 @@ async def test_handle_message_compression_task_is_tracked_and_drained():
     )
     await gm.stop()
     assert compressed.is_set()
+
+
+# ---------------------------------------------------------------------------
+# Review-batch3 perf/robustness fixes
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_resolve_short_workspace_serializes_concurrent_base_refresh(tmp_path):
+    """Two concurrent messages must trigger exactly one base-workspace
+    refresh (lock + re-check), never two overlapping copytrees."""
+    base = tmp_path / "base-workspace"
+
+    class _CountingSyncer:
+        def __init__(self) -> None:
+            self.refresh_calls = 0
+            self._fresh = False
+
+        def workspace_needs_refresh(self, root):
+            return not self._fresh
+
+        def refresh_workspace(self, root, **kwargs):
+            self.refresh_calls += 1
+            time.sleep(0.05)  # widen the race window across to_thread workers
+            root.mkdir(parents=True, exist_ok=True)
+            (root / "AGENTS.md").write_text("# agents\n", encoding="utf-8")
+            self._fresh = True
+
+    syncer = _CountingSyncer()
+    gm = GatewayManager(
+        [],
+        skill_syncer=syncer,
+        short_workspace={
+            "enabled": True,
+            "root": str(tmp_path / "sessions"),
+            "base_workspace": str(base),
+        },
+    )
+    session = _make_session()
+
+    results = await asyncio.gather(
+        gm._resolve_short_workspace(session, "thread-a"),
+        gm._resolve_short_workspace(session, "thread-b"),
+    )
+
+    assert all(ws is not None and ws.exists() for ws in results)
+    assert syncer.refresh_calls == 1
+    for ws in results:
+        assert (ws / "AGENTS.md").is_symlink()
+
+
+@pytest.mark.asyncio
+async def test_run_memory_judge_marks_judged_with_pre_run_watermark():
+    """The idle watermark is snapshotted BEFORE the judge LLM run and passed
+    as observed_ts — a message arriving mid-judge re-arms the idle timer
+    instead of being silently never-judged."""
+
+    class _FakeIdleTracker:
+        def __init__(self) -> None:
+            self.now_ts = 111.0
+            self.marked: list[tuple[str, float | None]] = []
+            self._on_fire = None
+
+        def last_message_ts(self, thread_key):
+            return self.now_ts
+
+        def mark_judged(self, thread_key, *, observed_ts=None):
+            self.marked.append((thread_key, observed_ts))
+
+        async def touch(self, thread_key, *, metadata=None):
+            self.now_ts = time.time()
+
+    tracker = _FakeIdleTracker()
+    judge_store = MagicMock()
+    judge_store.should_synthesize.return_value = False
+
+    judge_result = MagicMock(actions=[], stats={}, error=None)
+    judge = MagicMock()
+
+    async def _judge_run(**kwargs):
+        tracker.now_ts = 222.0  # simulate a message landing mid-judge
+        return judge_result
+
+    judge.run = _judge_run
+
+    gm = GatewayManager([], judge_store=judge_store, judge=judge, idle_tracker=tracker)
+    session = _make_session()
+
+    result = await gm._run_memory_judge(
+        session=session,
+        registry=MagicMock(spec=AgentRegistry),
+        thread_id="t1",
+        skill_name=None,
+        source_workspace=None,
+        req_id=None,
+        explicit_summary=None,
+        explicit_scope=None,
+    )
+
+    assert result is not None
+    assert tracker.marked == [("discord|100|t1", 111.0)]
+
+
+@pytest.mark.asyncio
+async def test_memory_md_synth_is_single_flight():
+    synth_calls = 0
+    release = asyncio.Event()
+
+    class _Store:
+        def should_synthesize(self):
+            return True
+
+        async def synthesize_memory_md(self, registry):
+            nonlocal synth_calls
+            synth_calls += 1
+            await release.wait()
+
+    gm = GatewayManager([], judge_store=_Store())
+    registry = MagicMock(spec=AgentRegistry)
+
+    gm._spawn_memory_md_synth(registry)
+    await asyncio.sleep(0)  # let the first task enter synthesize_memory_md
+    gm._spawn_memory_md_synth(registry)  # in-flight → skipped
+    gm._spawn_memory_md_synth(registry)  # still in-flight → skipped
+    release.set()
+    await asyncio.gather(*gm._fire_and_forget_tasks)
+    assert synth_calls == 1
+
+    # Once the in-flight task finishes, the next trigger runs again.
+    gm._spawn_memory_md_synth(registry)
+    await asyncio.gather(*gm._fire_and_forget_tasks)
+    assert synth_calls == 2
+
+
+def test_dump_channels_for_reads_scheduler_public_accessor(tmp_path):
+    scheduler = Scheduler(
+        storage_dir=tmp_path / "automations",
+        reload_interval_seconds=60.0,
+        dump_channels={
+            "oma_dump": DumpChannelConfig(platform="discord", channel_id="999"),
+            "slack_dump": DumpChannelConfig(platform="slack", channel_id="C-1"),
+        },
+    )
+    gm = GatewayManager([], scheduler=scheduler)
+
+    assert gm._dump_channels_for("discord", "100") == ["999"]
+    assert gm._dump_channels_for("discord", "999") == []  # source itself excluded
+    assert gm._dump_channels_for("matrix", "100") == []
+
+    # Property returns a snapshot — mutating it must not affect the scheduler.
+    snapshot = scheduler.dump_channels
+    snapshot.clear()
+    assert gm._dump_channels_for("discord", "100") == ["999"]

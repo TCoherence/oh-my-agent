@@ -289,16 +289,9 @@ export function fetchSessionTrace(opts: {
 
 // ── M2 PR5 — Skill health + Automation control ────────────────────── //
 
-export interface SkillHealthRow {
-  skill: string;
-  runs_7d: number;
-  runs_30d: number;
-  success_rate: number | null;
-  last_run_at: string | null;
-  last_failure_reason: string | null;
-  negative_feedback_rate: number | null;
-  disabled: boolean;
-}
+// (The legacy /api/v1/skills/health client lived here; the SPA now uses
+// /api/v1/skills exclusively, so the dead fetchSkillHealth/SkillHealthRow
+// pair was removed. The backend endpoint itself stays for external users.)
 
 /** /api/v1/skills row — installed catalog merged with runtime stats. */
 export interface SkillOverviewRow {
@@ -343,10 +336,6 @@ export interface AutomationRow {
   platform: string;
   channel_id: string;
   next_run_at: string | null;
-}
-
-export function fetchSkillHealth(): Promise<{ items: SkillHealthRow[] }> {
-  return apiGet<{ items: SkillHealthRow[] }>("/api/v1/skills/health");
 }
 
 export function fetchSkillsOverview(): Promise<SkillOverviewResponse> {

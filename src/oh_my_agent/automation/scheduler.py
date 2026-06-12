@@ -303,6 +303,11 @@ class Scheduler:
     def timezone_name(self) -> str:
         return self._timezone_name
 
+    @property
+    def dump_channels(self) -> dict[str, DumpChannelConfig]:
+        """Read-only snapshot of configured dump-channel aliases."""
+        return dict(self._dump_channels)
+
     def compute_next_run_at(self, job: ScheduledJob) -> datetime | None:
         """Return the next fire time for *job* from now.
 

@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -38,10 +37,18 @@ class SkillSync:
         else:
             self._skills_path = (self._project_root / raw_skills_path).resolve()
         self._state_filename = ".oh-my-agent-state.json"
+        # Content-hash state memo keyed by a cheap stat-only fingerprint.
+        # See _workspace_source_state() for the staleness argument.
+        self._source_state_cache: tuple[str, dict[str, str]] | None = None
 
     # ------------------------------------------------------------------ #
     #  Public API                                                          #
     # ------------------------------------------------------------------ #
+
+    @property
+    def skills_path(self) -> Path:
+        """Resolved canonical ``skills/`` directory (read-only)."""
+        return self._skills_path
 
     def sync(self) -> int:
         """Run forward sync and return the number of skills synced."""
@@ -307,10 +314,48 @@ class SkillSync:
         )
 
     def _workspace_source_state(self) -> dict[str, str]:
-        return {
+        """Content-hash state of the sync sources, memoized per instance.
+
+        Hashing every byte under ``skills/`` is too expensive for the hot
+        per-message path, so the content hashes are cached behind a cheap
+        stat-only fingerprint (relative path + size + mtime_ns of every
+        source file). Any real edit changes mtime_ns (nanosecond resolution)
+        or size, and adding/removing/renaming files changes the path set —
+        the cache can only serve a stale state if a file is rewritten while
+        deliberately preserving both size and mtime_ns, which no editor or
+        git operation does. The persisted workspace state stays content-hash
+        based, so existing ``.oh-my-agent-state.json`` files remain valid.
+        """
+        fingerprint = self._source_fingerprint()
+        cached = self._source_state_cache
+        if cached is not None and cached[0] == fingerprint:
+            return dict(cached[1])
+        state = {
             "source_agents_hash": self._hash_file(self._project_root / "AGENTS.md"),
             "canonical_skills_hash": self._hash_skills_tree(self._skills_path),
         }
+        self._source_state_cache = (fingerprint, dict(state))
+        return state
+
+    def _source_fingerprint(self) -> str:
+        """Stat-only digest over exactly the files _workspace_source_state hashes."""
+        digest = hashlib.sha256()
+        agents_md = self._project_root / "AGENTS.md"
+        try:
+            st = agents_md.stat()
+            digest.update(f"agents:{st.st_size}:{st.st_mtime_ns}\n".encode("utf-8"))
+        except OSError:
+            digest.update(b"agents:missing\n")
+        for skill_dir in self._collect_skills(self._skills_path):
+            digest.update(f"dir:{skill_dir.name}\n".encode("utf-8"))
+            for child in sorted(p for p in skill_dir.rglob("*") if p.is_file()):
+                try:
+                    st = child.stat()
+                except OSError:
+                    continue
+                rel = child.relative_to(self._skills_path).as_posix()
+                digest.update(f"{rel}:{st.st_size}:{st.st_mtime_ns}\n".encode("utf-8"))
+        return digest.hexdigest()
 
     def _write_workspace_state(self, workspace_root: Path) -> None:
         state_path = workspace_root / self._state_filename

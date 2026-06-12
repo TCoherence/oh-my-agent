@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
@@ -53,6 +55,14 @@ class _AutomationPostLookup:
     posted_at: datetime
     skill_name: str | None
     source_workspace: str | None
+
+
+@dataclass
+class _TaskLockEntry:
+    """Per-task lock with a refcount so idle entries can be evicted."""
+
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    refs: int = 0
 
 
 class FeedbackCollector:
@@ -89,17 +99,30 @@ class FeedbackCollector:
         # Codex round-1 catch: per-task lock prevents the scan worker and a
         # near-simultaneous reaction handler from both passing the dedupe
         # check and writing contradictory self_eval entries.
-        self._task_locks: dict[str, asyncio.Lock] = {}
-        self._task_locks_guard = asyncio.Lock()
+        self._task_locks: dict[str, _TaskLockEntry] = {}
 
-    def _lock_for_task(self, task_id: str) -> asyncio.Lock:
-        """Return an asyncio.Lock unique to this task_id (lazy init)."""
-        # Single guard so two callers don't both create new locks.
-        # Acquiring _task_locks_guard is fast (microseconds in asyncio),
-        # safe to hold for the dict access.
-        if task_id not in self._task_locks:
-            self._task_locks[task_id] = asyncio.Lock()
-        return self._task_locks[task_id]
+    @asynccontextmanager
+    async def _locked_task(self, task_id: str) -> AsyncIterator[None]:
+        """Serialize feedback writes for one task_id.
+
+        Entries are refcounted and dropped when the last holder releases, so
+        the dict only contains locks for in-flight operations (it previously
+        grew by one Lock per reacted/scanned task_id forever).
+        """
+        entry = self._task_locks.get(task_id)
+        if entry is None:
+            entry = _TaskLockEntry()
+            self._task_locks[task_id] = entry
+        # Incremented before any await: a concurrent waiter keeps refs > 0,
+        # which keeps the entry pinned in the dict until everyone releases.
+        entry.refs += 1
+        try:
+            async with entry.lock:
+                yield
+        finally:
+            entry.refs -= 1
+            if entry.refs == 0:
+                self._task_locks.pop(task_id, None)
 
     @staticmethod
     def classify_emoji(emoji: str) -> Literal["positive", "negative", "unknown"]:
@@ -151,7 +174,7 @@ class FeedbackCollector:
 
         # Codex round-1 catch: serialize record + scan against this task so
         # they don't both pass the dedupe pre-check.
-        async with self._lock_for_task(lookup.task_id):
+        async with self._locked_task(lookup.task_id):
             return await self._write_self_eval(
                 lookup=lookup,
                 quality=quality,
@@ -186,7 +209,7 @@ class FeedbackCollector:
         if note:
             # Cap note inline so summary stays under MemoryEntry width.
             reason_phrase = f"user explicit rating: {note[:160]}"
-        async with self._lock_for_task(lookup.task_id):
+        async with self._locked_task(lookup.task_id):
             return await self._write_self_eval(
                 lookup=lookup,
                 quality=quality,
@@ -248,7 +271,7 @@ class FeedbackCollector:
             )
             # Per-task lock: covers dedupe check + write, race-safe with
             # record_reaction() running concurrently on the same task.
-            async with self._lock_for_task(lookup.task_id):
+            async with self._locked_task(lookup.task_id):
                 # Codex M1 PR4 fix: dedupe on existing IMPLICIT signal, not
                 # any self_eval. The LLM self_eval now writes a per-task
                 # entry on completion, so checking "any self_eval" would

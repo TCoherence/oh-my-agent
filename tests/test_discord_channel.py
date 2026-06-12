@@ -2,6 +2,7 @@ import asyncio
 import logging
 from types import SimpleNamespace
 
+import discord
 import pytest
 
 from oh_my_agent.gateway.base import OutgoingAttachment
@@ -983,3 +984,310 @@ async def test_discord_channel_lifecycle_acquires_and_releases_annotator(caplog)
         ]
     finally:
         _reset_annotator_state()
+
+
+# ---------------------------------------------------------------------------
+# Skill-feedback reaction scope gate (raw reaction events fire for EVERY
+# channel the bot can see — out-of-scope payloads must be dropped before any
+# REST call burns the global rate budget).
+# ---------------------------------------------------------------------------
+
+
+class _FakeThreadChannel(discord.Thread):
+    """isinstance-compatible Thread fake; never calls discord.py's __init__."""
+
+    def __init__(self, *, thread_id: int, parent_id: int, message=None) -> None:
+        self.id = thread_id
+        self.parent_id = parent_id
+        self._message = message
+        self.fetch_message_calls = 0
+
+    async def fetch_message(self, message_id):
+        self.fetch_message_calls += 1
+        return self._message
+
+
+class _ScopeProbeClient:
+    """Mock client that records cache lookups and REST fetches."""
+
+    def __init__(self, cached: dict | None = None) -> None:
+        self.user = SimpleNamespace(id=999)
+        self._cached = cached or {}
+        self.get_channel_calls: list[int] = []
+        self.fetch_channel_calls: list[int] = []
+
+    def get_channel(self, channel_id):
+        self.get_channel_calls.append(channel_id)
+        return self._cached.get(channel_id)
+
+    async def fetch_channel(self, channel_id):
+        self.fetch_channel_calls.append(channel_id)
+        return self._cached.get(channel_id)
+
+
+class _FakeSkillEvalService:
+    def __init__(self) -> None:
+        self.recorded: list[dict] = []
+
+    def is_feedback_emoji(self, emoji: str) -> bool:
+        return emoji in {"👍", "👎"}
+
+    async def record_reaction(self, **kwargs):
+        self.recorded.append(kwargs)
+
+
+def _reaction_payload(channel_id: int, *, user_id: int = 1, message_id: int = 42):
+    return SimpleNamespace(
+        emoji="👍", user_id=user_id, channel_id=channel_id, message_id=message_id
+    )
+
+
+def _feedback_channel(client) -> DiscordChannel:
+    channel = DiscordChannel(token="x", channel_id="100")
+    channel._client = client  # type: ignore[assignment]
+    channel._skill_eval_service = _FakeSkillEvalService()  # type: ignore[assignment]
+    return channel
+
+
+@pytest.mark.asyncio
+async def test_skill_feedback_unrelated_channel_dropped_with_zero_fetches():
+    # Cached object for the unrelated channel: a plain text-channel stand-in
+    # whose fetch_message would blow up if the gate failed to short-circuit.
+    unrelated = SimpleNamespace(id=555)
+    client = _ScopeProbeClient(cached={555: unrelated})
+    channel = _feedback_channel(client)
+
+    await channel._sync_skill_feedback_from_payload(_reaction_payload(555))
+
+    assert client.fetch_channel_calls == []  # zero REST calls
+    assert channel._skill_eval_service.recorded == []
+
+
+@pytest.mark.asyncio
+async def test_skill_feedback_thread_under_unrelated_parent_dropped():
+    thread = _FakeThreadChannel(thread_id=200, parent_id=300)
+    client = _ScopeProbeClient(cached={200: thread})
+    channel = _feedback_channel(client)
+
+    await channel._sync_skill_feedback_from_payload(_reaction_payload(200))
+
+    assert client.fetch_channel_calls == []
+    assert thread.fetch_message_calls == 0
+    assert channel._skill_eval_service.recorded == []
+
+
+@pytest.mark.asyncio
+async def test_skill_feedback_bound_channel_still_recorded():
+    message = SimpleNamespace(reactions=[])
+    bound = _FakeThreadChannel(thread_id=100, parent_id=0, message=message)
+    client = _ScopeProbeClient(cached={100: bound})
+    channel = _feedback_channel(client)
+
+    await channel._sync_skill_feedback_from_payload(_reaction_payload(100))
+
+    recorded = channel._skill_eval_service.recorded
+    assert len(recorded) == 1
+    assert recorded[0]["thread_id"] == "100"
+    assert recorded[0]["active_score"] is None
+
+
+@pytest.mark.asyncio
+async def test_skill_feedback_thread_under_bound_channel_uses_cache():
+    message = SimpleNamespace(reactions=[])
+    thread = _FakeThreadChannel(thread_id=200, parent_id=100, message=message)
+    client = _ScopeProbeClient(cached={200: thread})
+    channel = _feedback_channel(client)
+
+    await channel._sync_skill_feedback_from_payload(_reaction_payload(200))
+
+    assert client.fetch_channel_calls == []  # gateway cache hit, no REST fetch
+    assert len(channel._skill_eval_service.recorded) == 1
+
+
+@pytest.mark.asyncio
+async def test_skill_feedback_registered_dump_channel_accepted():
+    message = SimpleNamespace(reactions=[])
+    dump = _FakeThreadChannel(thread_id=777, parent_id=0, message=message)
+    client = _ScopeProbeClient(cached={777: dump})
+    channel = _feedback_channel(client)
+    channel.register_dump_channel("777")
+
+    await channel._sync_skill_feedback_from_payload(_reaction_payload(777))
+
+    assert len(channel._skill_eval_service.recorded) == 1
+
+
+# ---------------------------------------------------------------------------
+# Outbound rate-limiter coverage for reaction signals, thread creation, and
+# message-edit fetches (Discord's 50/s global HTTP cap).
+# ---------------------------------------------------------------------------
+
+
+class _EventOrderLimiter:
+    def __init__(self, events: list[str]) -> None:
+        self._events = events
+
+    async def acquire(self, tokens: int = 1) -> None:
+        del tokens
+        self._events.append("acquire")
+
+
+@pytest.mark.asyncio
+async def test_signal_task_status_rate_limits_fetch_and_reaction():
+    events: list[str] = []
+    channel = DiscordChannel(token="x", channel_id="100")
+    channel._rate_limiter = _EventOrderLimiter(events)  # type: ignore[assignment]
+
+    class _Msg:
+        async def add_reaction(self, emoji):
+            events.append(f"react:{emoji}")
+
+    class _Target:
+        async def fetch_message(self, message_id):
+            events.append("fetch")
+            return _Msg()
+
+    async def _fake_resolve(_thread_id: str):
+        return _Target()
+
+    channel._resolve_channel = _fake_resolve  # type: ignore[method-assign]
+
+    await channel.signal_task_status("t1", "5", "✅")
+
+    assert events == ["acquire", "fetch", "acquire", "react:✅"]
+
+
+@pytest.mark.asyncio
+async def test_signal_task_status_no_message_id_skips_limiter():
+    events: list[str] = []
+    channel = DiscordChannel(token="x", channel_id="100")
+    channel._rate_limiter = _EventOrderLimiter(events)  # type: ignore[assignment]
+
+    await channel.signal_task_status("t1", None, "✅")
+
+    assert events == []
+
+
+@pytest.mark.asyncio
+async def test_create_thread_observes_rate_limiter():
+    events: list[str] = []
+    channel = DiscordChannel(token="x", channel_id="100")
+    channel._rate_limiter = _EventOrderLimiter(events)  # type: ignore[assignment]
+
+    class _RawMessage:
+        async def create_thread(self, *, name, auto_archive_duration):
+            events.append(f"create:{name}")
+            return SimpleNamespace(id=42)
+
+    msg = SimpleNamespace(raw=_RawMessage())
+
+    thread_id = await channel.create_thread(msg, "hello")
+
+    assert thread_id == "42"
+    assert events == ["acquire", "create:hello"]
+
+
+@pytest.mark.asyncio
+async def test_edit_message_rate_limits_fetch_and_edit():
+    events: list[str] = []
+    channel = DiscordChannel(token="x", channel_id="100")
+    channel._rate_limiter = _EventOrderLimiter(events)  # type: ignore[assignment]
+
+    class _Msg:
+        async def edit(self, *, content):
+            events.append(f"edit:{content}")
+
+    class _Thread:
+        async def fetch_message(self, message_id):
+            events.append("fetch")
+            return _Msg()
+
+    async def _fake_resolve(_thread_id: str):
+        return _Thread()
+
+    channel._resolve_channel = _fake_resolve  # type: ignore[method-assign]
+
+    await channel.edit_message("t1", "5", "new text")
+
+    assert events == ["acquire", "fetch", "acquire", "edit:new text"]
+
+
+@pytest.mark.asyncio
+async def test_update_interactive_rate_limits_fetch_and_edit():
+    events: list[str] = []
+    channel = DiscordChannel(token="x", channel_id="100")
+    channel._rate_limiter = _EventOrderLimiter(events)  # type: ignore[assignment]
+    channel._build_interactive_view = lambda prompt: "view"  # type: ignore[method-assign]
+
+    class _Msg:
+        async def edit(self, *, content, view):
+            events.append(f"edit:{content}:{view}")
+
+    class _Thread:
+        async def fetch_message(self, message_id):
+            events.append("fetch")
+            return _Msg()
+
+    async def _fake_resolve(_thread_id: str):
+        return _Thread()
+
+    channel._resolve_channel = _fake_resolve  # type: ignore[method-assign]
+
+    prompt = InteractivePrompt(text="pick")
+
+    await channel.update_interactive("t1", "5", prompt)
+
+    assert events == ["acquire", "fetch", "acquire", "edit:pick:view"]
+
+
+# ---------------------------------------------------------------------------
+# /reload-skills heavy path: sync + validation must run off the event loop
+# and still produce the operator summary.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_skill_reload_offloads_and_summarizes(tmp_path, monkeypatch):
+    from oh_my_agent.skills import validator as validator_mod
+
+    skills_path = tmp_path / "skills"
+    (skills_path / "demo").mkdir(parents=True)
+    (skills_path / "demo" / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: a demo skill\n---\nbody\n"
+    )
+
+    class _FakeSyncer:
+        def __init__(self) -> None:
+            self._skills_path = skills_path
+            self.calls: list[tuple] = []
+
+        def full_sync(self, extra_source_dirs=None):
+            self.calls.append(("full_sync", extra_source_dirs))
+            return 3, 1
+
+        def refresh_workspace_dirs(self, dirs):
+            self.calls.append(("refresh_workspace_dirs", dirs))
+
+    # validate_async contract: async wrapper around validate() with the same
+    # return type. Shim it in only if the real one hasn't landed yet so the
+    # test exercises the genuine implementation once available.
+    if not hasattr(validator_mod.SkillValidator, "validate_async"):
+        async def _shim_validate_async(self, skill_dir):
+            return self.validate(skill_dir)
+
+        monkeypatch.setattr(
+            validator_mod.SkillValidator,
+            "validate_async",
+            _shim_validate_async,
+            raising=False,
+        )
+
+    channel = DiscordChannel(token="x", channel_id="100")
+    syncer = _FakeSyncer()
+    channel.set_skill_syncer(syncer, None)
+
+    summary = await channel._run_skill_reload()
+
+    assert "**Skill reload complete** — 3 synced, 1 reverse-imported" in summary
+    assert "✅ **demo**" in summary
+    assert [c[0] for c in syncer.calls] == ["full_sync", "refresh_workspace_dirs"]

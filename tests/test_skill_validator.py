@@ -222,3 +222,33 @@ class TestScriptChecks:
         result = validator.validate(skill_dir)
         assert result.valid
         assert result.warnings == []
+
+
+# ---------------------------------------------------------------------------
+# validate_async — to_thread offload smoke test
+# ---------------------------------------------------------------------------
+
+class TestValidateAsync:
+    @pytest.mark.asyncio
+    async def test_validate_async_matches_sync_result(self, validator, tmp_path):
+        skill_dir = _make_skill(
+            tmp_path,
+            scripts=[
+                ("ok.sh", "#!/bin/bash\necho ok\n", True),
+                ("bad.sh", "if [ ; then\n", True),
+            ],
+        )
+        sync_result = validator.validate(skill_dir)
+        async_result = await validator.validate_async(skill_dir)
+
+        assert async_result.skill_name == sync_result.skill_name
+        assert async_result.errors == sync_result.errors
+        assert async_result.warnings == sync_result.warnings
+        assert any("bad.sh" in w for w in async_result.warnings)
+
+    @pytest.mark.asyncio
+    async def test_validate_async_missing_skill_md_is_error(self, validator, tmp_path):
+        skill_dir = _make_skill(tmp_path, with_skill_md=False)
+        result = await validator.validate_async(skill_dir)
+        assert not result.valid
+        assert "SKILL.md not found" in result.errors

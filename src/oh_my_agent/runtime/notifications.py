@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from oh_my_agent.gateway.session import ChannelSession
@@ -25,6 +27,14 @@ _INTERNAL_TO_PUSH_KIND: dict[str, "PushKind"] = {
 }
 
 
+@dataclass
+class _EmitLock:
+    """Refcounted per-dedupe-key lock entry; evicted once uncontended."""
+
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    refs: int = 0
+
+
 class NotificationManager:
     """Internal notification fan-out for owner-action-required states."""
 
@@ -40,10 +50,35 @@ class NotificationManager:
         self._owner_user_ids = set(owner_user_ids or set())
         self._session_lookup = session_lookup
         self._push_dispatcher = push_dispatcher
+        self._emit_locks: dict[str, _EmitLock] = {}
 
     async def emit(self, event: NotificationEvent) -> list[NotificationRecord]:
         if not self._owner_user_ids:
             return []
+        # The dedupe check and the record insert are separated by channel
+        # awaits (thread ping + owner DMs); two concurrent emits with the
+        # same key would both pass the check and deliver twice. Serialize
+        # check+send+insert per dedupe_key. Refcounting (incremented and
+        # decremented only in synchronous sections of this single-loop
+        # coroutine) lets us evict entries the moment no emit holds or
+        # awaits the lock, so the dict cannot grow unboundedly.
+        key = event.dedupe_key
+        if not key:
+            return await self._emit_inner(event)
+        entry = self._emit_locks.get(key)
+        if entry is None:
+            entry = _EmitLock()
+            self._emit_locks[key] = entry
+        entry.refs += 1
+        try:
+            async with entry.lock:
+                return await self._emit_inner(event)
+        finally:
+            entry.refs -= 1
+            if entry.refs <= 0 and self._emit_locks.get(key) is entry:
+                del self._emit_locks[key]
+
+    async def _emit_inner(self, event: NotificationEvent) -> list[NotificationRecord]:
         active = await self._store.list_active_notification_events(
             dedupe_key=event.dedupe_key,
             limit=max(10, len(self._owner_user_ids) * 2),

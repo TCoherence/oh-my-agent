@@ -24,7 +24,7 @@ import asyncio
 import logging
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Callable
 
 from oh_my_agent.memory.diary_reflector import ReflectionResult
 from oh_my_agent.memory.judge_store import JudgeStore, parse_judge_actions
@@ -286,7 +286,6 @@ class WeeklyReflectionLoop:
         fire_dow_local: int = 1,
         fire_hour_local: int = 3,
         clock: Callable[[], datetime] | None = None,
-        sleeper: Callable[[float], Awaitable[None]] | None = None,
     ) -> None:
         if not 0 <= fire_dow_local <= 6:
             raise ValueError(
@@ -299,7 +298,6 @@ class WeeklyReflectionLoop:
         self._fire_dow_local = int(fire_dow_local)
         self._fire_hour_local = int(fire_hour_local)
         self._clock = clock or datetime.now
-        self._sleeper = sleeper or asyncio.sleep
         self._task: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
 

@@ -267,7 +267,7 @@ async def test_run_for_task_self_eval_invalid_quality_returns_error(tmp_path: Pa
         task_output="y",
         automation_name="auto-x",
     )
-    # _coerce returns None → actions empty → persist still runs but writes nothing
+    # invalid quality → self_eval_invalid_quality error path, nothing written
     assert result.stats["add"] == 0
     assert store.get_active() == []
 
@@ -326,28 +326,6 @@ def test_run_for_task_unknown_mode_raises(tmp_path: Path):
                 task_output="y",
             )
         )
-
-
-def test_coerce_self_eval_to_action_shapes():
-    """_coerce_self_eval_to_action: structured-only happy path + invalid quality."""
-    action = Judge._coerce_self_eval_to_action(
-        {"quality": "fail", "reason": "r", "suggested_improvement": "s"},
-        automation_name="auto-Y",
-    )
-    assert action is not None
-    assert action["op"] == "add"
-    assert action["category"] == "self_eval"
-    assert action["scope"] == "automation"
-    assert action["source_automation"] == "auto-Y"
-    assert action["feedback_source"] == "llm_judge"
-    assert action["quality"] == "fail"
-    assert action["confidence"] == 0.6
-    assert "reason=r; suggested=s" in action["summary"]
-
-    none_action = Judge._coerce_self_eval_to_action(
-        {"quality": "bogus"}, automation_name="auto-Y"
-    )
-    assert none_action is None
 
 
 def test_try_parse_self_eval_handles_fenced_and_prose():

@@ -80,18 +80,58 @@ def _insert_turn(
 
 
 def test_cursor_round_trip() -> None:
-    encoded = _encode_cursor("2026-05-12T10:00:00", "thread-abc")
-    assert _decode_cursor(encoded) == ("2026-05-12T10:00:00", "thread-abc")
+    encoded = _encode_cursor("2026-05-12T10:00:00", "discord", "100", "thread-abc")
+    assert _decode_cursor(encoded) == (
+        "2026-05-12T10:00:00",
+        "discord",
+        "100",
+        "thread-abc",
+    )
 
 
 def test_cursor_decode_handles_empty_and_garbage() -> None:
     assert _decode_cursor(None) is None
     assert _decode_cursor("") is None
     assert _decode_cursor("not-base64!!!") is None
-    # base64 of "no-pipe-here"
-    no_pipe = _encode_cursor("foo", "bar")
+    encoded = _encode_cursor("foo", "discord", "100", "bar")
     # truncate to break the structure
-    assert _decode_cursor(no_pipe[:4]) is None
+    assert _decode_cursor(encoded[:4]) is None
+
+
+def test_cursor_legacy_two_field_format_decodes_to_none() -> None:
+    """Pre-(platform, channel_id) cursors must fail gracefully to first
+    page (decode → None), never raise."""
+
+    import base64
+
+    legacy = (
+        base64.urlsafe_b64encode(b"2026-05-12T10:00:00|thread-abc")
+        .decode("ascii")
+        .rstrip("=")
+    )
+    assert _decode_cursor(legacy) is None
+
+
+def test_session_list_legacy_cursor_falls_back_to_first_page(db_path: Path) -> None:
+    """A legacy-format cursor on the API path returns page 1 — not a 500."""
+
+    import base64
+
+    _insert_turn(
+        db_path,
+        platform="discord",
+        channel_id="100",
+        thread_id="t1",
+        role="user",
+        content="hi",
+        created_at="2026-05-12T10:00:00",
+    )
+    legacy = (
+        base64.urlsafe_b64encode(b"2026-05-12T10:00:00|t1").decode("ascii").rstrip("=")
+    )
+    result = fetch_session_list(db_path, cursor=legacy)
+    assert "error" not in result
+    assert [it["thread_id"] for it in result["items"]] == ["t1"]
 
 
 # ── fetch_session_list ─────────────────────────────────────────────── #
@@ -199,6 +239,49 @@ def test_session_list_pagination_composite_cursor_stable_on_equal_timestamps(
     assert union == {"thread-a", "thread-b", "thread-c"}
     intersection = set(page1_threads) & set(page2_threads)
     assert intersection == set()
+
+
+def test_session_list_pagination_stable_across_channels_same_thread_id(
+    db_path: Path,
+) -> None:
+    """Same thread_id in different channels with identical MAX(created_at)
+    must paginate without skips or repeats — requires platform+channel_id
+    in the cursor tie-break, not just thread_id."""
+
+    same_ts = "2026-05-12T10:00:00"
+    coords = [
+        ("discord", "100", "t1"),
+        ("discord", "200", "t1"),  # same thread_id, different channel
+        ("slack", "100", "t1"),  # same thread_id + channel_id, other platform
+    ]
+    for platform, channel_id, thread_id in coords:
+        _insert_turn(
+            db_path,
+            platform=platform,
+            channel_id=channel_id,
+            thread_id=thread_id,
+            role="user",
+            content="x",
+            created_at=same_ts,
+        )
+
+    seen: set[tuple[str, str, str]] = set()
+    pages = 0
+    cursor: str | None = None
+    while True:
+        page = fetch_session_list(db_path, limit=1, cursor=cursor)
+        assert "error" not in page
+        for it in page["items"]:
+            key = (it["platform"], it["channel_id"], it["thread_id"])
+            assert key not in seen, f"duplicate row across pages: {key}"
+            seen.add(key)
+        pages += 1
+        cursor = page["next_cursor"]
+        if cursor is None:
+            break
+        assert pages < 10, "pagination did not terminate"
+
+    assert seen == set(coords)
 
 
 def test_session_list_limit_clamped(db_path: Path) -> None:

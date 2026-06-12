@@ -342,10 +342,83 @@ async def test_remove_worktree_missing_is_noop(manager, tmp_path):
     await manager.remove_worktree(ghost)
 
 
+def _task_branches(repo: Path) -> list[str]:
+    out = subprocess.run(
+        [
+            "git", "-C", str(repo),
+            "branch", "--list", "codex/task-*", "--format=%(refname:short)",
+        ],
+        capture_output=True, text=True, check=True,
+    )
+    return [line.strip() for line in out.stdout.splitlines() if line.strip()]
+
+
+@pytest.mark.asyncio
+async def test_remove_worktree_delete_branch_removes_task_branch(manager, git_repo):
+    """Non-PR janitor cleanup passes delete_branch=True: the per-task local
+    branch must be deleted along with the worktree (regression: branches
+    were never deleted → unbounded local ref accumulation)."""
+    workspace = await manager.ensure_worktree("del-branch")
+    assert "codex/task-del-branch" in _task_branches(git_repo)
+    await manager.remove_worktree(workspace, delete_branch=True)
+    assert not workspace.exists()
+    assert "codex/task-del-branch" not in _task_branches(git_repo)
+
+
+@pytest.mark.asyncio
+async def test_remove_worktree_default_keeps_task_branch(manager, git_repo):
+    """Default delete_branch=False keeps the branch — the PR_OPENED cleanup
+    path relies on this: the local ref is the safety copy of the pushed
+    branch until the human merges the PR."""
+    workspace = await manager.ensure_worktree("keep-branch")
+    await manager.remove_worktree(workspace)
+    assert not workspace.exists()
+    assert "codex/task-keep-branch" in _task_branches(git_repo)
+
+
+@pytest.mark.asyncio
+async def test_remove_worktree_delete_branch_tolerates_missing_branch(manager, git_repo):
+    """delete_branch=True must swallow `git branch -D` failure when the
+    branch is already gone (second cleanup pass, manual deletion, ...)."""
+    workspace = await manager.ensure_worktree("gone-branch")
+    await manager.remove_worktree(workspace, delete_branch=True)
+    assert "codex/task-gone-branch" not in _task_branches(git_repo)
+    # Second pass: workspace and branch both gone — must not raise.
+    await manager.remove_worktree(workspace, delete_branch=True)
+
+
+@pytest.mark.asyncio
+async def test_remove_worktree_rmtree_fallback_for_unregistered_dir(manager, tmp_path):
+    """Smoke test for the to_thread-offloaded rmtree fallback: a directory
+    git doesn't know about (worktree remove fails) is still deleted."""
+    fake = tmp_path / "worktrees" / "not-a-worktree"
+    (fake / "nested").mkdir(parents=True)
+    (fake / "nested" / "junk.txt").write_text("x\n")
+    await manager.remove_worktree(fake)
+    assert not fake.exists()
+
+
 @pytest.mark.asyncio
 async def test_run_git_raises_worktree_error_on_failure(manager, git_repo):
     with pytest.raises(WorktreeError):
         await manager._run_git("-C", str(git_repo), "rev-parse", "does-not-exist")
+
+
+@pytest.mark.asyncio
+async def test_workspace_has_dirty_true_for_dirty_tree(manager):
+    workspace = await manager.ensure_worktree("dirty-check")
+    (workspace / "scratch.txt").write_text("x\n")
+    assert await manager.workspace_has_dirty_or_new_commits(workspace) is True
+
+
+@pytest.mark.asyncio
+async def test_workspace_has_dirty_false_for_clean_tree_without_upstream(manager):
+    """Regression: a previous version also ran `rev-list HEAD..HEAD@{u}`,
+    which counted the WRONG direction and — since the branch has no upstream
+    before first push — always raised WorktreeError that was silently
+    swallowed. A clean tree with no upstream must be a plain False."""
+    workspace = await manager.ensure_worktree("clean-check")
+    assert await manager.workspace_has_dirty_or_new_commits(workspace) is False
 
 
 @pytest.mark.asyncio

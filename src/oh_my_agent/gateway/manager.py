@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from oh_my_agent.runtime.types import AutomationPost
+    from oh_my_agent.skills.skill_sync import SkillSync
 
 from oh_my_agent.agents.registry import AgentRegistry
 from oh_my_agent.automation import ScheduledJob, Scheduler
@@ -185,6 +186,15 @@ class GatewayManager:
             if short_cfg.get("base_workspace")
             else None
         )
+        # Serializes base-workspace refreshes — two concurrent messages must
+        # not copytree into the same directory at once.
+        self._base_workspace_refresh_lock: asyncio.Lock = asyncio.Lock()
+        # Cached fallback syncer (only when no skill_syncer is injected):
+        # SkillSync memoizes the skills content-hash state per instance, so
+        # recreating it per message would defeat that cache.
+        self._fallback_workspace_syncer: SkillSync | None = None
+        # Single-flight MEMORY.md synthesis — see _spawn_memory_md_synth().
+        self._memory_md_synth_task: asyncio.Task | None = None
         # Published reports tree (runtime.reports_dir); surfaced read-intended in
         # per-thread workspaces as ``reports_archive/`` for cross-session recall.
         self._reports_dir = Path(reports_dir).expanduser().resolve() if reports_dir else None
@@ -247,7 +257,7 @@ class GatewayManager:
         sched = self._scheduler
         if sched is None:
             return []
-        configured: dict[str, object] = getattr(sched, "_dump_channels", {}) or {}
+        configured = sched.dump_channels
         seen: set[str] = set()
         result: list[str] = []
         for dump in configured.values():
@@ -2478,13 +2488,17 @@ class GatewayManager:
     ) -> None:
         """Detect new agent-created skills, sync them, validate, and notify via Discord."""
         try:
-            new_skills = self._skill_syncer.find_new_skills(self._workspace_skills_dirs)
+            new_skills = await asyncio.to_thread(
+                self._skill_syncer.find_new_skills, self._workspace_skills_dirs
+            )
             if not new_skills:
                 return
 
             logger.info("[%s] SKILL_SYNC new skills detected: %s", req_id, new_skills)
-            forward, reverse = self._skill_syncer.full_sync(
-                extra_source_dirs=self._workspace_skills_dirs
+            # full_sync / refresh_workspace_dirs copytree — keep off the loop.
+            forward, reverse = await asyncio.to_thread(
+                self._skill_syncer.full_sync,
+                extra_source_dirs=self._workspace_skills_dirs,
             )
             logger.info(
                 "[%s] SKILL_SYNC complete forward=%d reverse=%d", req_id, forward, reverse
@@ -2493,23 +2507,26 @@ class GatewayManager:
             # Validate each new skill
             from oh_my_agent.skills.validator import SkillValidator
             validator = SkillValidator()
-            skills_path = self._skill_syncer._skills_path
+            skills_path = self._skills_root()
 
             validation_lines = []
-            for skill_name in new_skills:
-                skill_dir = skills_path / skill_name
-                if not skill_dir.is_dir():
-                    continue
-                result = validator.validate(skill_dir)
-                icon = "✅" if result.valid else "⚠️"
-                line = f"{icon} **{skill_name}**"
-                if result.errors:
-                    line += f" — {len(result.errors)} error(s): {'; '.join(result.errors[:2])}"
-                if result.warnings:
-                    line += f" — {len(result.warnings)} warning(s)"
-                validation_lines.append(line)
+            if skills_path is not None:
+                for skill_name in new_skills:
+                    skill_dir = skills_path / skill_name
+                    if not skill_dir.is_dir():
+                        continue
+                    result = await validator.validate_async(skill_dir)
+                    icon = "✅" if result.valid else "⚠️"
+                    line = f"{icon} **{skill_name}**"
+                    if result.errors:
+                        line += f" — {len(result.errors)} error(s): {'; '.join(result.errors[:2])}"
+                    if result.warnings:
+                        line += f" — {len(result.warnings)} warning(s)"
+                    validation_lines.append(line)
 
-            self._skill_syncer.refresh_workspace_dirs(self._workspace_skills_dirs)
+            await asyncio.to_thread(
+                self._skill_syncer.refresh_workspace_dirs, self._workspace_skills_dirs
+            )
 
             # Notify via the current thread
             lines = [f"🔧 **New skill(s) synced** ({len(new_skills)}):"]
@@ -2588,6 +2605,14 @@ class GatewayManager:
             logger.warning("memory_judge: failed to load history thread=%s: %s", thread_id, exc)
             return None
         thread_topic = self._memory_thread_topic(history) if history else None
+        thread_key = self._thread_key(session.platform, session.channel_id, thread_id)
+        # Snapshot the idle watermark BEFORE the judge LLM run: if a message
+        # lands mid-judge, mark_judged(observed_ts=...) below won't advance
+        # the judged watermark, so the idle timer re-arms and the new turn
+        # still gets judged instead of being silently skipped.
+        observed_ts: float | None = None
+        if self._idle_tracker is not None:
+            observed_ts = self._idle_tracker.last_message_ts(thread_key)
         try:
             result = await self._judge.run(
                 conversation=history,
@@ -2607,17 +2632,28 @@ class GatewayManager:
         # surface as an unretrieved-task exception on the fire-and-forget path.
         try:
             if self._idle_tracker is not None:
-                await self._idle_tracker.mark_judged(
-                    self._thread_key(session.platform, session.channel_id, thread_id)
-                )
+                self._idle_tracker.mark_judged(thread_key, observed_ts=observed_ts)
             if self._judge_store.should_synthesize():
-                self._spawn_fire_and_forget(
-                    self._try_memory_md_synth(registry),
-                    name="memory-md-synth",
-                )
+                self._spawn_memory_md_synth(registry)
         except Exception as exc:
             logger.warning("memory_judge post-actions failed thread=%s: %s", thread_id, exc)
         return {"actions": result.actions, "stats": result.stats, "error": result.error}
+
+    def _spawn_memory_md_synth(self, registry: AgentRegistry) -> None:
+        """Start MEMORY.md synthesis unless one is already in flight.
+
+        Two judge runs finishing close together would otherwise launch
+        duplicate concurrent LLM synthesis. Skipping is safe: the store's
+        dirty flag persists, so the next should_synthesize() trigger picks
+        the skipped work up.
+        """
+        existing = self._memory_md_synth_task
+        if existing is not None and not existing.done():
+            return
+        self._memory_md_synth_task = self._spawn_fire_and_forget(
+            self._try_memory_md_synth(registry),
+            name="memory-md-synth",
+        )
 
     async def _try_memory_md_synth(self, registry: AgentRegistry) -> None:
         if self._judge_store is None:
@@ -2700,11 +2736,10 @@ class GatewayManager:
     ) -> Path | None:
         if not self._short_workspace_enabled or self._short_workspace_root is None:
             return None
-        self._refresh_base_workspace_if_needed()
+        await self._refresh_base_workspace_if_needed()
         ws_key = self._short_workspace_key(session.platform, session.channel_id, thread_id)
         workspace = self._short_workspace_root / self._workspace_dirname(thread_id, ws_key)
-        workspace.mkdir(parents=True, exist_ok=True)
-        self._prepare_workspace_compat_files(workspace)
+        await asyncio.to_thread(self._materialize_short_workspace, workspace)
         store = getattr(self, "_memory_store_ref", None)
         if store and hasattr(store, "upsert_ephemeral_workspace"):
             await store.upsert_ephemeral_workspace(ws_key, str(workspace))
@@ -2724,7 +2759,7 @@ class GatewayManager:
             for row in rows:
                 path = Path(row.get("workspace_path", ""))
                 if path.exists():
-                    shutil.rmtree(path, ignore_errors=True)
+                    await asyncio.to_thread(shutil.rmtree, path, ignore_errors=True)
                 if hasattr(store, "mark_ephemeral_workspace_cleaned"):
                     await store.mark_ephemeral_workspace_cleaned(row["workspace_key"])
                 cleaned += 1
@@ -2739,30 +2774,48 @@ class GatewayManager:
             age = now - child.stat().st_mtime
             if age < ttl_seconds:
                 continue
-            shutil.rmtree(child, ignore_errors=True)
+            await asyncio.to_thread(shutil.rmtree, child, ignore_errors=True)
             cleaned += 1
         return cleaned
 
-    def _refresh_base_workspace_if_needed(self) -> None:
+    async def _refresh_base_workspace_if_needed(self) -> None:
         if self._base_workspace is None:
             return
         syncer = self._workspace_syncer()
         if syncer is None:
             return
-        if not syncer.workspace_needs_refresh(self._base_workspace):
-            return
-        logger.info("Refreshing base workspace from repo sources: %s", self._base_workspace)
-        syncer.refresh_workspace(self._base_workspace)
+        # Hot path (every message) — both the staleness check and the
+        # copytree refresh hit the filesystem, so keep them off the event
+        # loop. The lock serializes concurrent messages; the re-check inside
+        # means the first holder refreshes for everyone queued behind it.
+        async with self._base_workspace_refresh_lock:
+            needs_refresh = await asyncio.to_thread(
+                syncer.workspace_needs_refresh, self._base_workspace
+            )
+            if not needs_refresh:
+                return
+            logger.info("Refreshing base workspace from repo sources: %s", self._base_workspace)
+            await asyncio.to_thread(syncer.refresh_workspace, self._base_workspace)
 
     def _workspace_syncer(self):
         if self._skill_syncer is not None:
             return self._skill_syncer
+        if self._fallback_workspace_syncer is not None:
+            return self._fallback_workspace_syncer
         try:
             from oh_my_agent.skills.skill_sync import SkillSync
         except Exception:
             logger.warning("Failed to import SkillSync for base workspace refresh", exc_info=True)
             return None
-        return SkillSync(self._repo_root / "skills", project_root=self._repo_root)
+        self._fallback_workspace_syncer = SkillSync(
+            self._repo_root / "skills", project_root=self._repo_root
+        )
+        return self._fallback_workspace_syncer
+
+    def _materialize_short_workspace(self, workspace: Path) -> None:
+        """Blocking workspace materialization — call via asyncio.to_thread."""
+        workspace.mkdir(parents=True, exist_ok=True)
+        self._prepare_workspace_compat_files(workspace)
 
     def _prepare_workspace_compat_files(self, workspace: Path) -> None:
         if self._base_workspace is None:
@@ -2900,11 +2953,24 @@ class GatewayManager:
             return None
         return skill_name
 
-    def _known_skill_names(self) -> set[str]:
+    def _skills_root(self) -> Path | None:
+        """Canonical skills directory from the syncer, or None.
+
+        Prefers the public ``SkillSync.skills_path`` property; falls back to
+        the legacy private attribute for test doubles that only stub
+        ``_skills_path``.
+        """
         if not self._skill_syncer:
-            return set()
-        skills_path = getattr(self._skill_syncer, "_skills_path", None)
-        if not isinstance(skills_path, Path) or not skills_path.is_dir():
+            return None
+        path = getattr(self._skill_syncer, "skills_path", None)
+        if isinstance(path, Path):
+            return path
+        path = getattr(self._skill_syncer, "_skills_path", None)
+        return path if isinstance(path, Path) else None
+
+    def _known_skill_names(self) -> set[str]:
+        skills_path = self._skills_root()
+        if skills_path is None or not skills_path.is_dir():
             return set()
         return {
             child.name
@@ -2913,10 +2979,8 @@ class GatewayManager:
         }
 
     def _known_skill_router_entries(self) -> list[tuple[str, str]]:
-        if not self._skill_syncer:
-            return []
-        skills_path = getattr(self._skill_syncer, "_skills_path", None)
-        if not isinstance(skills_path, Path) or not skills_path.is_dir():
+        skills_path = self._skills_root()
+        if skills_path is None or not skills_path.is_dir():
             return []
 
         entries: list[tuple[str, str]] = []
@@ -2964,11 +3028,11 @@ class GatewayManager:
         return self._recent_thread_skills.get(self._thread_skill_key(platform, channel_id, thread_id))
 
     def _skill_frontmatter_by_name(self, skill_name: str | None) -> dict:
-        skills_path = getattr(self._skill_syncer, "_skills_path", None) if self._skill_syncer else None
+        skills_path = self._skills_root()
         return resolve_skill_frontmatter(
             skill_name,
             repo_root=self._repo_root,
-            skills_path=skills_path if isinstance(skills_path, Path) and skills_path.is_dir() else None,
+            skills_path=skills_path if skills_path is not None and skills_path.is_dir() else None,
         )
 
     def _skill_description_by_name(self, skill_name: str | None) -> str:

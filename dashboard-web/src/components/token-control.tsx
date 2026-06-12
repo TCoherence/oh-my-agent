@@ -144,8 +144,10 @@ export function TokenModal() {
       <div className="w-80 rounded-md border border-border bg-card p-4 shadow-xl">
         <h2 className="text-sm font-semibold mb-1">Auth required</h2>
         <p className="text-xs text-muted-foreground mb-3">
-          The dashboard returned 401. Paste the bearer token
-          (from <code>OMA_DASHBOARD_TOKEN</code>) to continue.
+          The dashboard returned 401. Paste the bearer token to continue —
+          colocated: the env var named by <code>dashboard.auth_token_env</code>{" "}
+          in config.yaml; standalone: <code>--auth-token</code> /{" "}
+          <code>OMA_DASHBOARD_AUTH_TOKEN</code>.
         </p>
         <input
           type="password"

@@ -6,11 +6,12 @@ import fnmatch
 import inspect
 import json
 import logging
+import os
 import re
 import shutil
 import time
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -165,6 +166,14 @@ _FAILURE_CLEANUP_STATUSES = frozenset({
 })
 
 _TASK_LOG_ID_RE = re.compile(r"-([0-9a-f]{12})-step\d+-")
+
+# Per-run excerpt appended to the per-thread log (the full output stays in
+# the live agent log, referenced by the ``live_log_path=`` pointer line).
+_THREAD_LOG_RUN_EXCERPT_BYTES = 16 * 1024
+# Tail window scanned when extracting a run block from the per-thread log.
+# Run blocks are bounded by _THREAD_LOG_RUN_EXCERPT_BYTES, so this covers
+# the most recent ~dozen runs without reading the whole append-only file.
+_THREAD_LOG_SCAN_BYTES = 256 * 1024
 
 ACTIVE_AUTOMATION_TASK_STATUSES = {
     TASK_STATUS_DRAFT,
@@ -2564,10 +2573,9 @@ class RuntimeService:
         ckpt = await self._store.get_last_runtime_checkpoint(task.id)
         live_agent_tail = None
         if task.status in _TASK_LIVE_STATUSES and live_log_path and live_log_path.exists():
-            try:
-                live_agent_tail = self._tail_text(live_log_path.read_text(encoding="utf-8", errors="replace"))
-            except Exception:
-                live_agent_tail = None
+            live_agent_tail = self._tail_text(
+                self._tail_read(live_log_path, _THREAD_LOG_RUN_EXCERPT_BYTES)
+            ) or None
         if live_agent_tail:
             lines.append("")
             lines.append("**Live agent log tail**")
@@ -3800,6 +3808,28 @@ class RuntimeService:
     # M0 PR3 — post-completion judge trigger (fire-and-forget)
     # ------------------------------------------------------------------
 
+    def _retain_background_task(
+        self, coro: Coroutine[Any, Any, Any], *, name: str
+    ) -> asyncio.Task:
+        """Spawn a fire-and-forget task with a strong reference (bare
+        ``create_task`` results are GC-eligible mid-flight) and a done
+        callback that surfaces uncaught exceptions. Retained tasks share
+        ``_background_judge_tasks`` so ``stop()`` drains them too."""
+        bg = asyncio.create_task(coro, name=name)
+        self._background_judge_tasks.add(bg)
+        bg.add_done_callback(self._discard_background_task)
+        return bg
+
+    def _discard_background_task(self, task: asyncio.Task) -> None:
+        self._background_judge_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error(
+                "Background task %s failed: %s", task.get_name(), exc, exc_info=exc
+            )
+
     def _spawn_post_completion_judge(
         self,
         *,
@@ -4571,59 +4601,70 @@ class RuntimeService:
         if not roots:
             return 0
 
-        files: list[tuple[Path, float, str | None]] = []
-        task_ids: set[str] = set()
-        for root in roots:
-            for path in root.rglob("*"):
-                if not path.is_file():
-                    continue
-                try:
-                    mtime = path.stat().st_mtime
-                except Exception as exc:
-                    logger.warning("Failed to stat agent log %s: %s", path, exc)
-                    continue
-                match = _TASK_LOG_ID_RE.search(path.name)
-                task_id = match.group(1) if match else None
-                if task_id:
-                    task_ids.add(task_id)
-                files.append((path, mtime, task_id))
+        # FS sweeps run off-loop in two batched passes (collect, then
+        # unlink + rmdir) with the async status lookup in between — one
+        # to_thread call per pass, never per file.
+        def _collect() -> tuple[list[tuple[Path, float, str | None]], set[str]]:
+            files: list[tuple[Path, float, str | None]] = []
+            task_ids: set[str] = set()
+            for root in roots:
+                for path in root.rglob("*"):
+                    if not path.is_file():
+                        continue
+                    try:
+                        mtime = path.stat().st_mtime
+                    except Exception as exc:
+                        logger.warning("Failed to stat agent log %s: %s", path, exc)
+                        continue
+                    match = _TASK_LOG_ID_RE.search(path.name)
+                    task_id = match.group(1) if match else None
+                    if task_id:
+                        task_ids.add(task_id)
+                    files.append((path, mtime, task_id))
+            return files, task_ids
+
+        files, task_ids = await asyncio.to_thread(_collect)
 
         status_map = await self._store.get_task_statuses(sorted(task_ids)) if task_ids else {}
         now = time.time()
-        cleaned = 0
-        for path, mtime, task_id in files:
-            if task_id:
-                status = status_map.get(task_id)
-                if status is not None and status not in _TERMINAL_CLEANUP_STATUSES:
-                    continue
-                retention_hours = (
-                    self._retention_hours_for_status(status)
-                    if status is not None
-                    else self._retention_hours_default
-                )
-            else:
-                retention_hours = self._retention_hours_default
-            cutoff_ts = now - max(0, retention_hours) * 3600
-            if mtime > cutoff_ts:
-                continue
-            try:
-                path.unlink(missing_ok=True)
-                cleaned += 1
-            except Exception as exc:
-                logger.warning("Failed to remove stale agent log %s: %s", path, exc)
 
+        def _sweep() -> int:
+            cleaned = 0
+            for path, mtime, task_id in files:
+                if task_id:
+                    status = status_map.get(task_id)
+                    if status is not None and status not in _TERMINAL_CLEANUP_STATUSES:
+                        continue
+                    retention_hours = (
+                        self._retention_hours_for_status(status)
+                        if status is not None
+                        else self._retention_hours_default
+                    )
+                else:
+                    retention_hours = self._retention_hours_default
+                cutoff_ts = now - max(0, retention_hours) * 3600
+                if mtime > cutoff_ts:
+                    continue
+                try:
+                    path.unlink(missing_ok=True)
+                    cleaned += 1
+                except Exception as exc:
+                    logger.warning("Failed to remove stale agent log %s: %s", path, exc)
+            for root in roots:
+                for directory in sorted(root.rglob("*"), reverse=True):
+                    if directory.is_dir():
+                        try:
+                            directory.rmdir()
+                        except OSError:
+                            pass
+            return cleaned
+
+        cleaned = await asyncio.to_thread(_sweep)
         self._live_agent_logs = {
             tid: path
             for tid, path in self._live_agent_logs.items()
             if path.exists()
         }
-        for root in roots:
-            for directory in sorted(root.rglob("*"), reverse=True):
-                if directory.is_dir():
-                    try:
-                        directory.rmdir()
-                    except OSError:
-                        pass
         return cleaned
 
     async def _cleanup_single_task(self, task: RuntimeTask) -> bool:
@@ -4633,9 +4674,15 @@ class RuntimeService:
         if workspace.exists():
             try:
                 if self._uses_merge_flow(task):
-                    await self._worktree.remove_worktree(workspace)
+                    # Delete the per-task local branch too — except for
+                    # PR_OPENED, where the local ref is the safety copy of the
+                    # pushed branch until the human merges the PR.
+                    await self._worktree.remove_worktree(
+                        workspace,
+                        delete_branch=task.status != TASK_STATUS_PR_OPENED,
+                    )
                 else:
-                    shutil.rmtree(workspace, ignore_errors=True)
+                    await asyncio.to_thread(shutil.rmtree, workspace, ignore_errors=True)
             except Exception as exc:
                 logger.warning("Failed to remove workspace for task=%s: %s", task.id, exc)
                 return False
@@ -5151,9 +5198,16 @@ class RuntimeService:
     async def _collect_changed_files(self, task: RuntimeTask, workspace: Path) -> list[str]:
         if self._uses_merge_flow(task):
             return await self._worktree.changed_files(workspace)
-        files = self._list_workspace_files(workspace)
-        files.extend(self._scan_reports_dir_writes(task, workspace))
-        return files
+
+        # Both walks are pure FS I/O; reports_dir in particular is never
+        # pruned, so the rglob there grows unboundedly over time. Run them
+        # off-loop so per-step collection never stalls the event loop.
+        def _walk() -> list[str]:
+            files = self._list_workspace_files(workspace)
+            files.extend(self._scan_reports_dir_writes(task, workspace))
+            return files
+
+        return await asyncio.to_thread(_walk)
 
     def _scan_reports_dir_writes(self, task: RuntimeTask, workspace: Path) -> list[str]:
         # Skills like paper-digest / market-briefing-* call ``report_store.py
@@ -5653,8 +5707,14 @@ class RuntimeService:
         artifact_paths = self._artifact_paths_for_task(task, changed_files)
         if not artifact_paths:
             return None
-        published_paths = self._publish_artifact_files(
-            task.id, artifact_paths, workspace_path=task.workspace_path
+        # Publishing copies files around on disk (mkdir + copy2 per artifact);
+        # run the whole batch off-loop so a large artifact set cannot stall
+        # other coroutines.
+        published_paths = await asyncio.to_thread(
+            self._publish_artifact_files,
+            task.id,
+            artifact_paths,
+            workspace_path=task.workspace_path,
         )
         # NOTE: ``archived_paths`` is a legacy identifier retained for API
         # stability. Semantic is the list of absolute **published** paths (one
@@ -5787,6 +5847,20 @@ class RuntimeService:
         return self._thread_logs_root / f"{safe_thread}.log"
 
     @staticmethod
+    def _tail_read(path: Path, n_bytes: int) -> str:
+        """Read at most the last ``n_bytes`` of ``path`` via seek, so large
+        logs are never loaded whole. Returns "" on any I/O error."""
+        try:
+            with path.open("rb") as handle:
+                handle.seek(0, os.SEEK_END)
+                size = handle.tell()
+                handle.seek(max(0, size - n_bytes))
+                data = handle.read(n_bytes)
+        except OSError:
+            return ""
+        return data.decode("utf-8", errors="replace")
+
+    @staticmethod
     def _agent_specific_log_path(log_path: Path | None, agent_name: str) -> Path | None:
         if log_path is None:
             return None
@@ -5847,48 +5921,56 @@ class RuntimeService:
         error: str | None = None,
     ) -> None:
         thread_log = self._thread_log_path(thread_id)
-        thread_log.parent.mkdir(parents=True, exist_ok=True)
         ended_ts = time.time()
         started_ts = max(0.0, ended_ts - max(duration_s, 0.0))
         started_at = time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(started_ts))
         ended_at = time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(ended_ts))
-        content = ""
-        if live_log_path and live_log_path.exists():
-            try:
-                content = live_log_path.read_text(encoding="utf-8", errors="replace").strip()
-            except Exception:
-                content = ""
-        lines = [
-            "=== run start ===",
-            f"started_at={started_at}",
-            f"thread_id={thread_id}",
-            f"mode={mode}",
-            f"agent={agent_name}",
-        ]
-        if task_id:
-            lines.append(f"task_id={task_id}")
-        if skill_name:
-            lines.append(f"skill_name={skill_name}")
-        if request_id:
-            lines.append(f"request_id={request_id}")
-        if live_log_path:
-            lines.append(f"live_log_path={live_log_path}")
-        lines.append("--- output ---")
-        if content:
-            lines.append(content)
-        else:
-            lines.append("(no live output captured)")
-        lines.extend(
-            [
-                "=== run end ===",
-                f"ended_at={ended_at}",
-                f"duration_seconds={duration_s:.2f}",
-                f"error={error or ''}",
-                "",
+
+        def _append() -> None:
+            thread_log.parent.mkdir(parents=True, exist_ok=True)
+            # Bounded excerpt only: appending the full live log here used to
+            # duplicate every run's complete output into the per-thread log.
+            # The ``live_log_path=`` pointer line names the full log instead.
+            content = ""
+            if live_log_path and live_log_path.exists():
+                content = self._tail_read(live_log_path, _THREAD_LOG_RUN_EXCERPT_BYTES).strip()
+            lines = [
+                "=== run start ===",
+                f"started_at={started_at}",
+                f"thread_id={thread_id}",
+                f"mode={mode}",
+                f"agent={agent_name}",
             ]
-        )
-        with thread_log.open("a", encoding="utf-8") as handle:
-            handle.write("\n".join(lines))
+            if task_id:
+                lines.append(f"task_id={task_id}")
+            if skill_name:
+                lines.append(f"skill_name={skill_name}")
+            if request_id:
+                lines.append(f"request_id={request_id}")
+            if live_log_path:
+                lines.append(f"live_log_path={live_log_path}")
+            # Marker kept byte-identical to the historical format: the run
+            # block competes with a 1200-char tail window in
+            # _extract_thread_log_excerpt, so longer header lines can push
+            # task_id= out of the excerpt.
+            lines.append("--- output ---")
+            if content:
+                lines.append(content)
+            else:
+                lines.append("(no live output captured)")
+            lines.extend(
+                [
+                    "=== run end ===",
+                    f"ended_at={ended_at}",
+                    f"duration_seconds={duration_s:.2f}",
+                    f"error={error or ''}",
+                    "",
+                ]
+            )
+            with thread_log.open("a", encoding="utf-8") as handle:
+                handle.write("\n".join(lines))
+
+        await asyncio.to_thread(_append)
 
     async def record_thread_agent_run(
         self,
@@ -5925,9 +6007,11 @@ class RuntimeService:
         thread_log = self._thread_log_path(thread_id)
         if not thread_log.exists():
             return None
-        try:
-            text = thread_log.read_text(encoding="utf-8", errors="replace")
-        except Exception:
+        # Bounded tail read: the thread log is append-only and grows for the
+        # thread's whole lifetime; the excerpt only surfaces the most recent
+        # matching run block, so a fixed tail window is sufficient.
+        text = self._tail_read(thread_log, _THREAD_LOG_SCAN_BYTES)
+        if not text:
             return None
         blocks = [block.strip() for block in text.split("=== run start ===") if block.strip()]
         if not blocks:
@@ -6035,10 +6119,9 @@ class RuntimeService:
         log_path = self._live_agent_logs.get(task_id)
         if not log_path or not log_path.exists():
             return None
-        try:
-            content = log_path.read_text(encoding="utf-8", errors="replace").strip()
-        except Exception:
-            return None
+        # Seek-based tail read: the live log can be tens of MB and this runs
+        # every status heartbeat; never load the whole file for a short tail.
+        content = self._tail_read(log_path, max(2048, max_chars * 4)).strip()
         if not content:
             return None
         tail = content[-max_chars:] if len(content) > max_chars else content
@@ -7662,7 +7745,10 @@ class RuntimeService:
                     resume_context_json=updated_context,
                 )
                 await self._resolve_notification("auth_required", thread_id=flow.thread_id)
-                asyncio.create_task(self.resume_suspended_agent_run(suspended.id))
+                self._retain_background_task(
+                    self.resume_suspended_agent_run(suspended.id),
+                    name=f"auth_resume_{suspended.id[:8]}",
+                )
             elif event_type == "cancelled":
                 await self._store.update_suspended_agent_run(
                     suspended.id,

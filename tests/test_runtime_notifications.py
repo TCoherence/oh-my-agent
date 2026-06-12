@@ -1,6 +1,7 @@
 """Covers NotificationManager.emit/resolve with a real SQLite store and a fake channel."""
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -192,6 +193,61 @@ async def test_emit_includes_task_id_and_body_in_thread_message(store):
     assert "Please approve" in sent_text
     assert "manual approval" in sent_text
     assert "<@owner-1>" in sent_text
+
+
+@pytest.mark.asyncio
+async def test_concurrent_emits_same_dedupe_key_deliver_once(store):
+    """TOCTOU regression: the dedupe read and the record insert are separated
+    by channel awaits; without per-key serialization two concurrent emits
+    both pass the read and deliver everything twice."""
+    send_started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_send(thread_id, text):
+        send_started.set()
+        await release.wait()
+        return "thread-msg-1"
+
+    channel = MagicMock()
+    channel.platform = "discord"
+    channel.channel_id = "100"
+    channel.send = AsyncMock(side_effect=slow_send)
+    channel.send_dm = AsyncMock(return_value="dm-msg-1")
+    channel.render_user_mention = lambda uid: f"<@{uid}>"
+    session = _make_session(channel=channel)
+    mgr = NotificationManager(
+        store,
+        owner_user_ids={"owner-1"},
+        session_lookup=lambda p, c: session,
+    )
+
+    first = asyncio.create_task(mgr.emit(_make_event()))
+    await send_started.wait()  # first emit is mid-delivery, record not yet inserted
+    second = asyncio.create_task(mgr.emit(_make_event()))
+    await asyncio.sleep(0)  # let the second emit reach the keyed lock
+    release.set()
+
+    r1, r2 = await asyncio.gather(first, second)
+    assert len(r1) == 1
+    assert len(r2) == 1
+    assert r2[0].id == r1[0].id  # second emit deduped against the first
+    assert channel.send.await_count == 1
+    assert channel.send_dm.await_count == 1
+    # Lock entries are evicted once uncontended.
+    assert mgr._emit_locks == {}  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_emit_without_dedupe_key_skips_lock(store):
+    session = _make_session()
+    mgr = NotificationManager(
+        store,
+        owner_user_ids={"owner-1"},
+        session_lookup=lambda p, c: session,
+    )
+    records = await mgr.emit(_make_event(dedupe_key=""))
+    assert len(records) == 1
+    assert mgr._emit_locks == {}  # noqa: SLF001
 
 
 @pytest.mark.asyncio

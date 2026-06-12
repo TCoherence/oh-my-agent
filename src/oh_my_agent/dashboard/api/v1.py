@@ -20,6 +20,7 @@ Data flow:
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -239,7 +240,12 @@ def build_router(config: dict) -> APIRouter:
                 disabled = auto | manual
             except Exception:
                 disabled = set()
-        items = data.fetch_skill_health(
+        # to_thread: this handler must be async (it awaits the store), but
+        # fetch_skill_health does real SQLite + YAML IO. In colocated mode
+        # this coroutine runs on the bot's event loop and the SPA polls it
+        # every 5s — offload so the loop never blocks on disk.
+        items = await asyncio.to_thread(
+            data.fetch_skill_health,
             _runtime_db_path(),
             memories_yaml=paths.judge_memories_yaml_path(config),
             disabled_skills=disabled,
@@ -278,7 +284,10 @@ def build_router(config: dict) -> APIRouter:
                 )
         project_root = getattr(ctx, "project_root", None) if ctx is not None else None
         sdir = paths.skills_dir(config, project_root=project_root)
-        result = data.fetch_skills_overview(
+        # Same loop-safety rationale as skills_health above: disk walk of
+        # skills_dir + SQLite + YAML must not run inline on the event loop.
+        result = await asyncio.to_thread(
+            data.fetch_skills_overview,
             _runtime_db_path(),
             skills_dir=sdir,
             memories_yaml=paths.judge_memories_yaml_path(config),

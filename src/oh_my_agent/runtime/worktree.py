@@ -286,37 +286,21 @@ class WorktreeManager:
         return commit_hash.strip()
 
     async def workspace_has_dirty_or_new_commits(self, workspace: Path) -> bool:
-        """True if ``git status --porcelain`` has any changes OR the
-        worktree branch is ahead of HEAD~ (i.e. the agent already
-        committed something).
+        """True if ``git status --porcelain`` shows uncommitted changes.
 
         Used by the PR merge path to decide whether ``commit_workspace``
-        is needed before push. Be careful with the "ahead of HEAD~"
-        check: the worktree branch was created from HEAD at task start,
-        but HEAD itself isn't moved during the task run, so commit
-        ancestry from the worktree's POV is the right signal.
+        is needed before push. Committed-but-unpushed work is deliberately
+        NOT detected here: the caller (``_execute_merge_pr``) follows the
+        commit step with :meth:`fetch_base_ref` + :meth:`has_diff_vs_base`
+        (3-dot diff vs the fetched remote base), which is the authoritative
+        "does the PR introduce anything" gate and already covers commits
+        the agent made on the worktree branch. A previous version also ran
+        ``rev-list --count HEAD..HEAD@{u}`` here, but the branch has no
+        upstream before its first push, so that check always raised and
+        was swallowed — dead logic, now removed.
         """
-        # Dirty working tree.
         porcelain = await self._run_git("-C", str(workspace), "status", "--porcelain")
-        if porcelain.strip():
-            return True
-        # New commits beyond the original task base. The branch was
-        # created with ``-B <branch> HEAD`` at task start, so anything
-        # past the initial HEAD is bot work that should ship in the PR.
-        # We check against the worktree's first-parent ancestry via
-        # rev-list --count against HEAD (which the worktree shares with
-        # the main repo at task-creation time).
-        try:
-            out = await self._run_git(
-                "-C", str(workspace), "rev-list", "--count", "HEAD..HEAD@{u}"
-            )
-            if int(out.strip() or "0") > 0:
-                return True
-        except WorktreeError:
-            # Branch may have no upstream yet (never pushed) — treat as
-            # "no remote ahead-count to report", fall through.
-            pass
-        return False
+        return bool(porcelain.strip())
 
     async def fetch_base_ref(
         self,
@@ -551,14 +535,29 @@ class WorktreeManager:
         lines = [line.strip() for line in out.splitlines() if line.strip()]
         return lines[:limit]
 
-    async def remove_worktree(self, workspace: Path) -> None:
-        if not workspace.exists():
-            return
-        try:
-            await self._run_git("worktree", "remove", "--force", str(workspace))
-        except WorktreeError:
-            # Fall back to filesystem cleanup if git metadata is already stale.
-            shutil.rmtree(workspace, ignore_errors=True)
+    async def remove_worktree(self, workspace: Path, *, delete_branch: bool = False) -> None:
+        if workspace.exists():
+            try:
+                await self._run_git("worktree", "remove", "--force", str(workspace))
+            except WorktreeError:
+                # Fall back to filesystem cleanup if git metadata is already
+                # stale. Offloaded: rmtree of a full repo checkout can take
+                # seconds and must not block the event loop.
+                await asyncio.to_thread(shutil.rmtree, workspace, ignore_errors=True)
+        if delete_branch:
+            # The workspace directory name IS the task id (see
+            # ensure_worktree), so the per-task branch is derivable even
+            # after the directory itself is gone. Attempted regardless of
+            # workspace existence so a manually-deleted workspace still gets
+            # its local ref cleaned up.
+            branch = f"codex/task-{workspace.name}"
+            try:
+                await self._run_git("branch", "-D", branch)
+            except WorktreeError:
+                # Branch may not exist, or may still be registered as checked
+                # out if the rmtree fallback left a stale admin entry —
+                # cleanup stays best-effort.
+                pass
 
     async def prune_worktrees(self) -> None:
         """Remove orphaned worktree admin entries — but ONLY for worktrees under
@@ -620,7 +619,7 @@ class WorktreeManager:
             except (OSError, ValueError):
                 is_ours = False
             if is_ours and not worktree_dir.exists():
-                shutil.rmtree(admin, ignore_errors=True)
+                await asyncio.to_thread(shutil.rmtree, admin, ignore_errors=True)
 
     async def _run_git(self, *args: str) -> str:
         proc = await asyncio.create_subprocess_exec(

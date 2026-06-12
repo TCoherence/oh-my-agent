@@ -10,8 +10,10 @@ Public surface:
 
 - :func:`fetch_session_list`: paginated list of (platform, channel_id,
   thread_id) groups with turn counts and last-activity timestamps.
-  Composite cursor ``(last_turn_at, thread_id)`` makes pagination
-  stable when multiple threads share the same ``MAX(created_at)``.
+  Composite cursor ``(last_turn_at, platform, channel_id, thread_id)``
+  makes pagination stable when multiple threads share the same
+  ``MAX(created_at)`` — even across channels/platforms with colliding
+  thread ids.
 - :func:`fetch_session_history`: turns for a single thread, ordered
   oldest-first, with optional ``before_id`` for backward scrolling.
 
@@ -42,25 +44,31 @@ def _ro_connect(db_path: Path) -> sqlite3.Connection:
 # --------------------------------------------------------------------------- #
 
 
-def _encode_cursor(last_turn_at: str, thread_id: str) -> str:
-    """Encode ``(last_turn_at, thread_id)`` composite cursor as base64.
+def _encode_cursor(
+    last_turn_at: str, platform: str, channel_id: str, thread_id: str
+) -> str:
+    """Encode the ``(last_turn_at, platform, channel_id, thread_id)``
+    composite cursor as base64.
 
-    ``thread_id`` is part of the cursor as a tie-breaker — multiple threads
-    can share an exact ``MAX(created_at)`` (especially at small data
-    volumes), and a timestamp-only cursor would either skip or repeat
-    rows across pages.
+    The full grouping key is part of the cursor as a tie-breaker —
+    multiple threads can share an exact ``MAX(created_at)`` (especially
+    at small data volumes), and the same ``thread_id`` can exist in two
+    channels/platforms, so anything less than the full key would either
+    skip or repeat rows across pages.
     """
 
-    payload = f"{last_turn_at}|{thread_id}".encode("utf-8")
+    payload = f"{last_turn_at}|{platform}|{channel_id}|{thread_id}".encode("utf-8")
     return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
 
 
-def _decode_cursor(cursor: str | None) -> tuple[str, str] | None:
+def _decode_cursor(cursor: str | None) -> tuple[str, str, str, str] | None:
     """Reverse of :func:`_encode_cursor`. Returns ``None`` on invalid input.
 
     Defensive against malformed cursors (caller can present anything) —
     returns ``None`` for any decode failure, and the SQL handles ``NULL``
-    cursor as "first page".
+    cursor as "first page". Legacy two-field cursors (``ts|thread`` from
+    before platform/channel_id joined the tie-break) also decode to
+    ``None``: a graceful first-page restart, never a 500.
     """
 
     if not cursor:
@@ -70,12 +78,13 @@ def _decode_cursor(cursor: str | None) -> tuple[str, str] | None:
         raw = base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
     except (ValueError, UnicodeDecodeError):
         return None
-    if "|" not in raw:
+    # maxsplit=3: thread_id is the only field that could plausibly carry
+    # a "|", so let the last segment absorb any extras.
+    parts = raw.split("|", 3)
+    if len(parts) != 4 or not all(parts):
         return None
-    ts, _, thread = raw.partition("|")
-    if not ts or not thread:
-        return None
-    return ts, thread
+    ts, platform, channel_id, thread_id = parts
+    return ts, platform, channel_id, thread_id
 
 
 # --------------------------------------------------------------------------- #
@@ -103,11 +112,13 @@ def fetch_session_list(
     """
 
     limit = max(1, min(int(limit), 200))
-    cursor_pair = _decode_cursor(cursor)
+    cursor_fields = _decode_cursor(cursor)
     cursor_ts: str | None = None
+    cursor_platform: str | None = None
+    cursor_channel: str | None = None
     cursor_thread: str | None = None
-    if cursor_pair is not None:
-        cursor_ts, cursor_thread = cursor_pair
+    if cursor_fields is not None:
+        cursor_ts, cursor_platform, cursor_channel, cursor_thread = cursor_fields
 
     try:
         conn = _ro_connect(db_path)
@@ -115,9 +126,10 @@ def fetch_session_list(
         return {"error": f"memory db unavailable: {type(exc).__name__}: {exc}"}
 
     # HAVING (not WHERE) because we filter on the post-aggregation
-    # ``last_turn_at``. Composite cursor (last_turn_at, thread_id) — same
-    # ts allowed across threads, so we tie-break on thread_id DESC for a
-    # stable pagination order matching the ORDER BY.
+    # ``last_turn_at``. Composite cursor (last_turn_at, platform,
+    # channel_id, thread_id) — same ts allowed across threads (and the
+    # same thread_id can exist in two channels), so the tie-break walks
+    # the full grouping key DESC, matching the ORDER BY exactly.
     sql = """
         SELECT t1.platform, t1.channel_id, t1.thread_id,
                COUNT(*) AS turn_count,
@@ -133,8 +145,13 @@ def fetch_session_list(
         HAVING (:cursor_ts IS NULL
                 OR MAX(t1.created_at) < :cursor_ts
                 OR (MAX(t1.created_at) = :cursor_ts
-                    AND t1.thread_id < :cursor_thread))
-        ORDER BY last_turn_at DESC, t1.thread_id DESC
+                    AND (t1.platform < :cursor_platform
+                         OR (t1.platform = :cursor_platform
+                             AND (t1.channel_id < :cursor_channel
+                                  OR (t1.channel_id = :cursor_channel
+                                      AND t1.thread_id < :cursor_thread))))))
+        ORDER BY last_turn_at DESC, t1.platform DESC,
+                 t1.channel_id DESC, t1.thread_id DESC
         LIMIT :limit
     """
 
@@ -143,6 +160,8 @@ def fetch_session_list(
             sql,
             {
                 "cursor_ts": cursor_ts,
+                "cursor_platform": cursor_platform,
+                "cursor_channel": cursor_channel,
                 "cursor_thread": cursor_thread,
                 "limit": limit + 1,  # over-fetch by 1 to detect "has more"
             },
@@ -168,7 +187,12 @@ def fetch_session_list(
     next_cursor: str | None = None
     if len(rows) > limit and items:
         last = items[-1]
-        next_cursor = _encode_cursor(last["last_turn_at"], last["thread_id"])
+        next_cursor = _encode_cursor(
+            last["last_turn_at"],
+            last["platform"],
+            last["channel_id"],
+            last["thread_id"],
+        )
 
     return {"items": items, "next_cursor": next_cursor}
 

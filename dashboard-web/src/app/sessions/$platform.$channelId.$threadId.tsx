@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 
 import {
   Conversation,
@@ -14,7 +14,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useSessionHistory } from "@/hooks/use-session-history";
 import { useSessionTrace } from "@/hooks/use-session-trace";
 import type { TraceEvent, TurnRow } from "@/lib/api";
-import { formatLocal, todayYmd } from "@/lib/utils";
+import { formatLocal, shiftYmd, todayYmd, ymdFromIso } from "@/lib/utils";
 
 export const Route = createFileRoute(
   "/sessions/$platform/$channelId/$threadId",
@@ -24,9 +24,25 @@ export const Route = createFileRoute(
 
 function SessionDetailPage() {
   const { platform, channelId, threadId } = Route.useParams();
-  const date = todayYmd();
 
   const history = useSessionHistory({ platform, channelId, threadId, limit: 200 });
+
+  // Default the trace day to the session's last activity, NOT the
+  // browser-local today: sessions older than today would always show
+  // zero tool events, and a server/browser TZ mismatch shows empty
+  // traces around midnight. created_at is server-written, so its date
+  // portion matches the per-day trace file the backend reads.
+  const lastTurnYmd = useMemo(() => {
+    const rows = history.data;
+    if (!rows || rows.length === 0) return null;
+    return ymdFromIso(rows[rows.length - 1].created_at);
+  }, [history.data]);
+
+  // null = "follow the session" (auto-updates when new turns land on a
+  // newer day); a string = operator pinned a day via the ‹ › selector.
+  const [dateOverride, setDateOverride] = useState<string | null>(null);
+  const date = dateOverride ?? lastTurnYmd ?? todayYmd();
+
   const trace = useSessionTrace({ platform, channelId, threadId, date });
 
   // Interleave assistant turns with the tool events that fired between
@@ -54,7 +70,26 @@ function SessionDetailPage() {
               tool trace off — opt-in via experiment.tool_trace
             </span>
           ) : (
-            <span>auto-refresh 2s · trace: {date}</span>
+            <span className="flex items-center gap-1">
+              <span>auto-refresh 2s · trace:</span>
+              <button
+                type="button"
+                aria-label="previous trace day"
+                onClick={() => setDateOverride(shiftYmd(date, -1))}
+                className="px-1 rounded hover:bg-accent/40 hover:text-foreground"
+              >
+                ‹
+              </button>
+              <span className="font-mono">{date}</span>
+              <button
+                type="button"
+                aria-label="next trace day"
+                onClick={() => setDateOverride(shiftYmd(date, 1))}
+                className="px-1 rounded hover:bg-accent/40 hover:text-foreground"
+              >
+                ›
+              </button>
+            </span>
           )}
         </div>
       </div>
@@ -83,13 +118,10 @@ function SessionDetailPage() {
 
           {interleaved.map((item) => {
             if (item.kind === "turn") {
-              return <TurnView key={`turn-${item.row._id}`} row={item.row} />;
+              return <TurnView key={item.key} row={item.row} />;
             }
             return (
-              <div
-                key={`tool-${item.event.ts}-${item.event.tool_id ?? Math.random()}`}
-                className="ml-12 my-1"
-              >
+              <div key={item.key} className="ml-12 my-1">
                 <ToolEvent event={item.event} />
               </div>
             );
@@ -129,10 +161,14 @@ function TurnView({ row }: { row: TurnRow }) {
 }
 
 type InterleavedItem =
-  | { kind: "turn"; row: TurnRow; ts: number }
-  | { kind: "tool"; event: TraceEvent; ts: number };
+  | { kind: "turn"; row: TurnRow; ts: number; key: string }
+  | { kind: "tool"; event: TraceEvent; ts: number; key: string };
 
-function interleave(history: TurnRow[], events: TraceEvent[]): InterleavedItem[] {
+// Exported for tests (key stability across polls).
+export function interleave(
+  history: TurnRow[],
+  events: TraceEvent[],
+): InterleavedItem[] {
   // Convert both lists to (ts_ms, item) tuples, then merge sort.
   // ``created_at`` from SQLite is ISO without explicit Z but stored UTC;
   // ``ts`` from trace JSONL is ISO with timezone. Date() parses both
@@ -140,15 +176,28 @@ function interleave(history: TurnRow[], events: TraceEvent[]): InterleavedItem[]
   // ordering within one source which is what matters here.
   const out: InterleavedItem[] = [];
   for (const row of history) {
-    out.push({ kind: "turn", row, ts: tsToMs(row.created_at) });
+    out.push({
+      kind: "turn",
+      row,
+      ts: tsToMs(row.created_at),
+      key: `turn-${row._id}`,
+    });
   }
-  for (const ev of events) {
+  events.forEach((ev, i) => {
     // Skip "complete" / "text" events because their content typically
     // duplicates the assistant turn that comes through history. Keep
     // tool_use / tool_result / thinking / usage / error / system_init.
-    if (ev.type === "complete" || ev.type === "text") continue;
-    out.push({ kind: "tool", event: ev, ts: tsToMs(ev.ts) });
-  }
+    if (ev.type === "complete" || ev.type === "text") return;
+    // Stable composite key: the trace JSONL is append-only within a day,
+    // so (index, ts, type) never changes for an existing row across the
+    // 2s polls. A random fallback here would remount every row per poll.
+    out.push({
+      kind: "tool",
+      event: ev,
+      ts: tsToMs(ev.ts),
+      key: `tool-${i}-${ev.ts}-${ev.type}`,
+    });
+  });
   out.sort((a, b) => a.ts - b.ts);
   return out;
 }

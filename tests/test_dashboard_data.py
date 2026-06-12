@@ -518,6 +518,45 @@ def test_fetch_disk_usage_mixed_paths(tmp_path: Path) -> None:
     assert by_path[str(missing)]["kind"] == "missing"
 
 
+def test_fetch_disk_usage_skips_git_subtree(tmp_path: Path) -> None:
+    """Worktree-style dirs: the .git object store is excluded from sizing."""
+
+    d = tmp_path / "worktree"
+    (d / ".git" / "objects").mkdir(parents=True)
+    (d / ".git" / "objects" / "pack.bin").write_bytes(b"\x00" * 4096)
+    (d / "artifact.txt").write_bytes(b"\x00" * 10)
+
+    result = data.fetch_disk_usage([d])
+    assert result[0]["size_bytes"] == 10
+
+
+def test_fetch_disk_usage_caches_within_ttl(tmp_path: Path) -> None:
+    """Within the TTL the cached size is served — no re-walk per render."""
+
+    d = tmp_path / "reports"
+    d.mkdir()
+    (d / "x.bin").write_bytes(b"\x00" * 100)
+
+    first = data.fetch_disk_usage([d])
+    assert first[0]["size_bytes"] == 100
+
+    # Grow the dir; the cached value must persist until the TTL lapses.
+    (d / "y.bin").write_bytes(b"\x00" * 100)
+    cached = data.fetch_disk_usage([d])
+    assert cached[0]["size_bytes"] == 100
+    assert cached[0]["path"] == str(d)
+
+    # Simulate TTL expiry by back-dating the cache entry in place.
+    key = data._disk_usage_cache_key(d)
+    ts, entry = data._disk_usage_cache[key]
+    data._disk_usage_cache[key] = (
+        ts - data.DISK_USAGE_CACHE_TTL_SECONDS - 1,
+        entry,
+    )
+    refreshed = data.fetch_disk_usage([d])
+    assert refreshed[0]["size_bytes"] == 200
+
+
 # ---------------------------------------------------------------------------
 # fetch_bot_uptime
 # ---------------------------------------------------------------------------
