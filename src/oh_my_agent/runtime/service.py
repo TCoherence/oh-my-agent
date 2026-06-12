@@ -3574,6 +3574,12 @@ class RuntimeService:
                     )
                     return
 
+                # A stop/pause that landed while _notify was awaited must not
+                # be overwritten by the COMPLETED write below. No await sits
+                # between this probe and the write, so the check-then-write
+                # pair is atomic from the event loop's perspective.
+                if await self._abandon_run_if_stopped(task, phase="completion_write"):
+                    return
                 # Notify landed — commit the COMPLETED watermark. Ordering
                 # inside this block doesn't affect observer race semantics
                 # (the message is already visible); keep DB writes grouped

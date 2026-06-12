@@ -4980,6 +4980,54 @@ async def test_stop_during_test_phase_cancels_test_and_preserves_stopped(runtime
 
 
 @pytest.mark.asyncio
+async def test_stop_during_completion_notify_not_clobbered(runtime_env):
+    """A stop that lands while the terminal completion notify is in flight
+    must not be overwritten by the COMPLETED watermark write that follows
+    the notify (the pre-notify check alone cannot see it)."""
+    store: SQLiteMemoryStore = runtime_env["store"]
+    runtime: RuntimeService = runtime_env["runtime"]
+    channel: _FakeChannel = runtime_env["channel"]
+
+    registry = AgentRegistry([_DoneAgent()])
+    session = ChannelSession(
+        platform="discord",
+        channel_id="100",
+        channel=channel,
+        registry=registry,
+    )
+    runtime.register_session(session, registry)
+
+    task = await store.create_runtime_task(
+        task_id="t-stop-notify", platform="discord", channel_id="100",
+        thread_id="thread-stop-notify", created_by="owner-1", goal="g",
+        status=TASK_STATUS_RUNNING, max_steps=5, max_minutes=15,
+        test_command="true", completion_mode="reply", task_type="artifact",
+    )
+
+    original_notify = runtime._notify  # noqa: SLF001
+
+    async def _stopping_notify(t, text, **kwargs):
+        # Simulate stop_task racing the in-flight terminal notify.
+        if kwargs.get("terminal"):
+            await store.update_runtime_task(
+                t.id, status=TASK_STATUS_STOPPED, ended_at_now=True
+            )
+        return await original_notify(t, text, **kwargs)
+
+    runtime._notify = _stopping_notify  # type: ignore[method-assign]  # noqa: SLF001
+    await runtime._run_task(task)  # noqa: SLF001
+
+    final = await store.get_runtime_task(task.id)
+    assert final is not None
+    assert final.status == TASK_STATUS_STOPPED
+    events = await store.list_runtime_events(task.id, limit=100)
+    interrupted = [e for e in events if e.get("event_type") == "task.run_interrupted"]
+    assert interrupted
+    assert interrupted[-1].get("payload", {}).get("phase") == "completion_write"
+    assert not [e for e in events if e.get("event_type") == "task.completed"]
+
+
+@pytest.mark.asyncio
 async def test_active_task_for_thread_visible_beyond_recent_window(runtime_env):
     """An active task in an old thread must stay visible even when 20+ newer
     tasks exist in other threads (previously list_runtime_tasks(limit=20)
