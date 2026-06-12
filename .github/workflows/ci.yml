@@ -89,11 +89,15 @@ jobs:
           python -m pip install --upgrade pip
           pip install build
 
-      # No OMA_SKIP_FRONTEND here on purpose: this job exercises the real
-      # packaging path — setup.py's BuildPyWithFrontend must run npm ci +
-      # npm run build and fail loudly if the SPA can't be built.
+      # OMA_REQUIRE_FRONTEND=1: this job exercises the real packaging
+      # path — setup.py's BuildPyWithFrontend must run npm ci + npm run
+      # build and fail loudly if the SPA can't be built. (A plain
+      # `pip install -e .` without the var stays best-effort so dev
+      # installs don't need Node.)
       - name: Build wheel
         run: python -m build --wheel
+        env:
+          OMA_REQUIRE_FRONTEND: "1"
 
       - name: Assert SPA shipped inside the wheel
         run: |
