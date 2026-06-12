@@ -770,3 +770,23 @@ def test_access_owner_user_ids_valid_list_is_clean():
     errs = [e for e in result.errors if e.path.startswith("access")]
     assert errs == []
     assert result.ok
+
+
+# ── channel agents must be declared ──────────────────────────────────── #
+
+
+def test_channel_referencing_undeclared_agent_is_error():
+    cfg = _base_config()
+    cfg["gateway"]["channels"][0]["agents"] = ["claude", "ghost"]
+    result = validate_config(cfg)
+    errs = [
+        e for e in result.errors
+        if e.path == "gateway.channels[0].agents" and "ghost" in e.message
+    ]
+    assert errs, result.errors
+
+
+def test_channel_with_declared_agents_is_clean():
+    result = validate_config(_base_config())
+    errs = [e for e in result.errors if e.path.startswith("gateway.channels")]
+    assert errs == []

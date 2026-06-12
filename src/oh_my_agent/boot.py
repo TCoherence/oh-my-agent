@@ -1120,7 +1120,14 @@ async def ignite(ctx: BootContext) -> None:
         selected = []
         for name in agent_names:
             if name not in agent_instances:
-                logger.error("Agent '%s' referenced in channel config but not defined", name)
+                logger.error(
+                    "Agent '%s' referenced by channel %s:%s is not declared under "
+                    "agents: (declared: %s)",
+                    name,
+                    ch_cfg.get("platform"),
+                    ch_cfg.get("channel_id"),
+                    sorted(agent_instances),
+                )
                 sys.exit(1)
             selected.append(agent_instances[name])
         if not selected:

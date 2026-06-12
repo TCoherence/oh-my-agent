@@ -173,6 +173,19 @@ def _check_gateway(config: dict, result: ValidationResult) -> None:
         agents_ref = ch.get("agents")
         if not agents_ref or not isinstance(agents_ref, list) or len(agents_ref) == 0:
             result.errors.append(ConfigError(f"{prefix}.agents", "must be a non-empty list", "error"))
+        elif isinstance(config.get("agents"), dict):
+            # Agent entries are no longer fabricated at boot, so a channel
+            # referencing an undeclared agent fails ignite — catch it here
+            # so --validate-config flags it before deploy.
+            declared = set(config["agents"].keys())
+            for name in agents_ref:
+                if isinstance(name, str) and name not in declared:
+                    result.errors.append(ConfigError(
+                        f"{prefix}.agents",
+                        f"references agent '{name}' which is not declared under "
+                        f"agents: (declared: {sorted(declared)})",
+                        "error",
+                    ))
 
 
 # ── Agents ──────────────────────────────────────────────────────────── #
